@@ -18,7 +18,8 @@ step() { printf "${MAG}${BOLD}» %s${RST}\n" "$*"; }
 ok()   { printf "  ${GRN}✓${RST} %s\n" "$*"; }
 err()  { printf "  ${RED}✗ %s${RST}\n" "$*" >&2; }
 
-REPO_URL="${BAGASAI_REPO:-https://github.com/ahmadadptr/bagasai}"
+REPO_URL="${BAGASAI_REPO:-https://github.com/ahmadadptr001/bagas-ai}"
+REPO_BRANCH="${BAGASAI_BRANCH:-master}"
 
 printf "\n${MAG}${BOLD}bagasAI${RST} ${DIM}· installer${RST}\n\n"
 
@@ -50,7 +51,7 @@ else
   DEST="${HOME}/.bagasai/src"
   if command -v git >/dev/null 2>&1; then
     rm -rf "$DEST"; mkdir -p "$DEST"
-    git clone --depth 1 "$REPO_URL" "$DEST"
+    git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$DEST"
     SRC="$DEST"
     ok "Diunduh ke $DEST"
   else

@@ -14,7 +14,8 @@ function Step($m) { Write-Host "» $m" -ForegroundColor Magenta }
 function Ok($m)   { Write-Host "  + $m" -ForegroundColor Green }
 function Err($m)  { Write-Host "  x $m" -ForegroundColor Red }
 
-$RepoUrl = if ($env:BAGASAI_REPO) { $env:BAGASAI_REPO } else { "https://github.com/ahmadadptr/bagasai" }
+$RepoUrl = if ($env:BAGASAI_REPO) { $env:BAGASAI_REPO } else { "https://github.com/ahmadadptr001/bagas-ai" }
+$RepoBranch = if ($env:BAGASAI_BRANCH) { $env:BAGASAI_BRANCH } else { "master" }
 
 Write-Host ""
 Write-Host "bagasAI " -ForegroundColor Magenta -NoNewline
@@ -48,7 +49,7 @@ if ((Test-Path "pyproject.toml") -and (Select-String -Path "pyproject.toml" -Pat
     if (Get-Command git -ErrorAction SilentlyContinue) {
         if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
         New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-        git clone --depth 1 $RepoUrl $Dest
+        git clone --depth 1 --branch $RepoBranch $RepoUrl $Dest
         $Src = $Dest
         Ok "Diunduh ke $Dest"
     } else {

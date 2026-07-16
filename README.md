@@ -34,12 +34,12 @@ PATH, lalu menuntun proses **login**.
 
 **Linux / macOS / Git-Bash**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ahmadadptr/bagasai/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ahmadadptr001/bagas-ai/master/install.sh | bash
 ```
 
 **Windows (PowerShell)**
 ```powershell
-irm https://raw.githubusercontent.com/ahmadadptr/bagasai/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ahmadadptr001/bagas-ai/master/install.ps1 | iex
 ```
 
 > Sudah punya foldernya? Jalankan dari dalam proyek: `bash install.sh`
