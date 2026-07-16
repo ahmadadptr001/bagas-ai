@@ -315,9 +315,10 @@ class Agent:
                         "role": "user",
                         "content": (
                             "[SISTEM] Kamu tampak mengulang langkah / terlalu banyak "
-                            "memakai tool. STOP memakai tool. Rangkum secara jelas apa "
-                            "yang sudah dicapai dan berikan JAWABAN AKHIR sekarang "
-                            "dalam teks biasa."
+                            "memakai tool. STOP memakai tool dan berikan jawaban akhir "
+                            "dalam teks biasa. JUJUR: jelaskan apa yang SUDAH selesai "
+                            "dan apa yang BELUM. JANGAN mengaku tuntas kalau memang "
+                            "belum — sebutkan langkah tersisa yang perlu dilakukan."
                         ),
                     }
                 )

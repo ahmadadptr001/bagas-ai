@@ -100,8 +100,13 @@ def run_python(code: str) -> str:
     )
     if timed_out:
         return (
-            f"[timeout] Kode melebihi {config.CODE_EXEC_TIMEOUT} detik dan dihentikan.\n"
-            + _clip(out, 4000)
+            f"[GAGAL/timeout] Kode melebihi {config.CODE_EXEC_TIMEOUT} detik dan "
+            f"dihentikan — JANGAN anggap berhasil.\n" + _clip(out, 4000)
+        )
+    if rc != 0:
+        return (
+            f"[GAGAL] exit_code={rc} — kode TIDAK berhasil. Jangan anggap selesai; "
+            f"baca error lalu perbaiki.\n" + _clip(out)
         )
     return f"exit_code={rc}\n{_clip(out)}"
 
@@ -120,10 +125,16 @@ def run_command(command: str) -> str:
     )
     if timed_out:
         return (
-            f"[timeout] Perintah melewati {config.COMMAND_TIMEOUT} detik dan dihentikan "
-            f"beserta seluruh subprosesnya. Kemungkinan perintah menunggu input "
-            f"interaktif atau memang sangat lama. Gunakan flag non-interaktif "
-            f"(mis. '--yes'), atau pecah menjadi langkah lebih kecil. "
-            f"Output sejauh ini:\n" + _clip(out, 4000)
+            f"[GAGAL/timeout] Perintah melewati {config.COMMAND_TIMEOUT} detik dan "
+            f"dihentikan beserta seluruh subprosesnya — perintah BELUM selesai, "
+            f"JANGAN anggap berhasil. Kemungkinan menunggu input interaktif atau "
+            f"memang sangat lama. Gunakan flag non-interaktif (mis. '--yes'), atau "
+            f"pecah menjadi langkah lebih kecil. Output sejauh ini:\n"
+            + _clip(out, 4000)
+        )
+    if rc != 0:
+        return (
+            f"[GAGAL] exit_code={rc} — perintah TIDAK berhasil. Jangan anggap "
+            f"selesai; baca error di bawah lalu perbaiki.\n" + _clip(out)
         )
     return f"exit_code={rc}\n{_clip(out)}"

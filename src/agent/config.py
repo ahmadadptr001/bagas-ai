@@ -110,7 +110,7 @@ CODE_EXEC_TIMEOUT: int = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))
 # Timeout untuk perintah shell (run_command) — lebih longgar karena bisa lama
 # (mis. install dependency / scaffolding). Perintah dijalankan NON-INTERAKTIF
 # (stdin ditutup) & seluruh pohon prosesnya dibunuh bila melewati batas ini.
-COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "180"))
+COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "300"))
 
 ENV_FILE = CONFIG_HOME / ".env"
 
