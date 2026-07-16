@@ -220,9 +220,17 @@ class Agent:
             self.tokens_live = self.tokens_last.total
 
             if not tool_calls:
-                self.memory.add_assistant_text(content)
+                # Jaring pengaman: jangan pernah "berhenti diam". Bila model tak
+                # menghasilkan teks apa pun (mis. berhenti tanpa menjawab), beri
+                # pesan cadangan yang jelas alih-alih layar kosong.
+                final = content if (content and content.strip()) else (
+                    "Hmm, aku berhenti tanpa sempat menyusun jawaban. Coba ulangi "
+                    "atau perjelas permintaanmu. Kalau modelnya bertipe reasoning, "
+                    "turunkan /effort agar tidak kehabisan anggaran berpikir."
+                )
+                self.memory.add_assistant_text(final)
                 self._persist()
-                return content
+                return final
 
             # Narasi sebelum aksi tool (mis. "Baik, saya akan membuat file X").
             if content and content.strip() and on_message:

@@ -22,6 +22,7 @@ from InquirerPy import inquirer  # noqa: E402
 from InquirerPy.base.control import Choice  # noqa: E402
 from openai import RateLimitError  # noqa: E402
 from prompt_toolkit import PromptSession  # noqa: E402
+from prompt_toolkit.completion import Completer, Completion  # noqa: E402
 from prompt_toolkit.formatted_text import HTML  # noqa: E402
 from prompt_toolkit.key_binding import KeyBindings  # noqa: E402
 from prompt_toolkit.styles import Style as PTStyle  # noqa: E402
@@ -49,6 +50,46 @@ console = Console()  # auto-detect VT (Windows Terminal) -> warna/emoji mulus
 
 # Padding tepi supaya konten tidak mepet ke pinggir terminal (kiri/kanan/bawah).
 _LPAD = 2
+
+# Perintah slash + deskripsi singkat (dipakai autocomplete "/..." & bantuan).
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("menu", "menu interaktif"),
+    ("model", "pilih model + saran"),
+    ("effort", "mode berpikir"),
+    ("new", "mulai sesi baru"),
+    ("delete", "hapus sesi"),
+    ("reset", "kosongkan riwayat"),
+    ("clear", "bersihkan layar"),
+    ("memory", "memory jangka panjang"),
+    ("scripts", "script memory"),
+    ("models", "daftar semua model"),
+    ("update", "cek pembaruan"),
+    ("help", "bantuan"),
+    ("exit", "keluar"),
+]
+
+
+class SlashCompleter(Completer):
+    """Sugesti perintah saat mengetik '/': '/ef' -> '/effort', dst.
+
+    Hanya aktif untuk token perintah di awal baris (sebelum spasi), jadi tidak
+    mengganggu saat mengetik pesan biasa atau argumen (mis. '/model llama').
+    """
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        # Hanya untuk perintah slash di awal baris & sebelum ada spasi/argumen.
+        if not text.startswith("/") or " " in text:
+            return
+        prefix = text[1:].lower()
+        for name, desc in SLASH_COMMANDS:
+            if name.startswith(prefix):
+                yield Completion(
+                    name,
+                    start_position=-len(prefix),
+                    display=HTML(f"<b>/{name}</b>"),
+                    display_meta=desc,
+                )
 
 
 def pout(renderable, *, bottom: int = 1) -> None:
@@ -700,8 +741,19 @@ def main(resume: bool = False) -> None:
         "cmd": "#94e2d5",
         "exit": "#f38ba8",
         "muted": "#7f849c",
+        # Menu autocomplete "/..." — selaras tema catppuccin.
+        "completion-menu": "bg:#1e1e2e #cdd6f4",
+        "completion-menu.completion": "bg:#1e1e2e #cdd6f4",
+        "completion-menu.completion.current": "bg:#cba6f7 #1e1e2e bold",
+        "completion-menu.meta.completion": "bg:#181825 #7f849c",
+        "completion-menu.meta.completion.current": "bg:#45475a #cdd6f4",
     })
-    session_pt: PromptSession = PromptSession(key_bindings=kb, style=_pt_style)
+    session_pt: PromptSession = PromptSession(
+        key_bindings=kb,
+        style=_pt_style,
+        completer=SlashCompleter(),
+        complete_while_typing=True,  # sugesti muncul otomatis saat mengetik
+    )
 
     # Status bar token PERMANEN di paling bawah (selalu terlihat & rapi).
     def bottom_toolbar():

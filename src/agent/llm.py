@@ -227,8 +227,10 @@ def stream_completion(
     def _do() -> tuple[str, list[dict[str, Any]], Any]:
         stream = client.chat.completions.create(**kwargs)
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_slots: dict[int, dict[str, str]] = {}
         usage = None
+        finish_reason = None
         try:
             for chunk in stream:
                 if cancel_event is not None and cancel_event.is_set():
@@ -237,12 +239,25 @@ def stream_completion(
                     usage = chunk.usage
                 if not getattr(chunk, "choices", None):
                     continue
-                delta = chunk.choices[0].delta
+                choice = chunk.choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
                 piece = getattr(delta, "content", None)
                 if piece:
                     content_parts.append(piece)
                     if on_content:
                         on_content(piece)
+                # Model reasoning (Nemotron/gpt-oss/DeepSeek/dll) mengalirkan
+                # "pikiran" di field terpisah. Tangkap agar TIDAK hilang: dipakai
+                # sbg jawaban cadangan bila `content` akhirnya kosong, sekaligus
+                # menggerakkan penghitung token supaya UI tak terlihat macet.
+                rpiece = (getattr(delta, "reasoning_content", None)
+                          or getattr(delta, "reasoning", None))
+                if rpiece:
+                    reasoning_parts.append(rpiece)
+                    if on_content:
+                        on_content(rpiece)
                 for tc in getattr(delta, "tool_calls", None) or []:
                     slot = tool_slots.setdefault(
                         tc.index, {"id": "", "name": "", "arguments": ""}
@@ -261,11 +276,22 @@ def stream_completion(
                 pass
 
         content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
         tool_calls = [tool_slots[i] for i in sorted(tool_slots)]
-        if not content and not tool_calls and usage is None:
-            raise EmptyResponseError(
-                "Stream kosong (kemungkinan rate limit 40 RPM)."
-            )
+        # Model hanya "berpikir" tanpa menghasilkan jawaban akhir (mis. anggaran
+        # thinking habis): pakai isi pikirannya agar pengguna TETAP dapat respons,
+        # bukan layar kosong.
+        if not content and reasoning and not tool_calls:
+            content = reasoning.strip()
+        if not content and not tool_calls:
+            # Benar-benar tak ada apa pun. Tanpa sinyal `finish_reason`, ini khas
+            # body kosong saat throttle -> perlakukan sementara agar di-retry.
+            # Bila ADA finish_reason (model memang berhenti), jangan spam retry:
+            # kembalikan kosong, biar core.py yang memberi pesan cadangan.
+            if finish_reason is None:
+                raise EmptyResponseError(
+                    "Stream kosong (kemungkinan rate limit 40 RPM)."
+                )
         return content, tool_calls, usage
 
     return _call_with_retry(_do, cancel_event=cancel_event, on_retry=on_retry)
