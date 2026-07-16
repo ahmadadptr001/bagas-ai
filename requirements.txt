@@ -1,0 +1,12 @@
+openai>=1.30.0
+rich>=13.0.0
+InquirerPy>=0.3.4
+pyfiglet>=1.0.0
+ddgs>=6.0.0
+python-telegram-bot>=21.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+python-dotenv>=1.0.0
+tenacity>=8.2.0
+pydantic>=2.0.0
+requests>=2.31.0

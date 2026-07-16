@@ -1,0 +1,93 @@
+# ============================================================================
+# bagasAI — installer satu-perintah untuk Windows (PowerShell).
+#
+# Pakai salah satu:
+#   .\install.ps1                     # dari dalam folder proyek
+#   irm <URL>/install.ps1 | iex       # dari mana saja (mengunduh repo)
+#
+# Skrip ini: cek Python, memasang bagasAI sebagai perintah global, memastikan
+# PATH, lalu menjalankan wizard login untuk memasukkan API key NVIDIA.
+# ============================================================================
+$ErrorActionPreference = "Stop"
+
+function Step($m) { Write-Host "» $m" -ForegroundColor Magenta }
+function Ok($m)   { Write-Host "  + $m" -ForegroundColor Green }
+function Err($m)  { Write-Host "  x $m" -ForegroundColor Red }
+
+$RepoUrl = if ($env:BAGASAI_REPO) { $env:BAGASAI_REPO } else { "https://github.com/ahmadadptr/bagasai" }
+
+Write-Host ""
+Write-Host "bagasAI " -ForegroundColor Magenta -NoNewline
+Write-Host "· installer" -ForegroundColor DarkGray
+Write-Host ""
+
+# --- 1. Python 3.10+ ---
+Step "Memeriksa Python"
+$Py = $null
+foreach ($c in @("python", "py", "python3")) {
+    $cmd = Get-Command $c -ErrorAction SilentlyContinue
+    if ($cmd) {
+        & $c -c "import sys; raise SystemExit(0 if sys.version_info>=(3,10) else 1)" 2>$null
+        if ($LASTEXITCODE -eq 0) { $Py = $c; break }
+    }
+}
+if (-not $Py) {
+    Err "Butuh Python 3.10+. Pasang dari https://www.python.org/downloads/ (centang 'Add to PATH') lalu ulangi."
+    exit 1
+}
+Ok "Python: $(& $Py --version)"
+
+# --- 2. Dapatkan sumber kode ---
+$Src = $null
+if ((Test-Path "pyproject.toml") -and (Select-String -Path "pyproject.toml" -Pattern "bagasai" -Quiet)) {
+    $Src = (Get-Location).Path
+    Ok "Sumber: folder saat ini"
+} else {
+    Step "Mengunduh bagasAI"
+    $Dest = Join-Path $HOME ".bagasai\src"
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
+        New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+        git clone --depth 1 $RepoUrl $Dest
+        $Src = $Dest
+        Ok "Diunduh ke $Dest"
+    } else {
+        Err "git tidak ada. Pasang git, atau jalankan install.ps1 dari dalam folder proyek."
+        exit 1
+    }
+}
+
+# --- 3. Pasang sebagai perintah global ---
+Step "Memasang bagasAI (pip install)"
+& $Py -m pip install --user --upgrade $Src
+if ($LASTEXITCODE -ne 0) { Err "pip install gagal."; exit 1 }
+Ok "Terpasang"
+
+# --- 4. Pastikan folder Scripts ada di PATH (user) ---
+Step "Memeriksa PATH"
+$BinDir = & $Py -c "import site,os; print(os.path.join(site.getuserbase(),'Scripts'))"
+if (-not (Get-Command bagasAI -ErrorAction SilentlyContinue)) {
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($userPath -notlike "*$BinDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$userPath;$BinDir", "User")
+        $env:Path = "$env:Path;$BinDir"
+        Ok "Menambahkan $BinDir ke PATH (user). Buka terminal baru bila 'bagasAI' belum dikenali."
+    } else {
+        $env:Path = "$env:Path;$BinDir"
+    }
+} else {
+    Ok "Perintah 'bagasAI' siap dipakai"
+}
+
+# --- 5. Wizard login (API key NVIDIA + Telegram opsional) ---
+Write-Host ""
+Step "Login — masukkan API key NVIDIA"
+$bagas = Get-Command bagasAI -ErrorAction SilentlyContinue
+if ($bagas) { & bagasAI login } else { & $Py -m agent login }
+
+Write-Host ""
+Write-Host "Selesai. " -ForegroundColor Green -NoNewline
+Write-Host "Ketik " -NoNewline
+Write-Host "bagasAI" -ForegroundColor Cyan -NoNewline
+Write-Host " di terminal mana pun untuk mulai."
+Write-Host ""

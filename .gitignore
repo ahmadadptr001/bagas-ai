@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Agent working directory (file/kode yang dibuat agent)
+workspace/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
