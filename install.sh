@@ -74,7 +74,24 @@ ok "Terpasang via $INSTALLER"
 
 # --- 4. Pastikan direktori bin/Scripts ada di PATH ---
 step "Memeriksa PATH"
-BIN_DIR="$("$PY" -c 'import site,sys,os; base=site.getuserbase(); print(os.path.join(base,"Scripts") if os.name=="nt" else os.path.join(base,"bin"))')"
+# Cari lokasi executable yang BENAR-BENAR terpasang (lebih andal daripada
+# menebak dari getuserbase, mis. pada Python Store di Windows).
+BIN_DIR="$("$PY" - <<'PY'
+import importlib.metadata as M, os, site
+def find():
+    try:
+        d = M.distribution("bagasai")
+        for f in (d.files or []):
+            n = f.name.lower()
+            if n.startswith("bagas") and ("." not in n or n.endswith(".exe")):
+                return os.path.dirname(os.path.realpath(d.locate_file(f)))
+    except Exception:
+        pass
+    b = site.getuserbase()
+    return os.path.join(b, "Scripts" if os.name == "nt" else "bin")
+print(find())
+PY
+)"
 if ! command -v bagasAI >/dev/null 2>&1; then
   case ":$PATH:" in
     *":$BIN_DIR:"*) : ;;

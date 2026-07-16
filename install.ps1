@@ -65,8 +65,24 @@ if ($LASTEXITCODE -ne 0) { Err "pip install gagal."; exit 1 }
 Ok "Terpasang"
 
 # --- 4. Pastikan folder Scripts ada di PATH (user) ---
+# Cari lokasi .exe yang BENAR-BENAR terpasang (penting untuk Python Store yang
+# menaruh script di folder tak terduga), bukan sekadar menebak dari getuserbase.
 Step "Memeriksa PATH"
-$BinDir = & $Py -c "import site,os; print(os.path.join(site.getuserbase(),'Scripts'))"
+$Locate = @'
+import importlib.metadata as M, os, site
+def find():
+    try:
+        d = M.distribution("bagasai")
+        for f in (d.files or []):
+            n = f.name.lower()
+            if n.startswith("bagas") and n.endswith(".exe"):
+                return os.path.dirname(os.path.realpath(d.locate_file(f)))
+    except Exception:
+        pass
+    return os.path.join(site.getuserbase(), "Scripts")
+print(find())
+'@
+$BinDir = (& $Py -c $Locate).Trim()
 if (-not (Get-Command bagasAI -ErrorAction SilentlyContinue)) {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -notlike "*$BinDir*") {
