@@ -96,6 +96,30 @@ def pout(renderable, *, bottom: int = 1) -> None:
     """Cetak renderable dengan padding kiri/kanan (+bawah) yang konsisten."""
     console.print(Padding(renderable, (0, _LPAD, bottom, _LPAD)))
 
+
+def _update_notice() -> None:
+    """Notifikasi ringkas bila versi usang (dari cache), lalu cek ulang di latar.
+
+    Non-blocking: notifikasi diambil dari hasil cek TERAKHIR yang tersimpan,
+    sedangkan pengecekan baru ke GitHub berjalan di latar untuk startup berikut.
+    """
+    try:
+        cache = updater.read_cache()
+        if cache.get("status") == "update_available":
+            n = cache.get("behind", "?")
+            local, remote = cache.get("local", ""), cache.get("remote", "")
+            ver = f" ({local} → {remote})" if local and remote else ""
+            pout(
+                f"[#f9e2af]⬆ Pembaruan bagasAI tersedia[/] "
+                f"[dim]— {n} commit lebih baru{ver}.[/dim]  "
+                f"Ketik [#94e2d5]/update[/] untuk memperbarui.",
+                bottom=0,
+            )
+        # Segarkan cache untuk startup berikutnya (jalan di thread latar).
+        updater.background_refresh()
+    except Exception:
+        pass
+
 # Gradasi ungu -> biru (magenta neon) untuk teks shadow.
 _GRAD = ["#f0abfc", "#e879f9", "#c084fc", "#a855f7", "#7c3aed", "#4f46e5", "#2563eb"]
 
@@ -361,6 +385,7 @@ def main(resume: bool = False) -> None:
                 console.print("\n  [bold #89b4fa]🤖 bagasAI[/]")
                 console.print(Padding(Markdown(content), (0, 3, 1, 3)))
         console.print(Rule("[dim]lanjut di bawah[/dim]", style="#313244"))
+    _update_notice()  # info bila versi usang (dari cache) + cek ulang di latar
     console.print()
 
     live_holder: dict = {"live": None}
@@ -572,15 +597,11 @@ def main(resume: bool = False) -> None:
                 f"[dim]({res.get('local','')})[/dim]\n"
             )
             return
-        if st == "no_repo":
-            console.print(
-                "  [yellow]ℹ Instalasi ini bukan dari git,[/yellow] jadi tak bisa "
-                "auto-update.\n  [dim]Pasang lewat installer "
-                "(install.sh / install.ps1) agar /update aktif.[/dim]\n"
-            )
-            return
         if st == "no_git":
-            console.print("  [red]✖ git tidak ditemukan[/red] — pasang git dulu.\n")
+            console.print("  [red]✖ git tidak ditemukan[/red] — pasang git dulu agar bisa memperbarui.\n")
+            return
+        if st == "no_repo":
+            console.print("  [yellow]ℹ Tak bisa menentukan sumber pembaruan (REPO_URL kosong).[/yellow]\n")
             return
         if st == "no_upstream":
             console.print("  [yellow]ℹ Tidak ada remote/upstream yang dilacak.[/yellow]\n")
@@ -588,44 +609,68 @@ def main(resume: bool = False) -> None:
         if st == "fetch_error":
             console.print(f"  [red]✖ gagal fetch:[/red] {res.get('detail','')}\n")
             return
-        if st != "update_available":
+
+        if st == "setup_needed":
+            # Instalasi tanpa repo git penopang (salinan pip / installer dari
+            # folder). Bisa disiapkan otomatis: clone lalu reinstall.
+            body = Text()
+            body.append("Auto-update belum disiapkan untuk instalasi ini.\n\n",
+                        style="bold #f9e2af")
+            body.append(f"Sumber : {res.get('repo_url','')}\n", style="dim")
+            body.append(f"Branch : {res.get('branch','')}", style="dim")
+            pout(Panel(body, title="[bold #cba6f7]🔄 Siapkan pembaruan[/]",
+                       title_align="left", border_style="#cba6f7",
+                       box=box.ROUNDED, padding=(1, 2)))
+            try:
+                go = inquirer.confirm(message="Siapkan & perbarui sekarang?",
+                                      default=True).execute()
+            except (KeyboardInterrupt, EOFError):
+                go = False
+            if not go:
+                console.print("  [dim](dilewati)[/dim]\n")
+                return
+            console.print("  [dim]⏳ menyiapkan repo & memasang pembaruan…[/dim]")
+        elif st == "update_available":
+            n = res.get("behind", "?")
+            log = res.get("log", "")
+            body = Text()
+            body.append(f"{n} pembaruan tersedia  ", style="bold #f9e2af")
+            body.append(f"({res.get('local','')} → {res.get('remote','')})\n\n",
+                        style="dim")
+            if log:
+                for line in log.splitlines():
+                    body.append("  • ", style="#89b4fa")
+                    body.append(line + "\n")
+            pout(Panel(body, title="[bold #cba6f7]🔄 Pembaruan bagasAI[/]",
+                       title_align="left", border_style="#cba6f7",
+                       box=box.ROUNDED, padding=(1, 2)))
+            try:
+                go = inquirer.confirm(message="Terapkan pembaruan sekarang?",
+                                      default=True).execute()
+            except (KeyboardInterrupt, EOFError):
+                go = False
+            if not go:
+                console.print("  [dim](dilewati)[/dim]\n")
+                return
+            console.print("  [dim]⏳ menarik & memasang pembaruan…[/dim]")
+        else:
             console.print(f"  [red]✖ status tak terduga:[/red] {st}\n")
             return
 
-        # Ada pembaruan.
-        n = res.get("behind", "?")
-        log = res.get("log", "")
-        body = Text()
-        body.append(f"{n} pembaruan tersedia  ", style="bold #f9e2af")
-        body.append(f"({res.get('local','')} → {res.get('remote','')})\n\n",
-                    style="dim")
-        if log:
-            for line in log.splitlines():
-                body.append("  • ", style="#89b4fa")
-                body.append(line + "\n")
-        pout(Panel(body, title="[bold #cba6f7]🔄 Pembaruan bagasAI[/]",
-                   title_align="left", border_style="#cba6f7",
-                   box=box.ROUNDED, padding=(1, 2)))
-        try:
-            go = inquirer.confirm(message="Terapkan pembaruan sekarang?",
-                                  default=True).execute()
-        except (KeyboardInterrupt, EOFError):
-            go = False
-        if not go:
-            console.print("  [dim](dilewati)[/dim]\n")
-            return
-
-        console.print("  [dim]⏳ menarik & memasang pembaruan…[/dim]")
         try:
             out = updater.apply()
         except Exception as e:  # noqa: BLE001
             console.print(f"  [red]✖ gagal memperbarui:[/red] {e}\n")
             return
-        if out.get("status") == "pull_error":
+        ost = out.get("status")
+        if ost == "pull_error":
             console.print(f"  [red]✖ git pull gagal:[/red] {out.get('detail','')}\n")
             return
-        if out.get("status") != "updated":
-            console.print(f"  [red]✖ gagal:[/red] {out.get('status')}\n")
+        if ost == "clone_error":
+            console.print(f"  [red]✖ clone gagal:[/red] {out.get('detail','')}\n")
+            return
+        if ost != "updated":
+            console.print(f"  [red]✖ gagal ({ost}):[/red] {out.get('detail','')}\n")
             return
         note = "" if out.get("reinstalled") else (
             f"  [dim](catatan pip: {out.get('pip_detail','')})[/dim]")
@@ -708,14 +753,17 @@ def main(resume: bool = False) -> None:
         return do_action(action)
 
     # --- input (prompt_toolkit hanya saat idle) ---
-    # Backspace polos = hapus 1 HURUF (perilaku default). Hapus 1 KATA hanya
-    # saat menahan Ctrl (Ctrl+Backspace) atau Ctrl+W / Alt+Backspace.
+    # ATURAN UTAMA: Backspace polos = hapus 1 HURUF, SELALU, di terminal mana pun.
     #
-    # Tombol Backspace mengirim kode berbeda tergantung OS:
-    #   - Windows conhost: Backspace polos = c-h (\x08); Ctrl+Backspace = backspace (\x7f)
-    #   - Terminal Unix   : Backspace polos = backspace (\x7f); Ctrl+Backspace = c-h (\x08)
-    # Jadi kita mengikat hapus-kata ke varian yang BUKAN Backspace polos di OS ini,
-    # dan membiarkan Backspace polos memakai default (1 huruf).
+    # Kenyataannya tombol Backspace bisa terkirim sebagai `backspace` (\x7f) ATAU
+    # `c-h` (\x08) tergantung terminal/OS — dan tak bisa dibedakan dari Ctrl+
+    # Backspace secara andal. Maka kita SENGAJA membiarkan KEDUA kode itu memakai
+    # perilaku default prompt_toolkit (hapus 1 huruf) dan TIDAK PERNAH mengikatnya
+    # ke hapus-kata. Ini menjamin Backspace polos tak akan pernah menghapus sekata.
+    #
+    # Hapus 1 KATA hanya lewat kombinasi yang MUSTAHIL sama dengan Backspace polos:
+    #   - Ctrl+W        (c-w)
+    #   - Alt+Backspace (escape, backspace)
     kb = KeyBindings()
 
     def _del_word(event):
@@ -723,12 +771,8 @@ def main(resume: bool = False) -> None:
         if pos is not None:
             event.current_buffer.delete_before_cursor(count=-pos)
 
-    kb.add("c-w")(_del_word)  # Ctrl+W (universal)
-    kb.add("escape", "backspace")(_del_word)  # Alt+Backspace
-    if sys.platform == "win32":
-        kb.add("backspace")(_del_word)  # Windows: ini = Ctrl+Backspace
-    else:
-        kb.add("c-h")(_del_word)  # Unix: ini = Ctrl+Backspace
+    kb.add("c-w")(_del_word)                   # Ctrl+W
+    kb.add("escape", "backspace")(_del_word)   # Alt+Backspace
     # Gaya status bar: latar gelap "catppuccin" + aksen warna per segmen.
     _pt_style = PTStyle.from_dict({
         "bottom-toolbar": "bg:#181825 #cdd6f4 noreverse",

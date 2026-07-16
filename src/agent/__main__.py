@@ -66,39 +66,53 @@ def _cmd_update() -> None:
     if st == "up_to_date":
         print(f"✓ bagasAI sudah versi terbaru. ({res.get('local','')})")
         return
-    if st == "no_repo":
-        print("ℹ Instalasi ini bukan dari git — tak bisa auto-update.")
-        print("  Pasang lewat installer (install.sh / install.ps1) agar update aktif.")
-        return
     if st == "no_git":
-        print("✖ git tidak ditemukan — pasang git dulu.")
+        print("✖ git tidak ditemukan — pasang git dulu agar bisa memperbarui.")
+        return
+    if st == "no_repo":
+        print("ℹ Tak bisa menentukan sumber pembaruan (REPO_URL kosong).")
         return
     if st in ("no_upstream", "fetch_error"):
         print(f"✖ {st}: {res.get('detail','tidak ada remote/upstream')}")
         return
-    if st != "update_available":
+
+    if st == "setup_needed":
+        # Instalasi tanpa repo git penopang (salinan pip / installer dari folder).
+        # Bisa disiapkan otomatis dengan clone lalu reinstall.
+        print("ℹ Auto-update belum disiapkan untuk instalasi ini.")
+        print(f"  Sumber: {res.get('repo_url','')} (branch {res.get('branch','')})")
+        try:
+            ans = input("Siapkan & perbarui sekarang? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans in ("n", "no", "t", "tidak"):
+            print("Dilewati.")
+            return
+        print("⏳ Menyiapkan repo & memasang pembaruan…")
+    elif st == "update_available":
+        print(f"\n{res.get('behind','?')} pembaruan tersedia "
+              f"({res.get('local','')} → {res.get('remote','')}):")
+        if res.get("log"):
+            for line in res["log"].splitlines():
+                print("  • " + line)
+        try:
+            ans = input("\nTerapkan sekarang? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans in ("n", "no", "t", "tidak"):
+            print("Dilewati.")
+            return
+        print("⏳ Menarik & memasang pembaruan…")
+    else:
         print(f"✖ status tak terduga: {st}")
         return
 
-    print(f"\n{res.get('behind','?')} pembaruan tersedia "
-          f"({res.get('local','')} → {res.get('remote','')}):")
-    if res.get("log"):
-        for line in res["log"].splitlines():
-            print("  • " + line)
-    try:
-        ans = input("\nTerapkan sekarang? [Y/n] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        ans = "n"
-    if ans in ("n", "no", "t", "tidak"):
-        print("Dilewati.")
-        return
-    print("⏳ Menarik & memasang pembaruan…")
     out = updater.apply()
     if out.get("status") == "updated":
         tail = "" if out.get("reinstalled") else f" (catatan pip: {out.get('pip_detail','')})"
         print("✓ bagasAI diperbarui! Jalankan ulang perintah bagasAI." + tail)
     else:
-        print(f"✖ gagal: {out.get('detail') or out.get('status')}")
+        print(f"✖ gagal ({out.get('status')}): {out.get('detail','')}")
 
 
 def _need_key() -> bool:

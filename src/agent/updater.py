@@ -1,15 +1,25 @@
-"""Pembaruan bagasAI dari GitHub.
+"""Pembaruan bagasAI dari GitHub — menangani SEMUA cara instalasi.
 
-Mendeteksi repo git yang menopang instalasi ini (hasil clone installer di
-~/.bagasai/src, atau checkout dev), membandingkan dengan remote, lalu menarik
-pembaruan (git pull) dan memasang ulang bila perlu. Kalau tidak ada pembaruan,
-memberi tahu bahwa bagasAI sudah versi terbaru.
+Kasus yang didukung:
+- Instalasi via installer yang meng-clone repo ke ~/.bagasai/src (install.sh /
+  install.ps1 tanpa folder lokal): repo git sudah ada -> tinggal pull + reinstall.
+- Instalasi via installer DARI dalam folder proyek, atau `pip install` biasa
+  (salinan non-editable tanpa repo git penopang): auto-update DISIAPKAN dengan
+  meng-clone repo ke ~/.bagasai/src, lalu reinstall dari sana.
+- Checkout pengembangan (editable): pull + reinstall editable.
+
+Reinstall MEMPERTAHANKAN cara pasang aslinya (mis. `--user`) supaya kode yang
+benar-benar dijalankan ikut ter-update, bukan cuma repo-nya.
 """
 from __future__ import annotations
 
+import json
 import shutil
+import site
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from . import config
@@ -25,47 +35,107 @@ def _git_available() -> bool:
     return shutil.which("git") is not None
 
 
-def find_repo() -> Path | None:
-    """Temukan folder repo git (yang berisi .git) penopang instalasi ini."""
-    candidates: list[Path] = []
+def _pkg_path() -> Path | None:
     try:
-        from . import __file__ as pkg_file  # .../src/agent/__init__.py
+        from . import __file__ as pkg_file  # .../agent/__init__.py
 
-        candidates.append(Path(pkg_file).resolve())
+        return Path(pkg_file).resolve()
     except Exception:
-        pass
+        return None
+
+
+def _repo_dir() -> Path:
+    """Lokasi clone repo untuk auto-update (dibuat installer / oleh kita)."""
+    return config.CONFIG_HOME / "src"
+
+
+def find_repo() -> Path | None:
+    """Temukan folder repo git (berisi .git) penopang instalasi ini, bila ada."""
+    candidates: list[Path] = []
+    pkg = _pkg_path()
+    if pkg:
+        candidates.append(pkg)
     candidates.append(Path(__file__).resolve())
-    candidates.append(config.CONFIG_HOME / "src")  # lokasi clone installer
-    candidates.append(config.ROOT_DIR)  # checkout pengembangan
+    candidates.append(_repo_dir())        # lokasi clone installer / auto-setup
+    candidates.append(config.ROOT_DIR)    # checkout pengembangan
 
     seen: set[Path] = set()
     for c in candidates:
-        chain = [c, *c.parents] if c.exists() or c.parents else [c]
+        chain = [c, *c.parents] if (c.exists() or c.parents) else [c]
         for p in chain:
             if p in seen:
                 continue
             seen.add(p)
-            if (p / ".git").exists():
-                return p
+            try:
+                if (p / ".git").exists():
+                    return p
+            except OSError:
+                continue
     return None
 
 
 def _is_editable(repo: Path) -> bool:
     """True bila paket terpasang mode editable (agent.__file__ ada di repo/src)."""
+    pkg = _pkg_path()
+    if not pkg:
+        return False
     try:
-        from . import __file__ as pkg_file
-
-        return str((repo / "src").resolve()) in str(Path(pkg_file).resolve())
+        return str((repo / "src").resolve()) in str(pkg)
     except Exception:
         return False
+
+
+def _is_user_install() -> bool:
+    """True bila paket terpasang di user site-packages (pip install --user)."""
+    pkg = _pkg_path()
+    if not pkg:
+        return False
+    try:
+        usp = site.getusersitepackages()
+    except Exception:
+        return False
+    if not usp:
+        return False
+    try:
+        return str(pkg).startswith(str(Path(usp).resolve()))
+    except Exception:
+        return False
+
+
+def clone_repo() -> dict:
+    """Clone repo ke ~/.bagasai/src untuk MENGAKTIFKAN auto-update.
+
+    Return {ok: bool, repo?: Path, cloned?: bool, status?, detail?}.
+    """
+    if not _git_available():
+        return {"ok": False, "status": "no_git"}
+    if not config.REPO_URL:
+        return {"ok": False, "status": "no_repo"}
+    dest = _repo_dir()
+    if (dest / ".git").exists():
+        return {"ok": True, "repo": dest}
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    r = _run(
+        ["git", "clone", "--depth", "1", "--branch", config.REPO_BRANCH,
+         config.REPO_URL, str(dest)],
+        dest.parent, timeout=600,
+    )
+    if r.returncode != 0:
+        return {
+            "ok": False,
+            "status": "clone_error",
+            "detail": (r.stderr or r.stdout).strip()[:300],
+        }
+    return {"ok": True, "repo": dest, "cloned": True}
 
 
 def _upstream(repo: Path) -> str:
     r = _run(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo)
     if r.returncode == 0 and r.stdout.strip():
         return r.stdout.strip()
-    # Fallback umum.
-    for cand in ("origin/main", "origin/master"):
+    for cand in (f"origin/{config.REPO_BRANCH}", "origin/main", "origin/master"):
         if _run(["git", "rev-parse", cand], repo).returncode == 0:
             return cand
     return ""
@@ -74,14 +144,24 @@ def _upstream(repo: Path) -> str:
 def check() -> dict:
     """Periksa apakah ada pembaruan. Return dict dengan kunci 'status'.
 
-    status: no_repo | no_git | fetch_error | no_upstream | up_to_date |
-            update_available
+    status: no_git | setup_needed | no_repo | fetch_error | no_upstream |
+            up_to_date | update_available
     """
+    if not _git_available():
+        return {"status": "no_git"}
+
     repo = find_repo()
     if not repo:
+        # Instalasi tanpa repo git penopang (salinan pip / installer dari folder).
+        # Auto-update BISA disiapkan dengan clone saat apply().
+        if config.REPO_URL:
+            return {
+                "status": "setup_needed",
+                "repo_url": config.REPO_URL,
+                "branch": config.REPO_BRANCH,
+            }
         return {"status": "no_repo"}
-    if not _git_available():
-        return {"status": "no_git", "repo": str(repo)}
+
     if _run(["git", "rev-parse", "--is-inside-work-tree"], repo).returncode != 0:
         return {"status": "no_repo"}
 
@@ -117,35 +197,111 @@ def check() -> dict:
     }
 
 
-def apply() -> dict:
-    """Tarik pembaruan (git pull --ff-only) lalu pasang ulang bila perlu.
-
-    status: no_repo | pull_error | updated
-    """
-    repo = find_repo()
-    if not repo:
-        return {"status": "no_repo"}
-
-    pull = _run(["git", "pull", "--ff-only"], repo, timeout=180)
-    if pull.returncode != 0:
-        return {
-            "status": "pull_error",
-            "detail": (pull.stderr or pull.stdout).strip()[:300],
-            "repo": str(repo),
-        }
-
-    # Pasang ulang agar perubahan dependency / entry point ikut terpasang.
+def _reinstall(repo: Path) -> dict:
+    """Pasang ulang dari `repo`, mempertahankan cara pasang asli (--user, editable)."""
     editable = _is_editable(repo)
-    cmd = [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade"]
-    cmd += (["-e", str(repo)] if editable else [str(repo)])
-    inst = _run(cmd, repo, timeout=600)
+    base = [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade"]
+    flags: list[str] = []
+    if not editable and _is_user_install():
+        flags.append("--user")
+    target = ["-e", str(repo)] if editable else [str(repo)]
+
+    inst = _run(base + flags + target, repo, timeout=600)
+    # Fallback PEP 668 (Linux/macOS "externally-managed-environment").
+    blob = (inst.stderr + inst.stdout).lower()
+    if inst.returncode != 0 and "externally-managed" in blob:
+        inst = _run(base + flags + ["--break-system-packages"] + target, repo, timeout=600)
 
     return {
+        "ok": inst.returncode == 0,
+        "detail": "" if inst.returncode == 0 else (inst.stderr or inst.stdout).strip()[:200],
+        "editable": editable,
+    }
+
+
+# --- Cek otomatis saat startup (non-blocking, hasil di-cache) ---------------
+
+def _cache_file() -> Path:
+    return config.CONFIG_HOME / "update_check.json"
+
+
+def read_cache() -> dict:
+    """Baca hasil cek update terakhir (untuk notifikasi instan saat startup)."""
+    try:
+        return json.loads(_cache_file().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_cache(data: dict) -> None:
+    try:
+        _cache_file().write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def background_refresh(min_interval: float = 3 * 3600) -> None:
+    """Perbarui cache status update di LATAR — tak memblokir startup, aman gagal.
+
+    Hanya benar-benar menghubungi GitHub bila cache sudah lebih tua dari
+    `min_interval` detik, supaya tak boros jaringan saat sering dijalankan.
+    """
+    try:
+        cache = read_cache()
+        now = time.time()
+        if cache.get("ts") and (now - float(cache["ts"])) < min_interval:
+            return  # baru saja dicek
+
+        def _worker() -> None:
+            try:
+                res = check()
+                res["ts"] = time.time()
+                _write_cache(res)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+    except Exception:
+        pass
+
+
+def apply() -> dict:
+    """Siapkan repo bila perlu, tarik pembaruan, lalu pasang ulang.
+
+    status: no_git | no_repo | clone_error | pull_error | updated
+    """
+    if not _git_available():
+        return {"status": "no_git"}
+
+    repo = find_repo()
+    pull_out = ""
+    if not repo:
+        # Belum ada repo penopang -> siapkan dengan clone (mengaktifkan update
+        # untuk instalasi salinan / installer-dari-folder).
+        c = clone_repo()
+        if not c.get("ok"):
+            return {"status": c.get("status", "no_repo"), "detail": c.get("detail", "")}
+        repo = c["repo"]
+        pull_out = "repo disiapkan (clone baru)"
+    else:
+        pull = _run(["git", "pull", "--ff-only"], repo, timeout=180)
+        if pull.returncode != 0:
+            return {
+                "status": "pull_error",
+                "detail": (pull.stderr or pull.stdout).strip()[:300],
+                "repo": str(repo),
+            }
+        pull_out = pull.stdout.strip()[:300]
+
+    reinst = _reinstall(repo)
+    # Bersihkan cache notifikasi startup supaya tak lagi menampilkan "usang".
+    _write_cache({"status": "up_to_date", "ts": time.time()})
+    return {
         "status": "updated",
-        "pull": pull.stdout.strip()[:300],
-        "reinstalled": inst.returncode == 0,
-        "pip_detail": ""
-        if inst.returncode == 0
-        else (inst.stderr or inst.stdout).strip()[:200],
+        "pull": pull_out,
+        "reinstalled": reinst["ok"],
+        "pip_detail": reinst["detail"],
         "repo": str(repo),
     }

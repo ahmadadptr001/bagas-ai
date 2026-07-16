@@ -79,6 +79,14 @@ VISION_MODEL: str = os.getenv(
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
+# --- Auto-update (samakan dengan installer install.sh/install.ps1) ---
+# Dipakai `bagasAI update` untuk menyiapkan/menarik pembaruan dari GitHub, bahkan
+# bila instalasi berupa salinan (pip install biasa) tanpa repo git penopang.
+REPO_URL: str = os.getenv(
+    "BAGASAI_REPO", "https://github.com/ahmadadptr001/bagas-ai"
+).strip()
+REPO_BRANCH: str = os.getenv("BAGASAI_BRANCH", "master").strip()
+
 # --- Perilaku agent ---
 MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))
 TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.6"))
