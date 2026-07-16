@@ -96,8 +96,10 @@ MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))
 MAX_TOOL_CALLS: int = int(os.getenv("MAX_TOOL_CALLS", "80"))
 MAX_DUPLICATE_TOOL_CALLS: int = int(os.getenv("MAX_DUPLICATE_TOOL_CALLS", "3"))
 TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.6"))
-# Timeout per request (detik). Model besar NVIDIA bisa lambat saat cold-start.
-REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "120"))
+# Timeout per request (detik). Model BESAR/REASONING (Nemotron-Ultra, Mistral-
+# Large, DeepSeek-Pro) sering berpikir lama; 120s terlalu pendek -> request
+# di-timeout lalu DIULANG dari nol (malah makin lambat). Beri ruang lebih lega.
+REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "300"))
 # Total waktu (detik) bagasAI bertahan mencoba ulang saat NVIDIA rate-limit /
 # throttle ("worker local total request limit reached", dll) SEBELUM menyerah.
 # Free tier ~40 RPM reset tiap menit, jadi default 5 menit cukup untuk pulih
@@ -111,6 +113,10 @@ CODE_EXEC_TIMEOUT: int = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))
 # (mis. install dependency / scaffolding). Perintah dijalankan NON-INTERAKTIF
 # (stdin ditutup) & seluruh pohon prosesnya dibunuh bila melewati batas ini.
 COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "300"))
+# Cek sintaks OTOMATIS tiap kali write_file menulis file kode (.py/.js/.json/dll).
+# Ringan (hanya parsing, tak menjalankan kode) & memastikan bagasAI selalu
+# memverifikasi hasil ngoding-nya. Matikan dengan AUTO_SYNTAX_CHECK=false.
+AUTO_SYNTAX_CHECK: bool = _get_bool("AUTO_SYNTAX_CHECK", True)
 
 ENV_FILE = CONFIG_HOME / ".env"
 
