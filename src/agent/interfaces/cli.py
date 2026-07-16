@@ -41,7 +41,7 @@ try:
 except Exception:  # pragma: no cover
     Figlet = None  # type: ignore
 
-from .. import config, interaction, llm, longmem, models, prefs, scripts, updater  # noqa: E402
+from .. import config, interaction, llm, longmem, models, prefs, scripts, updater, workspace  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
@@ -56,6 +56,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("menu", "menu interaktif"),
     ("model", "pilih model + saran"),
     ("effort", "mode berpikir"),
+    ("add-dir", "tambah folder konteks"),
+    ("dirs", "folder konteks aktif"),
+    ("rm-dir", "hapus folder konteks"),
     ("new", "mulai sesi baru"),
     ("delete", "hapus sesi"),
     ("reset", "kosongkan riwayat"),
@@ -573,12 +576,13 @@ def main(resume: bool = False) -> None:
         c = "#94e2d5"
         pout(Panel(
             "[dim]ketik pesan biasa untuk mengobrol dengan bagasAI[/dim]\n\n"
-            f"[{c}]/menu[/]    menu interaktif        [{c}]/model[/]   pilih model + saran\n"
-            f"[{c}]/effort[/]  mode berpikir           [{c}]/new[/]     sesi baru\n"
-            f"[{c}]/delete[/]  hapus sesi              [{c}]/reset[/]   kosongkan riwayat\n"
-            f"[{c}]/memory[/]  memori jangka panjang   [{c}]/scripts[/] skrip tersimpan\n"
-            f"[{c}]/clear[/]   bersihkan layar         [{c}]/update[/]  cek pembaruan\n"
-            f"[dim]                                 [/dim][#f38ba8]/exit[/]    keluar",
+            f"[{c}]/menu[/]     menu interaktif        [{c}]/model[/]    pilih model + saran\n"
+            f"[{c}]/effort[/]   mode berpikir          [{c}]/new[/]      sesi baru\n"
+            f"[{c}]/add-dir[/]  tambah folder konteks  [{c}]/dirs[/]     folder konteks aktif\n"
+            f"[{c}]/rm-dir[/]   lepas folder konteks   [{c}]/delete[/]   hapus sesi\n"
+            f"[{c}]/memory[/]   memori jangka panjang  [{c}]/scripts[/]  skrip tersimpan\n"
+            f"[{c}]/reset[/]    kosongkan riwayat      [{c}]/clear[/]    bersihkan layar\n"
+            f"[{c}]/update[/]   cek pembaruan          [#f38ba8]/exit[/]     keluar",
             title="[bold #cba6f7]❔ Bantuan[/]", title_align="left",
             border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2)))
 
@@ -680,6 +684,52 @@ def main(resume: bool = False) -> None:
             "[dim]agar perubahan aktif.[/dim]" + note + "\n"
         )
 
+    def _dir_tree_panel(p, title: str) -> None:
+        body = Text()
+        body.append(f"{p}\n\n", style="bold #a6e3a1")
+        body.append(workspace.tree(p), style="dim")
+        pout(Panel(body, title=title, title_align="left",
+                   border_style="#a6e3a1", box=box.ROUNDED, padding=(1, 2)))
+
+    def do_add_dir(path: str) -> None:
+        try:
+            p = workspace.add(path)
+        except ValueError as e:
+            console.print(f"  [red]✖[/red] {e}\n")
+            return
+        agent.refresh_system_prompt()  # bagasAI langsung "paham" folder ini
+        _dir_tree_panel(p, "[bold #a6e3a1]📂 Folder konteks ditambahkan[/]")
+        console.print(
+            "  [dim]bagasAI kini memahami & bisa baca/tulis file di folder ini "
+            "(pakai path absolut).[/dim]\n"
+        )
+
+    def do_rm_dir(path: str) -> None:
+        if workspace.remove(path):
+            agent.refresh_system_prompt()
+            console.print(f"  [#a6e3a1]✓ Folder konteks dilepas:[/] [dim]{path}[/dim]\n")
+        else:
+            console.print(f"  [yellow]ℹ Folder itu tidak ada di daftar konteks.[/yellow]\n")
+
+    def show_dirs() -> None:
+        dirs = workspace.list_dirs()
+        if not dirs:
+            console.print(
+                "  [dim]Belum ada folder konteks tambahan.[/dim]  "
+                "Pakai [#94e2d5]/add-dir <path>[/] untuk menambah.\n"
+            )
+            return
+        body = Text()
+        body.append("Folder yang bagasAI pahami (selain root project):\n\n",
+                    style="dim")
+        for d in dirs:
+            body.append("  📂 ", style="#a6e3a1")
+            body.append(f"{d}\n")
+        body.append("\nLepas dengan /rm-dir <path>.", style="dim")
+        pout(Panel(body, title="[bold #a6e3a1]📂 Folder konteks[/]",
+                   title_align="left", border_style="#a6e3a1",
+                   box=box.ROUNDED, padding=(1, 2)))
+
     def do_action(action: str) -> bool:
         nonlocal agent, session
         if action in ("exit", "quit"):
@@ -688,6 +738,8 @@ def main(resume: bool = False) -> None:
             pick_model()
         elif action == "effort":
             pick_effort()
+        elif action == "dirs":
+            show_dirs()
         elif action == "delete":
             delete_sessions()
         elif action == "new":
@@ -844,6 +896,18 @@ def main(resume: bool = False) -> None:
                         console.print(f"[red]{e}[/red]")
                 else:
                     pick_model()
+            elif cmd == "add-dir" or cmd.startswith("add-dir "):
+                parts = text.split(maxsplit=1)
+                if len(parts) == 2:
+                    do_add_dir(parts[1].strip().strip('"').strip("'"))
+                else:
+                    console.print("  [yellow]Pakai: /add-dir <path folder>[/yellow]\n")
+            elif cmd == "rm-dir" or cmd.startswith("rm-dir "):
+                parts = text.split(maxsplit=1)
+                if len(parts) == 2:
+                    do_rm_dir(parts[1].strip().strip('"').strip("'"))
+                else:
+                    console.print("  [yellow]Pakai: /rm-dir <path folder>[/yellow]\n")
             else:
                 if do_action(cmd):
                     break

@@ -1,7 +1,7 @@
 """System prompt untuk bagasAI — dibangun dinamis (root project, memory, skrip)."""
 from __future__ import annotations
 
-from . import config, longmem, scripts
+from . import config, longmem, scripts, workspace
 
 BASE = """Kamu adalah bagasAI, asisten AI serbaguna yang cerdas, kritis, dan teliti.
 Jika ditanya namamu, jawab "bagasAI".
@@ -62,6 +62,14 @@ Targetmu: jawaban setingkat asisten AI terbaik. Terapkan ini pada tiap balasan:
   Buat pengguna merasa ditangani asisten yang cermat, bukan generator teks.
 
 # HEMAT WAKTU & TOOL (SANGAT PENTING — jangan buang-buang waktu)
+- FOKUS PADA INSTRUKSI TERBARU. Kerjakan HANYA yang sedang diminta pengguna di
+  giliran ini. Pekerjaan dari giliran SEBELUMNYA yang sudah selesai JANGAN
+  dikerjakan ulang dari nol; bila instruksi baru berbeda, kerjakan yang baru —
+  jangan tertarik mengulang tugas lama.
+- BERTINDAK KOHEREN, JANGAN NGELANTUR. Punya rencana singkat lalu ikuti berurutan.
+  Jangan melompat-lompat, jangan melakukan langkah acak yang tak diminta, jangan
+  memanggil tool "asal coba". Begitu informasi/hasil sudah CUKUP untuk menjawab,
+  BERHENTI memakai tool dan langsung berikan jawaban akhir.
 - JANGAN BACA ULANG. Kalau isi sebuah file SUDAH kamu baca di sesi/giliran ini,
   isinya masih ada di konteksmu — PAKAI itu, JANGAN read_file lagi file yang sama
   kecuali kamu baru saja mengubahnya dan perlu memastikan hasil akhirnya.
@@ -118,6 +126,15 @@ def build_system_prompt() -> str:
         f"Root project (folder terminal aktif): {config.PROJECT_ROOT}\n"
         f"Kamu bisa membaca/menulis file dan menjalankan kode di dalam folder itu."
     )
+    ws = workspace.as_prompt_block()
+    if ws:
+        parts.append(
+            "\n# Folder konteks tambahan (add-dir)\n"
+            "Selain root project, kamu JUGA boleh membaca/menulis file di folder "
+            "berikut memakai path ABSOLUT. Kamu sudah MEMAHAMI strukturnya di bawah, "
+            "jadi tak perlu list_dir ulang untuk hal yang sudah terlihat di sini:\n"
+            + ws
+        )
     mem = longmem.as_prompt_block()
     if mem:
         parts.append("\n# Memory\n" + mem)

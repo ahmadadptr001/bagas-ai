@@ -89,6 +89,12 @@ REPO_BRANCH: str = os.getenv("BAGASAI_BRANCH", "master").strip()
 
 # --- Perilaku agent ---
 MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))
+# Jaring pengaman anti-loop-liar: batas TOTAL panggilan tool per giliran, dan
+# batas berapa kali panggilan tool yang PERSIS SAMA boleh terjadi sebelum agent
+# dipaksa berhenti memakai tool & menyimpulkan. Mencegah AI mengulang-ulang
+# pekerjaan atau ngelantur tanpa henti.
+MAX_TOOL_CALLS: int = int(os.getenv("MAX_TOOL_CALLS", "80"))
+MAX_DUPLICATE_TOOL_CALLS: int = int(os.getenv("MAX_DUPLICATE_TOOL_CALLS", "3"))
 TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.6"))
 # Timeout per request (detik). Model besar NVIDIA bisa lambat saat cold-start.
 REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "120"))

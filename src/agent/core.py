@@ -110,6 +110,10 @@ class Agent:
         prefs.save(effort=name)
         return name
 
+    def refresh_system_prompt(self) -> None:
+        """Bangun ulang system prompt (mis. setelah add-dir) & pasang ke memory."""
+        self.memory.set_system(prompts.build_system_prompt())
+
     # --- sesi ---
     def reset(self) -> None:
         self.memory.reset()
@@ -171,10 +175,19 @@ class Agent:
         schemas = tools.get_schemas(self.tool_names)
         extra = self.model_spec.extra_body_for(self.effort)
 
-        # Tanpa batas iterasi tool: agent boleh terus memakai tool sampai tugas
-        # selesai. `max_iterations` hanya jaring pengaman anti-loop-liar (besar).
+        # Agent boleh memakai tool sampai tugas selesai, TAPI dengan jaring
+        # pengaman anti-loop-liar agar tidak mengulang-ulang / ngelantur:
+        #  - `seen_tools`  : cache hasil per (nama+argumen) -> panggilan PERSIS
+        #                    SAMA tak dieksekusi ulang, cukup dikembalikan + ditegur.
+        #  - `dup_hits`    : berapa kali pengulangan terjadi; bila melewati batas,
+        #                    tool DIMATIKAN dan agent dipaksa menyimpulkan.
+        #  - `total_calls` : total panggilan tool; ada anggaran maksimum.
         guard = 0
-        safety = max(self.max_iterations, 1000)
+        safety = max(self.max_iterations, 60)
+        seen_tools: dict[str, str] = {}
+        dup_hits = 0
+        total_calls = 0
+        force_final = False
         while True:
             guard += 1
             if guard > safety:
@@ -200,9 +213,12 @@ class Agent:
                 if on_retry:
                     on_retry(attempt, wait, exc)
 
+            # Saat stagnasi terdeteksi, matikan tool -> model TERPAKSA menjawab
+            # dengan teks (menyimpulkan), tidak bisa mengulang tool lagi.
+            active_tools = None if force_final else (schemas or None)
             content, tool_calls, usage = llm.stream_completion(
                 self.memory.messages,
-                tools=schemas or None,
+                tools=active_tools,
                 model=self.model_spec.id,
                 extra_body=extra,
                 on_content=on_content,
@@ -264,12 +280,45 @@ class Agent:
                     args = {}
                 if on_tool:
                     on_tool(name, args)
-                result = tools.execute(name, args)
+                # Dedup: panggilan PERSIS SAMA (nama+argumen) tak dieksekusi ulang.
+                key = name + "::" + json.dumps(
+                    args, sort_keys=True, ensure_ascii=False, default=str
+                )
+                if key in seen_tools:
+                    dup_hits += 1
+                    result = (
+                        "[SISTEM] Kamu SUDAH memanggil tool ini dengan argumen yang "
+                        "sama persis; hasilnya identik dengan di bawah. JANGAN "
+                        "mengulanginya — gunakan hasil ini lalu lanjut ke langkah "
+                        "berikutnya atau berikan jawaban akhir.\n\n" + seen_tools[key]
+                    )
+                else:
+                    result = tools.execute(name, args)
+                    seen_tools[key] = result
+                total_calls += 1
                 self.memory.add(
                     {
                         "role": "tool",
                         "tool_call_id": tc["id"] or f"call_{i}",
                         "content": result,
+                    }
+                )
+
+            # Deteksi stagnasi -> paksa menyimpulkan pada iterasi berikutnya.
+            if not force_final and (
+                dup_hits >= config.MAX_DUPLICATE_TOOL_CALLS
+                or total_calls >= config.MAX_TOOL_CALLS
+            ):
+                force_final = True
+                self.memory.add(
+                    {
+                        "role": "user",
+                        "content": (
+                            "[SISTEM] Kamu tampak mengulang langkah / terlalu banyak "
+                            "memakai tool. STOP memakai tool. Rangkum secara jelas apa "
+                            "yang sudah dicapai dan berikan JAWABAN AKHIR sekarang "
+                            "dalam teks biasa."
+                        ),
                     }
                 )
 

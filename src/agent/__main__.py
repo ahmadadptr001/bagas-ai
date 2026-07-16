@@ -34,6 +34,7 @@ Penggunaan:
   bagasAI              Buka sesi chat BARU di folder saat ini
   bagasAI --resume     Lanjutkan percakapan terakhir di folder ini
   bagasAI login        Wizard: masukkan API key NVIDIA (+ Telegram opsional)
+  bagasAI add-dir <p>  Tambah folder konteks agar bagasAI memahaminya
   bagasAI update       Cek & terapkan pembaruan dari GitHub
   bagasAI telegram     Jalankan bot Telegram
   bagasAI api          Jalankan server API di http://localhost:8000
@@ -115,6 +116,24 @@ def _cmd_update() -> None:
         print(f"✖ gagal ({out.get('status')}): {out.get('detail','')}")
 
 
+def _cmd_add_dir(args: list[str]) -> None:
+    """Tambah folder konteks dari terminal: bagasAI add-dir <path>."""
+    from . import workspace
+
+    paths = [a for a in args if not a.startswith("-")][1:]  # buang 'add-dir'
+    if not paths:
+        print("Pakai: bagasAI add-dir <path folder>")
+        return
+    for path in paths:
+        try:
+            p = workspace.add(path)
+        except ValueError as e:
+            print(f"[!] {e}")
+            continue
+        print(f"[+] Folder konteks ditambahkan: {p}")
+        print("    bagasAI akan memahami & bisa mengaksesnya di sesi berikutnya.")
+
+
 def _need_key() -> bool:
     if config.has_api_key():
         return False
@@ -142,6 +161,9 @@ def main() -> None:
         return
     if mode == "update":
         _cmd_update()
+        return
+    if mode in ("add-dir", "adddir"):
+        _cmd_add_dir(positional)
         return
 
     if mode in ("chat", "cli"):
