@@ -43,6 +43,32 @@ def add(fact: str) -> str:
     return f"Disimpan ke memory jangka panjang: {fact}"
 
 
+def upsert(prefix: str, fact: str) -> str:
+    """Simpan fakta ber-'kunci' (prefix): tambah bila belum ada, perbarui bila
+    berbeda, dan LEWATI (tak menulis) bila sudah ada & sama persis.
+
+    Return: 'added' | 'updated' | 'unchanged'. Berguna untuk fakta yang unik &
+    bisa berubah, mis. sistem operasi pengguna.
+    """
+    fact = fact.strip()
+    items = _load_raw()
+    prefix_l = prefix.strip().lower()
+    idx = next(
+        (i for i, it in enumerate(items)
+         if str(it.get("fact", "")).strip().lower().startswith(prefix_l)),
+        None,
+    )
+    if idx is None:
+        items.append({"fact": fact, "added": time.time()})
+        _save_raw(items)
+        return "added"
+    if str(items[idx].get("fact", "")).strip() == fact:
+        return "unchanged"  # sama -> jangan tulis ulang
+    items[idx] = {"fact": fact, "added": time.time()}
+    _save_raw(items)
+    return "updated"
+
+
 def remove(substring: str) -> str:
     items = _load_raw()
     kept = [it for it in items if substring.lower() not in it["fact"].lower()]

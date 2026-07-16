@@ -41,7 +41,7 @@ try:
 except Exception:  # pragma: no cover
     Figlet = None  # type: ignore
 
-from .. import config, interaction, llm, longmem, models, prefs, scripts, updater, workspace  # noqa: E402
+from .. import config, interaction, llm, longmem, models, osinfo, prefs, scripts, updater, workspace  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
@@ -362,6 +362,10 @@ def main(resume: bool = False) -> None:
     config.require_api_key()
     console.clear()
 
+    # Deteksi OS & sinkronkan ke memory SEBELUM agent dibangun, agar system
+    # prompt (yang memuat OS) sudah benar. add/update/lewati ditangani di sini.
+    os_status = osinfo.sync_to_memory()
+
     resumed = False
     if resume:
         session = session_mod.latest()
@@ -388,6 +392,10 @@ def main(resume: bool = False) -> None:
                 console.print("\n  [bold #89b4fa]🤖 bagasAI[/]")
                 console.print(Padding(Markdown(content), (0, 3, 1, 3)))
         console.print(Rule("[dim]lanjut di bawah[/dim]", style="#313244"))
+    if os_status in ("added", "updated"):
+        verb = "terdeteksi & disimpan" if os_status == "added" else "diperbarui"
+        pout(f"[dim]🖥  OS {verb}: {osinfo.summary()} — perintah terminal akan "
+             f"disesuaikan.[/dim]", bottom=0)
     _update_notice()  # info bila versi usang (dari cache) + cek ulang di latar
     console.print()
 

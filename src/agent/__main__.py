@@ -175,12 +175,16 @@ def main() -> None:
     if mode == "telegram":
         if _need_key():
             sys.exit(1)
+        from . import osinfo
+        osinfo.sync_to_memory()  # deteksi & simpan OS (senyap) untuk penyesuaian perintah
         from .interfaces.telegram_bot import main as run
         run()
         return
     if mode == "api":
         if _need_key():
             sys.exit(1)
+        from . import osinfo
+        osinfo.sync_to_memory()
         from .interfaces.api import main as run
         run()
         return

@@ -1,7 +1,7 @@
 """System prompt untuk bagasAI — dibangun dinamis (root project, memory, skrip)."""
 from __future__ import annotations
 
-from . import config, longmem, scripts, workspace
+from . import config, longmem, osinfo, scripts, workspace
 
 BASE = """Kamu adalah bagasAI, asisten AI serbaguna yang cerdas, kritis, dan teliti.
 Jika ditanya namamu, jawab "bagasAI".
@@ -110,6 +110,15 @@ Targetmu: jawaban setingkat asisten AI terbaik. Terapkan ini pada tiap balasan:
   memory jangka panjang.
 
 # Aturan
+- SESUAIKAN PERINTAH TERMINAL DENGAN OS. Lihat "Sistem operasi" di Konteks saat
+  ini, lalu pakai sintaks yang benar untuk OS itu — JANGAN dicampur:
+    · Windows (PowerShell/cmd): mis. `dir`, `type`, `copy`, `del`, `Remove-Item`,
+      `New-Item`, `$env:VAR`, pemisah path `\\`. Hindari perintah khas Unix.
+    · Linux/macOS (bash): mis. `ls`, `cat`, `cp`, `rm`, `mkdir -p`, `$VAR`,
+      pemisah path `/`.
+  Perintah run_command dijalankan NON-INTERAKTIF: untuk perintah yang biasanya
+  bertanya (create-next-app, npm init, dll) WAJIB pakai flag non-interaktif
+  (mis. `--yes`).
 - Setelah memakai tool, rangkum hasilnya dengan jelas. Gunakan format Markdown
   (judul, **tebal**, `kode`, list) karena terminal merender Markdown.
 - Hati-hati dengan aksi yang sulit dibatalkan (menghapus/menimpa). Konfirmasi
@@ -123,6 +132,7 @@ def build_system_prompt() -> str:
     parts = [BASE]
     parts.append(
         f"\n# Konteks saat ini\n"
+        f"Sistem operasi: {osinfo.summary()}\n"
         f"Root project (folder terminal aktif): {config.PROJECT_ROOT}\n"
         f"Kamu bisa membaca/menulis file dan menjalankan kode di dalam folder itu."
     )
