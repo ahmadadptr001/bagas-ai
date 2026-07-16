@@ -1,16 +1,16 @@
 # ============================================================================
-# bagasAI — installer satu-perintah untuk Windows (PowerShell).
+# bagasAI - installer satu-perintah untuk Windows (PowerShell).
 #
 # Pakai salah satu:
 #   .\install.ps1                     # dari dalam folder proyek
 #   irm <URL>/install.ps1 | iex       # dari mana saja (mengunduh repo)
 #
 # Skrip ini: cek Python, memasang bagasAI sebagai perintah global, memastikan
-# PATH, lalu menjalankan wizard login untuk memasukkan API key NVIDIA.
+# PATH, lalu menjalankan wizard login untuk memasukkan API key.
 # ============================================================================
 $ErrorActionPreference = "Stop"
 
-function Step($m) { Write-Host "» $m" -ForegroundColor Magenta }
+function Step($m) { Write-Host "> $m" -ForegroundColor Magenta }
 function Ok($m)   { Write-Host "  + $m" -ForegroundColor Green }
 function Err($m)  { Write-Host "  x $m" -ForegroundColor Red }
 
@@ -19,7 +19,7 @@ $RepoBranch = if ($env:BAGASAI_BRANCH) { $env:BAGASAI_BRANCH } else { "master" }
 
 Write-Host ""
 Write-Host "bagasAI " -ForegroundColor Magenta -NoNewline
-Write-Host "· installer" -ForegroundColor DarkGray
+Write-Host "- installer" -ForegroundColor DarkGray
 Write-Host ""
 
 # --- 1. Python 3.10+ ---
@@ -68,6 +68,9 @@ Ok "Terpasang"
 # Cari lokasi .exe yang BENAR-BENAR terpasang (penting untuk Python Store yang
 # menaruh script di folder tak terduga), bukan sekadar menebak dari getuserbase.
 Step "Memeriksa PATH"
+# Skrip locator ditulis ke file temporer lalu dijalankan. JANGAN dioper via
+# `python -c "<multi-baris>"`: PowerShell 5.1 menghapus tanda kutip di dalam
+# argumen multi-baris untuk program native -> Python jadi 'invalid syntax'.
 $Locate = @'
 import importlib.metadata as M, os, site
 def find():
@@ -82,23 +85,42 @@ def find():
     return os.path.join(site.getuserbase(), "Scripts")
 print(find())
 '@
-$BinDir = (& $Py -c $Locate).Trim()
-if (-not (Get-Command bagasAI -ErrorAction SilentlyContinue)) {
+$LocateFile = Join-Path $env:TEMP ("bagasai_locate_" + [guid]::NewGuid().ToString("N") + ".py")
+Set-Content -Path $LocateFile -Value $Locate -Encoding UTF8
+$BinDir = ""
+try {
+    $out = & $Py $LocateFile 2>$null | Select-Object -Last 1
+    if ($out) { $BinDir = "$out".Trim() }
+} catch {
+    # abaikan - akan pakai fallback di bawah
+} finally {
+    Remove-Item $LocateFile -ErrorAction SilentlyContinue
+}
+if (-not $BinDir) {
+    $fb = & $Py -c "import site,os; print(os.path.join(site.getuserbase(),'Scripts'))" 2>$null | Select-Object -Last 1
+    if ($fb) { $BinDir = "$fb".Trim() }
+}
+if (-not $BinDir) {
+    Err "Tak bisa menentukan folder Scripts. Tambahkan folder Scripts Python ke PATH secara manual."
+} elseif (-not (Get-Command bagasAI -ErrorAction SilentlyContinue)) {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($userPath -notlike "*$BinDir*") {
-        [Environment]::SetEnvironmentVariable("Path", "$userPath;$BinDir", "User")
+    if (-not $userPath) { $userPath = "" }
+    if ($userPath.Split(';') -notcontains $BinDir) {
+        $newPath = ($userPath.TrimEnd(';') + ";" + $BinDir).TrimStart(';')
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         $env:Path = "$env:Path;$BinDir"
         Ok "Menambahkan $BinDir ke PATH (user). Buka terminal baru bila 'bagasAI' belum dikenali."
     } else {
         $env:Path = "$env:Path;$BinDir"
+        Ok "Perintah 'bagasAI' sudah ada di PATH. Buka terminal baru bila belum dikenali."
     }
 } else {
     Ok "Perintah 'bagasAI' siap dipakai"
 }
 
-# --- 5. Wizard login (API key NVIDIA + Telegram opsional) ---
+# --- 5. Wizard login (API key + Telegram opsional) ---
 Write-Host ""
-Step "Login — masukkan API key NVIDIA"
+Step "Login - masukkan API key"
 $bagas = Get-Command bagasAI -ErrorAction SilentlyContinue
 if ($bagas) { & bagasAI login } else { & $Py -m agent login }
 

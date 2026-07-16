@@ -67,8 +67,14 @@ if command -v pipx >/dev/null 2>&1; then
   pipx install --force "$SRC" && INSTALLER="pipx" || INSTALLER=""
 fi
 if [ -z "$INSTALLER" ]; then
-  "$PY" -m pip install --user --upgrade "$SRC"
-  INSTALLER="pip --user"
+  # Di Linux/macOS modern (PEP 668) 'pip install --user' bisa ditolak karena
+  # environment "externally-managed". Coba normal dulu, lalu fallback.
+  if "$PY" -m pip install --user --upgrade "$SRC" 2>/dev/null; then
+    INSTALLER="pip --user"
+  else
+    "$PY" -m pip install --user --break-system-packages --upgrade "$SRC"
+    INSTALLER="pip --user"
+  fi
 fi
 ok "Terpasang via $INSTALLER"
 
@@ -96,7 +102,11 @@ if ! command -v bagasAI >/dev/null 2>&1; then
   case ":$PATH:" in
     *":$BIN_DIR:"*) : ;;
     *)
-      SHELL_RC="${HOME}/.bashrc"; [ -n "${ZSH_VERSION:-}" ] && SHELL_RC="${HOME}/.zshrc"
+      case "${SHELL:-}" in
+        */zsh)  SHELL_RC="${HOME}/.zshrc" ;;
+        */bash) SHELL_RC="${HOME}/.bashrc" ;;
+        *)      SHELL_RC="${HOME}/.profile" ;;
+      esac
       printf '\n# bagasAI\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$SHELL_RC"
       export PATH="$BIN_DIR:$PATH"
       ok "Menambahkan $BIN_DIR ke $SHELL_RC (buka terminal baru bila 'bagasAI' belum dikenali)"
@@ -107,7 +117,7 @@ else
 fi
 
 # --- 5. Wizard login (API key NVIDIA + Telegram opsional) ---
-printf "\n"; step "Login — masukkan API key NVIDIA"
+printf "\n"; step "Login — masukkan API key"
 if command -v bagasAI >/dev/null 2>&1; then
   bagasAI login || true
 else
