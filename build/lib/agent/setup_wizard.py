@@ -1,6 +1,6 @@
-"""Wizard login/setup interaktif untuk bagasAI.
+"""Wizard login/setup interaktif untuk bagas-ai.
 
-Dipanggil lewat `bagasAI login` (atau `bagasAI setup`). Meminta API key NVIDIA,
+Dipanggil lewat `bagas-ai login` (atau `bagas-ai setup`). Meminta API key NVIDIA,
 MEMVALIDASINYA langsung ke endpoint, lalu opsional menghubungkan bot Telegram —
 semuanya disimpan ke ~/.bagasai/.env. Dirancang agar mulus dipakai di laptop
 baru setelah instalasi satu-perintah.
@@ -57,7 +57,7 @@ def _read_env(path: Path) -> dict[str, str]:
 
 def _write_env(path: Path, data: dict[str, str]) -> None:
     lines = [
-        "# Konfigurasi bagasAI — dibuat oleh 'bagasAI login'.",
+        "# Konfigurasi bagas-ai — dibuat oleh 'bagas-ai login'.",
         "# Ambil API key NVIDIA gratis di https://build.nvidia.com (Get API Key).",
         "# 100% NVIDIA cloud; tidak ada model lokal.",
         "",
@@ -150,7 +150,7 @@ def run(console: Console | None = None) -> bool:
     for k, v in _DEFAULTS.items():
         env.setdefault(k, v)
 
-    title = Text("bagasAI", style="bold magenta")
+    title = Text("bagas-ai", style="bold magenta")
     title.append("  ·  login / setup", style="dim")
     console.print(Panel(title, border_style="magenta", padding=(0, 2)))
     console.print(
@@ -252,7 +252,7 @@ def run(console: Console | None = None) -> bool:
     _write_env(config.ENV_FILE, env)
     console.print(f"  [green]✔ Konfigurasi disimpan:[/green] [dim]{config.ENV_FILE}[/dim]")
     console.print(
-        "\n  [bold]Selesai![/bold] Ketik [bold cyan]bagasAI[/bold cyan] untuk mulai chat"
-        + ("  ·  [bold cyan]bagasAI telegram[/bold cyan] untuk bot." if want_tg else ".")
+        "\n  [bold]Selesai![/bold] Ketik [bold cyan]bagas-ai[/bold cyan] untuk mulai chat"
+        + ("  ·  [bold cyan]bagas-ai telegram[/bold cyan] untuk bot." if want_tg else ".")
     )
     return True

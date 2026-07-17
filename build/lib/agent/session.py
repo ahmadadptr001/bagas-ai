@@ -39,25 +39,41 @@ class Session:
         project_root: str,
         messages: list[dict[str, Any]] | None = None,
         created: float | None = None,
+        tokens: dict[str, int] | None = None,
     ) -> None:
         self.id = session_id
         self.project_root = project_root
         self.messages = messages or []
         self.created = created or time.time()
         self.updated = time.time()
+        # Token kumulatif SESI ini (persisten lintas --resume).
+        self.tokens = {"prompt": 0, "completion": 0}
+        if tokens:
+            self.tokens["prompt"] = int(tokens.get("prompt", 0) or 0)
+            self.tokens["completion"] = int(tokens.get("completion", 0) or 0)
 
     @property
     def path(self) -> Path:
         return _project_dir(Path(self.project_root)) / f"{self.id}.json"
 
-    def save(self, messages: list[dict[str, Any]]) -> None:
+    def save(
+        self,
+        messages: list[dict[str, Any]],
+        tokens: dict[str, int] | None = None,
+    ) -> None:
         self.messages = messages
         self.updated = time.time()
+        if tokens is not None:
+            self.tokens = {
+                "prompt": int(tokens.get("prompt", 0) or 0),
+                "completion": int(tokens.get("completion", 0) or 0),
+            }
         data = {
             "id": self.id,
             "project_root": self.project_root,
             "created": self.created,
             "updated": self.updated,
+            "tokens": self.tokens,
             "messages": messages,
         }
         self.path.write_text(
@@ -79,6 +95,7 @@ class Session:
             data["project_root"],
             data.get("messages", []),
             data.get("created"),
+            data.get("tokens"),
         )
         s.updated = data.get("updated", s.created)
         return s

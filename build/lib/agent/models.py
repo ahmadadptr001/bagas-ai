@@ -2,7 +2,7 @@
 
 Semua model DI-HOST NVIDIA (integrate.api.nvidia.com), bukan lokal. Setiap
 model di daftar ini sudah diverifikasi ADA di katalog `/v1/models` untuk key
-ini dan mendukung alur kerja bagasAI (chat + tool-calling). Dipakai oleh
+ini dan mendukung alur kerja bagas-ai (chat + tool-calling). Dipakai oleh
 perintah /model & /effort di CLI dan oleh Agent.
 
 Catatan penting: tiap keluarga model punya CARA mengaktifkan mode "thinking"
@@ -20,16 +20,24 @@ from dataclasses import dataclass
 # --- Level effort per gaya reasoning ---
 # Nemotron: nama -> reasoning_budget (token). 0 = thinking dimatikan.
 NEMOTRON_EFFORT: dict[str, int] = {
-    "mati": 0,
-    "cepat": 4096,
+    "langsung": 0,
+    "ringkas": 4096,
     "seimbang": 16384,
-    "maksimal": 32768,
+    "mendalam": 32768,
 }
-# gpt-oss: nama -> nilai reasoning_effort resmi OpenAI.
+# gpt-oss: nama -> nilai reasoning_effort resmi OpenAI (low/medium/high).
 GPTOSS_EFFORT: dict[str, str] = {
-    "rendah": "low",
-    "sedang": "medium",
-    "tinggi": "high",
+    "ringkas": "low",
+    "seimbang": "medium",
+    "mendalam": "high",
+}
+
+# Kosakata & penjelasan tiap level (untuk menu /effort) — (judul, deskripsi, ikon).
+EFFORT_INFO: dict[str, tuple[str, str, str]] = {
+    "langsung": ("Langsung", "tanpa mode berpikir — jawaban paling cepat", "⚡"),
+    "ringkas": ("Ringkas", "berpikir singkat — gesit & hemat token", "🌤"),
+    "seimbang": ("Seimbang", "nalar secukupnya — pas untuk kebanyakan tugas", "⚖"),
+    "mendalam": ("Mendalam", "berpikir penuh — untuk soal kompleks (lebih lambat)", "🔬"),
 }
 
 
@@ -57,11 +65,17 @@ class ModelSpec:
         return {}
 
     def default_effort(self) -> str | None:
-        if self.reasoning_style == "nemotron":
+        if self.reasoning_style in ("nemotron", "gpt_oss"):
             return "seimbang"
-        if self.reasoning_style == "gpt_oss":
-            return "sedang"
         return None
+
+    def effort_info(self) -> list[tuple[str, str, str, str]]:
+        """Daftar (kunci, judul, deskripsi, ikon) untuk menu /effort — terurut."""
+        out = []
+        for key in self.effort_options():
+            title, desc, icon = EFFORT_INFO.get(key, (key.capitalize(), "", "•"))
+            out.append((key, title, desc, icon))
+        return out
 
     def extra_body_for(self, effort: str | None) -> dict | None:
         """Parameter tambahan sesuai gaya reasoning & mode terpilih."""
@@ -75,7 +89,7 @@ class ModelSpec:
                 "reasoning_budget": budget,
             }
         if self.reasoning_style == "gpt_oss":
-            level = GPTOSS_EFFORT.get(effort or "sedang", "medium")
+            level = GPTOSS_EFFORT.get(effort or "seimbang", "medium")
             return {"reasoning_effort": level}
         return None
 
@@ -87,114 +101,121 @@ MODELS: dict[str, ModelSpec] = {
     "deepseek": ModelSpec(
         id="deepseek-ai/deepseek-v4-pro",
         label="DeepSeek-V4 Pro",
-        note="serba-guna, kuat",
+        note="Pilihan utama: paling pintar & serba-guna — tugas kompleks & coding berat",
     ),
     "deepseek-flash": ModelSpec(
         id="deepseek-ai/deepseek-v4-flash",
         label="DeepSeek-V4 Flash",
-        note="cepat, hemat, untuk coding/agent",
+        note="Cepat & hemat — coding cepat & agent yang banyak iterasi",
     ),
     "llama33": ModelSpec(
         id="meta/llama-3.3-70b-instruct",
         label="Meta Llama-3.3 70B",
-        note="andal, umum",
+        note="Andal & seimbang — tugas umum sehari-hari",
     ),
     "llama4": ModelSpec(
         id="meta/llama-4-maverick-17b-128e-instruct",
         label="Meta Llama-4 Maverick",
         multimodal=True,
-        note="MoE, bisa gambar",
+        note="Multimodal (teks+gambar) — analisis campuran teks & gambar",
     ),
     "llama31-70b": ModelSpec(
         id="meta/llama-3.1-70b-instruct",
         label="Meta Llama-3.1 70B",
+        note="Stabil & matang — tugas umum",
     ),
     "llama31-8b": ModelSpec(
         id="meta/llama-3.1-8b-instruct",
         label="Meta Llama-3.1 8B",
-        note="ringan & sangat cepat",
+        note="Sangat cepat & ringan — tanya-jawab singkat, hemat kuota",
     ),
     # --- Mistral ---
     "mistral-large": ModelSpec(
         id="mistralai/mistral-large-3-675b-instruct-2512",
         label="Mistral-Large-3 675B",
-        note="besar & pintar",
+        note="Sangat pintar — penalaran mendalam & penulisan panjang",
     ),
     "mistral-medium": ModelSpec(
         id="mistralai/mistral-medium-3.5-128b",
         label="Mistral-Medium-3.5",
+        note="Seimbang cepat & pintar — serba bisa",
     ),
     "mistral-small": ModelSpec(
         id="mistralai/mistral-small-4-119b-2603",
         label="Mistral-Small-4",
-        note="cepat",
+        note="Cepat — tugas ringan & respon kilat",
     ),
     "mistral-nemotron": ModelSpec(
         id="mistralai/mistral-nemotron",
         label="Mistral-Nemotron",
+        note="Efisien untuk agent & pemakaian tool",
     ),
     # --- Qwen ---
     "qwen": ModelSpec(
         id="qwen/qwen3.5-122b-a10b",
         label="Qwen3.5 122B",
-        note="bernalar kuat",
+        note="Penalaran & multibahasa kuat — matematika/analisis",
     ),
     "qwen-next": ModelSpec(
         id="qwen/qwen3-next-80b-a3b-instruct",
         label="Qwen3-Next 80B",
+        note="Efisien & konteks panjang — dokumen besar",
     ),
     # --- Agentic lain ---
     "glm": ModelSpec(
         id="z-ai/glm-5.2",
         label="GLM-5.2",
-        note="agentic, coding",
+        note="Jago agentic & coding — otomasi banyak langkah",
     ),
     "minimax": ModelSpec(
         id="minimaxai/minimax-m3",
         label="MiniMax-M3",
-        note="bernalar",
+        note="Penalaran panjang — perencanaan & pemecahan bertahap",
     ),
     # --- NVIDIA Nemotron (thinking via /effort) ---
     "nemotron-ultra": ModelSpec(
         id="nvidia/nemotron-3-ultra-550b-a55b",
         label="Nemotron-3 Ultra 550B",
         reasoning_style="nemotron",
-        note="flagship reasoning",
+        note="Reasoning flagship — soal tersulit (atur kedalaman via /effort)",
     ),
     "nemotron-super": ModelSpec(
         id="nvidia/nemotron-3-super-120b-a12b",
         label="Nemotron-3 Super 120B",
         reasoning_style="nemotron",
+        note="Reasoning kuat & lebih ringan dari Ultra",
     ),
     "nemotron49": ModelSpec(
         id="nvidia/llama-3.3-nemotron-super-49b-v1.5",
         label="Llama-3.3 Nemotron Super 49B",
         reasoning_style="nemotron",
+        note="Reasoning seimbang berbasis Llama — hemat & pintar",
     ),
     "nemotron-nano": ModelSpec(
         id="nvidia/nvidia-nemotron-nano-9b-v2",
         label="Nemotron Nano 9B",
         reasoning_style="nemotron",
-        note="reasoning ringan & cepat",
+        note="Reasoning ringan & cepat — berpikir tanpa lambat",
     ),
     # --- OpenAI gpt-oss (thinking via reasoning_effort) ---
     "gptoss120": ModelSpec(
         id="openai/gpt-oss-120b",
         label="GPT-OSS 120B",
         reasoning_style="gpt_oss",
+        note="Reasoning gaya OpenAI — atur low/medium/high via /effort",
     ),
     "gptoss20": ModelSpec(
         id="openai/gpt-oss-20b",
         label="GPT-OSS 20B",
         reasoning_style="gpt_oss",
-        note="ringan",
+        note="Reasoning ringan & cepat",
     ),
     # --- Vision (analisis gambar; dipakai VISION_MODEL) ---
     "llama-vision": ModelSpec(
         id="meta/llama-3.2-90b-vision-instruct",
         label="Llama-3.2 90B Vision",
         multimodal=True,
-        note="khusus analisis gambar",
+        note="Khusus analisis gambar — deskripsi & tanya-jawab foto",
     ),
 }
 

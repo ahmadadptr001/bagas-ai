@@ -6,7 +6,7 @@ menjalankan kode, menganalisis gambar). Setelah dipasang, panggil `bagas-ai`
 dari **terminal mana pun** — mirip CLI `claude`.
 
 ---
-
+.
 ## ✨ Kemampuan
 
 | | |

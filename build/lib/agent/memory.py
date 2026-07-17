@@ -36,13 +36,24 @@ class Memory:
     def messages(self) -> list[dict[str, Any]]:
         return self._messages
 
+    def set_system(self, system_prompt: str) -> None:
+        """Perbarui system prompt (indeks 0) tanpa mengubah riwayat lain.
+
+        Dipakai saat konteks berubah di tengah sesi (mis. add-dir folder baru).
+        """
+        msg = {"role": "system", "content": system_prompt}
+        if self._messages and self._messages[0].get("role") == "system":
+            self._messages[0] = msg
+        else:
+            self._messages.insert(0, msg)
+
     def reset(self) -> None:
         self._messages = self._messages[:1]  # sisakan hanya system prompt
 
     def repair_dangling_tools(self) -> None:
         """Rapikan riwayat setelah error/pembatalan di tengah giliran.
 
-        Instruksi pengguna & konteks TETAP disimpan (supaya bagasAI ingat
+        Instruksi pengguna & konteks TETAP disimpan (supaya bagas-ai ingat
         percakapan sebelumnya meski barusan terjadi error). Yang diperbaiki:
         setiap `assistant.tool_calls` harus diikuti respons tool untuk SEMUA
         panggilannya, dalam URUTAN yang sama dengan tool_calls, tanpa disela

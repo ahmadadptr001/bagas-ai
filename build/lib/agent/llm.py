@@ -3,23 +3,35 @@
 Poin penting: free tier NVIDIA (~40 request/menit) sering membalas error
 throttle yang BENTUKNYA bermacam-macam — bukan cuma HTTP 429/RateLimitError,
 tetapi juga pesan seperti "worker local total request limit reached", body
-kosong (HTTP 200), atau error server 5xx sesaat. bagasAI harus MENAHAN semua
+kosong (HTTP 200), atau error server 5xx sesaat. bagas-ai harus MENAHAN semua
 itu: menunggu dengan sabar lalu MENGULANG langkah yang sama sampai berhasil,
 sehingga progres tugas berlanjut dan tidak dibatalkan.
 """
 from __future__ import annotations
 
+import json as _json
+import re as _re
 import time
 from typing import Any, Callable
 
-from openai import (
-    OpenAI,
-    RateLimitError,
-    APIConnectionError,
-    APITimeoutError,
-    APIError,
-    InternalServerError,
-)
+# openai di-IMPOR MALAS: paket ini menarik ratusan modul tipe (~1.7 dtk saat impor)
+# yang tak dipakai bagas-ai. Menunda impornya sampai panggilan API PERTAMA membuat
+# bagas-ai START jauh lebih cepat (banner muncul dulu, openai dimuat saat perlu).
+_openai = None
+
+
+def _oa():
+    global _openai
+    if _openai is None:
+        import openai as _mod
+        _openai = _mod
+    return _openai
+
+
+def is_rate_limit(exc: Exception) -> bool:
+    """True bila exc adalah RateLimitError openai (tanpa memaksa impor openai)."""
+    return _openai is not None and isinstance(exc, _openai.RateLimitError)
+
 
 from . import config
 
@@ -54,15 +66,15 @@ def _is_transient(exc: Exception) -> bool:
     """True bila error layak dicoba ulang (rate limit / throttle / gangguan)."""
     if isinstance(exc, Cancelled):
         return False
-    if isinstance(
+    if isinstance(exc, EmptyResponseError):
+        return True
+    # Cek tipe exception openai HANYA bila openai sudah dimuat (pasti sudah, karena
+    # exc ini datang dari panggilan API yang memakai klien openai).
+    o = _openai
+    if o is not None and isinstance(
         exc,
-        (
-            RateLimitError,
-            APIConnectionError,
-            APITimeoutError,
-            InternalServerError,
-            EmptyResponseError,
-        ),
+        (o.RateLimitError, o.APIConnectionError, o.APITimeoutError,
+         o.InternalServerError),
     ):
         return True
     msg = str(getattr(exc, "message", "") or exc).lower()
@@ -76,9 +88,63 @@ def _is_transient(exc: Exception) -> bool:
         return True
     # APIError umum tanpa kode jelas -> anggap sementara (lebih baik menunggu
     # daripada membatalkan tugas pengguna).
-    if isinstance(exc, APIError):
+    if o is not None and isinstance(exc, o.APIError):
         return True
     return False
+
+
+_HAS_TOOLTEXT = _re.compile(r"<tool_call>|<function\s*=", _re.IGNORECASE)
+
+
+def _extract_text_tool_calls(text: str) -> list[dict[str, str]]:
+    """Sebagian model NVIDIA kadang MENULISKAN panggilan tool sebagai TEKS/XML
+    (mis. `<function=write_file><parameter=content>...</parameter></function>` atau
+    `<tool_call>{json}</tool_call>`) alih-alih memakai function-calling asli — lalu
+    berhenti. Endpoint tak mem-parse itu, jadi tanpa penanganan hasilnya cuma teks
+    sampah. Fungsi ini menyelamatkannya: ekstrak jadi tool_calls sungguhan.
+
+    HANYA menerima blok yang LENGKAP (ada tag penutup) demi keamanan — panggilan
+    yang terpotong (mis. kena batas token) tidak dieksekusi setengah jadi.
+    """
+    calls: list[tuple[str, dict]] = []
+    # Format A: <function=nama> ... <parameter=kunci>nilai</parameter> ... </function>
+    for m in _re.finditer(r"<function\s*=\s*([^\s>]+)\s*>(.*?)</function>",
+                          text, _re.DOTALL | _re.IGNORECASE):
+        name = m.group(1).strip()
+        args: dict[str, str] = {}
+        for pm in _re.finditer(r"<parameter\s*=\s*([^\s>]+)\s*>(.*?)</parameter>",
+                               m.group(2), _re.DOTALL | _re.IGNORECASE):
+            val = pm.group(2)
+            if val.startswith("\n"):
+                val = val[1:]
+            args[pm.group(1).strip()] = val.rstrip("\n")
+        if name:
+            calls.append((name, args))
+    # Format B: <tool_call>{"name":..,"arguments":..}</tool_call>
+    if not calls:
+        for m in _re.finditer(r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+                              text, _re.DOTALL | _re.IGNORECASE):
+            try:
+                obj = _json.loads(m.group(1))
+            except ValueError:
+                continue
+            name = obj.get("name")
+            a = obj.get("arguments", obj.get("parameters", {}))
+            if isinstance(a, str):
+                try:
+                    a = _json.loads(a)
+                except ValueError:
+                    a = {}
+            if name:
+                calls.append((name, a if isinstance(a, dict) else {}))
+    out: list[dict[str, str]] = []
+    for i, (name, args) in enumerate(calls):
+        out.append({
+            "id": f"txt_{i}",
+            "name": name,
+            "arguments": _json.dumps(args, ensure_ascii=False),
+        })
+    return out
 
 
 def _sleep_cancellable(seconds: float, cancel_event: Any) -> None:
@@ -104,7 +170,7 @@ def _call_with_retry(
     Backoff eksponensial (maks. 60s/percobaan) sampai TOTAL tunggu melewati
     `config.RETRY_MAX_SECONDS`, lalu baru menyerah. Tunggu bisa dibatalkan.
     Saat akan mengulang, `on_retry(attempt, wait, exc)` dipanggil supaya UI bisa
-    memberi tahu pengguna bahwa bagasAI menunggu lalu MELANJUTKAN — bukan gagal.
+    memberi tahu pengguna bahwa bagas-ai menunggu lalu MELANJUTKAN — bukan gagal.
     """
     attempt = 0
     waited = 0.0
@@ -131,15 +197,15 @@ def _call_with_retry(
 
 
 # Satu klien dipakai ulang di seluruh aplikasi.
-_client: OpenAI | None = None
+_client = None
 
 
-def get_client() -> OpenAI:
+def get_client():
     """Kembalikan klien OpenAI yang diarahkan ke endpoint NVIDIA (lazy init)."""
     global _client
     if _client is None:
         config.require_api_key()
-        _client = OpenAI(
+        _client = _oa().OpenAI(
             base_url=config.NVIDIA_BASE_URL,
             api_key=config.NVIDIA_API_KEY,
             timeout=config.REQUEST_TIMEOUT,
@@ -227,8 +293,10 @@ def stream_completion(
     def _do() -> tuple[str, list[dict[str, Any]], Any]:
         stream = client.chat.completions.create(**kwargs)
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_slots: dict[int, dict[str, str]] = {}
         usage = None
+        finish_reason = None
         try:
             for chunk in stream:
                 if cancel_event is not None and cancel_event.is_set():
@@ -237,12 +305,25 @@ def stream_completion(
                     usage = chunk.usage
                 if not getattr(chunk, "choices", None):
                     continue
-                delta = chunk.choices[0].delta
+                choice = chunk.choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
                 piece = getattr(delta, "content", None)
                 if piece:
                     content_parts.append(piece)
                     if on_content:
                         on_content(piece)
+                # Model reasoning (Nemotron/gpt-oss/DeepSeek/dll) mengalirkan
+                # "pikiran" di field terpisah. Tangkap agar TIDAK hilang: dipakai
+                # sbg jawaban cadangan bila `content` akhirnya kosong, sekaligus
+                # menggerakkan penghitung token supaya UI tak terlihat macet.
+                rpiece = (getattr(delta, "reasoning_content", None)
+                          or getattr(delta, "reasoning", None))
+                if rpiece:
+                    reasoning_parts.append(rpiece)
+                    if on_content:
+                        on_content(rpiece)
                 for tc in getattr(delta, "tool_calls", None) or []:
                     slot = tool_slots.setdefault(
                         tc.index, {"id": "", "name": "", "arguments": ""}
@@ -261,11 +342,41 @@ def stream_completion(
                 pass
 
         content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
         tool_calls = [tool_slots[i] for i in sorted(tool_slots)]
-        if not content and not tool_calls and usage is None:
-            raise EmptyResponseError(
-                "Stream kosong (kemungkinan rate limit 40 RPM)."
-            )
+        # Penyelamatan: model menuliskan panggilan tool sebagai TEKS/XML alih-alih
+        # function-calling asli. Bila tak ada tool_calls asli tapi konten memuat
+        # pola `<tool_call>`/`<function=...>`, parse & jadikan tool_calls sungguhan
+        # supaya benar-benar dieksekusi (bukan ditampilkan sebagai teks sampah).
+        if not tool_calls and content and _HAS_TOOLTEXT.search(content):
+            parsed = _extract_text_tool_calls(content)
+            if parsed:
+                tool_calls = parsed
+            # Buang blok XML tool dari konten agar tak bocor ke layar (baik yang
+            # sudah dieksekusi maupun yang TERPOTONG/gagal-parse -> jangan tampilkan
+            # panggilan tool setengah jadi sebagai "jawaban").
+            cleaned = _re.sub(r"<tool_call>.*?</tool_call>", "", content,
+                              flags=_re.DOTALL | _re.IGNORECASE)
+            cleaned = _re.sub(r"<function\s*=.*?</function>", "", cleaned,
+                              flags=_re.DOTALL | _re.IGNORECASE)
+            # Sisa penanda yang tak berpasangan (terpotong) -> potong dari situ.
+            cleaned = _re.sub(r"<tool_call>.*$", "", cleaned, flags=_re.DOTALL | _re.IGNORECASE)
+            cleaned = _re.sub(r"<function\s*=.*$", "", cleaned, flags=_re.DOTALL | _re.IGNORECASE)
+            content = cleaned.strip()
+        # Model hanya "berpikir" tanpa menghasilkan jawaban akhir (mis. anggaran
+        # thinking habis): pakai isi pikirannya agar pengguna TETAP dapat respons,
+        # bukan layar kosong.
+        if not content and reasoning and not tool_calls:
+            content = reasoning.strip()
+        if not content and not tool_calls:
+            # Benar-benar tak ada apa pun. Tanpa sinyal `finish_reason`, ini khas
+            # body kosong saat throttle -> perlakukan sementara agar di-retry.
+            # Bila ADA finish_reason (model memang berhenti), jangan spam retry:
+            # kembalikan kosong, biar core.py yang memberi pesan cadangan.
+            if finish_reason is None:
+                raise EmptyResponseError(
+                    "Stream kosong (kemungkinan rate limit 40 RPM)."
+                )
         return content, tool_calls, usage
 
     return _call_with_retry(_do, cancel_event=cancel_event, on_retry=on_retry)

@@ -1,4 +1,4 @@
-"""Konfigurasi terpusat untuk bagasAI.
+"""Konfigurasi terpusat untuk bagas-ai.
 
 Dirancang agar bekerja dari terminal mana pun (seperti CLI global):
 - API key & pengaturan dibaca dari (urutan prioritas):
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-APP_NAME = "bagasAI"
+APP_NAME = "bagas-ai"
 
 # Lokasi config global (seperti ~/.claude untuk Claude CLI).
 CONFIG_HOME = Path(os.getenv("BAGASAI_HOME", Path.home() / ".bagasai"))
@@ -79,12 +79,48 @@ VISION_MODEL: str = os.getenv(
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
+
+def _parse_ids(raw: str) -> set[int]:
+    out: set[int] = set()
+    for part in (raw or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))  # menerima '123' & '-100...'; token aneh dilewati
+        except ValueError:
+            pass
+    return out
+
+
+# Daftar chat/user ID Telegram yang BOLEH mengontrol bagas-ai (pisah koma). Karena
+# lewat Telegram bagas-ai bisa menjalankan perintah & menulis file di laptopmu,
+# batasi HANYA ke ID milikmu. Bila kosong, bot memakai "trust-on-first-use":
+# pengirim PERTAMA otomatis jadi pemilik (dan diberi tahu ID-nya untuk disimpan).
+TELEGRAM_ALLOWED_IDS: set[int] = _parse_ids(os.getenv("TELEGRAM_ALLOWED_IDS", ""))
+
+# --- Auto-update (samakan dengan installer install.sh/install.ps1) ---
+# Dipakai `bagas-ai update` untuk menyiapkan/menarik pembaruan dari GitHub, bahkan
+# bila instalasi berupa salinan (pip install biasa) tanpa repo git penopang.
+REPO_URL: str = os.getenv(
+    "BAGASAI_REPO", "https://github.com/ahmadadptr001/bagas-ai"
+).strip()
+REPO_BRANCH: str = os.getenv("BAGASAI_BRANCH", "master").strip()
+
 # --- Perilaku agent ---
 MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))
+# Jaring pengaman anti-loop-liar: batas TOTAL panggilan tool per giliran, dan
+# batas berapa kali panggilan tool yang PERSIS SAMA boleh terjadi sebelum agent
+# dipaksa berhenti memakai tool & menyimpulkan. Mencegah AI mengulang-ulang
+# pekerjaan atau ngelantur tanpa henti.
+MAX_TOOL_CALLS: int = int(os.getenv("MAX_TOOL_CALLS", "80"))
+MAX_DUPLICATE_TOOL_CALLS: int = int(os.getenv("MAX_DUPLICATE_TOOL_CALLS", "3"))
 TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.6"))
-# Timeout per request (detik). Model besar NVIDIA bisa lambat saat cold-start.
-REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "120"))
-# Total waktu (detik) bagasAI bertahan mencoba ulang saat NVIDIA rate-limit /
+# Timeout per request (detik). Model BESAR/REASONING (Nemotron-Ultra, Mistral-
+# Large, DeepSeek-Pro) sering berpikir lama; 120s terlalu pendek -> request
+# di-timeout lalu DIULANG dari nol (malah makin lambat). Beri ruang lebih lega.
+REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "300"))
+# Total waktu (detik) bagas-ai bertahan mencoba ulang saat NVIDIA rate-limit /
 # throttle ("worker local total request limit reached", dll) SEBELUM menyerah.
 # Free tier ~40 RPM reset tiap menit, jadi default 5 menit cukup untuk pulih
 # lalu MELANJUTKAN progres tanpa membatalkan tugas.
@@ -93,6 +129,14 @@ RETRY_MAX_SECONDS: float = float(os.getenv("RETRY_MAX_SECONDS", "300"))
 # --- Keamanan ---
 ALLOW_CODE_EXEC: bool = _get_bool("ALLOW_CODE_EXEC", True)
 CODE_EXEC_TIMEOUT: int = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))
+# Timeout untuk perintah shell (run_command) — lebih longgar karena bisa lama
+# (mis. install dependency / scaffolding). Perintah dijalankan NON-INTERAKTIF
+# (stdin ditutup) & seluruh pohon prosesnya dibunuh bila melewati batas ini.
+COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "300"))
+# Cek sintaks OTOMATIS tiap kali write_file menulis file kode (.py/.js/.json/dll).
+# Ringan (hanya parsing, tak menjalankan kode) & memastikan bagas-ai selalu
+# memverifikasi hasil ngoding-nya. Matikan dengan AUTO_SYNTAX_CHECK=false.
+AUTO_SYNTAX_CHECK: bool = _get_bool("AUTO_SYNTAX_CHECK", True)
 
 ENV_FILE = CONFIG_HOME / ".env"
 
