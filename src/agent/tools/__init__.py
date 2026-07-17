@@ -9,6 +9,7 @@ from . import web_search  # noqa: F401,E402
 from . import files  # noqa: F401,E402
 from . import shell  # noqa: F401,E402
 from . import memory_tool  # noqa: F401,E402
+from . import media  # noqa: F401,E402
 from . import scripts_tool  # noqa: F401,E402
 from . import interact_tool  # noqa: F401,E402
 
