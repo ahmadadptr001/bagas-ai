@@ -47,6 +47,15 @@ class Cancelled(Exception):
     """Dipakai untuk membatalkan generasi di tengah jalan (mis. Ctrl+C)."""
 
 
+class StreamStalled(Exception):
+    """Stream MACET berulang kali (tidak ada data > STREAM_STALL_TIMEOUT) dan
+    sudah dicoba-ulang beberapa kali di model yang sama tanpa hasil.
+
+    Dilempar ke core agar bisa NAIK KELAS (ganti effort/model) lalu mengulang
+    dengan konteks yang sama — bukan menggantung selamanya di model macet.
+    """
+
+
 # Kata kunci pada PESAN error yang menandakan kondisi SEMENTARA (throttle /
 # kapasitas / gangguan sesaat). NVIDIA sering mengirim "worker local total
 # request limit reached" dengan kode status yang tak terduga, jadi kita juga
@@ -91,6 +100,15 @@ def _is_transient(exc: Exception) -> bool:
     if o is not None and isinstance(exc, o.APIError):
         return True
     return False
+
+
+def _is_timeout(exc: Exception) -> bool:
+    """True bila error bertipe timeout/koneksi-macet (stream berhenti mengirim)."""
+    o = _openai
+    if o is not None and isinstance(exc, (o.APITimeoutError, o.APIConnectionError)):
+        return True
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    return "timed out" in msg or "timeout" in msg
 
 
 _HAS_TOOLTEXT = _re.compile(r"<tool_call>|<function\s*=", _re.IGNORECASE)
@@ -164,6 +182,7 @@ def _call_with_retry(
     *,
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
+    stall_escape: int | None = None,
 ) -> Any:
     """Jalankan `do()` dengan retry SABAR untuk error NVIDIA yang sementara.
 
@@ -171,10 +190,16 @@ def _call_with_retry(
     `config.RETRY_MAX_SECONDS`, lalu baru menyerah. Tunggu bisa dibatalkan.
     Saat akan mengulang, `on_retry(attempt, wait, exc)` dipanggil supaya UI bisa
     memberi tahu pengguna bahwa bagas-ai menunggu lalu MELANJUTKAN — bukan gagal.
+
+    `stall_escape`: bila diberi N, error bertipe MACET (timeout/stream berhenti)
+    yang terjadi N kali TIDAK diulang lagi di sini — dilempar sbg StreamStalled
+    agar pemanggil (core) bisa NAIK KELAS ke model lain, alih-alih menggantung
+    berulang-ulang di model yang sama.
     """
     attempt = 0
     waited = 0.0
     delay = 3.0
+    stalls = 0
     budget = config.RETRY_MAX_SECONDS
     while True:
         attempt += 1
@@ -183,6 +208,13 @@ def _call_with_retry(
         except Cancelled:
             raise
         except Exception as exc:  # noqa: BLE001
+            if stall_escape is not None and _is_timeout(exc):
+                stalls += 1
+                if stalls >= stall_escape:
+                    raise StreamStalled(
+                        f"stream macet {stalls}x (tidak ada data "
+                        f">{config.STREAM_STALL_TIMEOUT:.0f}s)"
+                    ) from exc
             if not _is_transient(exc) or waited >= budget:
                 raise
             wait = min(delay, 60.0)
@@ -289,6 +321,18 @@ def stream_completion(
     """
     client = get_client()
     kwargs = _base_kwargs(messages, tools, model, temperature, extra_body, True)
+    # WATCHDOG ANTI-MACET: timeout BACA per-chunk yang pendek. httpx menghitung
+    # read-timeout per operasi baca socket, jadi selama token terus mengalir
+    # jawaban sepanjang apa pun aman — tapi bila stream DIAM > STALL_TIMEOUT
+    # (server menggantung), request otomatis DIBATALKAN lalu diulang, bukan
+    # menggantung sampai REQUEST_TIMEOUT penuh.
+    try:
+        import httpx  # dependensi openai — pasti tersedia setelah get_client()
+        kwargs["timeout"] = httpx.Timeout(
+            connect=15.0, read=config.STREAM_STALL_TIMEOUT, write=60.0, pool=15.0
+        )
+    except Exception:  # noqa: BLE001 — tanpa httpx pun tetap jalan (timeout klien)
+        pass
 
     def _do() -> tuple[str, list[dict[str, Any]], Any]:
         stream = client.chat.completions.create(**kwargs)
@@ -379,4 +423,7 @@ def stream_completion(
                 )
         return content, tool_calls, usage
 
-    return _call_with_retry(_do, cancel_event=cancel_event, on_retry=on_retry)
+    return _call_with_retry(
+        _do, cancel_event=cancel_event, on_retry=on_retry,
+        stall_escape=max(1, config.MAX_STALLS_PER_CALL),
+    )

@@ -244,6 +244,9 @@ class Agent:
         # (weak_hits) atau membalas kosong berulang (empty_hits).
         weak_hits = 0
         empty_hits = 0
+        # Berapa kali giliran ini kena MACET total (StreamStalled) — dibatasi
+        # agar tak berputar selamanya bila jaringan/model benar-benar mati.
+        stall_rounds = 0
         while True:
             guard += 1
             if guard > safety:
@@ -275,15 +278,36 @@ class Agent:
             # Saat stagnasi terdeteksi, matikan tool -> model TERPAKSA menjawab
             # dengan teks (menyimpulkan), tidak bisa mengulang tool lagi.
             active_tools = None if force_final else (schemas or None)
-            content, tool_calls, usage = llm.stream_completion(
-                self.memory.messages,
-                tools=active_tools,
-                model=self.model_spec.id,
-                extra_body=extra,
-                on_content=on_content,
-                cancel_event=cancel_event,
-                on_retry=_on_retry,
-            )
+            try:
+                content, tool_calls, usage = llm.stream_completion(
+                    self.memory.messages,
+                    tools=active_tools,
+                    model=self.model_spec.id,
+                    extra_body=extra,
+                    on_content=on_content,
+                    cancel_event=cancel_event,
+                    on_retry=_on_retry,
+                )
+            except llm.StreamStalled:
+                # ANTI-MACET: stream berhenti mengirim data berulang kali di model
+                # ini. Batalkan sendiri, NAIK KELAS (effort/model), lalu ULANGI —
+                # memory belum disentuh di putaran ini, jadi konteks tetap utuh.
+                stall_rounds += 1
+                if stall_rounds > 3:
+                    final = (
+                        "Maaf, model terus macet (tidak mengirim respons) meski "
+                        "sudah kubatalkan & kuulang otomatis beberapa kali. "
+                        "Kemungkinan jaringan/server NVIDIA sedang bermasalah — "
+                        "coba lagi sebentar lagi, atau ganti model dengan /model."
+                    )
+                    self.memory.add_assistant_text(final)
+                    self._persist()
+                    return final
+                changed = self._escalate("respons macet — stream diam terlalu lama")
+                if on_notice:
+                    on_notice(changed or
+                              "respons macet — dibatalkan & diulang otomatis")
+                continue
 
             # Konfirmasi token: pakai usage asli bila ada, jika tidak estimasi.
             if usage:

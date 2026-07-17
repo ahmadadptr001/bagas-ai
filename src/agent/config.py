@@ -132,6 +132,14 @@ REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "300"))
 # Free tier ~40 RPM reset tiap menit, jadi default 5 menit cukup untuk pulih
 # lalu MELANJUTKAN progres tanpa membatalkan tugas.
 RETRY_MAX_SECONDS: float = float(os.getenv("RETRY_MAX_SECONDS", "300"))
+# WATCHDOG ANTI-MACET: bila stream TIDAK mengirim data apa pun (token, reasoning,
+# tool call) selama ini (detik), request dianggap MACET -> dibatalkan otomatis
+# lalu DIULANG. Berbeda dari REQUEST_TIMEOUT: ini mengukur JEDA antar-data, bukan
+# durasi total, jadi jawaban panjang tetap aman selama token terus mengalir.
+STREAM_STALL_TIMEOUT: float = float(os.getenv("STREAM_STALL_TIMEOUT", "90"))
+# Berapa kali macet boleh terjadi pada SATU langkah sebelum bagas-ai berhenti
+# mengulang di model yang sama dan NAIK KELAS (ganti effort/model) via core.
+MAX_STALLS_PER_CALL: int = int(os.getenv("MAX_STALLS_PER_CALL", "2"))
 
 # --- Keamanan ---
 ALLOW_CODE_EXEC: bool = _get_bool("ALLOW_CODE_EXEC", True)

@@ -414,6 +414,23 @@ class Status:
         return t
 
 
+# Tips singkat yang BERGANTIAN muncul di bawah status selama AI bekerja
+# (seperti Claude CLI) — biar waktu menunggu tetap informatif.
+_TIPS = (
+    "/model mengganti otak AI kapan saja — preferensimu tersimpan",
+    "/effort mengatur kedalaman berpikir: langsung → mendalam",
+    "/bot menyalakan kontrol lewat Telegram — perintah dari HP",
+    "/scan menyegarkan peta proyek · /review memburu bug proyek",
+    "perintah menetap (mis. npm run dev) otomatis jalan di latar",
+    "Ctrl+C sekali = batalkan dengan aman; ketik 'lanjutkan' untuk meneruskan",
+    "bagas-ai --resume melanjutkan sesi terakhirmu di folder ini",
+    "/expand N membuka hasil lengkap sebuah langkah setelah selesai",
+    "kalau model macet/ngeloop, bagas-ai membatalkan & naik kelas sendiri",
+    "/memory menyimpan fakta jangka panjang lintas sesi",
+    "/live mengalihkan tampilan inline ↔ klasik bila terminal bermasalah",
+)
+
+
 class TurnView:
     """Tampilan SATU GILIRAN yang hidup INLINE (rich.Live, TANPA layar-penuh),
     persis alur terminal biasa. Seluruh giliran (narasi, langkah, jawaban)
@@ -622,11 +639,18 @@ class TurnView:
         extra = f"   [dim]·[/]   [#f5c2e7]🔧 {self.tool}[/]" if self.tool else ""
         eff = getattr(self.agent, "effort", None)
         effseg = f"   [dim]·[/]   [#f5c2e7]◇ effort {eff}[/]" if eff else ""
-        return Text.from_markup(
+        status = Text.from_markup(
             f"  [bold #cba6f7]{frame}[/] [#cba6f7]{self.phase}[/]   [dim]·[/]   "
             f"[#89b4fa]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f9e2af]⚡ {tok}[/] "
             f"[dim]token[/]{effseg}{extra}"
             f"   [dim italic]Ctrl+C batal[/]")
+        # Tips bergantian (tiap 10 dtk) — baru muncul setelah beberapa detik agar
+        # giliran singkat tak sempat kedip-kedip tips.
+        if el > 4:
+            tip = _TIPS[int(el / 10) % len(_TIPS)]
+            return Group(status, Text(f"  ✦ tips: {tip}",
+                                      style="dim italic", no_wrap=True))
+        return status
 
 
 # ---------------------------------------------------------------------------
@@ -1024,9 +1048,12 @@ def main(resume: bool = False) -> None:
                 view.note_retry(wait, f"percobaan ke-{attempt}")
 
         def _on_notice(msg: str) -> None:
-            """bagas-ai naik-kelas otomatis (ngeloop/performa turun) — beri tahu."""
+            """bagas-ai naik-kelas / anti-macet otomatis — beri tahu pengguna.
+            Deskripsi naik-kelas selalu memuat '→' (mis. 'effort a → b')."""
+            label = ("⚡ naik kelas otomatis:" if "→" in msg
+                     else "🛟 anti-macet:")
             _commit([Text.from_markup(
-                f"  [#f9e2af]⚡ naik kelas otomatis:[/] [dim]{_esc(msg)} "
+                f"  [#f9e2af]{label}[/] [dim]{_esc(msg)} "
                 f"— konteks dipertahankan[/]")])
 
         cancel_event = threading.Event()
@@ -1079,6 +1106,10 @@ def main(resume: bool = False) -> None:
 
         worker_thread = threading.Thread(target=worker, daemon=True)
         interrupted = False
+        # Capture mouse MENELAN event scroll wheel -> terminal tak bisa digulung.
+        # Saat pengguna terdeteksi men-scroll, capture DILEPAS sementara (wheel
+        # kembali dilayani terminal secara native) lalu dipasang lagi otomatis.
+        mouse_pause = {"until": 0.0}
         try:
             with Live(view, console=console, refresh_per_second=12,
                       transient=False, vertical_overflow="visible") as live:
@@ -1088,13 +1119,47 @@ def main(resume: bool = False) -> None:
                     try:
                         if input_paused["on"]:
                             # ask_user sedang tampil -> JANGAN baca console; biarkan
-                            # inquirer yang menerima seluruh ketikan/klik.
+                            # inquirer yang menerima seluruh ketikan/klik. Lepaskan
+                            # juga capture mouse agar prompt & scroll normal.
+                            if mouse is not None and mouse.active:
+                                try:
+                                    mouse.disable()
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                mouse_pause["until"] = 0.0
                             worker_thread.join(timeout=0.1)
                         elif mouse is not None:
+                            # Jeda-scroll usai? pasang lagi capture klik.
+                            if (not mouse.active
+                                    and time.time() >= mouse_pause["until"]):
+                                try:
+                                    mouse.enable()
+                                except Exception:  # noqa: BLE001
+                                    pass
+                            if not mouse.active:
+                                # Capture DILEPAS (pengguna sedang men-scroll):
+                                # wheel dilayani terminal; keyboard via msvcrt.
+                                if _msvcrt is not None and _msvcrt.kbhit():
+                                    ch = _msvcrt.getwch()
+                                    if ch == "\x12":
+                                        view.toggle()
+                                    elif ch == "\x03":
+                                        raise KeyboardInterrupt
+                                else:
+                                    time.sleep(0.03)
+                                continue
                             got = False
                             for ev in mouse.poll():
                                 got = True
-                                if ev[0] == "click":
+                                if ev[0] == "wheel":
+                                    # Pengguna men-scroll: lepaskan capture agar
+                                    # wheel menggulung terminal seperti biasa.
+                                    try:
+                                        mouse.disable()
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                    mouse_pause["until"] = time.time() + 4.0
+                                elif ev[0] == "click":
                                     n = _hit_step(ev[2])
                                     if n is not None:
                                         view.toggle_step(n)

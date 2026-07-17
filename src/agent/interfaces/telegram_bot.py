@@ -343,8 +343,10 @@ def build_application(on_event: OnEvent | None = None) -> Application:
                 tok = interaction.set_context_handler(handler)
                 try:
                     def _notice(msg: str) -> None:
-                        emit("info", f"⚡ naik kelas otomatis: {msg}")
-                        steps_log.append(f"⚡ naik kelas: {msg}")
+                        label = ("⚡ naik kelas otomatis" if "→" in msg
+                                 else "🛟 anti-macet")
+                        emit("info", f"{label}: {msg}")
+                        steps_log.append(f"{label}: {msg}")
                         _render_status()
 
                     return agent.run(txt, on_tool=_tg_on_tool,

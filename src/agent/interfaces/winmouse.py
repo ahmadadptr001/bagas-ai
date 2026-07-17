@@ -37,6 +37,7 @@ if _OK:
     KEY_EVENT = 0x0001
     MOUSE_EVENT = 0x0002
     FROM_LEFT_1ST_BUTTON_PRESSED = 0x0001
+    MOUSE_WHEELED = 0x0004
 
     class _COORD(ctypes.Structure):
         _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
@@ -104,6 +105,11 @@ if _OK:
                 _k32.SetConsoleMode(self._hin, self._old)
                 self._active = False
 
+        @property
+        def active(self) -> bool:
+            """True bila capture mouse sedang terpasang (klik bisa dibaca)."""
+            return self._active
+
         def cursor_row(self) -> int | None:
             """Baris (buffer) posisi kursor kini = dasar region live saat ini."""
             info = _CSBI()
@@ -134,6 +140,12 @@ if _OK:
                             me.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED):
                         out.append(("click", int(me.dwMousePosition.X),
                                     int(me.dwMousePosition.Y)))
+                    elif me.dwEventFlags & MOUSE_WHEELED:
+                        # SCROLL WHEEL: selama capture aktif, event ini DITELAN
+                        # konsol (terminal tak menggulung sendiri). Laporkan ke
+                        # pemanggil agar capture bisa DILEPAS sementara sehingga
+                        # scroll kembali berfungsi normal.
+                        out.append(("wheel",))
                 elif rec.EventType == KEY_EVENT:
                     ke = rec.Event.KeyEvent
                     if ke.bKeyDown and ke.UnicodeChar:
