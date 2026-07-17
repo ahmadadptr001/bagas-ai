@@ -10,7 +10,13 @@ from __future__ import annotations
 import difflib
 import re
 import sys
+import threading
 import time
+
+try:  # keyboard non-blocking (Windows) untuk toggle expand inline (Ctrl+R)
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - non-Windows
+    _msvcrt = None
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -30,23 +36,62 @@ from rich import box  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
 from rich.live import Live  # noqa: E402
 from rich.markdown import Markdown  # noqa: E402
+from rich.markup import escape as _esc  # noqa: E402
 from rich.padding import Padding  # noqa: E402
 from rich.panel import Panel  # noqa: E402
 from rich.rule import Rule  # noqa: E402
 from rich.table import Table  # noqa: E402
 from rich.text import Text  # noqa: E402
+from rich.theme import Theme  # noqa: E402
 
 try:
     from pyfiglet import Figlet  # noqa: E402
 except Exception:  # pragma: no cover
     Figlet = None  # type: ignore
 
-from .. import config, interaction, llm, longmem, models, osinfo, prefs, scripts, updater, workspace  # noqa: E402
+from .. import config, interaction, llm, longmem, models, osinfo, prefs, projectindex, scripts, updater, workspace  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
 
-console = Console()  # auto-detect VT (Windows Terminal) -> warna/emoji mulus
+# Tema Markdown selaras palet "catppuccin" agar jawaban AI (heading, list, kutipan,
+# kode, tautan) serasi dengan seluruh UI — bukan warna default rich yang kontras.
+_MD_THEME = Theme({
+    "markdown.h1": "bold #cba6f7",
+    "markdown.h1.border": "#cba6f7",
+    "markdown.h2": "bold #89b4fa",
+    "markdown.h3": "bold #94e2d5",
+    "markdown.h4": "bold #a6e3a1",
+    "markdown.h5": "bold #f9e2af",
+    "markdown.h6": "bold #fab387",
+    "markdown.item.bullet": "bold #cba6f7",
+    "markdown.item.number": "bold #89b4fa",
+    "markdown.code": "#f5c2e7 on #313244",       # `inline code`
+    "markdown.link": "#89b4fa underline",
+    "markdown.link_url": "dim #74c7ec",
+    "markdown.block_quote": "italic #f9e2af",
+    "markdown.block_quote_border": "#585b70",
+    "markdown.hr": "#45475a",
+    "markdown.strong": "bold #f5e0dc",
+    "markdown.emph": "italic #cdd6f4",
+    "markdown.text": "#cdd6f4",
+})
+console = Console(theme=_MD_THEME)  # auto-detect VT -> warna/emoji mulus
+
+# Tema penyorotan sintaks blok kode ```lang``` — 'dracula' paling dekat dengan
+# nuansa catppuccin (pastel ungu/pink/hijau). Fallback aman bila tak tersedia.
+try:  # pragma: no cover - bergantung versi pygments
+    from pygments.styles import get_style_by_name as _gsbn
+    _gsbn("dracula")
+    _CODE_THEME = "dracula"
+except Exception:  # pragma: no cover
+    _CODE_THEME = "monokai"
+
+
+def _md(text: str) -> Markdown:
+    """Markdown bertema catppuccin (inline code pakai style `markdown.code`,
+    blok kode ```lang``` disorot tema `dracula`)."""
+    return Markdown(text, code_theme=_CODE_THEME)
 
 # Padding tepi supaya konten tidak mepet ke pinggir terminal (kiri/kanan/bawah).
 _LPAD = 2
@@ -63,6 +108,10 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("delete", "hapus sesi"),
     ("reset", "kosongkan riwayat"),
     ("clear", "bersihkan layar"),
+    ("review", "cari bug & kesalahan sistem di seluruh proyek"),
+    ("scan", "pindai ulang & segarkan peta proyek"),
+    ("live", "hidup/matikan tampilan interaktif (Ctrl+R buka/tutup live)"),
+    ("expand", "cetak ulang hasil penuh · /expand N untuk satu langkah"),
     ("memory", "memory jangka panjang"),
     ("scripts", "script memory"),
     ("models", "daftar semua model"),
@@ -70,6 +119,26 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("help", "bantuan"),
     ("exit", "keluar"),
 ]
+
+# Instruksi untuk /review — audit bug & kesalahan sistem menyeluruh.
+_REVIEW_PROMPT = (
+    "Lakukan REVIEW/AUDIT menyeluruh pada proyek ini KHUSUS untuk menemukan BUG dan "
+    "KESALAHAN SISTEM. Manfaatkan Peta Proyek yang sudah kamu punya untuk menentukan "
+    "file paling berisiko lebih dulu, lalu baca file-file itu seperlunya (jangan baca "
+    "semua kalau tak perlu). Telusuri terutama:\n"
+    "- Bug logika & kasus tepi: off-by-one, None/null/undefined, pembagian nol, "
+    "kondisi salah, loop tak berhenti, race condition, error/exception tak tertangani.\n"
+    "- Kesalahan sistem/konfigurasi: import/modul salah, path/berkas salah, dependency "
+    "hilang atau versi bentrok, variabel env yang belum diset, entry-point rusak.\n"
+    "- Referensi rusak: fungsi/variabel/atribut yang dipanggil tapi tak ada, salah tipe, "
+    "signature tak cocok.\n"
+    "- Keamanan: kredensial/secret bocor, injeksi (SQL/shell), path traversal, input "
+    "tak divalidasi.\n"
+    "Untuk SETIAP temuan sebutkan: `file:baris`, tingkat keparahan (KRITIS/TINGGI/"
+    "SEDANG/RENDAH), penjelasan singkat kenapa itu bug, dan saran perbaikan. URUTKAN "
+    "dari paling parah. Kalau tak ada masalah serius, katakan terus terang. PENTING: "
+    "ini fase pelaporan — JANGAN mengubah kode apa pun kecuali aku memintanya."
+)
 
 
 class SlashCompleter(Completer):
@@ -237,14 +306,29 @@ def show_logo() -> None:
     for i, ln in enumerate(lines):
         console.print(Text(m + ln, style=f"bold {_GRAD[min(i, len(_GRAD) - 1)]}"))
     sub = Text(m + "  ")
-    sub.append("AI agent serbaguna  ", style="bold white")
-    sub.append("· ditenagai NVIDIA (gratis)", style="dim italic")
+    sub.append("AI agent serbaguna", style="bold white")
     console.print(sub)
 
 
 # ---------------------------------------------------------------------------
 # Indikator "berpikir" realtime (rich Live) — nempel inline pada task
 # ---------------------------------------------------------------------------
+# Kata FASE per-tool: bikin indikator status menjelaskan APA yang sedang
+# dikerjakan (bukan cuma "berpikir"). Tanpa tool aktif -> "berpikir".
+_PHASE = {
+    "write_file": "menulis",
+    "delete_file": "menghapus",
+    "read_file": "membaca",
+    "list_dir": "menelusuri",
+    "web_search": "mencari",
+    "run_command": "menjalankan",
+    "run_python": "menjalankan",
+    "run_script": "menjalankan",
+    "save_script": "menyimpan",
+    "remember": "mengingat",
+}
+
+
 class Status:
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -252,14 +336,32 @@ class Status:
         self.agent = agent
         self.start = time.time()
         self.tool: str | None = None
+        self.phase = "berpikir"
+        self.step = 0
         self.disp = 0.0
         self.retry_until = 0.0
         self.retry_msg = ""
+        self.cancelling = False
 
     def note_retry(self, wait: float, msg: str) -> None:
         """Tandai bahwa bagasAI sedang menunggu rate limit lalu melanjutkan."""
         self.retry_until = time.time() + wait
         self.retry_msg = msg
+
+    def note_cancelling(self) -> None:
+        """Tandai bahwa pembatalan (Ctrl+C) sedang diproses di latar belakang."""
+        self.cancelling = True
+
+    def note_step(self, name: str) -> None:
+        """Mulai satu langkah tool: set fase sesuai jenis tool & naikkan nomor."""
+        self.tool = name
+        self.phase = _PHASE.get(name, "bekerja")
+        self.step += 1
+
+    def note_thinking(self) -> None:
+        """Kembali ke fase 'berpikir' (tak ada tool aktif)."""
+        self.tool = None
+        self.phase = "berpikir"
 
     def __rich__(self) -> Text:
         el = time.time() - self.start
@@ -267,6 +369,14 @@ class Status:
         frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
 
         dot = "[#45475a]•[/]"
+
+        # Mode membatalkan: Ctrl+C ditekan, menunggu langkah aman berhenti.
+        if self.cancelling:
+            t = Text()
+            t.append(f"  {frame} ", style="bold #f38ba8")
+            t.append("membatalkan — menunggu langkah aman berhenti", style="#f38ba8")
+            t.append("     Ctrl+C lagi = paksa", style="dim italic")
+            return t
 
         # Mode menunggu rate limit: tampilkan hitung mundur + jaminan lanjut.
         if now < self.retry_until:
@@ -286,7 +396,7 @@ class Status:
             self.disp = target
         t = Text()
         t.append(f"  {frame} ", style="bold #cba6f7")
-        t.append("berpikir", style="#cba6f7")
+        t.append(self.phase, style="#cba6f7")
         t.append(f"  {_fmt_elapsed(el)}", style="bold #89b4fa")
         t.append("   ")
         t.append_text(Text.from_markup(dot))
@@ -296,8 +406,191 @@ class Status:
             t.append("   ")
             t.append_text(Text.from_markup(dot))
             t.append(f"  🔧 {self.tool}", style="#f5c2e7")
+        if self.step:
+            t.append("   ")
+            t.append_text(Text.from_markup(dot))
+            t.append(f"  langkah {self.step}", style="dim #94e2d5")
         t.append("     Ctrl+C batal", style="dim italic")
         return t
+
+
+class TurnView:
+    """Tampilan SATU GILIRAN yang hidup INLINE (rich.Live, TANPA layar-penuh),
+    persis alur terminal biasa. Seluruh giliran (narasi, langkah, jawaban)
+    dirender di region yang terus diperbarui; hasil tiap langkah bisa DIBUKA/
+    ditutup secara realtime dengan Ctrl+R (seperti Claude). Saat giliran selesai,
+    region ini 'membeku' jadi bagian riwayat terminal (transient=False)."""
+
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, agent: Agent) -> None:
+        self.agent = agent
+        self.start = time.time()
+        self._lock = threading.Lock()
+        self.items: list[tuple[str, object]] = []  # ("narasi",str)|("step",rec)
+        self.answer: str | None = None
+        self.expanded = False          # Ctrl+R toggle: buka/tutup hasil semua langkah
+        self._clickable = False        # True bila mouse aktif -> tampilkan petunjuk klik
+        self.done = False
+        self.cancelling = False
+        self.retry_until = 0.0
+        self.retry_msg = ""
+        self.phase = "berpikir"
+        self.tool: str | None = None
+        self.disp = 0.0
+
+    # --- mutasi (dipanggil dari worker) ---
+    def add_narasi(self, text: str) -> None:
+        if text and text.strip():
+            with self._lock:
+                self.items.append(("narasi", text.strip()))
+
+    def start_step(self, n: int, name: str, label: str) -> dict:
+        rec = {"n": n, "name": name, "label": label, "result": "",
+               "failed": False, "running": True, "expanded": False}
+        with self._lock:
+            self.items.append(("step", rec))
+        self.tool = name
+        self.phase = _PHASE.get(name, "bekerja")
+        return rec
+
+    def end_step(self, rec: dict, result: str, failed: bool) -> None:
+        rec["result"] = result or ""
+        rec["failed"] = failed
+        rec["running"] = False
+        self.tool = None
+        self.phase = "berpikir"
+
+    def note_retry(self, wait: float, msg: str) -> None:
+        self.retry_until = time.time() + wait
+        self.retry_msg = msg
+
+    def toggle(self) -> None:
+        """Ctrl+R (cadangan): buka/tutup SEMUA hasil sekaligus."""
+        self.expanded = not self.expanded
+
+    def toggle_step(self, n: int) -> bool:
+        """Klik: buka/tutup hasil langkah #n saja. True bila langkah ada."""
+        with self._lock:
+            for kind, val in self.items:
+                if kind == "step" and val["n"] == n and not val["running"]:
+                    val["expanded"] = not val["expanded"]
+                    return True
+        return False
+
+    # --- render satu langkah ---
+    def _render_step(self, rec: dict) -> list:
+        n = rec["n"]
+        label = rec["label"] or ""
+        if len(label) > 64:
+            label = label[:61] + "…"
+        running = rec["running"]
+        failed = rec["failed"]
+        if running:
+            frame = self.FRAMES[int((time.time() - self.start) * 10) % len(self.FRAMES)]
+            icon = f"[#f9e2af]{frame}[/]"
+        else:
+            icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
+        phase = _PHASE.get(rec["name"], "langkah")
+        head = Text.from_markup(
+            f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
+            f"   [dim #94e2d5]#{n}[/]"
+        )
+        out = [head]
+        text = re.sub(r"^exit_code=\S+\n?", "", (rec["result"] or "").strip())
+        lines = [ln for ln in text.splitlines()]
+        nlines = len([ln for ln in lines if ln.strip()])
+        if running:
+            out.append(Text("     menjalankan…", style="italic #6c7086"))
+        elif not text:
+            pass
+        elif rec["expanded"] or self.expanded:
+            cap = 40
+            shown = lines[:cap]
+            body = Text("\n".join("     " + ln for ln in shown),
+                        style="#f5c9c9" if failed else "#a6adc8")
+            out.append(body)
+            if len(lines) > cap:
+                out.append(Text(f"     … {len(lines) - cap} baris lagi (/expand {n})",
+                                style="dim"))
+        else:
+            unit = "hasil" if rec["name"] == "web_search" else "baris"
+            tag = "[#f38ba8]gagal[/] · " if failed else ""
+            out.append(Text.from_markup(f"     [dim]{tag}{nlines} {unit}[/]"))
+        return out
+
+    def _blocks(self) -> list:
+        """Urutan (tag, renderable) untuk render & pemetaan-klik. tag =
+        ('step', n) bila baris itu milik langkah #n, else ('other', None)."""
+        blocks: list = []
+        with self._lock:
+            items = list(self.items)
+            answer = self.answer
+        header_shown = False
+        for kind, val in items:
+            if kind == "narasi":
+                if not header_shown:
+                    blocks.append((("other", None),
+                                   Padding(Text("🤖 bagasAI", style="bold #89b4fa"),
+                                           (1, 0, 0, 2))))
+                    header_shown = True
+                blocks.append((("other", None), Padding(_md(val), (0, 3, 1, 3))))
+            else:
+                for r in self._render_step(val):
+                    blocks.append((("step", val["n"]), r))
+        if answer:
+            blocks.append((("other", None),
+                           Padding(Text("🤖 bagasAI", style="bold #89b4fa"), (1, 0, 0, 2))))
+            blocks.append((("other", None), Padding(_md(answer), (0, 3, 1, 3))))
+        blocks.append((("other", None), self._footer()))
+        return blocks
+
+    def __rich__(self):
+        return Group(*[r for _, r in self._blocks()])
+
+    def _footer(self):
+        el = time.time() - self.start
+        frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
+        now = time.time()
+        if self.cancelling:
+            return Text.from_markup(
+                f"  [bold #f38ba8]{frame}[/] [#f38ba8]membatalkan — "
+                f"menunggu langkah aman berhenti[/]   [dim italic]Ctrl+C lagi = paksa[/]")
+        if now < self.retry_until:
+            left = self.retry_until - now
+            return Text.from_markup(
+                f"  [bold #f9e2af]{frame}[/] [#f9e2af]NVIDIA sibuk — menunggu lalu "
+                f"melanjutkan[/] [bold #fab387]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]")
+        target = float(self.agent.tokens_live)
+        self.disp += (target - self.disp) * 0.30
+        if abs(target - self.disp) < 1:
+            self.disp = target
+        tok = _fmt(int(self.disp))
+        if self.done:
+            with self._lock:
+                stps = [v for k, v in self.items if k == "step"]
+            n_step = len(stps)
+            if not n_step:
+                return Text("")  # chat murni: tanpa footer
+            n_file = sum(1 for s in stps if s["name"] in ("write_file", "delete_file"))
+            n_fail = sum(1 for s in stps if s["failed"])
+            seg = [f"{n_step} langkah"]
+            if n_file:
+                seg.append(f"{n_file} file")
+            if n_fail:
+                seg.append(f"[#f38ba8]{n_fail} gagal[/]")
+            seg += [_fmt_elapsed(el), f"⚡ {tok} token"]
+            return Text.from_markup(
+                "  [dim]" + " · ".join(seg) + "[/]   [dim]·[/]   "
+                "[#94e2d5]/expand N[/][dim] lihat penuh[/]")
+        extra = f"   [dim]·[/]   [#f5c2e7]🔧 {self.tool}[/]" if self.tool else ""
+        eff = getattr(self.agent, "effort", None)
+        effseg = f"   [dim]·[/]   [#f5c2e7]◇ effort {eff}[/]" if eff else ""
+        return Text.from_markup(
+            f"  [bold #cba6f7]{frame}[/] [#cba6f7]{self.phase}[/]   [dim]·[/]   "
+            f"[#89b4fa]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f9e2af]⚡ {tok}[/] "
+            f"[dim]token[/]{effseg}{extra}"
+            f"   [dim italic]Ctrl+C batal[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +623,7 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
     )
     body = Group(head, Text(), grid, Rule(style="#313244"), hint)
     return Panel(body, border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2),
-                 title="[bold #cba6f7]⬢ bagasAI[/]", title_align="left",
-                 subtitle="[dim]NVIDIA · gratis[/dim]", subtitle_align="right")
+                 title="[bold #cba6f7]⬢ bagasAI[/]", title_align="left")
 
 
 def _models_panel(current_id: str) -> Panel:
@@ -390,12 +682,23 @@ def main(resume: bool = False) -> None:
                 console.print(f"\n  [bold #cba6f7]❯[/] [#cba6f7]{content}[/]")
             elif role == "assistant" and content:
                 console.print("\n  [bold #89b4fa]🤖 bagasAI[/]")
-                console.print(Padding(Markdown(content), (0, 3, 1, 3)))
+                console.print(Padding(_md(content), (0, 3, 1, 3)))
         console.print(Rule("[dim]lanjut di bawah[/dim]", style="#313244"))
     if os_status in ("added", "updated"):
         verb = "terdeteksi & disimpan" if os_status == "added" else "diperbarui"
         pout(f"[dim]🖥  OS {verb}: {osinfo.summary()} — perintah terminal akan "
              f"disesuaikan.[/dim]", bottom=0)
+    # Peta proyek: sudah dibangun/di-cache saat Agent dibuat -> bagasAI paham
+    # proyek tanpa baca ulang tiap giliran/ganti model/resume.
+    try:
+        _pmap = projectindex.ensure()
+        _pn = _pmap.count("\n- ")
+        if _pn:
+            pout(f"[dim]🗺  peta proyek siap (~{_pn} file) — bagasAI sudah paham "
+                 f"strukturnya; ketik [/][#94e2d5]/scan[/][dim] untuk menyegarkan.[/]",
+                 bottom=0)
+    except Exception:  # noqa: BLE001
+        pass
     _update_notice()  # info bila versi usang (dari cache) + cek ulang di latar
     console.print()
 
@@ -409,6 +712,43 @@ def main(resume: bool = False) -> None:
 
     def _save_total() -> None:
         prefs.set_total_tokens(grand["base"] + agent.tokens_session.total)
+
+    # --- Jejak langkah + hasil yang bisa di-expand ---------------------------
+    # Tiap pemanggilan tool = satu "langkah" bernomor. Hasil PENUH tiap langkah
+    # disimpan di `steps` agar bisa ditampilkan ulang lengkap lewat `/expand N`
+    # (terminal bergulir tak bisa buka-tutup output lama di tempat, jadi expand =
+    # cetak ulang hasil penuh atas permintaan). `step_ctr` bikin nomor unik &
+    # stabil sepanjang sesi; `cur_step` menjembatani on_tool -> on_tool_result.
+    steps: dict[int, dict] = {}
+    step_ctr = {"n": 0}
+    cur_step: dict = {}
+    # Mode tampilan giliran: True = TUI interaktif (langkah bisa diklik SELAGI
+    # berjalan); False = tampilan rich biasa (mengalir, tanpa layar-penuh).
+    tui_mode = {"on": True}
+
+    def _step_label(name: str, args: dict) -> str:
+        a = args if isinstance(args, dict) else {}
+        if name == "run_command":
+            return a.get("command", "") or "perintah"
+        if name == "run_python":
+            return "kode Python"
+        if name == "run_script":
+            return f"skrip {a.get('name', '')}"
+        if name == "read_file":
+            return a.get("path", "")
+        if name == "list_dir":
+            return a.get("path", ".") or "."
+        if name == "web_search":
+            return a.get("query", "")
+        if name == "write_file":
+            return a.get("path", "")
+        if name == "delete_file":
+            return a.get("path", "")
+        if name == "save_script":
+            return a.get("name", "")
+        if name == "remember":
+            return a.get("fact", "") or "fakta"
+        return name
 
     def choice_handler(question: str, options: list[str], multiple: bool) -> str:
         live = live_holder.get("live")
@@ -433,10 +773,18 @@ def main(resume: bool = False) -> None:
 
     interaction.set_choice_handler(choice_handler)
 
+    # Tool yang hasilnya berupa teks substansial & layak di-expand penuh.
+    _EXPANDABLE = {"run_command", "run_python", "run_script",
+                   "read_file", "list_dir", "web_search"}
+
     def on_tool(name: str, args: dict) -> None:
-        """Progres inline: perubahan kode ditampilkan sebagai diff berwarna."""
-        status_obj.tool = name
+        """Mulai satu langkah: set fase + timer, dan untuk tulis/hapus tampilkan diff."""
+        status_obj.note_step(name)
+        step_ctr["n"] += 1
+        cur_step.clear()
+        cur_step.update(n=step_ctr["n"], name=name, args=args, start=time.time())
         p = args.get("path") if isinstance(args, dict) else None
+        # Diff/preview substantif ditampilkan SEBELUM aksi (konten inti perubahan).
         if name == "write_file" and p:
             full = config.PROJECT_ROOT / p
             exists = full.exists()
@@ -447,25 +795,282 @@ def main(resume: bool = False) -> None:
             full = config.PROJECT_ROOT / p
             content = full.read_text(encoding="utf-8", errors="replace") if full.exists() else ""
             _print_delete(p, content)
-        elif name == "read_file" and p:
-            console.print(f"  [dim]📖  membaca [cyan]{p}[/cyan][/dim]")
-        elif name == "list_dir":
-            console.print(f"  [dim]📂  melihat isi [cyan]{args.get('path', '.')}[/cyan][/dim]")
-        elif name == "web_search":
-            console.print(f"  [dim]🔎  mencari: {args.get('query', '')}[/dim]")
-        elif name == "run_command":
-            console.print(f"  [dim]▶  menjalankan[/dim] [white]{args.get('command', '')}[/white]")
-        elif name == "run_python":
-            console.print("  [dim]▶  menjalankan kode Python[/dim]")
-        elif name == "run_script":
-            console.print(f"  [dim]▶  menjalankan skrip [cyan]{args.get('name', '')}[/cyan][/dim]")
-        elif name == "save_script":
-            console.print(f"  [green]✚  menyimpan skrip [bold]{args.get('name', '')}[/bold][/green]")
+
+    def finish_step(name: str, result: str) -> None:
+        """Selesaikan langkah: catat hasil penuh (untuk /expand) + cetak baris jejak.
+
+        Baris jejak = ceklis ringkas (ikon, fase, target, durasi, #nomor). Hasil
+        yang layak di-expand diberi petunjuk `/expand N`; hasil gagal ditandai.
+        """
+        n = cur_step.get("n", step_ctr["n"])
+        args = cur_step.get("args", {})
+        dur = time.time() - cur_step.get("start", time.time())
+        text = (result or "").strip()
+        failed = text.startswith("[GAGAL") or text.startswith("[error]")
+
+        # Simpan hasil PENUH agar bisa dibuka lagi via /expand.
+        steps[n] = {"name": name, "label": _step_label(name, args),
+                    "result": result or "", "failed": failed, "dur": dur}
+        # Batasi memori: simpan 200 langkah terakhir saja.
+        if len(steps) > 200:
+            for old_n in sorted(steps)[:-200]:
+                steps.pop(old_n, None)
+
+        label = _step_label(name, args)
+        if len(label) > 64:
+            label = label[:61] + "…"
+        icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
+        phase = _PHASE.get(name, "selesai")
+        dur_s = f"{dur:.1f}s" if dur >= 0.05 else ""
+        head = (f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
+                f"   [dim]{dur_s}[/]   [dim #94e2d5]#{n}[/]")
+        console.print(head)
+
+        # Baris kedua: ringkasan hasil ringkas (buka & klik lewat penampil).
+        body = re.sub(r"^exit_code=\S+\n?", "", text)
+        nlines = len([ln for ln in body.splitlines() if ln.strip()])
+        if failed:
+            console.print("     [#f38ba8]gagal[/]")
+        elif name in _EXPANDABLE and nlines > 0:
+            unit = "hasil" if name == "web_search" else "baris"
+            console.print(f"     [dim]{nlines} {unit}[/]")
+        elif name == "write_file":
+            # Tampilkan status cek sintaks bila ada di hasil.
+            m = re.search(r"\[cek sintaks\]\s*(.+)", text)
+            if m:
+                ok = m.group(1).startswith("OK")
+                col = "#a6e3a1" if ok else "#f38ba8"
+                console.print(f"     [{col}]{_esc(m.group(1).strip())}[/]")
+        # Langkah tool selesai -> kembali ke fase "berpikir" untuk generasi berikut.
+        status_obj.note_thinking()
+
+    def show_expand(n: int | None) -> None:
+        """Tampilkan ulang hasil PENUH sebuah langkah (perintah `/expand N`)."""
+        if not steps:
+            console.print("  [dim]belum ada langkah untuk di-expand.[/dim]\n")
+            return
+        if n is None:
+            n = max(steps)
+        rec = steps.get(n)
+        if not rec:
+            console.print(f"  [yellow]Langkah #{n} tak ada. Yang tersedia: "
+                          f"{', '.join('#' + str(k) for k in sorted(steps))}[/yellow]\n")
+            return
+        text = (rec["result"] or "").strip() or "(tidak ada output)"
+        lines = text.splitlines()
+        cap = 400
+        if len(lines) > cap:
+            text = "\n".join(lines[:cap]) + f"\n… [dipotong, {len(lines) - cap} baris lagi]"
+        color = "#f38ba8" if rec["failed"] else "#a6e3a1"
+        icon = "✗" if rec["failed"] else "✓"
+        title = f"[{color}]{icon} #{n} · {rec['name']}[/] [dim]· {_esc(rec['label'])[:56]}[/]"
+        panel = Panel(Text(text), title=title, title_align="left",
+                      border_style=color, box=box.ROUNDED, padding=(0, 1))
+        console.print(Padding(panel, (0, 3, 1, 3)))
+
+    def open_step_viewer() -> None:
+        """Cetak ulang hasil PENUH semua langkah giliran terakhir (inline, teks).
+        Saat giliran berjalan, buka/tutup realtime cukup pakai Ctrl+R."""
+        if not steps:
+            console.print("  [dim]belum ada langkah untuk dibuka.[/dim]\n")
+            return
+        for k in sorted(steps):
+            show_expand(k)
 
     def process(text: str) -> None:
+        """Jalankan satu giliran INLINE (tanpa layar-penuh, tetap di alur terminal
+        biasa). Seluruh giliran dirender di satu region rich.Live yang hidup &
+        membeku jadi riwayat saat selesai. Hasil langkah bisa dibuka/tutup realtime
+        dengan Ctrl+R. Ctrl+C membatalkan. Bila gagal, jatuh ke process_classic."""
+        steps.clear()
+        step_ctr["n"] = 0
+        cur_step.clear()
+        turn_start = time.time()
+        if not tui_mode["on"]:
+            process_classic(text)
+            return
+
+        view = TurnView(agent)
+        ctr = {"n": 0}
+
+        def _on_tool(name: str, args: dict) -> None:
+            ctr["n"] += 1
+            n = ctr["n"]
+            label = _step_label(name, args)
+            rec = view.start_step(n, name, label)
+            cur_step.clear()
+            cur_step["rec"] = rec
+            cur_step["n"] = n
+            # Diff tulis/hapus dicetak (otomatis di ATAS region live) sbg konteks
+            # perubahan, lalu menjadi bagian riwayat terminal.
+            p = args.get("path") if isinstance(args, dict) else None
+            if name == "write_file" and p:
+                full = config.PROJECT_ROOT / p
+                exists = full.exists()
+                old = full.read_text(encoding="utf-8", errors="replace") if exists else ""
+                new = args.get("content", "") if isinstance(args, dict) else ""
+                _print_diff(p, old, new, is_new=not exists)
+            elif name == "delete_file" and p:
+                full = config.PROJECT_ROOT / p
+                content = full.read_text(encoding="utf-8", errors="replace") if full.exists() else ""
+                _print_delete(p, content)
+
+        def _on_result(name: str, result: str) -> None:
+            rec = cur_step.get("rec")
+            n = cur_step.get("n", ctr["n"])
+            failed = (result or "").strip().startswith(("[GAGAL", "[error]"))
+            if rec is not None:
+                view.end_step(rec, result, failed)
+            steps[n] = {"name": name, "label": _step_label(name, {}),
+                        "result": result or "", "failed": failed, "dur": 0.0}
+            if rec is not None:
+                steps[n]["label"] = rec["label"]
+            step_ctr["n"] = n
+
+        def _on_msg(content: str) -> None:
+            view.add_narasi(content)
+
+        def _on_retry(attempt: int, wait: float, exc: Exception) -> None:
+            view.note_retry(wait, f"percobaan ke-{attempt}")
+
+        cancel_event = threading.Event()
+        result: dict = {"answer": None, "error": None}
+
+        def worker() -> None:
+            try:
+                result["answer"] = agent.run(
+                    text, on_tool=_on_tool, on_message=_on_msg,
+                    on_retry=_on_retry, cancel_event=cancel_event,
+                    on_tool_result=_on_result,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        # Coba aktifkan MOUSE inline (klik hasil untuk buka/tutup) tanpa layar-penuh.
+        mouse = None
+        try:
+            from . import winmouse
+            if winmouse.available():
+                m = winmouse.MouseReader()
+                if m.enable():
+                    mouse = m
+                    view._clickable = True
+        except Exception:  # noqa: BLE001
+            mouse = None
+
+        def _hit_step(click_y: int) -> int | None:
+            """Petakan baris klik (koordinat buffer) ke #langkah, atau None."""
+            bottom = mouse.cursor_row() if mouse else None
+            if bottom is None:
+                return None
+            blocks = view._blocks()
+            opts = console.options
+            heights = []
+            for _, r in blocks:
+                try:
+                    heights.append(len(console.render_lines(r, opts, pad=False)))
+                except Exception:  # noqa: BLE001
+                    heights.append(1)
+            total = sum(heights)
+            top = bottom - total + 1
+            offset = click_y - top
+            acc = 0
+            for (tag, _), h in zip(blocks, heights):
+                if acc <= offset < acc + h:
+                    return tag[1] if tag[0] == "step" else None
+                acc += h
+            return None
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        interrupted = False
+        try:
+            with Live(view, console=console, refresh_per_second=12,
+                      transient=False, vertical_overflow="visible") as live:
+                live_holder["live"] = live
+                worker_thread.start()
+                while worker_thread.is_alive():
+                    try:
+                        if mouse is not None:
+                            got = False
+                            for ev in mouse.poll():
+                                got = True
+                                if ev[0] == "click":
+                                    n = _hit_step(ev[2])
+                                    if n is not None:
+                                        view.toggle_step(n)
+                                elif ev[0] == "key":
+                                    if ev[1] == "\x12":       # Ctrl+R (buka semua)
+                                        view.toggle()
+                                    elif ev[1] == "\x03":     # Ctrl+C
+                                        raise KeyboardInterrupt
+                            if not got:
+                                time.sleep(0.02)
+                        elif _msvcrt is not None:
+                            if _msvcrt.kbhit():
+                                ch = _msvcrt.getwch()
+                                if ch == "\x12":
+                                    view.toggle()
+                                elif ch == "\x03":
+                                    raise KeyboardInterrupt
+                            else:
+                                time.sleep(0.03)
+                        else:
+                            worker_thread.join(timeout=0.1)
+                    except KeyboardInterrupt:
+                        if not interrupted:
+                            interrupted = True
+                            cancel_event.set()
+                            view.cancelling = True
+                        else:
+                            break
+                # Selesai: tandai & render sekali lagi supaya footer final tampil.
+                view.done = True
+                if result["answer"] and not result["error"]:
+                    view.answer = (result["answer"] or "").strip() or None
+                live.refresh()
+        except KeyboardInterrupt:
+            interrupted = True
+            cancel_event.set()
+        finally:
+            live_holder["live"] = None
+            if mouse is not None:
+                try:
+                    mouse.disable()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        err = result["error"]
+        if interrupted or isinstance(err, (KeyboardInterrupt, llm.Cancelled)):
+            console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
+        elif isinstance(err, RateLimitError):
+            console.print("\n  [yellow]⏳ rate limit NVIDIA (~40 permintaan/menit) — "
+                          "tunggu ~1 menit lalu coba lagi[/yellow]\n")
+        elif err is not None:
+            console.print(f"\n  [red]✖ error:[/red] {err}\n")
+        # Sukses: seluruh giliran (narasi, langkah, jawaban, footer) sudah
+        # membeku dari region live -> tak perlu cetak apa pun lagi.
+        _reindex_if_edited()
+
+    def _reindex_if_edited() -> None:
+        """Bila giliran barusan menulis/menghapus file, segarkan PETA PROYEK &
+        system prompt supaya pemahaman bagasAI selalu sesuai kode terbaru."""
+        if any(s.get("name") in ("write_file", "delete_file")
+               for s in steps.values()):
+            try:
+                agent.refresh_system_prompt()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def process_classic(text: str) -> None:
         nonlocal status_obj
         status_obj = Status(agent)
         header = {"shown": False}
+        # Nomor langkah & hasil di-reset tiap giliran -> nomor tetap kecil (1..k)
+        # dan `/expand N` merujuk langkah giliran TERAKHIR yang barusan terlihat.
+        steps.clear()
+        step_ctr["n"] = 0
+        cur_step.clear()
+        turn_start = time.time()
 
         def say(content: str) -> None:
             """Tampilkan ucapan/narasi bagasAI: 1 header per giliran, indentasi rapi."""
@@ -475,32 +1080,94 @@ def main(resume: bool = False) -> None:
             if not header["shown"]:
                 console.print("  [bold #89b4fa]🤖 bagasAI[/]")
                 header["shown"] = True
-            console.print(Padding(Markdown(content.strip()), (0, 3, 1, 3)))
+            console.print(Padding(_md(content.strip()), (0, 3, 1, 3)))
 
         def on_retry(attempt: int, wait: float, exc: Exception) -> None:
             """NVIDIA rate-limit: bagasAI menunggu lalu MELANJUTKAN, bukan gagal."""
             status_obj.note_retry(wait, f"percobaan ke-{attempt}")
 
+        # Jalankan jawaban AI di THREAD LATAR BELAKANG supaya thread utama bebas
+        # menangkap Ctrl+C secara responsif. Ctrl+C pertama -> minta batal secara
+        # halus (cancel_event); Ctrl+C kedua -> tinggalkan worker (daemon) & kembali
+        # ke prompt tanpa menunggu.
+        cancel_event = threading.Event()
+        result: dict = {"answer": None, "error": None}
+
+        def worker() -> None:
+            try:
+                result["answer"] = agent.run(
+                    text, on_tool=on_tool, on_message=say,
+                    on_retry=on_retry, cancel_event=cancel_event,
+                    on_tool_result=finish_step,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        interrupted = False
+        forced = False
         try:
             with Live(status_obj, console=console, refresh_per_second=12,
                       transient=True) as live:
                 live_holder["live"] = live
-                answer = agent.run(text, on_tool=on_tool, on_message=say,
-                                   on_retry=on_retry)
-            live_holder["live"] = None
-            say(answer)
+                worker_thread.start()
+                while worker_thread.is_alive():
+                    try:
+                        worker_thread.join(timeout=0.1)
+                    except KeyboardInterrupt:
+                        if not interrupted:
+                            interrupted = True
+                            cancel_event.set()
+                            status_obj.note_cancelling()
+                        else:
+                            # Ctrl+C kedua: jangan tunggu lagi, tinggalkan worker.
+                            forced = True
+                            break
         except KeyboardInterrupt:
-            # Memory sudah dirapikan & disimpan di dalam agent.run(); di sini
-            # cukup tampilkan pesan ke pengguna.
+            # Ctrl+C di jendela sempit di luar join() (mis. saat Live start /
+            # thread mulai): perlakukan sebagai pembatalan, jangan sampai lolos
+            # & menjatuhkan REPL.
+            interrupted = True
+            cancel_event.set()
+        finally:
             live_holder["live"] = None
+
+        err = result["error"]
+        if forced or interrupted or isinstance(err, (KeyboardInterrupt, llm.Cancelled)):
+            # Memory sudah dirapikan & disimpan di dalam agent.run().
             console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
-        except RateLimitError:
-            live_holder["live"] = None
+        elif isinstance(err, RateLimitError):
             console.print("\n  [yellow]⏳ rate limit NVIDIA (~40 permintaan/menit) — "
                           "tunggu ~1 menit lalu coba lagi[/yellow]\n")
-        except Exception as exc:  # noqa: BLE001
-            live_holder["live"] = None
-            console.print(f"\n  [red]✖ error:[/red] {exc}\n")
+        elif err is not None:
+            console.print(f"\n  [red]✖ error:[/red] {err}\n")
+        else:
+            say(result["answer"])
+            _turn_footer(turn_start)
+        _reindex_if_edited()
+
+    def _turn_footer(turn_start: float) -> None:
+        """Ringkasan giliran: langkah, file disentuh, waktu, token — hanya bila
+        ada kerja tool (chat biasa tetap bersih tanpa footer)."""
+        if not steps:
+            return
+        n_step = len(steps)
+        n_file = sum(1 for s in steps.values()
+                     if s["name"] in ("write_file", "delete_file"))
+        n_fail = sum(1 for s in steps.values() if s["failed"])
+        el = _fmt_elapsed(time.time() - turn_start)
+        tok = _fmt(agent.tokens_last.total)
+        parts = [f"{n_step} langkah"]
+        if n_file:
+            parts.append(f"{n_file} file")
+        if n_fail:
+            parts.append(f"[#f38ba8]{n_fail} gagal[/]")
+        parts.append(el)
+        parts.append(f"⚡ {tok} token")
+        body = " [dim]·[/] ".join(parts)
+        hint = "   [dim]·[/]   [#94e2d5]/expand N[/][dim] lihat hasil penuh[/]"
+        console.print(Padding(
+            Text.from_markup(f"[dim]{body}[/dim]{hint}"), (0, 3, 1, 3)))
 
     # --- aksi menu (inquirer) ---
     def pick_model() -> None:
@@ -590,7 +1257,10 @@ def main(resume: bool = False) -> None:
             f"[{c}]/rm-dir[/]   lepas folder konteks   [{c}]/delete[/]   hapus sesi\n"
             f"[{c}]/memory[/]   memori jangka panjang  [{c}]/scripts[/]  skrip tersimpan\n"
             f"[{c}]/reset[/]    kosongkan riwayat      [{c}]/clear[/]    bersihkan layar\n"
-            f"[{c}]/update[/]   cek pembaruan          [#f38ba8]/exit[/]     keluar",
+            f"[{c}]/review[/]   cari bug seluruh proyek [{c}]/scan[/]     segarkan peta proyek\n"
+            f"[{c}]/live[/]     interaktif on/off      [{c}]/expand[/]   buka hasil (klik/tutup)\n"
+            f"[{c}]/models[/]   daftar semua model     [{c}]/update[/]   cek pembaruan\n"
+            f"[#f38ba8]/exit[/]     keluar",
             title="[bold #cba6f7]❔ Bantuan[/]", title_align="left",
             border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2)))
 
@@ -788,7 +1458,22 @@ def main(resume: bool = False) -> None:
             do_update()
         elif action == "models":
             pout(_models_panel(agent.model))
+        elif action == "scan":
+            do_scan()
         return False
+
+    def do_scan() -> None:
+        console.print("  [dim]🔍 memindai proyek & menyusun peta…[/dim]")
+        try:
+            txt = projectindex.ensure(force=True)
+            agent.refresh_system_prompt()
+            nfiles = txt.count("\n- ")
+            console.print(
+                f"  [#a6e3a1]✓ peta proyek diperbarui[/] [dim]· ~{nfiles} file · "
+                f"{len(txt):,} karakter — bagasAI kini paham struktur terbaru tanpa "
+                f"baca ulang.[/]\n".replace(",", "."))
+        except Exception as e:  # noqa: BLE001
+            console.print(f"  [red]✖ gagal memindai:[/red] {e}\n")
 
     def open_menu() -> bool:
         try:
@@ -881,13 +1566,14 @@ def main(resume: bool = False) -> None:
 
     while True:
         try:
-            text = session_pt.prompt(
+            raw = session_pt.prompt(
                 HTML('<style fg="#cba6f7"><b>❯</b></style> '),
-                bottom_toolbar=bottom_toolbar).strip()
+                bottom_toolbar=bottom_toolbar)
         except KeyboardInterrupt:
             continue
         except EOFError:
             break
+        text = raw.strip()
         if not text:
             continue
         if text.startswith("/"):
@@ -895,6 +1581,15 @@ def main(resume: bool = False) -> None:
             if cmd == "menu":
                 if open_menu():
                     break
+            elif cmd == "review":
+                # Audit bug/kesalahan sistem menyeluruh — dijalankan sbg giliran.
+                console.print("  [dim]🔎 mereview proyek untuk bug & kesalahan "
+                              "sistem…[/dim]")
+                try:
+                    process(_REVIEW_PROMPT)
+                except KeyboardInterrupt:
+                    console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
+                _save_total()
             elif cmd.startswith("model ") or cmd == "model":
                 parts = text.split(maxsplit=1)
                 if len(parts) == 2:
@@ -916,11 +1611,36 @@ def main(resume: bool = False) -> None:
                     do_rm_dir(parts[1].strip().strip('"').strip("'"))
                 else:
                     console.print("  [yellow]Pakai: /rm-dir <path folder>[/yellow]\n")
+            elif cmd == "live":
+                tui_mode["on"] = not tui_mode["on"]
+                if tui_mode["on"]:
+                    console.print("  [#a6e3a1]✓ tampilan interaktif AKTIF[/] "
+                                  "[dim]— hasil langkah bisa dibuka/tutup realtime "
+                                  "dengan Ctrl+R selagi AI berjalan (tetap inline).[/]\n")
+                else:
+                    console.print("  [#f9e2af]○ tampilan interaktif MATI[/] "
+                                  "[dim]— pakai tampilan mengalir biasa; buka hasil "
+                                  "lewat /expand N.[/]\n")
+            elif cmd == "expand" or cmd.startswith("expand "):
+                parts = text.split(maxsplit=1)
+                arg = parts[1].strip().lstrip("#") if len(parts) == 2 else ""
+                if not arg:
+                    # Tanpa nomor -> cetak ulang semua hasil giliran terakhir.
+                    open_step_viewer()
+                elif arg.isdigit():
+                    show_expand(int(arg))
+                else:
+                    console.print("  [yellow]Pakai: /expand (semua) "
+                                  "atau /expand <nomor>[/yellow]\n")
             else:
                 if do_action(cmd):
                     break
             continue
-        process(text)
+        try:
+            process(text)
+        except KeyboardInterrupt:
+            # Jaring pengaman terakhir: Ctrl+C tak boleh menjatuhkan REPL.
+            console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
         _save_total()
 
     _save_total()

@@ -141,11 +141,14 @@ class Agent:
         on_message: Callable[[str], None] | None = None,
         cancel_event: Any = None,
         on_retry: Callable[[int, float, Exception], None] | None = None,
+        on_tool_result: Callable[[str, str], None] | None = None,
     ) -> str:
         """Proses satu giliran (streaming). Kembalikan teks jawaban final.
 
         `on_message(teks)` dipanggil untuk narasi antar-langkah (ketika agent
         menjelaskan apa yang akan dilakukan sebelum memakai tool).
+        `on_tool_result(nama, hasil)` dipanggil SETELAH sebuah tool selesai —
+        dipakai UI untuk menampilkan hasil (mis. output perintah) secara ringkas.
         `on_retry(percobaan, tunggu, exc)` dipanggil saat NVIDIA rate-limit dan
         bagasAI menunggu lalu MELANJUTKAN langkah yang sama.
         Bila `cancel_event` diset di tengah jalan, melempar llm.Cancelled.
@@ -154,7 +157,9 @@ class Agent:
         self.tokens_last = Usage()
         self.tokens_live = 0
         try:
-            return self._run_loop(on_tool, on_message, cancel_event, on_retry)
+            return self._run_loop(
+                on_tool, on_message, cancel_event, on_retry, on_tool_result
+            )
         except BaseException:
             # Apa pun yang gagal di tengah giliran (rate limit, error tool,
             # pembatalan), rapikan state tool yang menggantung supaya instruksi
@@ -171,6 +176,7 @@ class Agent:
         on_message: Callable[[str], None] | None,
         cancel_event: Any,
         on_retry: Callable[[int, float, Exception], None] | None = None,
+        on_tool_result: Callable[[str, str], None] | None = None,
     ) -> str:
         schemas = tools.get_schemas(self.tool_names)
         extra = self.model_spec.extra_body_for(self.effort)
@@ -295,6 +301,10 @@ class Agent:
                 else:
                     result = tools.execute(name, args)
                     seen_tools[key] = result
+                    # Tampilkan hasil (mis. output perintah) HANYA saat benar-benar
+                    # dieksekusi — bukan saat dedup mengembalikan cache + teguran.
+                    if on_tool_result:
+                        on_tool_result(name, result)
                 total_calls += 1
                 self.memory.add(
                     {

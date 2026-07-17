@@ -7,10 +7,15 @@ ALLOW_CODE_EXEC=false.
 """
 from __future__ import annotations
 
+import atexit
+import collections
+import itertools
 import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 
 from .. import config
 from .base import tool
@@ -138,3 +143,126 @@ def run_command(command: str) -> str:
             f"selesai; baca error di bawah lalu perbaiki.\n" + _clip(out)
         )
     return f"exit_code={rc}\n{_clip(out)}"
+
+
+# ---------------------------------------------------------------------------
+# Perintah LATAR (menetap) — multitasking: proses jalan terus sementara bagasAI
+# tetap bisa merespons & memakai tool lain. Untuk server dev, watch, dll.
+# ---------------------------------------------------------------------------
+_BG: dict[str, dict] = {}
+_bg_seq = itertools.count(1)
+
+
+def _bg_reader(entry: dict) -> None:
+    """Baca output proses latar ke buffer bergulir (agar pipe tak penuh/nge-blok)."""
+    proc = entry["proc"]
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            entry["lines"].append(line.rstrip("\n"))
+    except Exception:
+        pass
+    finally:
+        try:
+            entry["rc"] = proc.wait()
+        except Exception:
+            entry["rc"] = None
+        entry["running"] = False
+
+
+def _cleanup_bg() -> None:
+    for e in list(_BG.values()):
+        if e.get("running"):
+            try:
+                _kill_tree(e["proc"])
+            except Exception:
+                pass
+
+
+atexit.register(_cleanup_bg)
+
+
+@tool
+def run_command_bg(command: str) -> str:
+    """Jalankan perintah yang MENETAP / berjalan lama (server dev, watcher, bot) di LATAR belakang, lalu SEGERA kembali tanpa menunggu selesai — sehingga kamu bisa lanjut merespons & memakai tool lain (multitasking). PAKAI ini untuk 'npm run dev', 'npm start', 'vite', 'uvicorn', 'flask run', 'watch', dsb. JANGAN pakai run_command untuk perintah menetap (akan menggantung). Cek keluaran dengan bg_output, hentikan dengan bg_stop.
+
+    command: perintah menetap yang akan dijalankan di latar (mis. 'npm run dev').
+    """
+    blocked = _guard()
+    if blocked:
+        return blocked
+    proc = _popen(command, shell=True)
+    bid = f"bg{next(_bg_seq)}"
+    entry = {
+        "id": bid, "command": command, "proc": proc,
+        "lines": collections.deque(maxlen=1000), "running": True,
+        "rc": None, "start": time.time(),
+    }
+    _BG[bid] = entry
+    threading.Thread(target=_bg_reader, args=(entry,), daemon=True).start()
+    time.sleep(0.8)  # beri jeda: tangkap output awal / deteksi gagal-cepat
+    head = "\n".join(list(entry["lines"])[-20:])
+    if not entry["running"]:
+        return (
+            f"[bg {bid}] perintah langsung BERHENTI (exit_code={entry['rc']}). "
+            f"Mungkin gagal start — periksa output:\n{head or '(tidak ada output)'}"
+        )
+    return (
+        f"[bg {bid}] BERJALAN di latar (PID {proc.pid}). Perintah TIDAK menggantung — "
+        f"kamu bisa LANJUT merespons/pakai tool lain sekarang. "
+        f"Lihat log: bg_output('{bid}') · hentikan: bg_stop('{bid}').\n"
+        f"Output awal:\n{head or '(belum ada output)'}"
+    )
+
+
+@tool
+def bg_output(bg_id: str, lines: int = 40) -> str:
+    """Ambil keluaran TERBARU dari sebuah perintah latar (yang dijalankan run_command_bg), serta status jalan/berhentinya. Berguna untuk memantau server dev, mengecek apakah sudah siap, atau membaca error.
+
+    bg_id: id perintah latar (mis. 'bg1').
+    lines: berapa baris terakhir yang ditampilkan (default 40).
+    """
+    e = _BG.get(bg_id)
+    if not e:
+        aktif = ", ".join(_BG.keys()) or "(tidak ada)"
+        return f"[bg] id '{bg_id}' tak ditemukan. Perintah latar yang ada: {aktif}"
+    n = max(1, int(lines) if str(lines).isdigit() or isinstance(lines, int) else 40)
+    tail = list(e["lines"])[-n:]
+    status = "BERJALAN" if e["running"] else f"BERHENTI (exit_code={e['rc']})"
+    body = "\n".join(tail) or "(belum ada output)"
+    return f"[bg {bg_id}] {status} · {e['command']}\n{body}"
+
+
+@tool
+def bg_stop(bg_id: str) -> str:
+    """Hentikan (matikan) sebuah perintah latar beserta seluruh subprosesnya. Pakai bila server/watcher sudah tak diperlukan atau perlu di-restart.
+
+    bg_id: id perintah latar (mis. 'bg1'), atau 'all' untuk menghentikan semua.
+    """
+    if bg_id == "all":
+        stopped = []
+        for e in list(_BG.values()):
+            if e["running"]:
+                _kill_tree(e["proc"])
+                e["running"] = False
+                stopped.append(e["id"])
+        return f"[bg] dihentikan: {', '.join(stopped) or '(tidak ada yang berjalan)'}"
+    e = _BG.get(bg_id)
+    if not e:
+        return f"[bg] id '{bg_id}' tak ditemukan."
+    if e["running"]:
+        _kill_tree(e["proc"])
+        e["running"] = False
+        return f"[bg {bg_id}] dihentikan."
+    return f"[bg {bg_id}] memang sudah berhenti (exit_code={e['rc']})."
+
+
+@tool
+def bg_list() -> str:
+    """Daftar semua perintah latar (run_command_bg) beserta statusnya."""
+    if not _BG:
+        return "(tidak ada perintah latar)"
+    rows = []
+    for e in _BG.values():
+        st = "BERJALAN" if e["running"] else f"berhenti(exit={e['rc']})"
+        rows.append(f"{e['id']}: {st} · {e['command']}")
+    return "\n".join(rows)

@@ -9,6 +9,8 @@ sehingga progres tugas berlanjut dan tidak dibatalkan.
 """
 from __future__ import annotations
 
+import json as _json
+import re as _re
 import time
 from typing import Any, Callable
 
@@ -79,6 +81,60 @@ def _is_transient(exc: Exception) -> bool:
     if isinstance(exc, APIError):
         return True
     return False
+
+
+_HAS_TOOLTEXT = _re.compile(r"<tool_call>|<function\s*=", _re.IGNORECASE)
+
+
+def _extract_text_tool_calls(text: str) -> list[dict[str, str]]:
+    """Sebagian model NVIDIA kadang MENULISKAN panggilan tool sebagai TEKS/XML
+    (mis. `<function=write_file><parameter=content>...</parameter></function>` atau
+    `<tool_call>{json}</tool_call>`) alih-alih memakai function-calling asli — lalu
+    berhenti. Endpoint tak mem-parse itu, jadi tanpa penanganan hasilnya cuma teks
+    sampah. Fungsi ini menyelamatkannya: ekstrak jadi tool_calls sungguhan.
+
+    HANYA menerima blok yang LENGKAP (ada tag penutup) demi keamanan — panggilan
+    yang terpotong (mis. kena batas token) tidak dieksekusi setengah jadi.
+    """
+    calls: list[tuple[str, dict]] = []
+    # Format A: <function=nama> ... <parameter=kunci>nilai</parameter> ... </function>
+    for m in _re.finditer(r"<function\s*=\s*([^\s>]+)\s*>(.*?)</function>",
+                          text, _re.DOTALL | _re.IGNORECASE):
+        name = m.group(1).strip()
+        args: dict[str, str] = {}
+        for pm in _re.finditer(r"<parameter\s*=\s*([^\s>]+)\s*>(.*?)</parameter>",
+                               m.group(2), _re.DOTALL | _re.IGNORECASE):
+            val = pm.group(2)
+            if val.startswith("\n"):
+                val = val[1:]
+            args[pm.group(1).strip()] = val.rstrip("\n")
+        if name:
+            calls.append((name, args))
+    # Format B: <tool_call>{"name":..,"arguments":..}</tool_call>
+    if not calls:
+        for m in _re.finditer(r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+                              text, _re.DOTALL | _re.IGNORECASE):
+            try:
+                obj = _json.loads(m.group(1))
+            except ValueError:
+                continue
+            name = obj.get("name")
+            a = obj.get("arguments", obj.get("parameters", {}))
+            if isinstance(a, str):
+                try:
+                    a = _json.loads(a)
+                except ValueError:
+                    a = {}
+            if name:
+                calls.append((name, a if isinstance(a, dict) else {}))
+    out: list[dict[str, str]] = []
+    for i, (name, args) in enumerate(calls):
+        out.append({
+            "id": f"txt_{i}",
+            "name": name,
+            "arguments": _json.dumps(args, ensure_ascii=False),
+        })
+    return out
 
 
 def _sleep_cancellable(seconds: float, cancel_event: Any) -> None:
@@ -278,6 +334,25 @@ def stream_completion(
         content = "".join(content_parts)
         reasoning = "".join(reasoning_parts)
         tool_calls = [tool_slots[i] for i in sorted(tool_slots)]
+        # Penyelamatan: model menuliskan panggilan tool sebagai TEKS/XML alih-alih
+        # function-calling asli. Bila tak ada tool_calls asli tapi konten memuat
+        # pola `<tool_call>`/`<function=...>`, parse & jadikan tool_calls sungguhan
+        # supaya benar-benar dieksekusi (bukan ditampilkan sebagai teks sampah).
+        if not tool_calls and content and _HAS_TOOLTEXT.search(content):
+            parsed = _extract_text_tool_calls(content)
+            if parsed:
+                tool_calls = parsed
+            # Buang blok XML tool dari konten agar tak bocor ke layar (baik yang
+            # sudah dieksekusi maupun yang TERPOTONG/gagal-parse -> jangan tampilkan
+            # panggilan tool setengah jadi sebagai "jawaban").
+            cleaned = _re.sub(r"<tool_call>.*?</tool_call>", "", content,
+                              flags=_re.DOTALL | _re.IGNORECASE)
+            cleaned = _re.sub(r"<function\s*=.*?</function>", "", cleaned,
+                              flags=_re.DOTALL | _re.IGNORECASE)
+            # Sisa penanda yang tak berpasangan (terpotong) -> potong dari situ.
+            cleaned = _re.sub(r"<tool_call>.*$", "", cleaned, flags=_re.DOTALL | _re.IGNORECASE)
+            cleaned = _re.sub(r"<function\s*=.*$", "", cleaned, flags=_re.DOTALL | _re.IGNORECASE)
+            content = cleaned.strip()
         # Model hanya "berpikir" tanpa menghasilkan jawaban akhir (mis. anggaran
         # thinking habis): pakai isi pikirannya agar pengguna TETAP dapat respons,
         # bukan layar kosong.

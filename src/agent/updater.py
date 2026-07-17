@@ -197,6 +197,17 @@ def check() -> dict:
     }
 
 
+def _ensure_pip() -> None:
+    """Pastikan modul pip tersedia untuk interpreter ini. Sebagian instalasi
+    (mis. beberapa Python Store / venv minimal) bisa memunculkan 'No module named
+    pip' saat `-m pip` — perbaiki dengan ensurepip, aman bila sudah ada."""
+    try:
+        _run([sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
+             config.CONFIG_HOME, timeout=180)
+    except Exception:
+        pass
+
+
 def _reinstall(repo: Path) -> dict:
     """Pasang ulang dari `repo`, mempertahankan cara pasang asli (--user, editable)."""
     editable = _is_editable(repo)
@@ -207,8 +218,13 @@ def _reinstall(repo: Path) -> dict:
     target = ["-e", str(repo)] if editable else [str(repo)]
 
     inst = _run(base + flags + target, repo, timeout=600)
-    # Fallback PEP 668 (Linux/macOS "externally-managed-environment").
     blob = (inst.stderr + inst.stdout).lower()
+    # 'No module named pip' -> interpreter belum punya pip; pasang lalu ulangi.
+    if inst.returncode != 0 and "no module named pip" in blob:
+        _ensure_pip()
+        inst = _run(base + flags + target, repo, timeout=600)
+        blob = (inst.stderr + inst.stdout).lower()
+    # Fallback PEP 668 (Linux/macOS "externally-managed-environment").
     if inst.returncode != 0 and "externally-managed" in blob:
         inst = _run(base + flags + ["--break-system-packages"] + target, repo, timeout=600)
 

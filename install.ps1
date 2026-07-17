@@ -60,8 +60,19 @@ if ((Test-Path "pyproject.toml") -and (Select-String -Path "pyproject.toml" -Pat
 
 # --- 3. Pasang sebagai perintah global ---
 Step "Memasang bagasAI (pip install)"
+# Pastikan pip ada dulu (sebagian Python Store/venv memicu 'No module named pip').
+& $Py -m pip --version 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  pip belum ada - memasang via ensurepip..." -ForegroundColor DarkGray
+    & $Py -m ensurepip --upgrade --default-pip 2>$null
+}
 & $Py -m pip install --user --upgrade $Src
-if ($LASTEXITCODE -ne 0) { Err "pip install gagal."; exit 1 }
+if ($LASTEXITCODE -ne 0) {
+    # Coba sekali lagi setelah memastikan pip (jaga-jaga 'No module named pip').
+    & $Py -m ensurepip --upgrade --default-pip 2>$null
+    & $Py -m pip install --user --upgrade $Src
+    if ($LASTEXITCODE -ne 0) { Err "pip install gagal."; exit 1 }
+}
 Ok "Terpasang"
 
 # --- 4. Pastikan folder Scripts ada di PATH (user) ---
@@ -72,17 +83,43 @@ Step "Memeriksa PATH"
 # `python -c "<multi-baris>"`: PowerShell 5.1 menghapus tanda kutip di dalam
 # argumen multi-baris untuk program native -> Python jadi 'invalid syntax'.
 $Locate = @'
-import importlib.metadata as M, os, site
+import importlib.metadata as M, os, site, sysconfig, glob
 def find():
+    cands = []
+    # 1) Lokasi .exe yang BENAR-BENAR tercatat saat install (paling andal).
     try:
         d = M.distribution("bagasai")
         for f in (d.files or []):
             n = f.name.lower()
             if n.startswith("bagas") and n.endswith(".exe"):
-                return os.path.dirname(os.path.realpath(d.locate_file(f)))
+                cands.append(os.path.dirname(os.path.realpath(d.locate_file(f))))
     except Exception:
         pass
-    return os.path.join(site.getuserbase(), "Scripts")
+    # 2) Skema sysconfig (user & default).
+    for sch in ("nt_user", "nt"):
+        try:
+            p = sysconfig.get_path("scripts", sch)
+            if p:
+                cands.append(p)
+        except Exception:
+            pass
+    ub = site.getuserbase()
+    # 3) Python Store menaruh script di local-packages\PythonXX\Scripts
+    #    (BUKAN getuserbase\Scripts) -> cari lewat glob.
+    cands += glob.glob(os.path.join(ub, "Python*", "Scripts"))
+    cands.append(os.path.join(ub, "Scripts"))
+    uniq = []
+    for c in cands:
+        if c and c not in uniq:
+            uniq.append(c)
+    # Utamakan folder yang MEMANG berisi bagas*.exe.
+    for c in uniq:
+        if glob.glob(os.path.join(c, "bagas*.exe")):
+            return c
+    for c in uniq:
+        if os.path.isdir(c):
+            return c
+    return uniq[0] if uniq else ""
 print(find())
 '@
 $LocateFile = Join-Path $env:TEMP ("bagasai_locate_" + [guid]::NewGuid().ToString("N") + ".py")
