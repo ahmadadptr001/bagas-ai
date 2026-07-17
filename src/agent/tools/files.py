@@ -18,7 +18,7 @@ def _syntax_check(target: Path) -> str | None:
     """Cek sintaks RINGAN (hanya parsing, tak menjalankan) file kode yang baru ditulis.
 
     Return pesan status ('✓ ...' / '✗ ...') atau None bila jenis file tak dicek.
-    Ini yang membuat bagasAI SELALU memverifikasi hasil ngoding-nya secara cepat.
+    Ini yang membuat bagas-ai SELALU memverifikasi hasil ngoding-nya secara cepat.
     """
     if not config.AUTO_SYNTAX_CHECK:
         return None
@@ -114,7 +114,7 @@ def write_file(path: str, content: str) -> str:
     target.write_text(content, encoding="utf-8")
     verb = "Ditimpa" if existed else "Dibuat"
     msg = f"{verb}: {_display(target)} ({len(content)} karakter)."
-    # SELALU cek sintaks hasil ngoding (cepat). Bila ada '✗', bagasAI wajib
+    # SELALU cek sintaks hasil ngoding (cepat). Bila ada '✗', bagas-ai wajib
     # memperbaikinya — jangan anggap selesai.
     chk = _syntax_check(target)
     if chk:

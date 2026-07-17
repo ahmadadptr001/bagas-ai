@@ -1,11 +1,11 @@
 # ============================================================================
-# bagasAI - installer satu-perintah untuk Windows (PowerShell).
+# bagas-ai - installer satu-perintah untuk Windows (PowerShell).
 #
 # Pakai salah satu:
 #   .\install.ps1                     # dari dalam folder proyek
 #   irm <URL>/install.ps1 | iex       # dari mana saja (mengunduh repo)
 #
-# Skrip ini: cek Python, memasang bagasAI sebagai perintah global, memastikan
+# Skrip ini: cek Python, memasang bagas-ai sebagai perintah global, memastikan
 # PATH, lalu menjalankan wizard login untuk memasukkan API key.
 # ============================================================================
 $ErrorActionPreference = "Stop"
@@ -18,7 +18,7 @@ $RepoUrl = if ($env:BAGASAI_REPO) { $env:BAGASAI_REPO } else { "https://github.c
 $RepoBranch = if ($env:BAGASAI_BRANCH) { $env:BAGASAI_BRANCH } else { "master" }
 
 Write-Host ""
-Write-Host "bagasAI " -ForegroundColor Magenta -NoNewline
+Write-Host "bagas-ai " -ForegroundColor Magenta -NoNewline
 Write-Host "- installer" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -44,7 +44,7 @@ if ((Test-Path "pyproject.toml") -and (Select-String -Path "pyproject.toml" -Pat
     $Src = (Get-Location).Path
     Ok "Sumber: folder saat ini"
 } else {
-    Step "Mengunduh bagasAI"
+    Step "Mengunduh bagas-ai"
     $Dest = Join-Path $HOME ".bagasai\src"
     if (Get-Command git -ErrorAction SilentlyContinue) {
         if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
@@ -59,7 +59,7 @@ if ((Test-Path "pyproject.toml") -and (Select-String -Path "pyproject.toml" -Pat
 }
 
 # --- 3. Pasang sebagai perintah global ---
-Step "Memasang bagasAI (pip install)"
+Step "Memasang bagas-ai (pip install)"
 # Pastikan pip ada dulu (sebagian Python Store/venv memicu 'No module named pip').
 & $Py -m pip --version 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -139,31 +139,34 @@ if (-not $BinDir) {
 }
 if (-not $BinDir) {
     Err "Tak bisa menentukan folder Scripts. Tambahkan folder Scripts Python ke PATH secara manual."
-} elseif (-not (Get-Command bagasAI -ErrorAction SilentlyContinue)) {
+} else {
+    # SELALU pastikan BinDir ada di User PATH (registry) supaya dikenali di SEMUA
+    # terminal baru (PowerShell/cmd). JANGAN bergantung pada Get-Command: PATH sesi
+    # belum ter-refresh, sehingga bisa keliru "sudah ada" lalu PATH tak dipersist
+    # -> gejala "sudah sukses tapi not recognized, harus install lagi".
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not $userPath) { $userPath = "" }
     if ($userPath.Split(';') -notcontains $BinDir) {
         $newPath = ($userPath.TrimEnd(';') + ";" + $BinDir).TrimStart(';')
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        $env:Path = "$env:Path;$BinDir"
-        Ok "Menambahkan $BinDir ke PATH (user). Buka terminal baru bila 'bagasAI' belum dikenali."
+        Ok "Ditambahkan ke PATH (User): $BinDir"
     } else {
-        $env:Path = "$env:Path;$BinDir"
-        Ok "Perintah 'bagasAI' sudah ada di PATH. Buka terminal baru bila belum dikenali."
+        Ok "PATH (User) sudah memuat: $BinDir"
     }
-} else {
-    Ok "Perintah 'bagasAI' siap dipakai"
+    # Perbarui sesi SAAT INI juga (agar login di bawah & terminal ini langsung bisa).
+    if (($env:Path -split ';') -notcontains $BinDir) { $env:Path = "$env:Path;$BinDir" }
+    Write-Host "  Tutup lalu buka terminal BARU bila 'bagas-ai' belum dikenali." -ForegroundColor DarkGray
 }
 
 # --- 5. Wizard login (API key + Telegram opsional) ---
 Write-Host ""
 Step "Login - masukkan API key"
-$bagas = Get-Command bagasAI -ErrorAction SilentlyContinue
-if ($bagas) { & bagasAI login } else { & $Py -m agent login }
+$bagas = Get-Command bagas-ai -ErrorAction SilentlyContinue
+if ($bagas) { & bagas-ai login } else { & $Py -m agent login }
 
 Write-Host ""
 Write-Host "Selesai. " -ForegroundColor Green -NoNewline
 Write-Host "Ketik " -NoNewline
-Write-Host "bagasAI" -ForegroundColor Cyan -NoNewline
+Write-Host "bagas-ai" -ForegroundColor Cyan -NoNewline
 Write-Host " di terminal mana pun untuk mulai."
 Write-Host ""

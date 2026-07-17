@@ -1,7 +1,7 @@
-"""Memory jangka panjang: fakta yang diingat bagasAI lintas SEMUA sesi.
+"""Memory jangka panjang: fakta yang diingat bagas-ai lintas SEMUA sesi.
 
 Disimpan di ~/.bagasai/memory.json. Fakta di-inject ke system prompt setiap
-sesi baru, sehingga bagasAI "mengingat" preferensi/informasi tentang pengguna.
+sesi baru, sehingga bagas-ai "mengingat" preferensi/informasi tentang pengguna.
 """
 from __future__ import annotations
 

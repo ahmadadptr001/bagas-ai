@@ -3,7 +3,7 @@
 Poin penting: free tier NVIDIA (~40 request/menit) sering membalas error
 throttle yang BENTUKNYA bermacam-macam — bukan cuma HTTP 429/RateLimitError,
 tetapi juga pesan seperti "worker local total request limit reached", body
-kosong (HTTP 200), atau error server 5xx sesaat. bagasAI harus MENAHAN semua
+kosong (HTTP 200), atau error server 5xx sesaat. bagas-ai harus MENAHAN semua
 itu: menunggu dengan sabar lalu MENGULANG langkah yang sama sampai berhasil,
 sehingga progres tugas berlanjut dan tidak dibatalkan.
 """
@@ -14,14 +14,24 @@ import re as _re
 import time
 from typing import Any, Callable
 
-from openai import (
-    OpenAI,
-    RateLimitError,
-    APIConnectionError,
-    APITimeoutError,
-    APIError,
-    InternalServerError,
-)
+# openai di-IMPOR MALAS: paket ini menarik ratusan modul tipe (~1.7 dtk saat impor)
+# yang tak dipakai bagas-ai. Menunda impornya sampai panggilan API PERTAMA membuat
+# bagas-ai START jauh lebih cepat (banner muncul dulu, openai dimuat saat perlu).
+_openai = None
+
+
+def _oa():
+    global _openai
+    if _openai is None:
+        import openai as _mod
+        _openai = _mod
+    return _openai
+
+
+def is_rate_limit(exc: Exception) -> bool:
+    """True bila exc adalah RateLimitError openai (tanpa memaksa impor openai)."""
+    return _openai is not None and isinstance(exc, _openai.RateLimitError)
+
 
 from . import config
 
@@ -56,15 +66,15 @@ def _is_transient(exc: Exception) -> bool:
     """True bila error layak dicoba ulang (rate limit / throttle / gangguan)."""
     if isinstance(exc, Cancelled):
         return False
-    if isinstance(
+    if isinstance(exc, EmptyResponseError):
+        return True
+    # Cek tipe exception openai HANYA bila openai sudah dimuat (pasti sudah, karena
+    # exc ini datang dari panggilan API yang memakai klien openai).
+    o = _openai
+    if o is not None and isinstance(
         exc,
-        (
-            RateLimitError,
-            APIConnectionError,
-            APITimeoutError,
-            InternalServerError,
-            EmptyResponseError,
-        ),
+        (o.RateLimitError, o.APIConnectionError, o.APITimeoutError,
+         o.InternalServerError),
     ):
         return True
     msg = str(getattr(exc, "message", "") or exc).lower()
@@ -78,7 +88,7 @@ def _is_transient(exc: Exception) -> bool:
         return True
     # APIError umum tanpa kode jelas -> anggap sementara (lebih baik menunggu
     # daripada membatalkan tugas pengguna).
-    if isinstance(exc, APIError):
+    if o is not None and isinstance(exc, o.APIError):
         return True
     return False
 
@@ -160,7 +170,7 @@ def _call_with_retry(
     Backoff eksponensial (maks. 60s/percobaan) sampai TOTAL tunggu melewati
     `config.RETRY_MAX_SECONDS`, lalu baru menyerah. Tunggu bisa dibatalkan.
     Saat akan mengulang, `on_retry(attempt, wait, exc)` dipanggil supaya UI bisa
-    memberi tahu pengguna bahwa bagasAI menunggu lalu MELANJUTKAN — bukan gagal.
+    memberi tahu pengguna bahwa bagas-ai menunggu lalu MELANJUTKAN — bukan gagal.
     """
     attempt = 0
     waited = 0.0
@@ -187,15 +197,15 @@ def _call_with_retry(
 
 
 # Satu klien dipakai ulang di seluruh aplikasi.
-_client: OpenAI | None = None
+_client = None
 
 
-def get_client() -> OpenAI:
+def get_client():
     """Kembalikan klien OpenAI yang diarahkan ke endpoint NVIDIA (lazy init)."""
     global _client
     if _client is None:
         config.require_api_key()
-        _client = OpenAI(
+        _client = _oa().OpenAI(
             base_url=config.NVIDIA_BASE_URL,
             api_key=config.NVIDIA_API_KEY,
             timeout=config.REQUEST_TIMEOUT,

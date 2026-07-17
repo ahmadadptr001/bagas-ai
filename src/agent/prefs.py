@@ -1,6 +1,6 @@
 """Preferensi pengguna yang tersimpan (model & effort terakhir dipakai).
 
-Disimpan di ~/.bagasai/prefs.json agar bagasAI memakai model terakhir saat
+Disimpan di ~/.bagasai/prefs.json agar bagas-ai memakai model terakhir saat
 dijalankan lagi.
 """
 from __future__ import annotations

@@ -146,7 +146,7 @@ def run_command(command: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Perintah LATAR (menetap) — multitasking: proses jalan terus sementara bagasAI
+# Perintah LATAR (menetap) — multitasking: proses jalan terus sementara bagas-ai
 # tetap bisa merespons & memakai tool lain. Untuk server dev, watch, dll.
 # ---------------------------------------------------------------------------
 _BG: dict[str, dict] = {}

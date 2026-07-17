@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bagasai"
 version = "1.0.0"
-description = "bagasAI — AI agent serbaguna berbasis API gratis NVIDIA, dipanggil dari terminal mana pun."
+description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -25,7 +25,7 @@ dependencies = [
 
 # Perintah global yang bisa dipanggil dari terminal mana pun.
 [project.scripts]
-bagasAI = "agent.__main__:main"
+bagas-ai = "agent.__main__:main"
 bagasai = "agent.__main__:main"
 bagas = "agent.__main__:main"
 

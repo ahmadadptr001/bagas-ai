@@ -1,10 +1,10 @@
 """Peta/indeks proyek — ringkasan STRUKTUR + simbol kunci tiap file kode, dibuat
 sekali lalu DI-CACHE per-proyek dan selalu disisipkan ke system prompt.
 
-Tujuan: bagasAI langsung "paham" proyek di SETIAP giliran, ganti model, dan
+Tujuan: bagas-ai langsung "paham" proyek di SETIAP giliran, ganti model, dan
 `--resume`, TANPA harus membaca ulang seluruh file tiap kali. Peta ini ringkas
 (hanya tanda tangan fungsi/kelas/ekspor, bukan seluruh isi kode), jadi muat di
-konteks meski proyeknya besar. bagasAI cukup membaca file tertentu HANYA saat
+konteks meski proyeknya besar. bagas-ai cukup membaca file tertentu HANYA saat
 butuh detail implementasinya.
 
 Cache disimpan di ~/.bagasai/project_index/<hash-root>.md dan dibangun ulang
@@ -129,15 +129,31 @@ def _symbols(path: Path, limit: int = _MAX_SYMS) -> list[str]:
     return out
 
 
-def build(root: Path | None = None) -> str:
-    """Bangun teks peta proyek (markdown ringkas)."""
+def count_files(root: Path | None = None) -> int:
+    """Jumlah file yang akan dipetakan (cepat, hanya jalan-jalan nama) — dipakai
+    UI untuk menetapkan TOTAL bar progres agar DETERMINATE (bukan pulsing)."""
     root = Path(root or config.PROJECT_ROOT).resolve()
+    n = 0
+    for _ in _iter_files(root):
+        n += 1
+        if n >= _MAX_FILES:
+            break
+    return n
+
+
+def build(root: Path | None = None, progress=None) -> str:
+    """Bangun teks peta proyek (markdown ringkas).
+
+    `progress(done, total)` dipanggil tiap file diproses -> UI bisa menampilkan
+    bar realtime sesuai berapa banyak data (file) yang sudah dibaca.
+    """
+    root = Path(root or config.PROJECT_ROOT).resolve()
+    files = list(_iter_files(root))          # kumpulkan dulu agar tahu TOTAL
+    total = min(len(files), _MAX_FILES)
     lines = [f"Peta proyek `{root.name}` (struktur + simbol kunci; "
              f"baca file utuh HANYA bila butuh detail):", ""]
-    n = 0
-    for p in _iter_files(root):
-        n += 1
-        if n > _MAX_FILES:
+    for i, p in enumerate(files):
+        if i >= _MAX_FILES:
             lines.append(f"… (>{_MAX_FILES} file, sisanya dipotong)")
             break
         rel = p.relative_to(root).as_posix()
@@ -148,14 +164,22 @@ def build(root: Path | None = None) -> str:
                 lines.append(f"    · {s}")
         else:
             lines.append(f"- {rel}")
+        if progress:
+            try:
+                progress(i + 1, total)
+            except Exception:
+                pass
     text = "\n".join(lines)
     if len(text) > _MAX_CHARS:
         text = text[:_MAX_CHARS] + "\n… (peta dipotong agar hemat konteks)"
     return text
 
 
-def ensure(root: Path | None = None, force: bool = False) -> str:
-    """Kembalikan peta proyek dari cache; bangun ulang bila belum ada / basi /force."""
+def ensure(root: Path | None = None, force: bool = False, progress=None) -> str:
+    """Kembalikan peta proyek dari cache; bangun ulang bila belum ada / basi /force.
+
+    `progress(done, total)` hanya dipanggil bila memang MEMBANGUN ulang (membaca
+    file); bila memakai cache, tak ada progres (instan)."""
     root = Path(root or config.PROJECT_ROOT).resolve()
     md_path, meta_path = _paths(root)
     sig = _signature(root)
@@ -166,7 +190,7 @@ def ensure(root: Path | None = None, force: bool = False) -> str:
                 return md_path.read_text(encoding="utf-8")
         except Exception:
             pass
-    text = build(root)
+    text = build(root, progress=progress)
     try:
         md_path.write_text(text, encoding="utf-8")
         meta_path.write_text(json.dumps({"sig": sig}, ensure_ascii=False),

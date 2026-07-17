@@ -1,11 +1,11 @@
 """Deteksi sistem operasi & sinkronisasi ke memory jangka panjang.
 
-Tiap bagasAI dijalankan, OS dideteksi lalu disimpan ke memory:
+Tiap bagas-ai dijalankan, OS dideteksi lalu disimpan ke memory:
   - belum ada  -> ditambahkan,
   - sudah ada & sama  -> DILEWATI (tidak menulis ulang),
   - sudah ada & beda  -> diperbarui.
 
-OS juga disisipkan ke system prompt (lihat prompts.py) supaya bagasAI
+OS juga disisipkan ke system prompt (lihat prompts.py) supaya bagas-ai
 MENYESUAIKAN semua perintah terminal dengan OS yang terdeteksi (PowerShell/cmd
 di Windows, bash di Linux/macOS).
 """

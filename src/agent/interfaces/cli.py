@@ -1,4 +1,4 @@
-"""Antarmuka CLI bagasAI (sinkron & bersih).
+"""Antarmuka CLI bagas-ai (sinkron & bersih).
 
 Desain: rich memegang terminal penuh (warna/emoji/panel mulus, tanpa bocor kode
 ANSI). Animasi loading realtime (spinner + token + waktu) NEMPEL inline pada tiap
@@ -26,11 +26,11 @@ for _s in (sys.stdout, sys.stderr):
 
 from InquirerPy import inquirer  # noqa: E402
 from InquirerPy.base.control import Choice  # noqa: E402
-from openai import RateLimitError  # noqa: E402
 from prompt_toolkit import PromptSession  # noqa: E402
 from prompt_toolkit.completion import Completer, Completion  # noqa: E402
 from prompt_toolkit.formatted_text import HTML  # noqa: E402
 from prompt_toolkit.key_binding import KeyBindings  # noqa: E402
+from prompt_toolkit.patch_stdout import patch_stdout  # noqa: E402
 from prompt_toolkit.styles import Style as PTStyle  # noqa: E402
 from rich import box  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
@@ -49,7 +49,7 @@ try:
 except Exception:  # pragma: no cover
     Figlet = None  # type: ignore
 
-from .. import config, interaction, llm, longmem, models, osinfo, prefs, projectindex, scripts, updater, workspace  # noqa: E402
+from .. import config, interaction, llm, longmem, models, osinfo, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
@@ -108,6 +108,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("delete", "hapus sesi"),
     ("reset", "kosongkan riwayat"),
     ("clear", "bersihkan layar"),
+    ("bot", "hidup/matikan bot Telegram di sesi ini"),
+    ("permissions-bot", "atur izin siapa yang boleh kontrol via Telegram"),
     ("review", "cari bug & kesalahan sistem di seluruh proyek"),
     ("scan", "pindai ulang & segarkan peta proyek"),
     ("live", "hidup/matikan tampilan interaktif (Ctrl+R buka/tutup live)"),
@@ -182,7 +184,7 @@ def _update_notice() -> None:
             local, remote = cache.get("local", ""), cache.get("remote", "")
             ver = f" ({local} → {remote})" if local and remote else ""
             pout(
-                f"[#f9e2af]⬆ Pembaruan bagasAI tersedia[/] "
+                f"[#f9e2af]⬆ Pembaruan bagas-ai tersedia[/] "
                 f"[dim]— {n} commit lebih baru{ver}.[/dim]  "
                 f"Ketik [#94e2d5]/update[/] untuk memperbarui.",
                 bottom=0,
@@ -294,10 +296,10 @@ def show_logo() -> None:
     for ln in _VIRUS.split("\n"):
         if ln.strip():
             console.print(Text(m + ln, style="bold green"))
-    # Teks "bagasAI" gaya ANSI Shadow, gradasi per baris (efek glow/shadow)
+    # Teks "bagas-ai" gaya ANSI Shadow, gradasi per baris (efek glow/shadow)
     if Figlet is not None:
         try:
-            art = Figlet(font="ansi_shadow").renderText("bagasAI")
+            art = Figlet(font="ansi_shadow").renderText("bagas-ai")
             lines = [ln for ln in art.split("\n") if ln.strip()]
         except Exception:
             lines = ["b a g a s A I"]
@@ -344,7 +346,7 @@ class Status:
         self.cancelling = False
 
     def note_retry(self, wait: float, msg: str) -> None:
-        """Tandai bahwa bagasAI sedang menunggu rate limit lalu melanjutkan."""
+        """Tandai bahwa bagas-ai sedang menunggu rate limit lalu melanjutkan."""
         self.retry_until = time.time() + wait
         self.retry_msg = msg
 
@@ -531,7 +533,7 @@ class TurnView:
             if kind == "narasi":
                 if not header_shown:
                     blocks.append((("other", None),
-                                   Padding(Text("🤖 bagasAI", style="bold #89b4fa"),
+                                   Padding(Text("🤖 bagas-ai", style="bold #89b4fa"),
                                            (1, 0, 0, 2))))
                     header_shown = True
                 blocks.append((("other", None), Padding(_md(val), (0, 3, 1, 3))))
@@ -540,7 +542,7 @@ class TurnView:
                     blocks.append((("step", val["n"]), r))
         if answer:
             blocks.append((("other", None),
-                           Padding(Text("🤖 bagasAI", style="bold #89b4fa"), (1, 0, 0, 2))))
+                           Padding(Text("🤖 bagas-ai", style="bold #89b4fa"), (1, 0, 0, 2))))
             blocks.append((("other", None), Padding(_md(answer), (0, 3, 1, 3))))
         blocks.append((("other", None), self._footer()))
         return blocks
@@ -623,7 +625,7 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
     )
     body = Group(head, Text(), grid, Rule(style="#313244"), hint)
     return Panel(body, border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2),
-                 title="[bold #cba6f7]⬢ bagasAI[/]", title_align="left")
+                 title="[bold #cba6f7]⬢ bagas-ai[/]", title_align="left")
 
 
 def _models_panel(current_id: str) -> Panel:
@@ -653,9 +655,13 @@ def _models_panel(current_id: str) -> Panel:
 def main(resume: bool = False) -> None:
     config.require_api_key()
     console.clear()
+    show_logo()          # tampil segera setelah preload -> pengguna tahu app hidup
+    console.print()
 
-    # Deteksi OS & sinkronkan ke memory SEBELUM agent dibangun, agar system
-    # prompt (yang memuat OS) sudah benar. add/update/lewati ditangani di sini.
+    # Persiapan cepat (deteksi OS, baca sesi, peta proyek). Bar loading BERTAHAP
+    # sudah ditampilkan saat impor pustaka (di __main__._preload_with_bar) — fase
+    # yang benar-benar lama. Sisa kerja di sini ringan; untuk pemindaian proyek
+    # BESAR yang butuh baca banyak file, tampilkan bar tersendiri.
     os_status = osinfo.sync_to_memory()
 
     resumed = False
@@ -668,10 +674,34 @@ def main(resume: bool = False) -> None:
     else:
         session = Session.create()
 
-    agent = Agent(session=session)
+    # Peta proyek: kalau perlu MEMBANGUN (baca banyak file) tampilkan bar per-file;
+    # kalau cache segar, instan tanpa bar.
+    n_files = projectindex.count_files(config.PROJECT_ROOT)
+    if n_files >= 40:   # cukup besar untuk terasa -> tampilkan progres nyata
+        from rich.progress import (BarColumn, Progress, TaskProgressColumn,
+                                   TextColumn)
+        with Progress(
+            TextColumn("  [#cba6f7]memindai proyek[/]"),
+            BarColumn(bar_width=18, complete_style="#a6e3a1",
+                      finished_style="#a6e3a1"),
+            TaskProgressColumn(),
+            TextColumn("[dim]{task.fields[detail]}[/]"),
+            console=console, transient=True,
+        ) as _prog:
+            _t = _prog.add_task("", total=n_files, completed=0, detail="")
 
-    show_logo()
-    console.print()
+            def _scan_cb(done: int, total: int) -> None:
+                _prog.update(_t, completed=done, detail=f"{done}/{total} file")
+
+            projectindex.ensure(config.PROJECT_ROOT, progress=_scan_cb)
+            _prog.update(_t, completed=n_files)
+    else:
+        projectindex.ensure(config.PROJECT_ROOT)   # kecil/cache -> instan
+
+    agent = Agent(session=session)   # peta proyek sudah di-cache -> cepat
+    # Panaskan openai di LATAR (impornya ~1.9 dtk) supaya respons PERTAMA tak
+    # tertunda oleh impor — selesai jauh sebelum pengguna selesai mengetik.
+    threading.Thread(target=llm._oa, daemon=True).start()
     pout(_banner(agent, resumed), bottom=0)
     if resumed:
         console.print(Padding(Rule("[dim]percakapan sebelumnya[/dim]",
@@ -681,20 +711,20 @@ def main(resume: bool = False) -> None:
             if role == "user":
                 console.print(f"\n  [bold #cba6f7]❯[/] [#cba6f7]{content}[/]")
             elif role == "assistant" and content:
-                console.print("\n  [bold #89b4fa]🤖 bagasAI[/]")
+                console.print("\n  [bold #89b4fa]🤖 bagas-ai[/]")
                 console.print(Padding(_md(content), (0, 3, 1, 3)))
         console.print(Rule("[dim]lanjut di bawah[/dim]", style="#313244"))
     if os_status in ("added", "updated"):
         verb = "terdeteksi & disimpan" if os_status == "added" else "diperbarui"
         pout(f"[dim]🖥  OS {verb}: {osinfo.summary()} — perintah terminal akan "
              f"disesuaikan.[/dim]", bottom=0)
-    # Peta proyek: sudah dibangun/di-cache saat Agent dibuat -> bagasAI paham
+    # Peta proyek: sudah dibangun/di-cache saat Agent dibuat -> bagas-ai paham
     # proyek tanpa baca ulang tiap giliran/ganti model/resume.
     try:
         _pmap = projectindex.ensure()
         _pn = _pmap.count("\n- ")
         if _pn:
-            pout(f"[dim]🗺  peta proyek siap (~{_pn} file) — bagasAI sudah paham "
+            pout(f"[dim]🗺  peta proyek siap (~{_pn} file) — bagas-ai sudah paham "
                  f"strukturnya; ketik [/][#94e2d5]/scan[/][dim] untuk menyegarkan.[/]",
                  bottom=0)
     except Exception:  # noqa: BLE001
@@ -704,6 +734,7 @@ def main(resume: bool = False) -> None:
 
     live_holder: dict = {"live": None}
     status_obj = Status(agent)
+    tg_service: dict = {"svc": None}   # layanan bot Telegram di dalam sesi ini
     # Total token PERSISTEN lintas semua sesi ("dimanapun").
     # "sesi" (agent.tokens_session) kini persisten per-sesi (ikut saat --resume),
     # dan sudah termasuk di total global. Agar tidak dobel saat resume, base =
@@ -1042,7 +1073,7 @@ def main(resume: bool = False) -> None:
         err = result["error"]
         if interrupted or isinstance(err, (KeyboardInterrupt, llm.Cancelled)):
             console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
-        elif isinstance(err, RateLimitError):
+        elif llm.is_rate_limit(err):
             console.print("\n  [yellow]⏳ rate limit NVIDIA (~40 permintaan/menit) — "
                           "tunggu ~1 menit lalu coba lagi[/yellow]\n")
         elif err is not None:
@@ -1053,7 +1084,7 @@ def main(resume: bool = False) -> None:
 
     def _reindex_if_edited() -> None:
         """Bila giliran barusan menulis/menghapus file, segarkan PETA PROYEK &
-        system prompt supaya pemahaman bagasAI selalu sesuai kode terbaru."""
+        system prompt supaya pemahaman bagas-ai selalu sesuai kode terbaru."""
         if any(s.get("name") in ("write_file", "delete_file")
                for s in steps.values()):
             try:
@@ -1073,17 +1104,17 @@ def main(resume: bool = False) -> None:
         turn_start = time.time()
 
         def say(content: str) -> None:
-            """Tampilkan ucapan/narasi bagasAI: 1 header per giliran, indentasi rapi."""
+            """Tampilkan ucapan/narasi bagas-ai: 1 header per giliran, indentasi rapi."""
             if not content or not content.strip():
                 return
             console.print()
             if not header["shown"]:
-                console.print("  [bold #89b4fa]🤖 bagasAI[/]")
+                console.print("  [bold #89b4fa]🤖 bagas-ai[/]")
                 header["shown"] = True
             console.print(Padding(_md(content.strip()), (0, 3, 1, 3)))
 
         def on_retry(attempt: int, wait: float, exc: Exception) -> None:
-            """NVIDIA rate-limit: bagasAI menunggu lalu MELANJUTKAN, bukan gagal."""
+            """NVIDIA rate-limit: bagas-ai menunggu lalu MELANJUTKAN, bukan gagal."""
             status_obj.note_retry(wait, f"percobaan ke-{attempt}")
 
         # Jalankan jawaban AI di THREAD LATAR BELAKANG supaya thread utama bebas
@@ -1136,7 +1167,7 @@ def main(resume: bool = False) -> None:
         if forced or interrupted or isinstance(err, (KeyboardInterrupt, llm.Cancelled)):
             # Memory sudah dirapikan & disimpan di dalam agent.run().
             console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
-        elif isinstance(err, RateLimitError):
+        elif llm.is_rate_limit(err):
             console.print("\n  [yellow]⏳ rate limit NVIDIA (~40 permintaan/menit) — "
                           "tunggu ~1 menit lalu coba lagi[/yellow]\n")
         elif err is not None:
@@ -1210,7 +1241,7 @@ def main(resume: bool = False) -> None:
         ]
         try:
             sel = inquirer.select(
-                message="Mode berpikir — seberapa dalam bagasAI menalar?",
+                message="Mode berpikir — seberapa dalam bagas-ai menalar?",
                 choices=choices, default=agent.effort, pointer="❯",
                 long_instruction="Makin dalam = makin cermat tapi lebih lambat & boros token.",
             ).execute()
@@ -1250,7 +1281,7 @@ def main(resume: bool = False) -> None:
     def show_help() -> None:
         c = "#94e2d5"
         pout(Panel(
-            "[dim]ketik pesan biasa untuk mengobrol dengan bagasAI[/dim]\n\n"
+            "[dim]ketik pesan biasa untuk mengobrol dengan bagas-ai[/dim]\n\n"
             f"[{c}]/menu[/]     menu interaktif        [{c}]/model[/]    pilih model + saran\n"
             f"[{c}]/effort[/]   mode berpikir          [{c}]/new[/]      sesi baru\n"
             f"[{c}]/add-dir[/]  tambah folder konteks  [{c}]/dirs[/]     folder konteks aktif\n"
@@ -1258,6 +1289,7 @@ def main(resume: bool = False) -> None:
             f"[{c}]/memory[/]   memori jangka panjang  [{c}]/scripts[/]  skrip tersimpan\n"
             f"[{c}]/reset[/]    kosongkan riwayat      [{c}]/clear[/]    bersihkan layar\n"
             f"[{c}]/review[/]   cari bug seluruh proyek [{c}]/scan[/]     segarkan peta proyek\n"
+            f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
             f"[{c}]/live[/]     interaktif on/off      [{c}]/expand[/]   buka hasil (klik/tutup)\n"
             f"[{c}]/models[/]   daftar semua model     [{c}]/update[/]   cek pembaruan\n"
             f"[#f38ba8]/exit[/]     keluar",
@@ -1275,7 +1307,7 @@ def main(resume: bool = False) -> None:
 
         if st == "up_to_date":
             console.print(
-                f"  [bold #a6e3a1]✓ bagasAI sudah versi terbaru.[/]  "
+                f"  [bold #a6e3a1]✓ bagas-ai sudah versi terbaru.[/]  "
                 f"[dim]({res.get('local','')})[/dim]\n"
             )
             return
@@ -1323,7 +1355,7 @@ def main(resume: bool = False) -> None:
                 for line in log.splitlines():
                     body.append("  • ", style="#89b4fa")
                     body.append(line + "\n")
-            pout(Panel(body, title="[bold #cba6f7]🔄 Pembaruan bagasAI[/]",
+            pout(Panel(body, title="[bold #cba6f7]🔄 Pembaruan bagas-ai[/]",
                        title_align="left", border_style="#cba6f7",
                        box=box.ROUNDED, padding=(1, 2)))
             try:
@@ -1357,8 +1389,8 @@ def main(resume: bool = False) -> None:
         note = "" if out.get("reinstalled") else (
             f"  [dim](catatan pip: {out.get('pip_detail','')})[/dim]")
         console.print(
-            "  [bold #a6e3a1]✓ bagasAI diperbarui![/]  "
-            "[dim]jalankan ulang[/dim] [#94e2d5]bagasAI[/] "
+            "  [bold #a6e3a1]✓ bagas-ai diperbarui![/]  "
+            "[dim]jalankan ulang[/dim] [#94e2d5]bagas-ai[/] "
             "[dim]agar perubahan aktif.[/dim]" + note + "\n"
         )
 
@@ -1375,10 +1407,10 @@ def main(resume: bool = False) -> None:
         except ValueError as e:
             console.print(f"  [red]✖[/red] {e}\n")
             return
-        agent.refresh_system_prompt()  # bagasAI langsung "paham" folder ini
+        agent.refresh_system_prompt()  # bagas-ai langsung "paham" folder ini
         _dir_tree_panel(p, "[bold #a6e3a1]📂 Folder konteks ditambahkan[/]")
         console.print(
-            "  [dim]bagasAI kini memahami & bisa baca/tulis file di folder ini "
+            "  [dim]bagas-ai kini memahami & bisa baca/tulis file di folder ini "
             "(pakai path absolut).[/dim]\n"
         )
 
@@ -1398,7 +1430,7 @@ def main(resume: bool = False) -> None:
             )
             return
         body = Text()
-        body.append("Folder yang bagasAI pahami (selain root project):\n\n",
+        body.append("Folder yang bagas-ai pahami (selain root project):\n\n",
                     style="dim")
         for d in dirs:
             body.append("  📂 ", style="#a6e3a1")
@@ -1460,6 +1492,10 @@ def main(resume: bool = False) -> None:
             pout(_models_panel(agent.model))
         elif action == "scan":
             do_scan()
+        elif action == "bot":
+            do_bot()
+        elif action in ("permissions-bot", "perms-bot", "permissions"):
+            do_permissions_bot()
         return False
 
     def do_scan() -> None:
@@ -1470,15 +1506,125 @@ def main(resume: bool = False) -> None:
             nfiles = txt.count("\n- ")
             console.print(
                 f"  [#a6e3a1]✓ peta proyek diperbarui[/] [dim]· ~{nfiles} file · "
-                f"{len(txt):,} karakter — bagasAI kini paham struktur terbaru tanpa "
+                f"{len(txt):,} karakter — bagas-ai kini paham struktur terbaru tanpa "
                 f"baca ulang.[/]\n".replace(",", "."))
         except Exception as e:  # noqa: BLE001
             console.print(f"  [red]✖ gagal memindai:[/red] {e}\n")
 
+    # --- Bot Telegram DI DALAM sesi CLI -------------------------------------
+    def _tg_event(kind: str, text: str) -> None:
+        """Tampilkan aktivitas bot Telegram di terminal (dipanggil dari thread bot)."""
+        t = _esc(text or "")
+        if kind == "in":
+            console.print(f"\n  [#89b4fa]📲 Telegram ▸[/] [#cdd6f4]{t}[/]")
+        elif kind == "out":
+            snip = t if len(t) <= 600 else t[:600] + "…"
+            console.print(f"  [#a6e3a1]  ↳ balasan:[/] [dim]{snip}[/]")
+        elif kind == "perm":
+            console.print(f"\n  [#f9e2af]🔔 {t}[/]")
+        elif kind == "error":
+            console.print(f"  [red]📲 error:[/] {t}")
+        else:
+            console.print(f"  [dim]📲 {t}[/]")
+
+    def do_bot() -> None:
+        svc = tg_service.get("svc")
+        if svc is not None and svc.running:
+            console.print("  [dim]📲 mematikan bot Telegram…[/dim]")
+            try:
+                svc.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            tg_service["svc"] = None
+            console.print("  [#f9e2af]○ bot Telegram MATI.[/]\n")
+            return
+        if not config.TELEGRAM_BOT_TOKEN:
+            console.print("  [red]✖ TELEGRAM_BOT_TOKEN belum diisi di .env[/] "
+                          "[dim]— dapatkan dari @BotFather, lalu isi di "
+                          f"{config.ENV_FILE}.[/]\n")
+            return
+        console.print("  [dim]📲 menyalakan bot Telegram…[/dim]")
+        try:
+            from .telegram_bot import TelegramService  # lazy: hindari impor berat
+            svc = TelegramService()
+            ok = svc.start(on_event=_tg_event)
+        except Exception as e:  # noqa: BLE001
+            console.print(f"  [red]✖ gagal:[/] {e}\n")
+            return
+        if ok:
+            tg_service["svc"] = svc
+            ids = sorted(telegram_perms.allowed_ids())
+            idtxt = (str(ids) if ids
+                     else "belum ada — kirim pesan pertama dari HP, kamu otomatis jadi pemilik")
+            console.print(
+                f"  [#a6e3a1]✓ bot Telegram AKTIF[/] [dim]— kontrol bagas-ai dari HP-mu "
+                f"selama sesi ini hidup. Folder: {config.PROJECT_ROOT}\n"
+                f"     ID diizinkan: {idtxt}. Aktivitas tampil di sini. "
+                f"Atur izin: [/][#94e2d5]/permissions-bot[/][dim].[/]\n")
+        elif svc.error is not None:
+            console.print(f"  [red]✖ gagal menyalakan bot:[/] {svc.error}\n")
+        elif svc.alive():
+            # Belum 'running' tapi thread masih menyala (jaringan lambat) -> SIMPAN
+            # supaya tak jadi bot yatim & tetap bisa dimatikan via /bot.
+            tg_service["svc"] = svc
+            console.print("  [#f9e2af]… bot lambat menyala[/] [dim]— tunggu sebentar "
+                          "lalu coba kirim pesan; /bot lagi untuk mematikan.[/]\n")
+        else:
+            console.print("  [red]✖ bot berhenti tak terduga saat menyala.[/]\n")
+
+    def do_permissions_bot() -> None:
+        env_ids = set(config.TELEGRAM_ALLOWED_IDS)
+        while True:
+            pend = telegram_perms.pending()
+            allowed = sorted(telegram_perms.allowed_ids())
+            head = Text.from_markup(
+                f"[bold #89b4fa]🔐 Izin bot Telegram[/]\n"
+                f"[dim]Diizinkan:[/] {allowed or '(belum ada)'}\n"
+                f"[dim]Menunggu izin:[/] {len(pend)}")
+            pout(Panel(head, border_style="#89b4fa", box=box.ROUNDED, padding=(1, 2)))
+            choices = []
+            for cid, info in pend.items():
+                choices.append(Choice(("approve", int(cid)),
+                                      f"✅ Izinkan {info.get('name', '?')} (id {cid})"))
+                choices.append(Choice(("deny", int(cid)), f"🗑 Tolak id {cid}"))
+            for cid in allowed:
+                if cid in env_ids:
+                    continue  # dari .env -> ubah di .env, bukan di sini
+                choices.append(Choice(("revoke", cid), f"🚫 Cabut izin id {cid}"))
+            choices.append(Choice(("add", None), "➕ Tambah ID manual"))
+            choices.append(Choice(("done", None), "↩ Selesai"))
+            try:
+                act = inquirer.select(message="Pilih aksi izin", choices=choices,
+                                      pointer="❯").execute()
+            except (KeyboardInterrupt, EOFError):
+                return
+            kind, cid = act
+            if kind == "done":
+                return
+            if kind == "approve":
+                telegram_perms.add_allowed(cid)
+                console.print(f"  [green]✓ id {cid} kini diizinkan[/]")
+            elif kind == "deny":
+                telegram_perms.deny(cid)
+                console.print(f"  [yellow]🗑 id {cid} ditolak[/]")
+            elif kind == "revoke":
+                telegram_perms.remove_allowed(cid)
+                console.print(f"  [yellow]🚫 izin id {cid} dicabut[/]")
+            elif kind == "add":
+                try:
+                    val = inquirer.text(message="ID Telegram (angka):").execute()
+                except (KeyboardInterrupt, EOFError):
+                    continue
+                if val and val.strip().lstrip("-").isdigit():
+                    telegram_perms.add_allowed(int(val.strip()))
+                    console.print(f"  [green]✓ id {val.strip()} ditambahkan[/]")
+                else:
+                    console.print("  [yellow]ID harus angka.[/]")
+
     def open_menu() -> bool:
         try:
             action = inquirer.select(
-                message="Menu bagasAI", pointer="❯",
+                message="Menu bagas-ai", pointer="❯",
                 choices=[Choice("model", "🔀 Ganti model"),
                          Choice("effort", "🎚 Mode / effort"),
                          Choice("new", "✨ Sesi baru"),
@@ -1553,7 +1699,7 @@ def main(resume: bool = False) -> None:
         eff = f" <eff>◇ {agent.effort}</eff>" if agent.effort else ""
         sep = " <sep>│</sep> "
         return HTML(
-            " <brand>⬢ bagasAI</brand>"
+            " <brand>⬢ bagas-ai</brand>"
             + sep
             + f"{kind} <model>{spec.label}</model>{eff}"
             + sep
@@ -1566,9 +1712,12 @@ def main(resume: bool = False) -> None:
 
     while True:
         try:
-            raw = session_pt.prompt(
-                HTML('<style fg="#cba6f7"><b>❯</b></style> '),
-                bottom_toolbar=bottom_toolbar)
+            # patch_stdout: aktivitas bot Telegram (dari thread latar) tercetak
+            # RAPI di atas prompt, tak merusak baris input.
+            with patch_stdout(raw=True):
+                raw = session_pt.prompt(
+                    HTML('<style fg="#cba6f7"><b>❯</b></style> '),
+                    bottom_toolbar=bottom_toolbar)
         except KeyboardInterrupt:
             continue
         except EOFError:
@@ -1644,8 +1793,13 @@ def main(resume: bool = False) -> None:
         _save_total()
 
     _save_total()
+    if tg_service.get("svc") is not None and tg_service["svc"].running:
+        try:
+            tg_service["svc"].stop()
+        except Exception:  # noqa: BLE001
+            pass
     console.clear()
-    console.print("\n  [#cba6f7]⬢ bagasAI[/]  [dim]— sampai jumpa! 👋[/dim]\n")
+    console.print("\n  [#cba6f7]⬢ bagas-ai[/]  [dim]— sampai jumpa! 👋[/dim]\n")
 
 
 if __name__ == "__main__":

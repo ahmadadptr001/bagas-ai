@@ -1,7 +1,7 @@
 """Folder konteks tambahan (fitur `add-dir`).
 
 Selain root project (folder tempat `bagasai` dipanggil), pengguna bisa menambah
-folder lain sebagai konteks. bagasAI lalu:
+folder lain sebagai konteks. bagas-ai lalu:
   - BOLEH membaca/menulis file di folder itu (tool file mengizinkannya), dan
   - OTOMATIS MEMAHAMI isinya (struktur folder disisipkan ke system prompt).
 

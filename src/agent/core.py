@@ -150,7 +150,7 @@ class Agent:
         `on_tool_result(nama, hasil)` dipanggil SETELAH sebuah tool selesai —
         dipakai UI untuk menampilkan hasil (mis. output perintah) secara ringkas.
         `on_retry(percobaan, tunggu, exc)` dipanggil saat NVIDIA rate-limit dan
-        bagasAI menunggu lalu MELANJUTKAN langkah yang sama.
+        bagas-ai menunggu lalu MELANJUTKAN langkah yang sama.
         Bila `cancel_event` diset di tengah jalan, melempar llm.Cancelled.
         """
         self.memory.add_user(user_input)

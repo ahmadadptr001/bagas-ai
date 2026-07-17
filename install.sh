@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================================
-# bagasAI — installer satu-perintah (Linux / macOS / Git-Bash di Windows).
+# bagas-ai — installer satu-perintah (Linux / macOS / Git-Bash di Windows).
 #
 # Pakai salah satu:
 #   ./install.sh                      # dari dalam folder proyek
 #   curl -fsSL <URL>/install.sh | bash   # dari mana saja (mengunduh repo)
 #
-# Skrip ini: cek Python, memasang bagasAI sebagai perintah global, memastikan
+# Skrip ini: cek Python, memasang bagas-ai sebagai perintah global, memastikan
 # PATH, lalu menjalankan wizard login untuk memasukkan API key NVIDIA.
 # ============================================================================
 set -euo pipefail
@@ -21,7 +21,7 @@ err()  { printf "  ${RED}✗ %s${RST}\n" "$*" >&2; }
 REPO_URL="${BAGASAI_REPO:-https://github.com/ahmadadptr001/bagas-ai}"
 REPO_BRANCH="${BAGASAI_BRANCH:-master}"
 
-printf "\n${MAG}${BOLD}bagasAI${RST} ${DIM}· installer${RST}\n\n"
+printf "\n${MAG}${BOLD}bagas-ai${RST} ${DIM}· installer${RST}\n\n"
 
 # --- 1. Python 3.10+ ---
 step "Memeriksa Python"
@@ -47,7 +47,7 @@ if [ -f "pyproject.toml" ] && grep -q "bagasai" pyproject.toml 2>/dev/null; then
   SRC="$(pwd)"
   ok "Sumber: folder saat ini"
 else
-  step "Mengunduh bagasAI"
+  step "Mengunduh bagas-ai"
   DEST="${HOME}/.bagasai/src"
   if command -v git >/dev/null 2>&1; then
     rm -rf "$DEST"; mkdir -p "$DEST"
@@ -61,7 +61,7 @@ else
 fi
 
 # --- 3. Pasang sebagai perintah global ---
-step "Memasang bagasAI (pip install)"
+step "Memasang bagas-ai (pip install)"
 INSTALLER=""
 if command -v pipx >/dev/null 2>&1; then
   pipx install --force "$SRC" && INSTALLER="pipx" || INSTALLER=""
@@ -98,7 +98,35 @@ def find():
 print(find())
 PY
 )"
-if ! command -v bagasAI >/dev/null 2>&1; then
+# Deteksi Windows (Git Bash / MSYS / Cygwin): PATH harus diperbarui di REGISTRY
+# Windows (User PATH), BUKAN di ~/.bashrc — kalau ke .bashrc, perintah cuma
+# muncul di Git Bash dan tidak di PowerShell/cmd (dan hanya sesi bash BARU).
+IS_WIN=false
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) IS_WIN=true ;; esac
+
+if command -v bagas-ai >/dev/null 2>&1; then
+  ok "Perintah 'bagas-ai' siap dipakai"
+elif $IS_WIN; then
+  # BIN_DIR sudah bentuk Windows (C:\...) dari locator. Tambahkan ke User PATH
+  # registry via PowerShell -> berlaku di SEMUA terminal Windows (PowerShell,
+  # cmd, dan sesi Git Bash BARU yang mewarisi PATH Windows).
+  PS="powershell"; command -v powershell >/dev/null 2>&1 || PS="powershell.exe"
+  if command -v "$PS" >/dev/null 2>&1; then
+    "$PS" -NoProfile -Command "\$d='$BIN_DIR'; \$p=[Environment]::GetEnvironmentVariable('Path','User'); if(\$null -eq \$p){\$p=''}; if((\$p -split ';') -notcontains \$d){ [Environment]::SetEnvironmentVariable('Path', ((\$p.TrimEnd(';'))+';'+\$d).TrimStart(';'), 'User') }" 2>/dev/null \
+      && ok "Ditambahkan ke PATH Windows (User) — berlaku di PowerShell, cmd, & Git Bash baru." \
+      || err "Gagal memperbarui PATH Windows; tambahkan '$BIN_DIR' ke PATH manual."
+  else
+    err "PowerShell tak ditemukan; tambahkan '$BIN_DIR' ke PATH Windows manual."
+  fi
+  # Perbarui juga sesi Git Bash SAAT INI (bentuk POSIX).
+  if command -v cygpath >/dev/null 2>&1; then
+    export PATH="$(cygpath -u "$BIN_DIR"):$PATH"
+  else
+    export PATH="$BIN_DIR:$PATH"
+  fi
+  say "  ${DIM}Buka terminal BARU bila 'bagas-ai' belum dikenali.${RST}"
+else
+  # Linux/macOS: tambahkan ke rc shell.
   case ":$PATH:" in
     *":$BIN_DIR:"*) : ;;
     *)
@@ -107,21 +135,19 @@ if ! command -v bagasAI >/dev/null 2>&1; then
         */bash) SHELL_RC="${HOME}/.bashrc" ;;
         *)      SHELL_RC="${HOME}/.profile" ;;
       esac
-      printf '\n# bagasAI\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$SHELL_RC"
+      printf '\n# bagas-ai\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$SHELL_RC"
       export PATH="$BIN_DIR:$PATH"
-      ok "Menambahkan $BIN_DIR ke $SHELL_RC (buka terminal baru bila 'bagasAI' belum dikenali)"
+      ok "Menambahkan $BIN_DIR ke $SHELL_RC (buka terminal baru bila belum dikenali)"
       ;;
   esac
-else
-  ok "Perintah 'bagasAI' siap dipakai"
 fi
 
 # --- 5. Wizard login (API key NVIDIA + Telegram opsional) ---
 printf "\n"; step "Login — masukkan API key"
-if command -v bagasAI >/dev/null 2>&1; then
-  bagasAI login || true
+if command -v bagas-ai >/dev/null 2>&1; then
+  bagas-ai login || true
 else
   "$PY" -m agent login || true
 fi
 
-printf "\n${GRN}${BOLD}Selesai.${RST} Ketik ${CYN}${BOLD}bagasAI${RST} di terminal mana pun untuk mulai.\n\n"
+printf "\n${GRN}${BOLD}Selesai.${RST} Ketik ${CYN}${BOLD}bagas-ai${RST} di terminal mana pun untuk mulai.\n\n"

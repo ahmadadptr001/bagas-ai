@@ -2,7 +2,7 @@
 
 Semua model DI-HOST NVIDIA (integrate.api.nvidia.com), bukan lokal. Setiap
 model di daftar ini sudah diverifikasi ADA di katalog `/v1/models` untuk key
-ini dan mendukung alur kerja bagasAI (chat + tool-calling). Dipakai oleh
+ini dan mendukung alur kerja bagas-ai (chat + tool-calling). Dipakai oleh
 perintah /model & /effort di CLI dan oleh Agent.
 
 Catatan penting: tiap keluarga model punya CARA mengaktifkan mode "thinking"

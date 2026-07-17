@@ -1,4 +1,4 @@
-"""Pembaruan bagasAI dari GitHub — menangani SEMUA cara instalasi.
+"""Pembaruan bagas-ai dari GitHub — menangani SEMUA cara instalasi.
 
 Kasus yang didukung:
 - Instalasi via installer yang meng-clone repo ke ~/.bagasai/src (install.sh /

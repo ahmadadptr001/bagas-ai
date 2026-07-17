@@ -1,8 +1,8 @@
-# bagasAI — AI Agent Serbaguna untuk Terminal
+# bagas-ai — AI Agent Serbaguna untuk Terminal
 
-**bagasAI** adalah AI agent Python yang berjalan **gratis** dan bisa benar-benar
+**bagas-ai** adalah AI agent Python yang berjalan **gratis** dan bisa benar-benar
 mengambil tindakan lewat **tool calling** (mencari web, mengelola file,
-menjalankan kode, menganalisis gambar). Setelah dipasang, panggil `bagasAI`
+menjalankan kode, menganalisis gambar). Setelah dipasang, panggil `bagas-ai`
 dari **terminal mana pun** — mirip CLI `claude`.
 
 ---
@@ -29,7 +29,7 @@ Satu core agent, tiga antarmuka:
 
 ## 🚀 Pasang — satu perintah
 
-Installer akan memeriksa Python, memasang perintah global `bagasAI`, mengatur
+Installer akan memeriksa Python, memasang perintah global `bagas-ai`, mengatur
 PATH, lalu menuntun proses **login**.
 
 **Linux / macOS / Git-Bash**
@@ -50,10 +50,10 @@ irm https://raw.githubusercontent.com/ahmadadptr001/bagas-ai/master/install.ps1 
 
 ```bash
 pip install -e .     # dari folder proyek
-bagasAI login        # masukkan API key
+bagas-ai login        # masukkan API key
 ```
 
-**Windows — jika `bagasAI` tidak dikenali:** tambahkan folder `Scripts` Python
+**Windows — jika `bagas-ai` tidak dikenali:** tambahkan folder `Scripts` Python
 ke **Environment Variables → Path** (user), lalu buka terminal baru.
 </details>
 
@@ -64,7 +64,7 @@ ke **Environment Variables → Path** (user), lalu buka terminal baru.
 Installer menjalankan wizard login otomatis. Kapan pun bisa diulang:
 
 ```bash
-bagasAI login
+bagas-ai login
 ```
 
 Wizard akan:
@@ -82,13 +82,13 @@ Wizard akan:
 ## ▶️ Jalankan
 
 ```bash
-bagasAI              # chat di terminal (default)
-bagasAI --resume     # lanjutkan percakapan terakhir di folder ini
-bagasAI login        # masukkan / ganti API key (+ Telegram)
-bagasAI update       # cek & terapkan pembaruan dari GitHub
-bagasAI telegram     # bot Telegram
-bagasAI api          # server API di http://localhost:8000
-bagasAI help         # bantuan
+bagas-ai              # chat di terminal (default)
+bagas-ai --resume     # lanjutkan percakapan terakhir di folder ini
+bagas-ai login        # masukkan / ganti API key (+ Telegram)
+bagas-ai update       # cek & terapkan pembaruan dari GitHub
+bagas-ai telegram     # bot Telegram
+bagas-ai api          # server API di http://localhost:8000
+bagas-ai help         # bantuan
 ```
 
 ### Perintah dalam chat
@@ -122,7 +122,7 @@ print(agent.run("Hitung 15% dari 2.400.000 dan jelaskan caranya"))
 
 ## ⚙️ Konfigurasi
 
-Semua opsional kecuali API key (diisi otomatis lewat `bagasAI login`).
+Semua opsional kecuali API key (diisi otomatis lewat `bagas-ai login`).
 Disimpan di `~/.bagasai/.env`.
 
 | Variabel | Keterangan |
@@ -156,7 +156,7 @@ src/agent/
   prompts.py     # system prompt
   tools/         # web_search, files, shell, vision
   interfaces/    # cli, telegram_bot, api
-  __main__.py    # dispatcher perintah `bagasAI`
+  __main__.py    # dispatcher perintah `bagas-ai`
 pyproject.toml   # definisi perintah global
 run.py           # entry point mode pengembangan
 ```

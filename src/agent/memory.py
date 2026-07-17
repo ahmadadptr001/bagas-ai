@@ -53,7 +53,7 @@ class Memory:
     def repair_dangling_tools(self) -> None:
         """Rapikan riwayat setelah error/pembatalan di tengah giliran.
 
-        Instruksi pengguna & konteks TETAP disimpan (supaya bagasAI ingat
+        Instruksi pengguna & konteks TETAP disimpan (supaya bagas-ai ingat
         percakapan sebelumnya meski barusan terjadi error). Yang diperbaiki:
         setiap `assistant.tool_calls` harus diikuti respons tool untuk SEMUA
         panggilannya, dalam URUTAN yang sama dengan tool_calls, tanpa disela

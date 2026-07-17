@@ -1,16 +1,16 @@
-"""Entry point CLI global bagasAI.
+"""Entry point CLI global bagas-ai.
 
-Dipasang sebagai perintah `bagasAI` (lihat pyproject.toml). Penggunaan:
+Dipasang sebagai perintah `bagas-ai` (lihat pyproject.toml). Penggunaan:
 
-    bagasAI            # chat di terminal (default)
-    bagasAI chat       # sama dengan di atas
-    bagasAI login      # wizard: masukkan API key NVIDIA (+ Telegram opsional)
-    bagasAI update     # cek & terapkan pembaruan dari GitHub
-    bagasAI telegram   # jalankan bot Telegram
-    bagasAI api        # jalankan server API (FastAPI)
-    bagasAI setup      # sama dengan login
-    bagasAI version
-    bagasAI help
+    bagas-ai            # chat di terminal (default)
+    bagas-ai chat       # sama dengan di atas
+    bagas-ai login      # wizard: masukkan API key NVIDIA (+ Telegram opsional)
+    bagas-ai update     # cek & terapkan pembaruan dari GitHub
+    bagas-ai telegram   # jalankan bot Telegram
+    bagas-ai api        # jalankan server API (FastAPI)
+    bagas-ai setup      # sama dengan login
+    bagas-ai version
+    bagas-ai help
 """
 from __future__ import annotations
 
@@ -28,19 +28,19 @@ from . import config
 __version__ = "1.0.0"
 
 HELP = f"""\
-bagasAI v{__version__} — AI agent serbaguna (NVIDIA free API)
+bagas-ai v{__version__} — AI agent serbaguna (NVIDIA free API)
 
 Penggunaan:
-  bagasAI              Buka sesi chat BARU di folder saat ini
-  bagasAI --resume     Lanjutkan percakapan terakhir di folder ini
-  bagasAI login        Wizard: masukkan API key NVIDIA (+ Telegram opsional)
-  bagasAI add-dir <p>  Tambah folder konteks agar bagasAI memahaminya
-  bagasAI update       Cek & terapkan pembaruan dari GitHub
-  bagasAI telegram     Jalankan bot Telegram
-  bagasAI api          Jalankan server API di http://localhost:8000
-  bagasAI setup        Sama dengan 'login'
-  bagasAI version      Tampilkan versi
-  bagasAI help         Tampilkan bantuan ini
+  bagas-ai              Buka sesi chat BARU di folder saat ini
+  bagas-ai --resume     Lanjutkan percakapan terakhir di folder ini
+  bagas-ai login        Wizard: masukkan API key NVIDIA (+ Telegram opsional)
+  bagas-ai add-dir <p>  Tambah folder konteks agar bagas-ai memahaminya
+  bagas-ai update       Cek & terapkan pembaruan dari GitHub
+  bagas-ai telegram     Jalankan bot Telegram
+  bagas-ai api          Jalankan server API di http://localhost:8000
+  bagas-ai setup        Sama dengan 'login'
+  bagas-ai version      Tampilkan versi
+  bagas-ai help         Tampilkan bantuan ini
 
 Config  : {config.CONFIG_HOME}
 Project : {config.PROJECT_ROOT}   (folder terminal aktif = root project)
@@ -58,14 +58,14 @@ def _cmd_login() -> None:
 
 
 def _cmd_update() -> None:
-    """Cek & terapkan pembaruan bagasAI dari GitHub (dari terminal)."""
+    """Cek & terapkan pembaruan bagas-ai dari GitHub (dari terminal)."""
     from . import updater
 
     print("🔄 Memeriksa pembaruan di GitHub…")
     res = updater.check()
     st = res.get("status")
     if st == "up_to_date":
-        print(f"✓ bagasAI sudah versi terbaru. ({res.get('local','')})")
+        print(f"✓ bagas-ai sudah versi terbaru. ({res.get('local','')})")
         return
     if st == "no_git":
         print("✖ git tidak ditemukan — pasang git dulu agar bisa memperbarui.")
@@ -111,18 +111,18 @@ def _cmd_update() -> None:
     out = updater.apply()
     if out.get("status") == "updated":
         tail = "" if out.get("reinstalled") else f" (catatan pip: {out.get('pip_detail','')})"
-        print("✓ bagasAI diperbarui! Jalankan ulang perintah bagasAI." + tail)
+        print("✓ bagas-ai diperbarui! Jalankan ulang perintah bagas-ai." + tail)
     else:
         print(f"✖ gagal ({out.get('status')}): {out.get('detail','')}")
 
 
 def _cmd_add_dir(args: list[str]) -> None:
-    """Tambah folder konteks dari terminal: bagasAI add-dir <path>."""
+    """Tambah folder konteks dari terminal: bagas-ai add-dir <path>."""
     from . import workspace
 
     paths = [a for a in args if not a.startswith("-")][1:]  # buang 'add-dir'
     if not paths:
-        print("Pakai: bagasAI add-dir <path folder>")
+        print("Pakai: bagas-ai add-dir <path folder>")
         return
     for path in paths:
         try:
@@ -131,16 +131,56 @@ def _cmd_add_dir(args: list[str]) -> None:
             print(f"[!] {e}")
             continue
         print(f"[+] Folder konteks ditambahkan: {p}")
-        print("    bagasAI akan memahami & bisa mengaksesnya di sesi berikutnya.")
+        print("    bagas-ai akan memahami & bisa mengaksesnya di sesi berikutnya.")
 
 
 def _need_key() -> bool:
     if config.has_api_key():
         return False
     print("[!] NVIDIA_API_KEY belum diisi.")
-    print("   Jalankan: bagasAI login   (wizard memandu memasukkan API key)")
+    print("   Jalankan: bagas-ai login   (wizard memandu memasukkan API key)")
     print("   Ambil key gratis di https://build.nvidia.com\n")
     return True
+
+
+def _preload_with_bar() -> None:
+    """Bar loading BERTAHAP saat memuat pustaka berat — fase paling lambat (~1 dtk)
+    dari startup. Tiap pustaka diimpor satu per satu sambil bar terisi bertahap,
+    lalu impor CLI jadi instan (semua sudah ter-cache)."""
+    import importlib
+    pkg = __package__ or "agent"
+    steps = [
+        ("tampilan (rich)", "rich.console"),
+        ("live view", "rich.live"),
+        ("markdown", "rich.markdown"),
+        ("input terminal", "prompt_toolkit"),
+        ("menu interaktif", "InquirerPy"),
+        ("logo", "pyfiglet"),
+        ("pencarian web", "ddgs"),
+        ("inti agent", f"{pkg}.core"),
+        ("antarmuka", f"{pkg}.interfaces.cli"),
+    ]
+    total = len(steps)
+    w = 22
+    for i, (label, mod) in enumerate(steps, 1):
+        try:
+            importlib.import_module(mod)
+        except Exception:
+            pass
+        filled = round(w * i / total)
+        bar = "█" * filled + "░" * (w - filled)
+        try:
+            sys.stdout.write(
+                f"\r  ⬢ bagas-ai  memuat  {bar}  {round(100 * i / total):3d}%"
+                f"  {label:<18}")
+            sys.stdout.flush()
+        except Exception:
+            pass
+    try:
+        sys.stdout.write("\r" + " " * 74 + "\r")  # bersihkan baris
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -154,7 +194,7 @@ def main() -> None:
         print(HELP)
         return
     if mode in ("version",) or flags & {"-v", "--version"}:
-        print(f"bagasAI v{__version__}")
+        print(f"bagas-ai v{__version__}")
         return
     if mode in ("setup", "login"):
         _cmd_login()
@@ -169,6 +209,7 @@ def main() -> None:
     if mode in ("chat", "cli"):
         if _need_key():
             sys.exit(1)
+        _preload_with_bar()  # bar loading BERTAHAP selama impor pustaka (~1 dtk)
         from .interfaces.cli import main as run
         run(resume=resume)
         return
