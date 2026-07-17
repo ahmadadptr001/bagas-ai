@@ -227,9 +227,19 @@ def _reinstall(repo: Path) -> dict:
     # Fallback PEP 668 (Linux/macOS "externally-managed-environment").
     if inst.returncode != 0 and "externally-managed" in blob:
         inst = _run(base + flags + ["--break-system-packages"] + target, repo, timeout=600)
+        blob = (inst.stderr + inst.stdout).lower()
 
+    # Windows: .exe (bagas-ai.exe) TERKUNCI karena bagas-ai-nya SENDIRI sedang
+    # berjalan saat `bagas-ai update` -> pip gagal menimpa skrip. Ini penyebab
+    # umum "update gagal". Untuk instalasi editable, KODE sudah ter-update lewat
+    # git pull, jadi ini TIDAK fatal — cukup restart.
+    locked = inst.returncode != 0 and any(
+        s in blob for s in ("winerror 32", "being used by another process",
+                            "access is denied", "permission denied")
+    )
     return {
         "ok": inst.returncode == 0,
+        "locked": locked,
         "detail": "" if inst.returncode == 0 else (inst.stderr or inst.stdout).strip()[:200],
         "editable": editable,
     }
@@ -301,12 +311,39 @@ def apply() -> dict:
             return {"status": c.get("status", "no_repo"), "detail": c.get("detail", "")}
         repo = c["repo"]
         pull_out = "repo disiapkan (clone baru)"
-    else:
-        pull = _run(["git", "pull", "--ff-only"], repo, timeout=180)
-        if pull.returncode != 0:
+    elif repo.resolve() == _repo_dir().resolve():
+        # Repo KELOLAAN kita (~/.bagasai/src): tak ada kerja pengguna di sini, jadi
+        # aman diselaraskan PAKSA ke remote. `git pull --ff-only` sering GAGAL di
+        # sini gara-gara perubahan lokal sepele / riwayat menyimpang -> itulah
+        # penyebab umum "update gagal".
+        fetch = _run(["git", "fetch", "--all", "--quiet"], repo, timeout=180)
+        if fetch.returncode != 0:
+            # Tanpa fetch sukses, reset hanya menyelaraskan ke upstream BASI ->
+            # akan keliru melaporkan "updated" padahal tidak menarik apa pun.
+            return {
+                "status": "fetch_error",
+                "detail": (fetch.stderr or fetch.stdout).strip()[:300],
+                "repo": str(repo),
+            }
+        up = _upstream(repo) or f"origin/{config.REPO_BRANCH}"
+        r = _run(["git", "reset", "--hard", up], repo, timeout=120)
+        if r.returncode != 0:
             return {
                 "status": "pull_error",
-                "detail": (pull.stderr or pull.stdout).strip()[:300],
+                "detail": (r.stderr or r.stdout).strip()[:300],
+                "repo": str(repo),
+            }
+        _run(["git", "clean", "-fd"], repo, timeout=120)
+        pull_out = f"diselaraskan ke {up}"
+    else:
+        # Checkout PENGEMBANGAN milik pengguna -> JANGAN paksa (bisa hilang kerja).
+        pull = _run(["git", "pull", "--ff-only"], repo, timeout=180)
+        if pull.returncode != 0:
+            detail = (pull.stderr or pull.stdout).strip()[:300]
+            return {
+                "status": "pull_error",
+                "detail": (detail + "  — ada perubahan lokal / riwayat menyimpang. "
+                           "Commit/stash dulu, atau update lewat installer."),
                 "repo": str(repo),
             }
         pull_out = pull.stdout.strip()[:300]
@@ -314,10 +351,21 @@ def apply() -> dict:
     reinst = _reinstall(repo)
     # Bersihkan cache notifikasi startup supaya tak lagi menampilkan "usang".
     _write_cache({"status": "up_to_date", "ts": time.time()})
+    note = ""
+    if not reinst["ok"] and reinst.get("locked"):
+        note = ("skrip bagas-ai sedang dipakai (kamu menjalankan update DARI "
+                "bagas-ai), jadi file .exe tak bisa ditimpa. "
+                + ("Kode sudah ter-update — cukup TUTUP lalu buka lagi bagas-ai."
+                   if reinst.get("editable") else
+                   "Tutup semua bagas-ai lalu jalankan `bagas-ai update` sekali lagi."))
     return {
         "status": "updated",
         "pull": pull_out,
-        "reinstalled": reinst["ok"],
+        # Instalasi editable: kode aktif langsung dari repo -> git pull SUDAH
+        # meng-update meski pip gagal menimpa .exe yang terkunci.
+        "reinstalled": reinst["ok"] or bool(reinst.get("locked") and reinst.get("editable")),
+        "locked": bool(reinst.get("locked")),
+        "note": note,
         "pip_detail": reinst["detail"],
         "repo": str(repo),
     }

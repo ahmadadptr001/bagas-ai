@@ -69,6 +69,10 @@ class Agent:
         self.tokens_last = Usage()
         self.tokens_live = 0  # nilai token realtime untuk tampilan
 
+        # Auto-fallback: model yang sudah dicoba & berapa kali naik-kelas (per giliran).
+        self._tried_models: set[str] = set()
+        self._escalations = 0
+
         # Token SESI bersifat persisten: saat --resume, lanjutkan hitungan
         # sesi sebelumnya (bukan mulai dari nol).
         if session and getattr(session, "tokens", None):
@@ -110,6 +114,40 @@ class Agent:
         prefs.save(effort=name)
         return name
 
+    # --- auto-fallback saat AI ngeloop / performanya turun -------------------
+    def _escalate(self, reason: str) -> str | None:
+        """Naik kelas ketika AI ngelantur: NAIKKAN effort dulu (murah), lalu GANTI
+        model. Memory/konteks TIDAK disentuh -> percakapan tetap nyambung, agent
+        lanjut dari titik yang sama dengan otak yang lebih kuat/berbeda.
+
+        Return deskripsi perubahan, atau None bila tak ada yang bisa dinaikkan.
+        """
+        if not config.AUTO_FALLBACK:
+            return None
+        if self._escalations >= config.MAX_ESCALATIONS:
+            return None
+        # 1) Naikkan effort (paling murah & cepat, model tetap sama).
+        if self.model_spec.supports_effort() and self.effort:
+            opts = list(self.model_spec.effort_options().keys())
+            if self.effort in opts:
+                i = opts.index(self.effort)
+                if i < len(opts) - 1:
+                    old, self.effort = self.effort, opts[i + 1]
+                    self._escalations += 1
+                    return f"effort {old} → {self.effort} ({reason})"
+        # 2) Ganti ke model lain yang belum dicoba di giliran ini.
+        self._tried_models.add(self.model_spec.id)
+        for _, _key, spec in models.catalog():
+            if spec.id in self._tried_models or spec.multimodal and not spec.reasoning:
+                continue
+            old = self.model_spec.label
+            self.model_spec = spec
+            self._tried_models.add(spec.id)
+            self._init_effort()
+            self._escalations += 1
+            return f"model {old} → {spec.label} ({reason})"
+        return None
+
     def refresh_system_prompt(self) -> None:
         """Bangun ulang system prompt (mis. setelah add-dir) & pasang ke memory."""
         self.memory.set_system(prompts.build_system_prompt())
@@ -142,8 +180,12 @@ class Agent:
         cancel_event: Any = None,
         on_retry: Callable[[int, float, Exception], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
+        on_notice: Callable[[str], None] | None = None,
     ) -> str:
         """Proses satu giliran (streaming). Kembalikan teks jawaban final.
+
+        `on_notice(teks)` dipanggil saat bagas-ai OTOMATIS naik-kelas (ganti
+        effort/model) karena terdeteksi ngeloop / performanya menurun.
 
         `on_message(teks)` dipanggil untuk narasi antar-langkah (ketika agent
         menjelaskan apa yang akan dilakukan sebelum memakai tool).
@@ -156,9 +198,13 @@ class Agent:
         self.memory.add_user(user_input)
         self.tokens_last = Usage()
         self.tokens_live = 0
+        # Jatah naik-kelas dihitung ulang tiap giliran (masalah bisa spesifik tugas).
+        self._escalations = 0
+        self._tried_models = {self.model_spec.id}
         try:
             return self._run_loop(
-                on_tool, on_message, cancel_event, on_retry, on_tool_result
+                on_tool, on_message, cancel_event, on_retry, on_tool_result,
+                on_notice,
             )
         except BaseException:
             # Apa pun yang gagal di tengah giliran (rate limit, error tool,
@@ -177,9 +223,9 @@ class Agent:
         cancel_event: Any,
         on_retry: Callable[[int, float, Exception], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
+        on_notice: Callable[[str], None] | None = None,
     ) -> str:
         schemas = tools.get_schemas(self.tool_names)
-        extra = self.model_spec.extra_body_for(self.effort)
 
         # Agent boleh memakai tool sampai tugas selesai, TAPI dengan jaring
         # pengaman anti-loop-liar agar tidak mengulang-ulang / ngelantur:
@@ -194,6 +240,10 @@ class Agent:
         dup_hits = 0
         total_calls = 0
         force_final = False
+        # Sinyal "performa menurun": model menuliskan tool call sebagai TEKS/XML
+        # (weak_hits) atau membalas kosong berulang (empty_hits).
+        weak_hits = 0
+        empty_hits = 0
         while True:
             guard += 1
             if guard > safety:
@@ -201,6 +251,9 @@ class Agent:
             if cancel_event is not None and cancel_event.is_set():
                 raise llm.Cancelled()
 
+            # Dihitung ULANG tiap putaran: model/effort bisa BERUBAH di tengah
+            # giliran akibat auto-fallback.
+            extra = self.model_spec.extra_body_for(self.effort)
             prompt_est = _est_messages(self.memory.messages)
             state = {"completion_est": 0}
             self.tokens_live = self.tokens_last.total + prompt_est
@@ -241,7 +294,30 @@ class Agent:
                 self.tokens_session.add_raw(prompt_est, state["completion_est"])
             self.tokens_live = self.tokens_last.total
 
+            # --- Deteksi "performa menurun" ---
+            # Model menuliskan tool call sebagai TEKS/XML (diselamatkan llm.py &
+            # diberi id 'txt_') = tanda model ini lemah di function-calling.
+            if tool_calls and any(
+                str(tc.get("id", "")).startswith("txt_") for tc in tool_calls
+            ):
+                weak_hits += 1
+            if not tool_calls and not (content and content.strip()):
+                empty_hits += 1
+
             if not tool_calls:
+                # Balasan kosong berulang -> coba naik-kelas dulu sebelum menyerah.
+                if empty_hits >= 2 and not force_final:
+                    changed = self._escalate("respons kosong berulang")
+                    if changed:
+                        empty_hits = 0
+                        if on_notice:
+                            on_notice(changed)
+                        self.memory.add({
+                            "role": "user",
+                            "content": ("[SISTEM] Balasanmu kosong. Lanjutkan tugas "
+                                        "dari konteks di atas dan berikan jawaban."),
+                        })
+                        continue
                 # Jaring pengaman: jangan pernah "berhenti diam". Bila model tak
                 # menghasilkan teks apa pun (mis. berhenti tanpa menjawab), beri
                 # pesan cadangan yang jelas alih-alih layar kosong.
@@ -314,10 +390,40 @@ class Agent:
                     }
                 )
 
-            # Deteksi stagnasi -> paksa menyimpulkan pada iterasi berikutnya.
+            # --- Stagnasi / performa menurun ---
+            # NGELOOP (mengulang tool sama) atau model lemah di function-calling:
+            # COBA NAIK-KELAS DULU (effort ↑, lalu ganti model) dan LANJUTKAN dengan
+            # KONTEKS YANG SAMA — memory tak direset, jadi progres tak hilang.
+            looping = dup_hits >= config.MAX_DUPLICATE_TOOL_CALLS
+            weak = weak_hits >= 2
+            if not force_final and (looping or weak):
+                reason = "terdeteksi mengulang langkah" if looping else \
+                         "model lemah memanggil tool"
+                changed = self._escalate(reason)
+                if changed:
+                    if on_notice:
+                        on_notice(changed)
+                    # Reset penghitung loop supaya otak baru dapat kesempatan bersih.
+                    dup_hits = 0
+                    weak_hits = 0
+                    seen_tools.clear()
+                    self.memory.add(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"[SISTEM] Kamu tampak {reason}. Aku sudah menaikkan "
+                                f"kemampuanmu ({changed}). Konteks & progres di atas "
+                                f"TETAP berlaku — JANGAN ulangi dari nol. Lihat apa "
+                                f"yang SUDAH selesai, lalu lanjutkan langkah "
+                                f"BERIKUTNYA sampai tuntas."
+                            ),
+                        }
+                    )
+                    continue
+            # Sudah tak bisa naik-kelas lagi (atau anggaran tool habis) -> minta
+            # menyimpulkan dengan jujur.
             if not force_final and (
-                dup_hits >= config.MAX_DUPLICATE_TOOL_CALLS
-                or total_calls >= config.MAX_TOOL_CALLS
+                looping or weak or total_calls >= config.MAX_TOOL_CALLS
             ):
                 force_final = True
                 self.memory.add(

@@ -115,6 +115,13 @@ MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))
 # pekerjaan atau ngelantur tanpa henti.
 MAX_TOOL_CALLS: int = int(os.getenv("MAX_TOOL_CALLS", "80"))
 MAX_DUPLICATE_TOOL_CALLS: int = int(os.getenv("MAX_DUPLICATE_TOOL_CALLS", "3"))
+# AUTO-FALLBACK: bila AI mulai NGELOOP atau performanya menurun (mengulang tool
+# yang sama, menuliskan tool call sebagai teks, atau respons kosong berulang),
+# bagas-ai otomatis MENAIKKAN effort lalu MENGGANTI model — dengan KONTEKS
+# percakapan tetap dipertahankan (memory tak direset).
+AUTO_FALLBACK: bool = _get_bool("AUTO_FALLBACK", True)
+# Berapa kali boleh naik-kelas dalam satu giliran sebelum menyerah & menyimpulkan.
+MAX_ESCALATIONS: int = int(os.getenv("MAX_ESCALATIONS", "2"))
 TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.6"))
 # Timeout per request (detik). Model BESAR/REASONING (Nemotron-Ultra, Mistral-
 # Large, DeepSeek-Pro) sering berpikir lama; 120s terlalu pendek -> request

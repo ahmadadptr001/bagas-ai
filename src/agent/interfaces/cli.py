@@ -197,15 +197,6 @@ def _update_notice() -> None:
 # Gradasi ungu -> biru (magenta neon) untuk teks shadow.
 _GRAD = ["#f0abfc", "#e879f9", "#c084fc", "#a855f7", "#7c3aed", "#4f46e5", "#2563eb"]
 
-# ASCII "virus" (spike protein) — aksen di atas logo.
-_VIRUS = r"""
-        .  o   o  .
-      o   \  |  /   o
-   o ---- ( ((*)) ) ---- o
-      o   /  |  \   o
-        '  o   o  '
-"""
-
 
 def _fmt(n: int) -> str:
     return f"{n:,}".replace(",", ".")
@@ -291,24 +282,31 @@ def _print_delete(path: str, content: str, limit: int = 80) -> None:
 
 
 def show_logo() -> None:
+    """Wordmark modern: figlet bergradasi + garis aksen gradasi + tagline bersih
+    (tanpa doodle ASCII)."""
     m = " " * _LPAD  # indent kiri agar tidak mepet
-    # Virus (hijau neon)
-    for ln in _VIRUS.split("\n"):
-        if ln.strip():
-            console.print(Text(m + ln, style="bold green"))
-    # Teks "bagas-ai" gaya ANSI Shadow, gradasi per baris (efek glow/shadow)
+    console.print()
     if Figlet is not None:
         try:
             art = Figlet(font="ansi_shadow").renderText("bagas-ai")
             lines = [ln for ln in art.split("\n") if ln.strip()]
         except Exception:
-            lines = ["b a g a s A I"]
+            lines = ["b a g a s - a i"]
     else:
-        lines = ["b a g a s A I"]
+        lines = ["b a g a s - a i"]
+    width = max((len(ln) for ln in lines), default=24)
     for i, ln in enumerate(lines):
         console.print(Text(m + ln, style=f"bold {_GRAD[min(i, len(_GRAD) - 1)]}"))
-    sub = Text(m + "  ")
-    sub.append("AI agent serbaguna", style="bold white")
+    # Garis aksen gradasi di bawah wordmark (aksen modern pengganti doodle).
+    seg = max(12, min(width, 56))
+    per = max(1, seg // len(_GRAD))
+    bar = Text(m)
+    for col in _GRAD:
+        bar.append("━" * per, style=col)
+    console.print(bar)
+    sub = Text(m)
+    sub.append("AI agent serbaguna", style="bold #cdd6f4")
+    sub.append("  ·  terminal · telegram · multitasking", style="dim")
     console.print(sub)
 
 
@@ -425,11 +423,20 @@ class TurnView:
 
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-    def __init__(self, agent: Agent) -> None:
+    # Region live SENGAJA dijaga PENDEK: kalau seluruh giliran (narasi + banyak
+    # langkah + jawaban panjang) ditaruh di region live, tingginya melebihi layar
+    # -> rich.Live menggambar ulang semuanya tiap frame => KEDIP & scroll rusak
+    # (terasa saat sesi/jawaban besar). Item lama "dibekukan" ke riwayat terminal.
+    MAX_LIVE_STEPS = 5
+
+    def __init__(self, agent: Agent, commit=None) -> None:
         self.agent = agent
+        self.commit = commit          # commit(renderables) -> cetak ke riwayat
         self.start = time.time()
         self._lock = threading.Lock()
-        self.items: list[tuple[str, object]] = []  # ("narasi",str)|("step",rec)
+        self.items: list[tuple[str, object]] = []  # ("step",rec) yang masih live
+        self.all_steps: list[dict] = []            # SEMUA langkah (untuk ringkasan)
+        self._said = False                         # header "🤖" sekali per giliran
         self.answer: str | None = None
         self.expanded = False          # Ctrl+R toggle: buka/tutup hasil semua langkah
         self._clickable = False        # True bila mouse aktif -> tampilkan petunjuk klik
@@ -443,23 +450,50 @@ class TurnView:
 
     # --- mutasi (dipanggil dari worker) ---
     def add_narasi(self, text: str) -> None:
-        if text and text.strip():
-            with self._lock:
-                self.items.append(("narasi", text.strip()))
+        """Narasi langsung DIBEKUKAN ke riwayat (bisa panjang) -> region live tetap
+        pendek & tak berkedip."""
+        if not (text and text.strip()):
+            return
+        if self.commit:
+            out = []
+            if not self._said:
+                out.append(Padding(Text("🤖 bagas-ai", style="bold #89b4fa"),
+                                   (1, 0, 0, 2)))
+                self._said = True
+            out.append(Padding(_md(text.strip()), (0, 3, 1, 3)))
+            self.commit(out)
+
+    def _overflow(self) -> list:
+        """Langkah lama yang keluar dari jatah region live (untuk dibekukan)."""
+        out = []
+        with self._lock:
+            while len(self.items) > self.MAX_LIVE_STEPS:
+                out.append(self.items.pop(0))
+        return out
 
     def start_step(self, n: int, name: str, label: str) -> dict:
         rec = {"n": n, "name": name, "label": label, "result": "",
                "failed": False, "running": True, "expanded": False}
         with self._lock:
             self.items.append(("step", rec))
+            self.all_steps.append(rec)
         self.tool = name
         self.phase = _PHASE.get(name, "bekerja")
+        # Bekukan langkah lama ke riwayat agar region live tak tumbuh tanpa batas.
+        for kind, val in self._overflow():
+            if kind == "step" and self.commit:
+                self.commit(self._render_step(val))
         return rec
 
     def end_step(self, rec: dict, result: str, failed: bool) -> None:
         rec["result"] = result or ""
         rec["failed"] = failed
         rec["running"] = False
+        # Pra-hitung baris hasil SEKALI di sini — _render_step dipanggil ~12x/dtk
+        # per frame; tanpa cache ini regex+splitlines diulang terus tiap frame.
+        text = re.sub(r"^exit_code=\S+\n?", "", (result or "").strip())
+        rec["_lines"] = text.splitlines()
+        rec["_nlines"] = sum(1 for ln in rec["_lines"] if ln.strip())
         self.tool = None
         self.phase = "berpikir"
 
@@ -499,12 +533,17 @@ class TurnView:
             f"   [dim #94e2d5]#{n}[/]"
         )
         out = [head]
-        text = re.sub(r"^exit_code=\S+\n?", "", (rec["result"] or "").strip())
-        lines = [ln for ln in text.splitlines()]
-        nlines = len([ln for ln in lines if ln.strip()])
+        # Pakai baris pra-hitung dari end_step (fallback hitung bila belum ada).
+        lines = rec.get("_lines")
+        if lines is None:
+            text = re.sub(r"^exit_code=\S+\n?", "", (rec["result"] or "").strip())
+            lines = text.splitlines()
+        nlines = rec.get("_nlines")
+        if nlines is None:
+            nlines = sum(1 for ln in lines if ln.strip())
         if running:
             out.append(Text("     menjalankan…", style="italic #6c7086"))
-        elif not text:
+        elif not lines:
             pass
         elif rec["expanded"] or self.expanded:
             cap = 40
@@ -523,28 +562,23 @@ class TurnView:
 
     def _blocks(self) -> list:
         """Urutan (tag, renderable) untuk render & pemetaan-klik. tag =
-        ('step', n) bila baris itu milik langkah #n, else ('other', None)."""
+        ('step', n) bila baris itu milik langkah #n, else ('other', None).
+
+        HANYA berisi langkah yang masih 'live' (maks. MAX_LIVE_STEPS) + footer,
+        supaya region live PENDEK -> tak berkedip & terminal tetap bisa di-scroll.
+        Narasi & jawaban dibekukan ke riwayat, bukan dirender di sini."""
         blocks: list = []
         with self._lock:
             items = list(self.items)
-            answer = self.answer
-        header_shown = False
         for kind, val in items:
-            if kind == "narasi":
-                if not header_shown:
-                    blocks.append((("other", None),
-                                   Padding(Text("🤖 bagas-ai", style="bold #89b4fa"),
-                                           (1, 0, 0, 2))))
-                    header_shown = True
-                blocks.append((("other", None), Padding(_md(val), (0, 3, 1, 3))))
-            else:
+            if kind == "step":
                 for r in self._render_step(val):
                     blocks.append((("step", val["n"]), r))
-        if answer:
-            blocks.append((("other", None),
-                           Padding(Text("🤖 bagas-ai", style="bold #89b4fa"), (1, 0, 0, 2))))
-            blocks.append((("other", None), Padding(_md(answer), (0, 3, 1, 3))))
-        blocks.append((("other", None), self._footer()))
+        # Footer (spinner/status) HANYA selama berjalan. Saat done, region yang
+        # membeku ke riwayat cukup berisi langkah — tanpa "membatalkan…"/spinner
+        # basi, dan ringkasan dicetak SETELAH jawaban (urutan benar).
+        if not self.done:
+            blocks.append((("other", None), self._footer()))
         return blocks
 
     def __rich__(self):
@@ -570,7 +604,7 @@ class TurnView:
         tok = _fmt(int(self.disp))
         if self.done:
             with self._lock:
-                stps = [v for k, v in self.items if k == "step"]
+                stps = list(self.all_steps)
             n_step = len(stps)
             if not n_step:
                 return Text("")  # chat murni: tanpa footer
@@ -781,7 +815,13 @@ def main(resume: bool = False) -> None:
             return a.get("fact", "") or "fakta"
         return name
 
+    # Saat prompt pilihan (ask_user) aktif, POLLER input di loop giliran (msvcrt/
+    # mouse) HARUS berhenti membaca — kalau tidak, ketikan user DICURI poller dan
+    # dropdown inquirer rusak (keduanya membaca console yang sama).
+    input_paused = {"on": False}
+
     def choice_handler(question: str, options: list[str], multiple: bool) -> str:
+        input_paused["on"] = True
         live = live_holder.get("live")
         if live:
             live.stop()
@@ -797,6 +837,8 @@ def main(resume: bool = False) -> None:
                     message=question, choices=options, pointer="❯").execute()
         except (KeyboardInterrupt, EOFError):
             answer = "(dibatalkan)"
+        finally:
+            input_paused["on"] = False
         console.print(f"[dim]-> {answer}[/dim]")
         if live:
             live.start()
@@ -921,10 +963,23 @@ def main(resume: bool = False) -> None:
             process_classic(text)
             return
 
-        view = TurnView(agent)
+        # Saklar hidup callback: worker daemon yang DITINGGAL (Ctrl+C dua kali)
+        # tidak boleh lagi mencetak ke terminal setelah kita kembali ke prompt.
+        cbs_alive = {"on": True}
+
+        def _commit(renderables) -> None:
+            """Bekukan konten ke riwayat terminal (tercetak DI ATAS region live)."""
+            if not cbs_alive["on"]:
+                return
+            for r in renderables:
+                console.print(r)
+
+        view = TurnView(agent, commit=_commit)
         ctr = {"n": 0}
 
         def _on_tool(name: str, args: dict) -> None:
+            if not cbs_alive["on"]:
+                return
             ctr["n"] += 1
             n = ctr["n"]
             label = _step_label(name, args)
@@ -947,6 +1002,8 @@ def main(resume: bool = False) -> None:
                 _print_delete(p, content)
 
         def _on_result(name: str, result: str) -> None:
+            if not cbs_alive["on"]:
+                return
             rec = cur_step.get("rec")
             n = cur_step.get("n", ctr["n"])
             failed = (result or "").strip().startswith(("[GAGAL", "[error]"))
@@ -959,10 +1016,18 @@ def main(resume: bool = False) -> None:
             step_ctr["n"] = n
 
         def _on_msg(content: str) -> None:
-            view.add_narasi(content)
+            if cbs_alive["on"]:
+                view.add_narasi(content)
 
         def _on_retry(attempt: int, wait: float, exc: Exception) -> None:
-            view.note_retry(wait, f"percobaan ke-{attempt}")
+            if cbs_alive["on"]:
+                view.note_retry(wait, f"percobaan ke-{attempt}")
+
+        def _on_notice(msg: str) -> None:
+            """bagas-ai naik-kelas otomatis (ngeloop/performa turun) — beri tahu."""
+            _commit([Text.from_markup(
+                f"  [#f9e2af]⚡ naik kelas otomatis:[/] [dim]{_esc(msg)} "
+                f"— konteks dipertahankan[/]")])
 
         cancel_event = threading.Event()
         result: dict = {"answer": None, "error": None}
@@ -972,7 +1037,7 @@ def main(resume: bool = False) -> None:
                 result["answer"] = agent.run(
                     text, on_tool=_on_tool, on_message=_on_msg,
                     on_retry=_on_retry, cancel_event=cancel_event,
-                    on_tool_result=_on_result,
+                    on_tool_result=_on_result, on_notice=_on_notice,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
@@ -1021,7 +1086,11 @@ def main(resume: bool = False) -> None:
                 worker_thread.start()
                 while worker_thread.is_alive():
                     try:
-                        if mouse is not None:
+                        if input_paused["on"]:
+                            # ask_user sedang tampil -> JANGAN baca console; biarkan
+                            # inquirer yang menerima seluruh ketikan/klik.
+                            worker_thread.join(timeout=0.1)
+                        elif mouse is not None:
                             got = False
                             for ev in mouse.poll():
                                 got = True
@@ -1055,14 +1124,15 @@ def main(resume: bool = False) -> None:
                         else:
                             break
                 # Selesai: tandai & render sekali lagi supaya footer final tampil.
+                # Jawaban TIDAK ditaruh di region live (bisa sangat panjang ->
+                # bikin kedip & scroll rusak); dicetak ke riwayat setelah Live tutup.
                 view.done = True
-                if result["answer"] and not result["error"]:
-                    view.answer = (result["answer"] or "").strip() or None
                 live.refresh()
         except KeyboardInterrupt:
             interrupted = True
             cancel_event.set()
         finally:
+            cbs_alive["on"] = False   # worker yatim tak boleh mencetak lagi
             live_holder["live"] = None
             if mouse is not None:
                 try:
@@ -1071,15 +1141,41 @@ def main(resume: bool = False) -> None:
                     pass
 
         err = result["error"]
-        if interrupted or isinstance(err, (KeyboardInterrupt, llm.Cancelled)):
+        ans = (result["answer"] or "").strip()
+        if isinstance(err, (KeyboardInterrupt, llm.Cancelled)) or (
+                interrupted and not ans and err is None):
+            # Benar-benar terputus (tak ada jawaban yang sempat jadi).
             console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
         elif llm.is_rate_limit(err):
             console.print("\n  [yellow]⏳ rate limit NVIDIA (~40 permintaan/menit) — "
                           "tunggu ~1 menit lalu coba lagi[/yellow]\n")
         elif err is not None:
             console.print(f"\n  [red]✖ error:[/red] {err}\n")
-        # Sukses: seluruh giliran (narasi, langkah, jawaban, footer) sudah
-        # membeku dari region live -> tak perlu cetak apa pun lagi.
+        else:
+            # Jawaban dicetak SEBAGAI RIWAYAT biasa (di luar region live) supaya
+            # sepanjang apa pun tak bikin kedip dan terminal tetap bisa di-scroll.
+            # Ini juga menyelamatkan jawaban yang SELESAI tepat saat Ctrl+C ditekan
+            # (sudah tersimpan di memory — tampilkan, jangan dibuang).
+            if ans:
+                console.print()
+                console.print("  [bold #89b4fa]🤖 bagas-ai[/]")
+                console.print(Padding(_md(ans), (0, 3, 1, 3)))
+            # Ringkasan giliran SETELAH jawaban (urutan yang benar).
+            stps = view.all_steps
+            if stps:
+                n_file = sum(1 for s in stps
+                             if s["name"] in ("write_file", "delete_file"))
+                n_fail = sum(1 for s in stps if s["failed"])
+                seg = [f"{len(stps)} langkah"]
+                if n_file:
+                    seg.append(f"{n_file} file")
+                if n_fail:
+                    seg.append(f"[#f38ba8]{n_fail} gagal[/]")
+                seg += [_fmt_elapsed(time.time() - view.start),
+                        f"⚡ {_fmt(agent.tokens_last.total)} token"]
+                console.print(Padding(Text.from_markup(
+                    "[dim]" + " · ".join(seg) + "[/]   [dim]·[/]   "
+                    "[#94e2d5]/expand N[/][dim] lihat penuh[/]"), (0, 3, 1, 3)))
         _reindex_if_edited()
 
     def _reindex_if_edited() -> None:
@@ -1088,6 +1184,7 @@ def main(resume: bool = False) -> None:
         if any(s.get("name") in ("write_file", "delete_file")
                for s in steps.values()):
             try:
+                projectindex.invalidate()   # jangan pakai memo basi pasca-edit
                 agent.refresh_system_prompt()
             except Exception:  # noqa: BLE001
                 pass
@@ -1386,8 +1483,12 @@ def main(resume: bool = False) -> None:
         if ost != "updated":
             console.print(f"  [red]✖ gagal ({ost}):[/red] {out.get('detail','')}\n")
             return
-        note = "" if out.get("reinstalled") else (
-            f"  [dim](catatan pip: {out.get('pip_detail','')})[/dim]")
+        if out.get("note"):
+            note = f"\n  [#f9e2af]ℹ {_esc(out['note'])}[/]"
+        elif not out.get("reinstalled"):
+            note = f"  [dim](catatan pip: {_esc(out.get('pip_detail', ''))})[/dim]"
+        else:
+            note = ""
         console.print(
             "  [bold #a6e3a1]✓ bagas-ai diperbarui![/]  "
             "[dim]jalankan ulang[/dim] [#94e2d5]bagas-ai[/] "
@@ -1529,7 +1630,10 @@ def main(resume: bool = False) -> None:
 
     def do_bot() -> None:
         svc = tg_service.get("svc")
-        if svc is not None and svc.running:
+        # Toggle-off juga untuk svc yang MASIH proses menyala (alive tapi belum
+        # running) — kalau tidak, /bot berikutnya membuat service KEDUA dan dua
+        # polling bentrok ("Conflict: terminated by other getUpdates").
+        if svc is not None and (svc.running or svc.alive()):
             console.print("  [dim]📲 mematikan bot Telegram…[/dim]")
             try:
                 svc.stop()
@@ -1793,7 +1897,8 @@ def main(resume: bool = False) -> None:
         _save_total()
 
     _save_total()
-    if tg_service.get("svc") is not None and tg_service["svc"].running:
+    if tg_service.get("svc") is not None:
+        # stop() aman dipanggil apa pun keadaannya (running / masih menyala).
         try:
             tg_service["svc"].stop()
         except Exception:  # noqa: BLE001

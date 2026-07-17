@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 
 from . import config
@@ -175,29 +176,49 @@ def build(root: Path | None = None, progress=None) -> str:
     return text
 
 
+# Memo singkat: ensure() dipanggil BERUNTUN saat startup (main() lalu Agent() ->
+# system prompt). Tanpa memo, tiap panggilan memindai ulang SELURUH file proyek
+# hanya untuk signature. TTL pendek agar perubahan file tetap cepat terdeteksi.
+_MEMO = {"root": "", "text": "", "ts": 0.0}
+_MEMO_TTL = 5.0
+
+
 def ensure(root: Path | None = None, force: bool = False, progress=None) -> str:
     """Kembalikan peta proyek dari cache; bangun ulang bila belum ada / basi /force.
 
     `progress(done, total)` hanya dipanggil bila memang MEMBANGUN ulang (membaca
     file); bila memakai cache, tak ada progres (instan)."""
     root = Path(root or config.PROJECT_ROOT).resolve()
+    now = time.time()
+    if (not force and _MEMO["text"] and _MEMO["root"] == str(root)
+            and now - _MEMO["ts"] < _MEMO_TTL):
+        return _MEMO["text"]
     md_path, meta_path = _paths(root)
     sig = _signature(root)
+    text = ""
     if not force and md_path.is_file():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("sig") == sig:
-                return md_path.read_text(encoding="utf-8")
+                text = md_path.read_text(encoding="utf-8")
         except Exception:
+            text = ""
+    if not text:
+        text = build(root, progress=progress)
+        try:
+            md_path.write_text(text, encoding="utf-8")
+            meta_path.write_text(json.dumps({"sig": sig}, ensure_ascii=False),
+                                 encoding="utf-8")
+        except OSError:
             pass
-    text = build(root, progress=progress)
-    try:
-        md_path.write_text(text, encoding="utf-8")
-        meta_path.write_text(json.dumps({"sig": sig}, ensure_ascii=False),
-                             encoding="utf-8")
-    except OSError:
-        pass
+    _MEMO.update(root=str(root), text=text, ts=now)
     return text
+
+
+def invalidate() -> None:
+    """Paksa ensure() berikutnya memeriksa ulang disk (abaikan memo singkat).
+    Dipanggil setelah AI menulis/menghapus file agar peta tak pernah basi."""
+    _MEMO["ts"] = 0.0
 
 
 def as_prompt_block(root: Path | None = None) -> str:
