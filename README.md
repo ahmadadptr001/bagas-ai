@@ -7,7 +7,7 @@ dari **terminal mana pun** — mirip CLI `claude`.
 
 ---
 .
-## ✨ Kemampuan
+## ✨ Kemampuann
 
 | | |
 |---|---|
