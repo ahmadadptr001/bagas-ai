@@ -68,9 +68,14 @@ NVIDIA_BASE_URL: str = os.getenv(
 ).strip()
 
 # --- Model (semua di-host NVIDIA) ---
-# Default chat: DeepSeek-V4-Pro. Bisa diganti via /model, dan model terakhir
+# Default chat: GLM-5.2. Bisa diganti via /model, dan model terakhir
 # yang dipakai tersimpan (lihat prefs.py).
-CHAT_MODEL: str = os.getenv("CHAT_MODEL", "deepseek-ai/deepseek-v4-pro").strip()
+CHAT_MODEL: str = os.getenv("CHAT_MODEL", "z-ai/glm-5.2").strip()
+# Model DeepSeek DIHAPUS dari bagas-ai (sering gagal dipakai). Nilai lama yang
+# masih tersimpan di .env (mis. ditulis setup wizard versi lama) dialihkan
+# otomatis ke default agar pengguna tidak terjebak di model yang tak jalan.
+if "deepseek" in CHAT_MODEL.lower():
+    CHAT_MODEL = "z-ai/glm-5.2"
 # Model untuk analisis gambar (VLM NVIDIA resmi).
 VISION_MODEL: str = os.getenv(
     "VISION_MODEL", "meta/llama-3.2-90b-vision-instruct"
@@ -124,7 +129,7 @@ AUTO_FALLBACK: bool = _get_bool("AUTO_FALLBACK", True)
 MAX_ESCALATIONS: int = int(os.getenv("MAX_ESCALATIONS", "2"))
 TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.6"))
 # Timeout per request (detik). Model BESAR/REASONING (Nemotron-Ultra, Mistral-
-# Large, DeepSeek-Pro) sering berpikir lama; 120s terlalu pendek -> request
+# Large) sering berpikir lama; 120s terlalu pendek -> request
 # di-timeout lalu DIULANG dari nol (malah makin lambat). Beri ruang lebih lega.
 REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "300"))
 # Total waktu (detik) bagas-ai bertahan mencoba ulang saat NVIDIA rate-limit /

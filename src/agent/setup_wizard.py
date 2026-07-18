@@ -33,7 +33,7 @@ _ENV_ORDER = [
 
 _DEFAULTS = {
     "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
-    "CHAT_MODEL": "deepseek-ai/deepseek-v4-pro",
+    "CHAT_MODEL": "z-ai/glm-5.2",
     "VISION_MODEL": "meta/llama-3.2-90b-vision-instruct",
     "MAX_TOOL_ITERATIONS": "8",
     "TEMPERATURE": "0.6",

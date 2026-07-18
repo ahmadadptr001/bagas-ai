@@ -57,6 +57,13 @@ class Agent:
         session: Session | None = None,
     ) -> None:
         model_id = model or prefs.get_model() or config.CHAT_MODEL
+        if "deepseek" in model_id.lower():
+            # DeepSeek dihapus dari katalog (sering gagal dipakai) -> alihkan
+            # preferensi lama ke model pengganti ACAK (tanpa pola, beban
+            # menyebar antar model) & simpan agar migrasi sekali saja.
+            picked = models.random_fallback()
+            model_id = picked.id if picked else config.CHAT_MODEL
+            prefs.save(model=model_id)
         self.model_spec = models.spec_for_id(model_id)
         self._init_effort()
 
@@ -135,18 +142,19 @@ class Agent:
                     old, self.effort = self.effort, opts[i + 1]
                     self._escalations += 1
                     return f"effort {old} → {self.effort} ({reason})"
-        # 2) Ganti ke model lain yang belum dicoba di giliran ini.
+        # 2) Ganti ke model lain yang belum dicoba di giliran ini — dipilih
+        #    ACAK (bukan urutan katalog) agar pengalihan tak berpola: kegagalan
+        #    tidak selalu jatuh ke model yang itu-itu saja.
         self._tried_models.add(self.model_spec.id)
-        for _, _key, spec in models.catalog():
-            if spec.id in self._tried_models or spec.multimodal and not spec.reasoning:
-                continue
-            old = self.model_spec.label
-            self.model_spec = spec
-            self._tried_models.add(spec.id)
-            self._init_effort()
-            self._escalations += 1
-            return f"model {old} → {spec.label} ({reason})"
-        return None
+        spec = models.random_fallback(self._tried_models)
+        if spec is None:
+            return None
+        old = self.model_spec.label
+        self.model_spec = spec
+        self._tried_models.add(spec.id)
+        self._init_effort()
+        self._escalations += 1
+        return f"model {old} → {spec.label} ({reason})"
 
     def refresh_system_prompt(self) -> None:
         """Bangun ulang system prompt (mis. setelah add-dir) & pasang ke memory."""

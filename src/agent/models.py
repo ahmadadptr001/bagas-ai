@@ -14,6 +14,7 @@ yang berbeda, jadi ModelSpec menyimpan `reasoning_style`:
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
 
@@ -98,15 +99,10 @@ class ModelSpec:
 # Semua entri di bawah sudah diuji: ADA di katalog & bisa tool-calling.
 MODELS: dict[str, ModelSpec] = {
     # --- Serba-guna (default & cepat) ---
-    "deepseek": ModelSpec(
-        id="deepseek-ai/deepseek-v4-pro",
-        label="DeepSeek-V4 Pro",
-        note="Pilihan utama: paling pintar & serba-guna — tugas kompleks & coding berat",
-    ),
-    "deepseek-flash": ModelSpec(
-        id="deepseek-ai/deepseek-v4-flash",
-        label="DeepSeek-V4 Flash",
-        note="Cepat & hemat — coding cepat & agent yang banyak iterasi",
+    "glm": ModelSpec(
+        id="z-ai/glm-5.2",
+        label="GLM-5.2",
+        note="Pilihan utama: jago agentic & coding — tugas kompleks banyak langkah",
     ),
     "llama33": ModelSpec(
         id="meta/llama-3.3-70b-instruct",
@@ -162,11 +158,6 @@ MODELS: dict[str, ModelSpec] = {
         note="Efisien & konteks panjang — dokumen besar",
     ),
     # --- Agentic lain ---
-    "glm": ModelSpec(
-        id="z-ai/glm-5.2",
-        label="GLM-5.2",
-        note="Jago agentic & coding — otomasi banyak langkah",
-    ),
     "minimax": ModelSpec(
         id="minimaxai/minimax-m3",
         label="MiniMax-M3",
@@ -262,6 +253,23 @@ def spec_for_id(model_id: str) -> ModelSpec:
     return ModelSpec(id=model_id, label=model_id)
 
 
+def random_fallback(exclude: set[str] | frozenset[str] = frozenset()) -> ModelSpec | None:
+    """Pilih model pengganti secara ACAK dari katalog (sengaja tanpa pola).
+
+    Dipakai setiap kali bagas-ai harus MENGALIHKAN model otomatis: naik-kelas
+    karena macet/ngeloop, atau migrasi dari model yang dihapus. Pilihan acak
+    mencegah kegagalan selalu jatuh ke model urutan berikutnya yang sama dan
+    menyebarkan beban antar model. Model khusus-vision (multimodal tanpa
+    reasoning) dilewati. None bila semua kandidat ada di `exclude`.
+    """
+    pool = [
+        spec
+        for spec in MODELS.values()
+        if spec.id not in exclude and not (spec.multimodal and not spec.reasoning)
+    ]
+    return random.choice(pool) if pool else None
+
+
 def catalog() -> list[tuple[int, str, ModelSpec]]:
     """Daftar (nomor, alias, spec) terurut — untuk ditampilkan sebagai tabel."""
     return [(i, key, MODELS[key]) for i, key in enumerate(_ORDER, start=1)]
@@ -283,6 +291,6 @@ def list_text(current_id: str | None = None) -> str:
         mark = "  <- aktif" if current_id and spec.id == current_id else ""
         lines.append(f"  {i:>2}. {key:16s} {spec.label} ({spec.id}){tag}{mark}")
     lines.append(
-        "Pilih: /model <nama|nomor|id>   contoh: /model deepseek  atau  /model 2"
+        "Pilih: /model <nama|nomor|id>   contoh: /model glm  atau  /model 2"
     )
     return "\n".join(lines)
