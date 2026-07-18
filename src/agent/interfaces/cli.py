@@ -220,6 +220,15 @@ def _fmt_elapsed(sec: float) -> str:
     return f"{d}d {h}h"
 
 
+def _oneline(t: Text) -> Text:
+    """Baris untuk region live: JANGAN pernah wrap — wrap membuat tinggi region
+    berubah antar-frame sehingga rich.Live menggambar ulang kacau (kedip/baris
+    hantu, terutama di terminal sempit). Kelebihan dipotong dengan elipsis."""
+    t.no_wrap = True
+    t.overflow = "ellipsis"
+    return t
+
+
 # Warna gaya editor (GitHub-like): teks terang di atas bg gelap hijau/merah.
 _ADD = "#c9f5cf on #123d1c"
 _DEL = "#f5c9c9 on #3d1212"
@@ -230,14 +239,18 @@ _GUT_D = "#e06b6b on #2a0d0d"
 
 def _row(lineno: str, sign: str, text: str, style: str) -> None:
     """Cetak satu baris gaya editor '123 + kode' dengan bg + margin tepi."""
-    inner = min(console.width - 2 * _LPAD, 108)
+    inner = max(20, min(console.width - 2 * _LPAD, 108))
     line = Text(" " * _LPAD)  # margin kiri tanpa background
     line.append(f" {lineno:>4} {sign} ", style=style)
     body = f"{text}".replace("\t", "    ")
     line.append(body, style=style)
+    # Baris panjang DIPOTONG (bukan wrap): wrap membuat background hijau/merah
+    # meluber tak beraturan ke baris berikutnya.
+    line.truncate(_LPAD + inner, overflow="ellipsis")
     pad = (_LPAD + inner) - line.cell_len  # isi bg sampai batas kanan
     if pad > 0:
         line.append(" " * pad, style=style)
+    line.no_wrap = True
     console.print(line)
 
 
@@ -298,8 +311,15 @@ def show_logo() -> None:
     else:
         lines = ["b a g a s - a i"]
     width = max((len(ln) for ln in lines), default=24)
+    # Terminal lebih sempit dari seni figlet? wrap bikin logo jadi sampah —
+    # jatuh ke wordmark teks biasa yang selalu muat.
+    if width + _LPAD > console.width:
+        lines = ["b a g a s - a i"]
+        width = len(lines[0])
     for i, ln in enumerate(lines):
-        console.print(Text(m + ln, style=f"bold {_GRAD[min(i, len(_GRAD) - 1)]}"))
+        t = Text(m + ln, style=f"bold {_GRAD[min(i, len(_GRAD) - 1)]}")
+        t.no_wrap = True
+        console.print(t)
     # Garis aksen gradasi di bawah wordmark (aksen modern pengganti doodle).
     seg = max(12, min(width, 56))
     per = max(1, seg // len(_GRAD))
@@ -310,7 +330,7 @@ def show_logo() -> None:
     sub = Text(m)
     sub.append("AI agent serbaguna", style="bold #cdd6f4")
     sub.append("  ·  terminal · telegram · multitasking", style="dim")
-    console.print(sub)
+    console.print(_oneline(sub))
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +399,7 @@ class Status:
             t.append(f"  {frame} ", style="bold #f38ba8")
             t.append("membatalkan — menunggu langkah aman berhenti", style="#f38ba8")
             t.append("     Ctrl+C lagi = paksa", style="dim italic")
-            return t
+            return _oneline(t)
 
         # Mode menunggu rate limit: tampilkan hitung mundur + jaminan lanjut.
         if now < self.retry_until:
@@ -391,7 +411,7 @@ class Status:
             if self.retry_msg:
                 t.append(f"  ·  {self.retry_msg}", style="dim #f9e2af")
             t.append("     Ctrl+C batal", style="dim italic")
-            return t
+            return _oneline(t)
 
         target = float(self.agent.tokens_live)
         self.disp += (target - self.disp) * 0.30  # easing -> angka mengalir
@@ -414,7 +434,7 @@ class Status:
             t.append_text(Text.from_markup(dot))
             t.append(f"  langkah {self.step}", style="dim #94e2d5")
         t.append("     Ctrl+C batal", style="dim italic")
-        return t
+        return _oneline(t)
 
 
 # Tips singkat yang BERGANTIAN muncul di bawah status selama AI bekerja
@@ -535,7 +555,9 @@ class TurnView:
         return False
 
     # --- render satu langkah ---
-    def _render_step(self, rec: dict) -> list:
+    def _render_step(self, rec: dict, live_cap: int = 0) -> list:
+        """`live_cap` > 0 = sedang dirender di region LIVE: batasi jumlah baris
+        hasil ter-expand agar total region < tinggi layar (lihat _blocks)."""
         n = rec["n"]
         label = rec["label"] or ""
         if len(label) > 64:
@@ -548,10 +570,10 @@ class TurnView:
         else:
             icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
         phase = _PHASE.get(rec["name"], "langkah")
-        head = Text.from_markup(
+        head = _oneline(Text.from_markup(
             f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
             f"   [dim #94e2d5]#{n}[/]"
-        )
+        ))
         out = [head]
         # Pakai baris pra-hitung dari end_step (fallback hitung bila belum ada).
         lines = rec.get("_lines")
@@ -566,18 +588,22 @@ class TurnView:
         elif not lines:
             pass
         elif rec["expanded"] or self.expanded:
-            cap = 40
+            cap = live_cap if live_cap > 0 else 40
             shown = lines[:cap]
             body = Text("\n".join("     " + ln for ln in shown),
                         style="#f5c9c9" if failed else "#a6adc8")
-            out.append(body)
+            # Tiap baris hasil juga anti-wrap: baris super panjang (log/minified)
+            # yang wrap membuat tinggi region berubah -> kedip/baris hantu.
+            out.append(_oneline(body))
             if len(lines) > cap:
-                out.append(Text(f"     … {len(lines) - cap} baris lagi (/expand {n})",
-                                style="dim"))
+                out.append(_oneline(Text(
+                    f"     … {len(lines) - cap} baris lagi (/expand {n})",
+                    style="dim")))
         else:
             unit = "hasil" if rec["name"] == "web_search" else "baris"
             tag = "[#f38ba8]gagal[/] · " if failed else ""
-            out.append(Text.from_markup(f"     [dim]{tag}{nlines} {unit}[/]"))
+            out.append(_oneline(Text.from_markup(
+                f"     [dim]{tag}{nlines} {unit}[/]")))
         return out
 
     def _blocks(self) -> list:
@@ -590,9 +616,23 @@ class TurnView:
         blocks: list = []
         with self._lock:
             items = list(self.items)
+        # Region live WAJIB lebih pendek dari layar: bila lebih tinggi, rich.Live
+        # tak bisa menghapus baris yang sudah lewat atas layar -> baris hantu/
+        # dobel. Saat ada langkah ter-expand, jatah barisnya dihitung dari tinggi
+        # terminal dan dibagi rata antar langkah yang terbuka.
+        n_exp = sum(1 for kind, val in items
+                    if kind == "step" and not val["running"]
+                    and (val["expanded"] or self.expanded))
+        live_cap = 0
+        if n_exp:
+            try:
+                avail = console.size.height
+            except Exception:  # noqa: BLE001
+                avail = 30
+            live_cap = max(3, (avail - 4 - 2 * len(items)) // n_exp)
         for kind, val in items:
             if kind == "step":
-                for r in self._render_step(val):
+                for r in self._render_step(val, live_cap=live_cap):
                     blocks.append((("step", val["n"]), r))
         # Footer (spinner/status) HANYA selama berjalan. Saat done, region yang
         # membeku ke riwayat cukup berisi langkah — tanpa "membatalkan…"/spinner
@@ -609,14 +649,14 @@ class TurnView:
         frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
         now = time.time()
         if self.cancelling:
-            return Text.from_markup(
+            return _oneline(Text.from_markup(
                 f"  [bold #f38ba8]{frame}[/] [#f38ba8]membatalkan — "
-                f"menunggu langkah aman berhenti[/]   [dim italic]Ctrl+C lagi = paksa[/]")
+                f"menunggu langkah aman berhenti[/]   [dim italic]Ctrl+C lagi = paksa[/]"))
         if now < self.retry_until:
             left = self.retry_until - now
-            return Text.from_markup(
+            return _oneline(Text.from_markup(
                 f"  [bold #f9e2af]{frame}[/] [#f9e2af]NVIDIA sibuk — menunggu lalu "
-                f"melanjutkan[/] [bold #fab387]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]")
+                f"melanjutkan[/] [bold #fab387]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]"))
         target = float(self.agent.tokens_live)
         self.disp += (target - self.disp) * 0.30
         if abs(target - self.disp) < 1:
@@ -636,23 +676,23 @@ class TurnView:
             if n_fail:
                 seg.append(f"[#f38ba8]{n_fail} gagal[/]")
             seg += [_fmt_elapsed(el), f"⚡ {tok} token"]
-            return Text.from_markup(
+            return _oneline(Text.from_markup(
                 "  [dim]" + " · ".join(seg) + "[/]   [dim]·[/]   "
-                "[#94e2d5]/expand N[/][dim] lihat penuh[/]")
+                "[#94e2d5]/expand N[/][dim] lihat penuh[/]"))
         extra = f"   [dim]·[/]   [#f5c2e7]🔧 {self.tool}[/]" if self.tool else ""
         eff = getattr(self.agent, "effort", None)
         effseg = f"   [dim]·[/]   [#f5c2e7]◇ effort {eff}[/]" if eff else ""
-        status = Text.from_markup(
+        status = _oneline(Text.from_markup(
             f"  [bold #cba6f7]{frame}[/] [#cba6f7]{self.phase}[/]   [dim]·[/]   "
             f"[#89b4fa]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f9e2af]⚡ {tok}[/] "
             f"[dim]token[/]{effseg}{extra}"
-            f"   [dim italic]Ctrl+C batal[/]")
+            f"   [dim italic]Ctrl+C batal[/]"))
         # Tips bergantian (tiap 10 dtk) — baru muncul setelah beberapa detik agar
         # giliran singkat tak sempat kedip-kedip tips.
         if el > 4:
             tip = _TIPS[int(el / 10) % len(_TIPS)]
-            return Group(status, Text(f"  ✦ tips: {tip}",
-                                      style="dim italic", no_wrap=True))
+            return Group(status, _oneline(Text(f"  ✦ tips: {tip}",
+                                               style="dim italic")))
         return status
 
 
@@ -745,8 +785,10 @@ def main(resume: bool = False) -> None:
 
     def _bg_build_map() -> None:
         try:
+            # Spek laptop: deteksi LOKAL sekali saja (tanpa LLM) -> memory.
+            hw_status = osinfo.sync_hardware_to_memory()
             fresh = projectindex.refresh(config.PROJECT_ROOT)
-            if fresh != _primed_map:
+            if fresh != _primed_map or hw_status == "added":
                 agent.refresh_system_prompt()
         except Exception:  # noqa: BLE001
             pass
@@ -837,6 +879,19 @@ def main(resume: bool = False) -> None:
     # mouse) HARUS berhenti membaca — kalau tidak, ketikan user DICURI poller dan
     # dropdown inquirer rusak (keduanya membaca console yang sama).
     input_paused = {"on": False}
+    # Event Telegram yang datang saat console "dipinjam" menu — dicetak nanti.
+    _tg_pending: list[tuple[str, str]] = []
+
+    def _with_console(fn, *a, **k):
+        """Jalankan aksi ber-dropdown (inquirer) dengan console dipinjam penuh:
+        poller input berhenti & pesan thread lain (Telegram) ditahan dulu —
+        mencegah menu rusak oleh cetakan yang menyela."""
+        input_paused["on"] = True
+        try:
+            return fn(*a, **k)
+        finally:
+            input_paused["on"] = False
+            _tg_flush()
 
     def choice_handler(question: str, options: list[str], multiple: bool) -> str:
         input_paused["on"] = True
@@ -857,6 +912,7 @@ def main(resume: bool = False) -> None:
             answer = "(dibatalkan)"
         finally:
             input_paused["on"] = False
+            _tg_flush()
         console.print(f"[dim]-> {answer}[/dim]")
         if live:
             live.start()
@@ -1217,7 +1273,10 @@ def main(resume: bool = False) -> None:
             # (sudah tersimpan di memory — tampilkan, jangan dibuang).
             if ans:
                 console.print()
-                console.print("  [bold #89b4fa]🤖 bagas-ai[/]")
+                # Header bot cukup SEKALI per giliran — kalau narasi sudah
+                # menampilkannya, jawaban akhir tak perlu header kedua.
+                if not view._said:
+                    console.print("  [bold #89b4fa]🤖 bagas-ai[/]")
                 console.print(Padding(_md(ans), (0, 3, 1, 3)))
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
@@ -1605,13 +1664,13 @@ def main(resume: bool = False) -> None:
         if action in ("exit", "quit"):
             return True
         if action == "model":
-            pick_model()
+            _with_console(pick_model)
         elif action == "effort":
-            pick_effort()
+            _with_console(pick_effort)
         elif action == "dirs":
             show_dirs()
         elif action == "delete":
-            delete_sessions()
+            _with_console(delete_sessions)
         elif action == "new":
             _save_total()  # persist kontribusi sesi lama ke total global
             session = Session.create()
@@ -1647,7 +1706,7 @@ def main(resume: bool = False) -> None:
         elif action == "help":
             show_help()
         elif action == "update":
-            do_update()
+            _with_console(do_update)
         elif action == "models":
             pout(_models_panel(agent.model))
         elif action == "scan":
@@ -1655,7 +1714,7 @@ def main(resume: bool = False) -> None:
         elif action == "bot":
             do_bot()
         elif action in ("permissions-bot", "perms-bot", "permissions"):
-            do_permissions_bot()
+            _with_console(do_permissions_bot)
         return False
 
     def do_scan() -> None:
@@ -1673,7 +1732,24 @@ def main(resume: bool = False) -> None:
 
     # --- Bot Telegram DI DALAM sesi CLI -------------------------------------
     def _tg_event(kind: str, text: str) -> None:
-        """Tampilkan aktivitas bot Telegram di terminal (dipanggil dari thread bot)."""
+        """Tampilkan aktivitas bot Telegram di terminal (dipanggil dari thread bot).
+
+        Saat dropdown/menu (inquirer) sedang menggambar, mencetak dari thread
+        lain MERUSAK tampilannya — event DITAHAN dulu lalu dicetak setelah
+        menu selesai (lihat _with_console / choice_handler)."""
+        if input_paused["on"]:
+            _tg_pending.append((kind, text))
+            if len(_tg_pending) > 50:
+                _tg_pending.pop(0)
+            return
+        _tg_emit(kind, text)
+
+    def _tg_flush() -> None:
+        while _tg_pending:
+            k, t = _tg_pending.pop(0)
+            _tg_emit(k, t)
+
+    def _tg_emit(kind: str, text: str) -> None:
         t = _esc(text or "")
         if kind == "in":
             console.print(f"\n  [#89b4fa]📲 Telegram ▸[/] [#cdd6f4]{t}[/]")
@@ -1891,7 +1967,7 @@ def main(resume: bool = False) -> None:
         if text.startswith("/"):
             cmd = text[1:].strip().lower()
             if cmd == "menu":
-                if open_menu():
+                if _with_console(open_menu):
                     break
             elif cmd == "review":
                 # Audit bug/kesalahan sistem menyeluruh — dijalankan sbg giliran.
@@ -1910,7 +1986,7 @@ def main(resume: bool = False) -> None:
                     except ValueError as e:
                         console.print(f"[red]{e}[/red]")
                 else:
-                    pick_model()
+                    _with_console(pick_model)
             elif cmd == "add-dir" or cmd.startswith("add-dir "):
                 parts = text.split(maxsplit=1)
                 if len(parts) == 2:

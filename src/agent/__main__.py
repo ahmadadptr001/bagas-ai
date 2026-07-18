@@ -268,6 +268,7 @@ def main() -> None:
             sys.exit(1)
         from . import osinfo
         osinfo.sync_to_memory()  # deteksi & simpan OS (senyap) untuk penyesuaian perintah
+        osinfo.sync_hardware_to_memory()  # spek laptop: lokal, sekali saja
         from .interfaces.telegram_bot import main as run
         run()
         return
@@ -276,6 +277,7 @@ def main() -> None:
             sys.exit(1)
         from . import osinfo
         osinfo.sync_to_memory()
+        osinfo.sync_hardware_to_memory()
         from .interfaces.api import main as run
         run()
         return
