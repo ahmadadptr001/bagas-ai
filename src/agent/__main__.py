@@ -134,6 +134,55 @@ def _cmd_add_dir(args: list[str]) -> None:
         print("    bagas-ai akan memahami & bisa mengaksesnya di sesi berikutnya.")
 
 
+def _enforce_update() -> None:
+    """PAKSA pasang pembaruan sebelum chat bila cek terakhir menemukannya.
+
+    Instan saat tidak ada pembaruan: hanya membaca cache hasil cek latar
+    (tanpa jaringan), jadi startup tetap cepat. Bila cache bilang ada
+    pembaruan, update dipasang otomatis (tanpa tanya) lalu bagas-ai
+    dimulai ulang dengan versi baru.
+    """
+    from . import updater
+
+    try:
+        cache = updater.read_cache()
+    except Exception:
+        return
+    if cache.get("status") != "update_available":
+        return
+
+    local, remote = cache.get("local", "?"), cache.get("remote", "?")
+    print(f"⬆ Pembaruan bagas-ai tersedia ({local} → {remote}) — "
+          f"dipasang otomatis dulu…")
+    for line in (cache.get("log") or "").splitlines()[:5]:
+        print("   • " + line)
+    try:
+        out = updater.apply()
+    except KeyboardInterrupt:
+        print("\n✖ Update dibatalkan — bagas-ai butuh versi terbaru. Jalankan lagi ya.")
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠ Gagal memasang pembaruan: {exc}")
+        print("  Lanjut pakai versi sekarang; coba `bagas-ai update` nanti.\n")
+        return
+
+    if out.get("status") == "updated" and out.get("reinstalled"):
+        print("✓ bagas-ai diperbarui — memulai ulang…\n")
+        import subprocess
+        rc = subprocess.call(
+            [sys.executable, "-m", __package__ or "agent", *sys.argv[1:]])
+        sys.exit(rc)
+    if out.get("status") == "updated":
+        # Ter-update sebagian (mis. .exe terkunci di Windows) -> wajib buka ulang.
+        print("✓ Kode terbaru sudah ditarik. "
+              + (out.get("note") or "Tutup lalu buka lagi bagas-ai."))
+        sys.exit(0)
+    # Gagal (jaringan/git) -> jangan kunci pengguna dari AI-nya; beri tahu & lanjut.
+    print(f"⚠ Gagal memasang pembaruan ({out.get('status')}): "
+          f"{out.get('detail', '')}")
+    print("  Lanjut pakai versi sekarang; coba `bagas-ai update` nanti.\n")
+
+
 def _need_key() -> bool:
     if config.has_api_key():
         return False
@@ -209,6 +258,7 @@ def main() -> None:
     if mode in ("chat", "cli"):
         if _need_key():
             sys.exit(1)
+        _enforce_update()    # paksa update bila cek latar menemukan pembaruan
         _preload_with_bar()  # bar loading BERTAHAP selama impor pustaka (~1 dtk)
         from .interfaces.cli import main as run
         run(resume=resume)

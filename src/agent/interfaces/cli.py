@@ -180,17 +180,20 @@ def _update_notice() -> None:
     try:
         cache = updater.read_cache()
         if cache.get("status") == "update_available":
+            # Sampai sini artinya pemasangan paksa saat startup GAGAL
+            # (jaringan/git) — beri jalan manual.
             n = cache.get("behind", "?")
             local, remote = cache.get("local", ""), cache.get("remote", "")
             ver = f" ({local} → {remote})" if local and remote else ""
             pout(
                 f"[#f9e2af]⬆ Pembaruan bagas-ai tersedia[/] "
-                f"[dim]— {n} commit lebih baru{ver}.[/dim]  "
-                f"Ketik [#94e2d5]/update[/] untuk memperbarui.",
+                f"[dim]— {n} commit lebih baru{ver} (pemasangan otomatis "
+                f"gagal).[/dim]  Ketik [#94e2d5]/update[/] untuk mencoba lagi.",
                 bottom=0,
             )
-        # Segarkan cache untuk startup berikutnya (jalan di thread latar).
-        updater.background_refresh()
+        # Segarkan cache di thread latar; startup berikutnya otomatis
+        # MEMASANG pembaruan yang ditemukan (paksa, tanpa tanya).
+        updater.background_refresh(min_interval=1800)
     except Exception:
         pass
 
@@ -732,31 +735,23 @@ def main(resume: bool = False) -> None:
     else:
         session = Session.create()
 
-    # Peta proyek: kalau perlu MEMBANGUN (baca banyak file) tampilkan bar per-file;
-    # kalau cache segar, instan tanpa bar.
-    n_files = projectindex.count_files(config.PROJECT_ROOT)
-    if n_files >= 40:   # cukup besar untuk terasa -> tampilkan progres nyata
-        from rich.progress import (BarColumn, Progress, TaskProgressColumn,
-                                   TextColumn)
-        with Progress(
-            TextColumn("  [#cba6f7]memindai proyek[/]"),
-            BarColumn(bar_width=18, complete_style="#a6e3a1",
-                      finished_style="#a6e3a1"),
-            TaskProgressColumn(),
-            TextColumn("[dim]{task.fields[detail]}[/]"),
-            console=console, transient=True,
-        ) as _prog:
-            _t = _prog.add_task("", total=n_files, completed=0, detail="")
+    # Peta proyek: JANGAN memblokir startup — pengguna harus bisa LANGSUNG
+    # mengetik. Pakai cache disk apa adanya (instan, mungkin sedikit basi), lalu
+    # periksa kesegaran & bangun ulang DI THREAD LATAR; system prompt disegarkan
+    # otomatis begitu peta terbaru siap.
+    _primed_map = projectindex.prime(config.PROJECT_ROOT)
 
-            def _scan_cb(done: int, total: int) -> None:
-                _prog.update(_t, completed=done, detail=f"{done}/{total} file")
+    agent = Agent(session=session)   # instan: pakai peta cache / tanpa peta dulu
 
-            projectindex.ensure(config.PROJECT_ROOT, progress=_scan_cb)
-            _prog.update(_t, completed=n_files)
-    else:
-        projectindex.ensure(config.PROJECT_ROOT)   # kecil/cache -> instan
+    def _bg_build_map() -> None:
+        try:
+            fresh = projectindex.refresh(config.PROJECT_ROOT)
+            if fresh != _primed_map:
+                agent.refresh_system_prompt()
+        except Exception:  # noqa: BLE001
+            pass
 
-    agent = Agent(session=session)   # peta proyek sudah di-cache -> cepat
+    threading.Thread(target=_bg_build_map, daemon=True).start()
     # Panaskan openai di LATAR (impornya ~1.9 dtk) supaya respons PERTAMA tak
     # tertunda oleh impor — selesai jauh sebelum pengguna selesai mengetik.
     threading.Thread(target=llm._oa, daemon=True).start()
@@ -776,17 +771,16 @@ def main(resume: bool = False) -> None:
         verb = "terdeteksi & disimpan" if os_status == "added" else "diperbarui"
         pout(f"[dim]🖥  OS {verb}: {osinfo.summary()} — perintah terminal akan "
              f"disesuaikan.[/dim]", bottom=0)
-    # Peta proyek: sudah dibangun/di-cache saat Agent dibuat -> bagas-ai paham
-    # proyek tanpa baca ulang tiap giliran/ganti model/resume.
-    try:
-        _pmap = projectindex.ensure()
-        _pn = _pmap.count("\n- ")
-        if _pn:
-            pout(f"[dim]🗺  peta proyek siap (~{_pn} file) — bagas-ai sudah paham "
-                 f"strukturnya; ketik [/][#94e2d5]/scan[/][dim] untuk menyegarkan.[/]",
-                 bottom=0)
-    except Exception:  # noqa: BLE001
-        pass
+    # Peta proyek: dari cache instan (disegarkan di latar), atau sedang dibangun
+    # pertama kali di latar — dua-duanya TANPA menunda prompt.
+    _pn = _primed_map.count("\n- ")
+    if _pn:
+        pout(f"[dim]🗺  peta proyek siap (~{_pn} file) — disegarkan di latar; "
+             f"ketik [/][#94e2d5]/scan[/][dim] untuk paksa pindai ulang.[/]",
+             bottom=0)
+    else:
+        pout("[dim]🗺  peta proyek dibangun di latar — langsung ngetik aja, "
+             "tak perlu menunggu.[/dim]", bottom=0)
     _update_notice()  # info bila versi usang (dari cache) + cek ulang di latar
     console.print()
 

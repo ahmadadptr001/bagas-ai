@@ -179,8 +179,33 @@ def build(root: Path | None = None, progress=None) -> str:
 # Memo singkat: ensure() dipanggil BERUNTUN saat startup (main() lalu Agent() ->
 # system prompt). Tanpa memo, tiap panggilan memindai ulang SELURUH file proyek
 # hanya untuk signature. TTL pendek agar perubahan file tetap cepat terdeteksi.
-_MEMO = {"root": "", "text": "", "ts": 0.0}
+# `hold`: memo DITAHAN (tanpa TTL/cek basi) selama startup — diisi prime(),
+# dilepas refresh() di thread latar — supaya pengguna bisa LANGSUNG mengetik.
+_MEMO = {"root": "", "text": "", "ts": 0.0, "hold": False}
 _MEMO_TTL = 5.0
+
+
+def prime(root: Path | None = None) -> str:
+    """Muat peta dari cache DISK apa adanya (mungkin basi; TANPA memindai/
+    membangun — instan) dan TAHAN di memo agar startup tidak memblokir.
+    Kesegarannya diperiksa kemudian lewat refresh() di thread latar.
+    Return teks cache ("" bila proyek ini belum pernah dipetakan)."""
+    root = Path(root or config.PROJECT_ROOT).resolve()
+    md_path, _ = _paths(root)
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    _MEMO.update(root=str(root), text=text, ts=time.time(), hold=True)
+    return text
+
+
+def refresh(root: Path | None = None, progress=None) -> str:
+    """Lepaskan penahanan memo lalu periksa kesegaran & bangun peta bila basi
+    (blocking — panggil dari THREAD LATAR). Return teks peta terbaru."""
+    _MEMO["hold"] = False
+    _MEMO["ts"] = 0.0
+    return ensure(root, progress=progress)
 
 
 def ensure(root: Path | None = None, force: bool = False, progress=None) -> str:
@@ -190,8 +215,9 @@ def ensure(root: Path | None = None, force: bool = False, progress=None) -> str:
     file); bila memakai cache, tak ada progres (instan)."""
     root = Path(root or config.PROJECT_ROOT).resolve()
     now = time.time()
-    if (not force and _MEMO["text"] and _MEMO["root"] == str(root)
-            and now - _MEMO["ts"] < _MEMO_TTL):
+    if (not force and _MEMO["root"] == str(root)
+            and (_MEMO["hold"]
+                 or (_MEMO["text"] and now - _MEMO["ts"] < _MEMO_TTL))):
         return _MEMO["text"]
     md_path, meta_path = _paths(root)
     sig = _signature(root)
@@ -219,6 +245,7 @@ def invalidate() -> None:
     """Paksa ensure() berikutnya memeriksa ulang disk (abaikan memo singkat).
     Dipanggil setelah AI menulis/menghapus file agar peta tak pernah basi."""
     _MEMO["ts"] = 0.0
+    _MEMO["hold"] = False
 
 
 def as_prompt_block(root: Path | None = None) -> str:
