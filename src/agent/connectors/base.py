@@ -32,6 +32,26 @@ TokenCb = Callable[[str], None]
 # struktur (bullet, tabel, heading, blok kode) sehingga jawaban tampil polos di
 # terminal; ini merekonstruksi markdown dari HTML yang sudah dirender situs agar
 # rich bisa menampilkannya rapi (list, tabel, kode, bold, tautan).
+# Ambil ISI MENTAH tiap blok kode pada balasan terakhir. Dipakai untuk membaca
+# usulan tool: textContent = byte apa adanya, jadi backslash & escape JSON TIDAK
+# rusak oleh perenderan markdown situs (sumber bug "perintah salah path").
+JS_CODE_BLOCKS = r"""
+(selectors) => {
+  let el = null;
+  for (const s of selectors) {
+    const nodes = document.querySelectorAll(s);
+    if (nodes.length) { el = nodes[nodes.length - 1]; break; }
+  }
+  if (!el) return [];
+  const out = [];
+  for (const pre of el.querySelectorAll('pre')) {
+    const code = pre.querySelector('code');
+    out.push((code ? code.textContent : pre.textContent) || '');
+  }
+  return out;
+}
+"""
+
 JS_TO_MARKDOWN = r"""
 (selectors) => {
   let el = null;
@@ -186,6 +206,8 @@ class WebConnector:
     chat_url_template: str = ""
     # ID percakapan yang terakhir dipakai (diisi tiap kali send selesai).
     last_chat_id: str = ""
+    # Isi mentah blok kode balasan terakhir (diisi tiap kali send selesai).
+    last_code_blocks: list[str] = []
 
     def chat_url_for(self, chat_id: str) -> str:
         """URL percakapan lama. "" bila situs ini tak mendukung."""
@@ -402,6 +424,7 @@ class WebConnector:
             )
         box.click()
         counts_before = self._msg_counts(page)
+        text_before = self._read_last_message(page)
         if self.input_is_contenteditable:
             page.keyboard.insert_text(prompt)
         else:
@@ -414,7 +437,14 @@ class WebConnector:
         started = False
         while time.time() - t0 < self.start_timeout:
             check_cancel()
-            if self._answer_started(page, counts_before):
+            if self._answer_started(page, counts_before, text_before):
+                started = True
+                break
+            # Sinyal "mulai" bisa TERLEWAT (balasan sangat cepat, atau situs tak
+            # memberi penanda). Kalau situs sudah menyatakan selesai dan ada teks
+            # yang bisa dibaca, jangan menunggu sampai batas waktu — lanjut saja.
+            if time.time() - t0 > 6 and self._is_done(page) and \
+                    self._read_last_message(page):
                 started = True
                 break
             page.wait_for_timeout(300)
@@ -450,9 +480,14 @@ class WebConnector:
                 # "sedang mengetik", DAN (bila diminta) balasan sudah utuh
                 # menurut pemanggil — mencegah berhenti saat blok usulan tool
                 # baru separuh dirender.
-                if (stable >= self._stable_needed and self._is_done(page)
-                        and (complete_when is None or complete_when(cur))):
-                    break
+                if stable >= self._stable_needed and self._is_done(page):
+                    if complete_when is None or complete_when(cur):
+                        break
+                    # Syarat pemanggil tak kunjung terpenuhi padahal situs sudah
+                    # selesai & teks diam: jangan menunggu sampai batas waktu
+                    # (terminal terlihat macet) — terima apa adanya.
+                    if stable >= self._stable_needed * 4:
+                        break
             else:
                 stable = 0
                 last = cur
@@ -460,6 +495,9 @@ class WebConnector:
 
         # Catat ID percakapan yang sedang dipakai (untuk fitur bersih-bersih).
         self.last_chat_id = self.current_chat_id(page)
+        # Simpan isi MENTAH blok kode balasan ini — pemanggil memakainya untuk
+        # membaca usulan tool tanpa risiko rusak oleh perenderan markdown.
+        self.last_code_blocks = self._read_code_blocks(page)
 
         if not last:
             raise BrowserError(
@@ -540,7 +578,13 @@ class WebConnector:
                 out[sel] = 0
         return out
 
-    def _answer_started(self, page: Any, counts_before: dict[str, int]) -> bool:
+    def _answer_started(self, page: Any, counts_before: dict[str, int],
+                        text_before: str = "") -> bool:
+        """Balasan baru sudah mulai muncul?
+
+        Tiga petunjuk dicoba — cukup salah satu. Tanpa petunjuk teks, situs yang
+        MEMAKAI ULANG wadah pesan yang sama (jumlahnya tak bertambah) membuat
+        bagas-ai menunggu sia-sia sampai batas waktu & terasa macet."""
         if self.streaming_selector:
             try:
                 if page.query_selector(self.streaming_selector) is not None:
@@ -548,7 +592,10 @@ class WebConnector:
             except Exception:  # noqa: BLE001
                 pass
         now = self._msg_counts(page)
-        return any(now.get(s, 0) > n for s, n in counts_before.items())
+        if any(now.get(s, 0) > n for s, n in counts_before.items()):
+            return True
+        cur = self._read_last_message(page)
+        return bool(cur) and cur != text_before
 
     def _is_noise(self, text: str) -> bool:
         """True bila teks HANYA chrome UI situs (mis. 'Thought for 2s'), bukan
@@ -572,6 +619,14 @@ class WebConnector:
             except Exception:  # noqa: BLE001 - DOM sedang transisi
                 continue
         return ""
+
+    def _read_code_blocks(self, page: Any) -> list[str]:
+        """Isi MENTAH semua blok kode pada balasan terakhir (apa adanya)."""
+        try:
+            out = page.evaluate(JS_CODE_BLOCKS, list(self._msg_selectors()))
+            return [str(x) for x in (out or [])]
+        except Exception:  # noqa: BLE001
+            return []
 
     def _read_last_markdown(self, page: Any) -> str:
         """Jawaban TERAKHIR sebagai Markdown (list/tabel/heading/kode utuh),

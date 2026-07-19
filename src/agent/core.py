@@ -19,7 +19,12 @@ from .tools import base as tools
 # dengan menuliskan blok teks bertanda kurung siku ganda yang mudah di-parse,
 # lalu bagas-ai mengeksekusi tool itu SUNGGUHAN di laptop (mesin tool yang sama
 # dengan model NVIDIA) dan mengirim balik hasilnya — berulang sampai selesai.
-_WEB_TOOL_RE = re.compile(r"\[\[TOOL\]\](.*?)\[\[/TOOL\]\]", re.DOTALL)
+# Penanda ditulis ulang oleh AI web dengan variasi kecil (spasi di dalam kurung,
+# huruf kecil), jadi polanya dibuat longgar — kalau tidak, penanda lolos ke layar.
+_OPEN_MARK = r"\[\[\s*TOOL\s*\]\]"
+_CLOSE_MARK = r"\[\[\s*/\s*TOOL\s*\]\]"
+_WEB_TOOL_RE = re.compile(
+    _OPEN_MARK + r"(.*?)" + _CLOSE_MARK, re.DOTALL | re.IGNORECASE)
 # Pagar blok kode markdown (```json / ```): AI web sering merender usulan tool
 # sebagai blok kode, jadi pagarnya harus dibuang sebelum JSON di-parse.
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*")
@@ -86,43 +91,108 @@ def _web_tool_protocol() -> str:
         "5. Untuk membuat/mengubah file, usulkan write_file (bukan menampilkan "
         "kode untuk saya salin manual), karena tujuan saya memang agar bagas-ai "
         "yang menuliskannya langsung ke proyek.\n"
-        "6. Path file relatif terhadap folder proyek yang disebut di konteks.\n\n"
+        "6. Path file relatif terhadap folder proyek yang disebut di konteks, "
+        "dan pakai garis miring biasa (src/app/main.py) — JANGAN backslash, "
+        "supaya tidak rusak saat dikirim.\n"
+        "7. JANGAN memakai tool bawaanmu sendiri (pencarian web, analysis/REPL, "
+        "artifact) di percakapan ini — semuanya lewat [[TOOL]] saja. Kalau "
+        "sebuah langkah gagal, cukup usulkan langkah berikutnya; tak perlu "
+        "minta maaf atau menjelaskan panjang lebar.\n"
+        "8. Untuk membaca file, pakai read_file (bukan perintah shell seperti "
+        "Get-Content/cat) supaya hasilnya rapi & utuh.\n\n"
         f"LANGKAH yang bisa diusulkan (tanda * = wajib):\n{tools_text}"
     )
 
 
-def _parse_web_tool_calls(text: str) -> list[dict]:
-    """Ambil daftar {'name','arguments'} dari blok [[TOOL]] pada balasan AI web.
+# Backslash yang BUKAN escape JSON sah (mis. path Windows "src\entities" yang
+# kehilangan gandanya saat dirender web) -> digandakan agar JSON bisa dibaca.
+_BAD_ESCAPE_RE = re.compile(r'\\(?![\\/"bfnrtu]|u[0-9a-fA-F]{4})')
 
-    Toleran terhadap cara AI web merender blok: pagar markdown (```json), spasi/
-    baris kosong, dan teks tambahan sesudah objek JSON."""
-    calls = []
-    for m in _WEB_TOOL_RE.finditer(text or ""):
-        body = _FENCE_RE.sub("", m.group(1) or "").strip()
-        start = body.find("{")
-        if start < 0:
-            continue
+
+def _json_tool_obj(raw: str) -> dict | None:
+    """Baca satu objek tool JSON dari teks. Bila gagal karena escape rusak
+    (efek perenderan markdown), coba perbaiki lalu baca ulang."""
+    start = raw.find("{")
+    if start < 0:
+        return None
+    body = raw[start:]
+    for candidate in (body, _BAD_ESCAPE_RE.sub(r"\\\\", body)):
         try:
             # raw_decode: berhenti di akhir objek JSON pertama, sisanya diabaikan.
-            obj, _ = json.JSONDecoder().raw_decode(body[start:])
+            obj, _ = json.JSONDecoder().raw_decode(candidate)
         except ValueError:
             continue
-        if not isinstance(obj, dict):
-            continue
-        name = obj.get("tool") or obj.get("name")
-        args = obj.get("args") or obj.get("arguments") or {}
-        if name and isinstance(args, dict):
-            calls.append({"name": str(name), "arguments": args})
-    return calls
+        if isinstance(obj, dict) and (obj.get("tool") or obj.get("name")):
+            return obj
+    return None
+
+
+def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
+    """Ambil daftar {'name','arguments'} dari blok [[TOOL]] pada balasan AI web.
+
+    Toleran terhadap cara AI web merender blok: pagar markdown (```json), label
+    bahasa yang bocor, spasi, teks tambahan, dan escape yang rusak.
+
+    `code_blocks` = isi MENTAH blok kode dari DOM. Bila teks yang dirender gagal
+    dibaca (paling sering: backslash pada path Windows hilang), usulan diambil
+    dari sini karena isinya persis seperti yang ditulis AI web.
+    """
+    calls: list[dict] = []
+    for m in _WEB_TOOL_RE.finditer(text or ""):
+        body = _FENCE_RE.sub("", m.group(1) or "").strip()
+        obj = _json_tool_obj(body)
+        if obj is not None:
+            calls.append({"name": str(obj.get("tool") or obj.get("name")),
+                          "arguments": obj.get("args") or obj.get("arguments") or {}})
+
+    # Cadangan: sebagian/seluruh usulan gagal dibaca dari teks -> pakai isi
+    # mentah blok kode (byte apa adanya, tak tersentuh perenderan markdown).
+    n_markers = (text or "").count("[[TOOL]]")
+    if code_blocks and len(calls) < n_markers:
+        from_code: list[dict] = []
+        for raw in code_blocks:
+            obj = _json_tool_obj(str(raw))
+            if obj is not None:
+                from_code.append(
+                    {"name": str(obj.get("tool") or obj.get("name")),
+                     "arguments": obj.get("args") or obj.get("arguments") or {}})
+        if len(from_code) > len(calls):
+            calls = from_code
+
+    return [c for c in calls if c["name"] and isinstance(c["arguments"], dict)]
+
+
+# Penanda protokol yang boleh SAJA tersisa di teks (mis. blok rusak / tak
+# berpasangan). Semuanya dibuang sebelum jawaban ditampilkan ke pengguna.
+_WEB_MARKER_RE = re.compile(
+    _OPEN_MARK + r"|" + _CLOSE_MARK + r"|\[\[\s*/?\s*HASIL[^\]]*\]\]",
+    re.IGNORECASE)
+
+
+def _strip_web_markers(text: str) -> str:
+    """Buang blok usulan tool + SISA penanda protokol dari teks jawaban.
+
+    Tanpa ini, penanda seperti `[[/TOOL]]` bisa bocor ke layar saat blok tool
+    rusak/tak berpasangan — pengguna melihat penanda alih-alih jawaban."""
+    out = _WEB_TOOL_RE.sub("", text or "")
+    out = _WEB_MARKER_RE.sub("", out)
+    # Sisa pagar kode kosong akibat blok yang dibuang.
+    out = re.sub(r"^\s*```[a-zA-Z0-9_+-]*\s*$", "", out, flags=re.MULTILINE)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
 def _web_reply_complete(text: str) -> bool:
-    """False bila balasan AI web tampak MASIH ditulis: ada [[TOOL]] yang belum
-    ditutup [[/TOOL]]. Dipakai agar bagas-ai tidak menganggap balasan selesai
-    padahal blok usulan tool baru separuh dirender (akar bug 'AI cuma menjawab
-    iya tanpa melakukan apa pun')."""
+    """False HANYA bila balasan tampak masih ditulis: ada pembuka [[TOOL]] yang
+    belum ditutup. Dipakai agar bagas-ai tak menganggap balasan selesai saat blok
+    usulan tool baru separuh dirender.
+
+    PENTING: penutup nyasar (mis. AI menulis [[/TOOL]] sendirian) TIDAK boleh
+    dianggap 'belum selesai' — dulu itu membuat penungguan berjalan sampai batas
+    waktu 5 menit dan terminal terlihat macet."""
     t = text or ""
-    return t.count("[[TOOL]]") == t.count("[[/TOOL]]")
+    opens = len(re.findall(_OPEN_MARK, t, re.IGNORECASE))
+    closes = len(re.findall(_CLOSE_MARK, t, re.IGNORECASE))
+    return opens <= closes
 
 
 def _est_tokens(text: str) -> int:
@@ -500,20 +570,46 @@ class Agent:
                     pass
 
             steps = 0
+            repairs = 0   # berapa kali minta AI web mengirim ulang blok rusak
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise llm.Cancelled()
-                calls = _parse_web_tool_calls(reply)
+                calls = _parse_web_tool_calls(
+                    reply, getattr(conn, "last_code_blocks", ()))
+
+                # Ada penanda [[TOOL]] tapi isinya tak terbaca (rusak saat
+                # dirender web). Jangan tampilkan penanda mentah ke pengguna —
+                # minta AI web mengirim ulang usulannya dengan format benar.
+                if not calls and "[[TOOL]]" in (reply or "") and repairs < 2:
+                    repairs += 1
+                    reply = _send(
+                        "[SISTEM] Blok usulan tool-mu tidak terbaca (JSON-nya "
+                        "rusak saat dirender). Kirim ULANG langkah itu SAJA "
+                        "dengan format persis:\n[[TOOL]]\n```json\n"
+                        '{"tool": "...", "args": {...}}\n```\n[[/TOOL]]\n'
+                        "Pakai garis miring biasa pada path, tanpa teks lain.")
+                    continue
+
                 if not calls or steps >= _WEB_MAX_STEPS:
                     # Tak ada tool -> ini jawaban AKHIR. Bersihkan sisa penanda.
-                    answer = _WEB_TOOL_RE.sub("", reply).strip() or reply.strip()
+                    answer = _strip_web_markers(reply)
+                    if not answer:
+                        # Seluruh balasan hanya berupa blok/penanda yang tak
+                        # terbaca -> beri pesan jelas, jangan tampilkan penanda
+                        # mentah atau layar kosong.
+                        answer = (
+                            "Balasan dari AI web tak bisa kubaca sebagai langkah "
+                            "yang sah (formatnya rusak saat dirender). Coba "
+                            "kirim ulang permintaanmu, atau perjelas langkah "
+                            "yang kamu mau."
+                        )
                     if steps >= _WEB_MAX_STEPS and calls:
                         answer += ("\n\n_(batas langkah tool tercapai — sebagian "
                                    "aksi mungkin belum tuntas.)_")
                     break
 
                 # Narasi sebelum tool (teks di luar blok [[TOOL]]).
-                narration = _WEB_TOOL_RE.sub("", reply).strip()
+                narration = _strip_web_markers(reply)
                 if narration and on_message:
                     on_message(narration)
 
