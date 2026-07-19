@@ -16,6 +16,7 @@ berikutnya otomatis. Semua aksi Playwright dijalankan di thread hub (browser.py)
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Callable
 
@@ -157,6 +158,11 @@ class WebConnector:
     )
     # Selector penanda "sedang mengetik/streaming" (bila situs punya).
     streaming_selector: str = ""
+    # Teks yang BUKAN jawaban (chrome UI situs), mis. indikator berpikir
+    # "Thought for 2s". Bila SELURUH teks yang terbaca hanya ini, artinya jawaban
+    # BELUM muncul — jangan dianggap sebagai balasan (akar bug: giliran berhenti
+    # lebih awal & mengembalikan "Thought for 2s" alih-alih jawaban asli).
+    noise_pattern: str = ""
 
     # --- Aksi UI yang bisa DIKLIK program di situs (permintaan pengguna: ganti
     #     varian model & mode berpikir dari terminal via /effort). Tiap aksi =
@@ -198,15 +204,21 @@ class WebConnector:
         on_token: TokenCb | None = None,
         cancel_event: Any = None,
         new_chat: bool = False,
+        complete_when: Callable[[str], bool] | None = None,
     ) -> str:
         """Kirim prompt ke situs & kembalikan teks jawaban (lewat thread hub).
 
         `new_chat=True` memulai PERCAKAPAN BARU di situs (buang konteks chat lama)
         — dipakai pada pesan pertama tiap sesi bagas-ai supaya AI web tak terbawa
-        konteks percakapan sebelumnya."""
+        konteks percakapan sebelumnya.
+
+        `complete_when(teks)` (opsional) = syarat TAMBAHAN bahwa balasan sudah
+        utuh. Dipakai pemanggil untuk menahan kesimpulan 'selesai' saat balasan
+        masih setengah dirender (mis. blok usulan tool belum tertutup)."""
         return hub().submit(
             lambda h: self._send_on_hub(
-                h, prompt, on_status, on_token, cancel_event, new_chat),
+                h, prompt, on_status, on_token, cancel_event, new_chat,
+                complete_when),
             timeout=self.login_timeout + self.answer_timeout + 120,
         )
 
@@ -257,6 +269,7 @@ class WebConnector:
         on_token: TokenCb | None,
         cancel_event: Any,
         new_chat: bool = False,
+        complete_when: Callable[[str], bool] | None = None,
     ) -> str:
         from .. import llm  # untuk llm.Cancelled (impor tunda: hindari siklus)
 
@@ -332,7 +345,12 @@ class WebConnector:
                 emitted = len(cur)
             if cur == last:
                 stable += 1
-                if stable >= self._stable_needed and self._is_done(page):
+                # Selesai bila: teks berhenti berubah, situs tak lagi menandai
+                # "sedang mengetik", DAN (bila diminta) balasan sudah utuh
+                # menurut pemanggil — mencegah berhenti saat blok usulan tool
+                # baru separuh dirender.
+                if (stable >= self._stable_needed and self._is_done(page)
+                        and (complete_when is None or complete_when(cur))):
                     break
             else:
                 stable = 0
@@ -428,15 +446,24 @@ class WebConnector:
         now = self._msg_counts(page)
         return any(now.get(s, 0) > n for s, n in counts_before.items())
 
+    def _is_noise(self, text: str) -> bool:
+        """True bila teks HANYA chrome UI situs (mis. 'Thought for 2s'), bukan
+        jawaban sesungguhnya."""
+        if not self.noise_pattern:
+            return False
+        return bool(re.fullmatch(self.noise_pattern, (text or "").strip(),
+                                 re.DOTALL))
+
     def _read_last_message(self, page: Any) -> str:
         """Teks pesan jawaban TERAKHIR — kandidat selector dicoba berurutan.
-        Dipakai untuk deteksi kestabilan (poll), jadi sengaja teks polos & cepat."""
+        Dipakai untuk deteksi kestabilan (poll), jadi sengaja teks polos & cepat.
+        Teks yang cuma indikator berpikir dilewati (bukan jawaban)."""
         for sel in self._msg_selectors():
             try:
                 els = page.query_selector_all(sel)
                 if els:
                     txt = (els[-1].inner_text() or "").strip()
-                    if txt:
+                    if txt and not self._is_noise(txt):
                         return txt
             except Exception:  # noqa: BLE001 - DOM sedang transisi
                 continue

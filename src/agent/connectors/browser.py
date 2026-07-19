@@ -39,7 +39,10 @@ def _kill_profile_browsers(service: str | None = None) -> None:
         return
     try:
         target = _PROFILE_ROOT / service if service else _PROFILE_ROOT
-        marker = str(target).replace("'", "").replace("\\", "\\\\")
+        # PENTING: -like memakai backslash secara LITERAL. Jangan meng-escape
+        # (menggandakan) backslash — polanya jadi tak pernah cocok & proses
+        # Chrome yang mengunci profil tak pernah terbunuh.
+        marker = str(target).replace("'", "")
         ps = (
             "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%'\" | "
             "Where-Object { $_.CommandLine -like '*" + marker + "*' } | "
@@ -50,6 +53,13 @@ def _kill_profile_browsers(service: str | None = None) -> None:
             ["powershell", "-NoProfile", "-Command", ps],
             capture_output=True, timeout=25,
         )
+        # Sisa file kunci Chrome bisa menghalangi peluncuran berikutnya.
+        for name in ("lockfile", "SingletonLock", "SingletonCookie",
+                     "SingletonSocket"):
+            try:
+                (target / name).unlink()
+            except OSError:
+                pass
     except Exception:  # noqa: BLE001
         pass
 

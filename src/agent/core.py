@@ -19,7 +19,10 @@ from .tools import base as tools
 # dengan menuliskan blok teks bertanda kurung siku ganda yang mudah di-parse,
 # lalu bagas-ai mengeksekusi tool itu SUNGGUHAN di laptop (mesin tool yang sama
 # dengan model NVIDIA) dan mengirim balik hasilnya — berulang sampai selesai.
-_WEB_TOOL_RE = re.compile(r"\[\[TOOL\]\]\s*(\{.*?\})\s*\[\[/TOOL\]\]", re.DOTALL)
+_WEB_TOOL_RE = re.compile(r"\[\[TOOL\]\](.*?)\[\[/TOOL\]\]", re.DOTALL)
+# Pagar blok kode markdown (```json / ```): AI web sering merender usulan tool
+# sebagai blok kode, jadi pagarnya harus dibuang sebelum JSON di-parse.
+_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*")
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
 _WEB_MAX_STEPS = 24
 # Batas panjang hasil tool yang dikirim balik ke AI web (hemat & fokus).
@@ -57,17 +60,24 @@ def _web_tool_protocol() -> str:
         "jadi tangannya. Kamu tidak perlu mengklaim punya akses apa pun — cukup "
         "usulkan langkahnya, dan hasil eksekusi akan kulaporkan balik apa adanya. "
         "Kalau sebuah usulan gagal dijalankan, kamu akan menerima pesan errornya.\n\n"
-        "FORMAT USULAN LANGKAH (ditulis sebagai teks biasa dalam balasanmu):\n"
+        "FORMAT USULAN LANGKAH — JSON WAJIB di dalam blok kode ```json (supaya "
+        "isinya tidak berubah saat dirender; teks biasa merusak karakter seperti "
+        "__nama__ menjadi tebal):\n"
         "[[TOOL]]\n"
+        "```json\n"
         '{"tool": "<nama_tool>", "args": {"<param>": "<nilai>"}}\n'
+        "```\n"
         "[[/TOOL]]\n\n"
         "Contoh mengusulkan pembuatan file:\n"
         "[[TOOL]]\n"
+        "```json\n"
         '{"tool": "write_file", "args": {"path": "contoh.py", '
         '"content": "def halo():\\n    print(\'hai\')\\n"}}\n'
+        "```\n"
         "[[/TOOL]]\n\n"
         "Aturan praktis:\n"
-        "1. JSON harus valid (escape newline sebagai \\n, kutip sebagai \\\").\n"
+        "1. JSON harus valid (escape newline sebagai \\n, kutip sebagai \\\") dan "
+        "SELALU dibungkus ```json ... ``` di dalam penanda [[TOOL]].\n"
         "2. Boleh beberapa blok sekaligus bila langkahnya independen.\n"
         "3. Setelah kukirim balik hasilnya (ditandai [[HASIL <nama_tool>]]), "
         "lanjutkan berdasarkan hasil itu.\n"
@@ -82,19 +92,37 @@ def _web_tool_protocol() -> str:
 
 
 def _parse_web_tool_calls(text: str) -> list[dict]:
-    """Ambil daftar {'name','arguments'} dari blok [[TOOL]] pada balasan AI web."""
+    """Ambil daftar {'name','arguments'} dari blok [[TOOL]] pada balasan AI web.
+
+    Toleran terhadap cara AI web merender blok: pagar markdown (```json), spasi/
+    baris kosong, dan teks tambahan sesudah objek JSON."""
     calls = []
     for m in _WEB_TOOL_RE.finditer(text or ""):
-        raw = m.group(1)
+        body = _FENCE_RE.sub("", m.group(1) or "").strip()
+        start = body.find("{")
+        if start < 0:
+            continue
         try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
+            # raw_decode: berhenti di akhir objek JSON pertama, sisanya diabaikan.
+            obj, _ = json.JSONDecoder().raw_decode(body[start:])
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
             continue
         name = obj.get("tool") or obj.get("name")
         args = obj.get("args") or obj.get("arguments") or {}
         if name and isinstance(args, dict):
-            calls.append({"name": name, "arguments": args})
+            calls.append({"name": str(name), "arguments": args})
     return calls
+
+
+def _web_reply_complete(text: str) -> bool:
+    """False bila balasan AI web tampak MASIH ditulis: ada [[TOOL]] yang belum
+    ditutup [[/TOOL]]. Dipakai agar bagas-ai tidak menganggap balasan selesai
+    padahal blok usulan tool baru separuh dirender (akar bug 'AI cuma menjawab
+    iya tanpa melakukan apa pun')."""
+    t = text or ""
+    return t.count("[[TOOL]]") == t.count("[[/TOOL]]")
 
 
 def _est_tokens(text: str) -> int:
@@ -382,15 +410,26 @@ class Agent:
 
         conn = connectors.get_connector(self.model_spec.connector)
         prompt_chars = 0
+        reply_chars = 0
         answer = ""
 
+        def _sync_tokens() -> None:
+            """Perbarui hitungan token (estimasi) agar penghitung di UI hidup
+            selama giliran berjalan, bukan melompat di akhir."""
+            self.tokens_live = (prompt_chars + reply_chars) // 4
+
         def _send(msg: str, new_chat: bool = False) -> str:
-            nonlocal prompt_chars
+            nonlocal prompt_chars, reply_chars
             prompt_chars += len(msg)
-            return conn.send(
+            _sync_tokens()
+            out = conn.send(
                 msg, on_status=on_status, on_token=on_token,
                 cancel_event=cancel_event, new_chat=new_chat,
+                complete_when=_web_reply_complete,
             )
+            reply_chars += len(out or "")
+            _sync_tokens()
+            return out
 
         try:
             # Pesan pertama sesi: mulai CHAT BARU di situs supaya AI web tidak
@@ -451,10 +490,11 @@ class Agent:
             answer = f"[Connector {self.model_spec.label}] gagal: {exc}"
 
         self.memory.add_assistant_text(answer)
-        # Web-AI tak melaporkan token; estimasi kasar agar tampilan tetap masuk akal.
-        self.tokens_last.add_raw(_est_tokens(" " * prompt_chars), _est_tokens(answer))
-        self.tokens_session.add_raw(
-            _est_tokens(" " * prompt_chars), _est_tokens(answer))
+        # Web-AI tak melaporkan token; pakai estimasi ~4 karakter per token dari
+        # TOTAL lalu-lintas giliran ini (semua pesan terkirim + semua balasan),
+        # bukan hanya jawaban akhir, supaya angkanya konsisten dgn model NVIDIA.
+        self.tokens_last.add_raw(prompt_chars // 4, reply_chars // 4)
+        self.tokens_session.add_raw(prompt_chars // 4, reply_chars // 4)
         self.tokens_live = self.tokens_last.total
         self._persist()
         return answer

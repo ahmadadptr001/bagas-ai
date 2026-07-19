@@ -33,17 +33,22 @@ class ClaudeConnector(WebConnector):
     read_as_markdown = True  # jawaban Claude penuh markdown (list/tabel/kode)
     # Penanda "sedang mengetik": atribut data-is-streaming="true" (verified).
     streaming_selector = '[data-is-streaming="true"]'
+    # Saat Claude masih BERPIKIR, satu-satunya teks yang terbaca adalah indikator
+    # "Thought for 2s" (kadang berulang). Itu BUKAN jawaban — kalau dianggap
+    # jawaban, giliran berhenti dini & usulan tool tak pernah terbaca.
+    noise_pattern = r"(?:Thought for[^\n]*\s*)+"
 
     # Tombol/opsi UI yang bisa diklik program lewat /effort (DIVERIFIKASI live):
     #   tombol pemilih model: data-testid="model-selector-dropdown"
-    #   varian model (role=menuitemradio): Sonnet 5 / Haiku 4.5 (free), Opus 4.8 (Pro)
+    #   varian model (role=menuitemradio): Sonnet 5 / Haiku 4.5.
     #   submenu Effort (role=menuitem "Effort") -> Low/Medium/High/Extra/Max.
     #   ("Medium" ambigu dg pembuka submenu -> cocokkan "Default" utk level Medium.)
+    # Model berlabel "Pro" (Opus 4.8, Fable 5) SENGAJA TIDAK ditawarkan: memilihnya
+    # hanya memunculkan ajakan "Upgrade" dan tak mengganti model apa pun.
     web_model_button = 'button[data-testid="model-selector-dropdown"]'
     web_actions = (
-        ("Sonnet 5", ("Sonnet 5",), "model cepat & efisien (free)"),
-        ("Haiku 4.5", ("Haiku 4.5",), "model tercepat (free)"),
-        ("Opus 4.8", ("Opus 4.8",), "model tugas kompleks (butuh Pro)"),
+        ("Sonnet 5", ("Sonnet 5",), "model cepat & efisien"),
+        ("Haiku 4.5", ("Haiku 4.5",), "model tercepat"),
         ("Effort: Low", ("Effort", "Low"), "usaha berpikir minimal"),
         ("Effort: Medium", ("Effort", "Default"), "usaha berpikir sedang (default)"),
         ("Effort: High", ("Effort", "High"), "usaha berpikir tinggi"),
@@ -51,9 +56,22 @@ class ClaudeConnector(WebConnector):
         ("Effort: Max", ("Effort", "Max"), "usaha berpikir maksimum"),
     )
 
+    # Tombol "stop" hanya ada SELAMA Claude membalas — sinyal paling andal bahwa
+    # respons masih berjalan (atribut data-is-streaming sempat hilang saat fase
+    # berpikir, sehingga tak cukup diandalkan sendirian).
+    _STOP_SELECTORS = (
+        '[data-testid="stop-button"]',
+        'button[aria-label*="Stop"]',
+        'button[aria-label*="stop"]',
+    )
+
     def _is_done(self, page: Any) -> bool:
-        # Saat Claude masih mengetik, ada wadah dengan data-is-streaming="true".
         try:
-            return page.query_selector('[data-is-streaming="true"]') is None
+            if page.query_selector('[data-is-streaming="true"]') is not None:
+                return False
+            for sel in self._STOP_SELECTORS:
+                if page.query_selector(sel) is not None:
+                    return False
+            return True
         except Exception:  # noqa: BLE001
             return True
