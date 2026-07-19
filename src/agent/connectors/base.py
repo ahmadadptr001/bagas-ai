@@ -42,6 +42,21 @@ class WebConnector:
     _poll_ms: int = 400
 
     # ---- API publik ----
+    def connect(
+        self,
+        *,
+        on_status: StatusCb | None = None,
+        cancel_event: Any = None,
+    ) -> bool:
+        """Hubungkan ke situs — dipanggil SAAT MODEL DIPILIH (/model), bukan saat
+        pesan pertama. Belum pernah login -> diarahkan ke Chrome untuk login
+        SEKALI; sudah pernah -> langsung tersambung ke sesi chat.
+
+        Return True bila proses login baru saja dilakukan (False = sesi lama)."""
+        return hub().submit(
+            lambda h: self._connect_on_hub(h, on_status, cancel_event)
+        )
+
     def send(
         self,
         prompt: str,
@@ -81,7 +96,7 @@ class WebConnector:
                 raise llm.Cancelled()
 
         status("menyiapkan sesi browser…")
-        page = self._acquire_ready_page(h, status, check_cancel)
+        page, _ = self._acquire_ready_page(h, status, check_cancel)
 
         # --- kirim prompt ---
         check_cancel()
@@ -149,10 +164,27 @@ class WebConnector:
             )
         return last
 
+    def _connect_on_hub(
+        self, h: Any, on_status: StatusCb | None, cancel_event: Any
+    ) -> bool:
+        from .. import llm  # impor tunda: hindari siklus impor
+
+        def status(msg: str) -> None:
+            if on_status:
+                on_status(msg)
+
+        def check_cancel() -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise llm.Cancelled()
+
+        status(f"menghubungkan ke {self.label}…")
+        _, did_login = self._acquire_ready_page(h, status, check_cancel)
+        return did_login
+
     def _acquire_ready_page(
         self, h: Any, status: StatusCb, check_cancel: Callable[[], None]
-    ) -> Any:
-        """Kembalikan page siap-pakai yang SUDAH login.
+    ) -> tuple[Any, bool]:
+        """Kembalikan (page siap-pakai yang SUDAH login, apakah login BARU terjadi).
 
         Konsep connector: browser MUNCUL sekali untuk LOGIN, lalu MINGGIR
         (di-minimize) — seluruh proses & jawaban tampil di TERMINAL, pengguna tak
@@ -167,23 +199,24 @@ class WebConnector:
         if config.CONNECTOR_HEADLESS:
             page = h.page_for(self.service, headless=True)
             if self._input_ready(page, 1500):
-                return page
+                return page, False
             self._goto(page)
             if not self._input_ready(page, 10000):
                 raise BrowserError(
                     "mode headless belum siap (kemungkinan diblok anti-bot / "
                     "belum login). Hapus CONNECTOR_HEADLESS agar login via jendela."
                 )
-            return page
+            return page, False
 
         # Default: jendela TAMPIL (lolos Cloudflare) lalu di-minimize.
         page = h.page_for(self.service, headless=False)
         # Sudah di percakapan aktif? Lanjutkan (jangan buka chat baru tiap giliran).
         if self._input_ready(page, 1500):
             self._minimize(page)
-            return page
+            return page, False
 
         self._goto(page)
+        did_login = False
         if not self._input_ready(page, 8000):
             status(
                 "🔐 Silakan LOGIN di jendela Chrome yang terbuka "
@@ -191,8 +224,9 @@ class WebConnector:
             )
             self._wait_login(page, check_cancel)
             status("login berhasil ✓ — jendela diminimalkan, lanjut di terminal")
+            did_login = True
         self._minimize(page)
-        return page
+        return page, did_login
 
     def _minimize(self, page: Any) -> None:
         """Sembunyikan jendela browser (minimize) via CDP — pengguna cukup pakai

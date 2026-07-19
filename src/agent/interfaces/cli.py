@@ -1096,6 +1096,89 @@ def main(resume: bool = False) -> None:
                 f"[dim]{_fmt_elapsed(time.time() - turn_start)} · via browser[/]"),
                 (0, 3, 1, 3)))
 
+    def _connect_web(prev_model_id: str) -> None:
+        """Alur CONNECT saat model web DIPILIH (bukan saat pesan pertama):
+        belum pernah login -> diarahkan ke Chrome untuk login SEKALI; sudah
+        pernah -> langsung tersambung ke sesi chat. Gagal/dibatalkan -> kembali
+        ke model sebelumnya supaya pengguna tak terjebak di model yang mati."""
+        spec = agent.model_spec
+        try:
+            from .. import connectors
+        except Exception:  # noqa: BLE001
+            connectors = None
+        if connectors is None or not connectors.playwright_available():
+            console.print(
+                "  [yellow]⚠ Connector butuh Playwright:[/] [bold]pip install "
+                "playwright[/] lalu [bold]playwright install chromium[/]\n")
+            _revert_model(prev_model_id)
+            return
+
+        state = {"status": f"menghubungkan ke {spec.label}…"}
+        cancel_event = threading.Event()
+        result: dict = {"login": None, "error": None}
+
+        def worker() -> None:
+            try:
+                result["login"] = connectors.get_connector(spec.connector).connect(
+                    on_status=lambda m: state.__setitem__("status", m),
+                    cancel_event=cancel_event,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        def render():
+            return Text.from_markup(
+                f"  [#94e2d5]◐[/] [dim]{_esc(state['status'])}[/]")
+
+        wt = threading.Thread(target=worker, daemon=True)
+        interrupted = False
+        try:
+            with Live(render(), console=console, refresh_per_second=8,
+                      transient=True) as live:
+                wt.start()
+                while wt.is_alive():
+                    try:
+                        live.update(render())
+                        wt.join(timeout=0.1)
+                    except KeyboardInterrupt:
+                        if not interrupted:
+                            interrupted = True
+                            cancel_event.set()
+                            state["status"] = "membatalkan…"
+                        else:
+                            break
+        except KeyboardInterrupt:
+            interrupted = True
+            cancel_event.set()
+
+        if result["login"] is not None:
+            if result["login"]:
+                console.print(
+                    f"  [#a6e3a1]✓ login berhasil — terhubung ke "
+                    f"[bold]{_esc(spec.label)}[/bold]. Jendela diminimalkan; "
+                    f"chat & jawaban di terminal ini.[/]\n")
+            else:
+                console.print(
+                    f"  [#a6e3a1]✓ terhubung — sesi login [bold]"
+                    f"{_esc(spec.label)}[/bold] masih aktif, langsung ke chat.[/]\n")
+            return
+        err = result["error"]
+        why = ("dibatalkan" if interrupted or isinstance(err, llm.Cancelled)
+               else f"gagal: {err}")
+        console.print(f"  [yellow]⚠ koneksi {_esc(spec.label)} {_esc(str(why))}[/]")
+        _revert_model(prev_model_id)
+
+    def _revert_model(prev_model_id: str) -> None:
+        # Jangan "kembali" ke model web lain (sama-sama butuh koneksi) — pakai
+        # model NVIDIA default agar pengguna selalu punya model yang pasti jalan.
+        if models.spec_for_id(prev_model_id).is_web:
+            prev_model_id = config.CHAT_MODEL
+        try:
+            console.print(
+                f"  [dim]kembali ke model: {agent.set_model(prev_model_id)}[/dim]\n")
+        except ValueError:
+            console.print()
+
     def process(text: str) -> None:
         """Jalankan satu giliran INLINE (tanpa layar-penuh, tetap di alur terminal
         biasa). Seluruh giliran dirender di satu region rich.Live yang hidup &
@@ -1492,10 +1575,14 @@ def main(resume: bool = False) -> None:
             Text.from_markup(f"[dim]{body}[/dim]{hint}"), (0, 3, 1, 3)))
 
     # --- aksi menu (inquirer) ---
-    def pick_model() -> None:
+    def pick_model() -> str | None:
+        """Menu pilih model. Return ID model SEBELUMNYA bila yang dipilih adalah
+        connector web (pemanggil lalu menjalankan _connect_web), selain itu None."""
         def _describe(spec) -> str:
             # Satu baris: nama (rata) + badge kemampuan + SARAN "cocok untuk apa".
             badge = ""
+            if spec.is_web:
+                badge += "🌐"
             if spec.reasoning:
                 badge += "🧠"
             if spec.multimodal:
@@ -1514,10 +1601,14 @@ def main(resume: bool = False) -> None:
                 default=next((k for _, k, s in models.catalog()
                               if s.id == agent.model), None),
             ).execute()
+            prev = agent.model
             console.print(f"[green]✓ Model: {agent.set_model(sel)}[/green] "
                           f"[dim]({agent.model})[/dim]")
+            if agent.model_spec.is_web:
+                return prev
         except (KeyboardInterrupt, EOFError):
             pass
+        return None
 
     def pick_effort() -> None:
         if not agent.model_spec.supports_effort():
@@ -1740,7 +1831,9 @@ def main(resume: bool = False) -> None:
         if action in ("exit", "quit"):
             return True
         if action == "model":
-            _with_console(pick_model)
+            prev = _with_console(pick_model)
+            if prev is not None:
+                _connect_web(prev)
         elif action == "effort":
             _with_console(pick_effort)
         elif action == "dirs":
@@ -2058,12 +2151,20 @@ def main(resume: bool = False) -> None:
             elif cmd.startswith("model ") or cmd == "model":
                 parts = text.split(maxsplit=1)
                 if len(parts) == 2:
+                    prev_model = agent.model
                     try:
                         console.print(f"[green]✓ Model: {agent.set_model(parts[1])}[/green]")
                     except ValueError as e:
                         console.print(f"[red]{e}[/red]")
+                    else:
+                        # Model connector web: CONNECT sekarang juga (login sekali
+                        # bila belum pernah; sudah pernah -> langsung ke sesi chat).
+                        if agent.model_spec.is_web:
+                            _connect_web(prev_model)
                 else:
-                    _with_console(pick_model)
+                    prev_model = _with_console(pick_model)
+                    if prev_model is not None:
+                        _connect_web(prev_model)
             elif cmd == "add-dir" or cmd.startswith("add-dir "):
                 parts = text.split(maxsplit=1)
                 if len(parts) == 2:
