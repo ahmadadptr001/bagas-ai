@@ -156,7 +156,7 @@ class BrowserHub:
 
         prof = _PROFILE_ROOT / service
         prof.mkdir(parents=True, exist_ok=True)
-        ctx = self._launch(str(prof), headless)
+        ctx = self._launch(str(prof), headless, service)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         self._ctx[service] = (ctx, page)
         return page
@@ -181,10 +181,15 @@ class BrowserHub:
         except Exception:  # noqa: BLE001
             return False
 
-    def _launch(self, user_data_dir: str, headless: bool) -> Any:
+    def _launch(self, user_data_dir: str, headless: bool,
+               service: str | None = None) -> Any:
         """Buka persistent context. Utamakan CHROME asli (channel="chrome") agar
         lebih jarang di-blok anti-bot; fallback ke Chromium bawaan bila Chrome
-        tak terpasang. Tak meng-override user-agent -> pakai UA asli browser."""
+        tak terpasang. Tak meng-override user-agent -> pakai UA asli browser.
+
+        Bila peluncuran GAGAL karena profil masih dikunci Chrome sisa (proses
+        lama belum mati -> 'Target ... has been closed'), Chrome profil itu
+        dibunuh lalu peluncuran DIULANG sekali."""
         opts = dict(
             user_data_dir=user_data_dir,
             headless=headless,
@@ -201,14 +206,24 @@ class BrowserHub:
             ],
         )
         channel = config.CONNECTOR_BROWSER_CHANNEL
-        if channel:
-            try:
-                return self._pw.chromium.launch_persistent_context(
-                    channel=channel, **opts
-                )
-            except Exception:  # noqa: BLE001 - Chrome tak ada -> Chromium bawaan
-                pass
-        return self._pw.chromium.launch_persistent_context(**opts)
+
+        def _try() -> Any:
+            if channel:
+                try:
+                    return self._pw.chromium.launch_persistent_context(
+                        channel=channel, **opts
+                    )
+                except Exception:  # noqa: BLE001 - Chrome tak ada -> Chromium bawaan
+                    pass
+            return self._pw.chromium.launch_persistent_context(**opts)
+
+        try:
+            return _try()
+        except Exception:  # noqa: BLE001 - profil terkunci Chrome sisa?
+            _kill_profile_browsers(service)
+            import time as _t
+            _t.sleep(1.0)  # beri OS waktu melepas kunci profil
+            return _try()
 
 
 _HUB: BrowserHub | None = None

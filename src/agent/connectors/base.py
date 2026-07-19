@@ -26,6 +26,114 @@ StatusCb = Callable[[str], None]
 TokenCb = Callable[[str], None]
 
 
+# Serializer DOM -> Markdown (dijalankan DI HALAMAN). inner_text() membuang
+# struktur (bullet, tabel, heading, blok kode) sehingga jawaban tampil polos di
+# terminal; ini merekonstruksi markdown dari HTML yang sudah dirender situs agar
+# rich bisa menampilkannya rapi (list, tabel, kode, bold, tautan).
+JS_TO_MARKDOWN = r"""
+(selectors) => {
+  let el = null;
+  for (const s of selectors) {
+    const nodes = document.querySelectorAll(s);
+    if (nodes.length) { el = nodes[nodes.length - 1]; break; }
+  }
+  if (!el) return "";
+
+  function listItems(listEl, ordered) {
+    let out = ""; let i = 1;
+    for (const li of listEl.children) {
+      if (li.tagName.toLowerCase() !== "li") continue;
+      const marker = ordered ? (i + ".") : "-";
+      let content = ser(li).trim().replace(/\n{2,}/g, "\n").replace(/\n/g, "\n  ");
+      out += marker + " " + content + "\n";
+      i++;
+    }
+    return out;
+  }
+  function table(t) {
+    const rows = [];
+    for (const tr of t.querySelectorAll("tr")) {
+      const cells = [];
+      for (const c of tr.querySelectorAll("th,td"))
+        cells.push((c.innerText || "").trim().replace(/\|/g, "\\|").replace(/\n/g, " "));
+      if (cells.length) rows.push(cells);
+    }
+    if (!rows.length) return "";
+    let out = "| " + rows[0].join(" | ") + " |\n";
+    out += "| " + rows[0].map(() => "---").join(" | ") + " |\n";
+    for (let r = 1; r < rows.length; r++) out += "| " + rows[r].join(" | ") + " |\n";
+    return out + "\n";
+  }
+  function codeFence(pre) {
+    const codeEl = pre.querySelector("code");
+    let lang = "";
+    if (codeEl && codeEl.className) {
+      const m = codeEl.className.match(/language-([\w+-]+)/);
+      if (m) lang = m[1];
+    }
+    const code = (codeEl ? codeEl.textContent : pre.textContent).replace(/\n$/, "");
+    return "\n```" + lang + "\n" + code + "\n```\n\n";
+  }
+  function ser(node) {
+    let out = "";
+    for (const ch of node.childNodes) {
+      if (ch.nodeType === 3) { out += ch.textContent; continue; }
+      if (ch.nodeType !== 1) continue;
+      const tag = ch.tagName.toLowerCase();
+      // Buang chrome UI (tombol salin/svg) yang bukan isi jawaban.
+      if (tag === "button" || tag === "svg") continue;
+      if (/^h[1-6]$/.test(tag)) {
+        out += "\n" + "#".repeat(+tag[1]) + " " + (ch.innerText || "").trim() + "\n\n";
+      } else if (tag === "p") {
+        out += ser(ch).trim() + "\n\n";
+      } else if (tag === "br") {
+        out += "\n";
+      } else if (tag === "strong" || tag === "b") {
+        out += "**" + ser(ch).trim() + "**";
+      } else if (tag === "em" || tag === "i") {
+        out += "*" + ser(ch).trim() + "*";
+      } else if (tag === "del" || tag === "s") {
+        out += "~~" + ser(ch).trim() + "~~";
+      } else if (tag === "pre") {
+        out += codeFence(ch);
+      } else if (tag === "code") {
+        out += "`" + ch.textContent + "`";
+      } else if (tag === "ul") {
+        out += "\n" + listItems(ch, false) + "\n";
+      } else if (tag === "ol") {
+        out += "\n" + listItems(ch, true) + "\n";
+      } else if (tag === "blockquote") {
+        const inner = ser(ch).trim();
+        out += inner.split("\n").map(l => "> " + l).join("\n") + "\n\n";
+      } else if (tag === "a") {
+        const href = ch.getAttribute("href") || "";
+        const txt = ser(ch).trim();
+        out += href ? ("[" + txt + "](" + href + ")") : txt;
+      } else if (tag === "table") {
+        out += "\n" + table(ch);
+      } else if (tag === "hr") {
+        out += "\n---\n\n";
+      } else if (tag === "li") {
+        out += ser(ch);
+      } else {
+        // Wadah code-block (div pembungkus dg header bahasa + tombol salin):
+        // kalau elemen ini memuat <pre> dan sisa teksnya PENDEK (cuma label
+        // bahasa/salin), emit kode-nya saja supaya label tak bocor jadi teks.
+        const pre = ch.querySelector ? ch.querySelector("pre") : null;
+        if (pre) {
+          const extra = (ch.innerText || "").length - (pre.innerText || "").length;
+          if (extra < 40) { out += codeFence(pre); continue; }
+        }
+        out += ser(ch);
+      }
+    }
+    return out;
+  }
+  return ser(el).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+"""
+
+
 class WebConnector:
     """Basis connector. Subclass mengisi atribut kelas di bawah."""
 
@@ -38,6 +146,9 @@ class WebConnector:
     message_selector: str | tuple[str, ...] = ""
     input_is_contenteditable: bool = False
     submit_key: str = "Enter"  # tombol kirim
+    # True = jawaban FINAL direkonstruksi jadi Markdown dari HTML (agar list,
+    # tabel, heading, blok kode tampil rapi di terminal), bukan teks polos.
+    read_as_markdown: bool = False
     # Penanda URL halaman LOGIN/AUTH: selama URL page mengandung salah satu ini,
     # user pasti BELUM login — jangan pernah dicap "siap" walau ada elemen input
     # yang kebetulan cocok selector (inilah sumber salah-deteksi sebelumnya).
@@ -225,6 +336,12 @@ class WebConnector:
                 f"tidak ada jawaban terbaca dari {self.label}. Coba periksa "
                 "selektor pesan, atau kirim ulang."
             )
+        # Jawaban final: rekonstruksi Markdown dari HTML (list/tabel/heading/kode
+        # utuh) bila diaktifkan; kalau gagal, pakai teks polos yang sudah stabil.
+        if self.read_as_markdown:
+            md = self._read_last_markdown(page)
+            if md:
+                return md
         return last
 
     def _set_action_on_hub(self, h: Any, label: str, path: tuple[str, ...]) -> str:
@@ -304,7 +421,8 @@ class WebConnector:
         return any(now.get(s, 0) > n for s, n in counts_before.items())
 
     def _read_last_message(self, page: Any) -> str:
-        """Teks pesan jawaban TERAKHIR — kandidat selector dicoba berurutan."""
+        """Teks pesan jawaban TERAKHIR — kandidat selector dicoba berurutan.
+        Dipakai untuk deteksi kestabilan (poll), jadi sengaja teks polos & cepat."""
         for sel in self._msg_selectors():
             try:
                 els = page.query_selector_all(sel)
@@ -315,6 +433,15 @@ class WebConnector:
             except Exception:  # noqa: BLE001 - DOM sedang transisi
                 continue
         return ""
+
+    def _read_last_markdown(self, page: Any) -> str:
+        """Jawaban TERAKHIR sebagai Markdown (list/tabel/heading/kode utuh),
+        direkonstruksi dari HTML yang dirender situs."""
+        try:
+            md = page.evaluate(JS_TO_MARKDOWN, list(self._msg_selectors()))
+            return (md or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
 
     # ---- kesiapan halaman & login ----
     def _acquire_ready_page(

@@ -30,6 +30,7 @@ class ClaudeConnector(WebConnector):
         ".font-claude-response",
     )
     submit_key = "Enter"
+    read_as_markdown = True  # jawaban Claude penuh markdown (list/tabel/kode)
     # Penanda "sedang mengetik": atribut data-is-streaming="true" (verified).
     streaming_selector = '[data-is-streaming="true"]'
 
