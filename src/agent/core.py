@@ -6,12 +6,78 @@ pemilihan model & effort yang tersimpan, dan penyimpanan sesi.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from . import config, llm, models, prefs, prompts
 from .memory import Memory
 from .session import Session
 from .tools import base as tools
+
+# --- Protokol tool untuk CONNECTOR web (Claude/Qwen web) ---
+# AI web tak punya function-calling API, jadi kita ajari ia "memanggil" tool
+# dengan menuliskan blok teks bertanda kurung siku ganda yang mudah di-parse,
+# lalu bagas-ai mengeksekusi tool itu SUNGGUHAN di laptop (mesin tool yang sama
+# dengan model NVIDIA) dan mengirim balik hasilnya — berulang sampai selesai.
+_WEB_TOOL_RE = re.compile(r"\[\[TOOL\]\]\s*(\{.*?\})\s*\[\[/TOOL\]\]", re.DOTALL)
+# Batas langkah tool per giliran web (jaring anti-loop-liar).
+_WEB_MAX_STEPS = 24
+# Batas panjang hasil tool yang dikirim balik ke AI web (hemat & fokus).
+_WEB_RESULT_CAP = 6000
+
+
+def _web_tool_protocol() -> str:
+    """Instruksi + katalog tool untuk AI web agar bisa BERTINDAK (edit file,
+    jalankan perintah, cari web, dll) seperti model NVIDIA."""
+    lines = []
+    for sc in tools.get_schemas():
+        fn = sc.get("function", sc)
+        name = fn.get("name", "")
+        desc = (fn.get("description", "") or "").strip().split("\n")[0]
+        params = fn.get("parameters", {}).get("properties", {}) or {}
+        req = set(fn.get("parameters", {}).get("required", []) or [])
+        pieces = []
+        for pn, pinfo in params.items():
+            tag = pn + ("*" if pn in req else "")
+            pieces.append(f"{tag}:{pinfo.get('type', 'any')}")
+        lines.append(f"- {name}({', '.join(pieces)}) — {desc}")
+    tools_text = "\n".join(lines)
+    return (
+        "Kamu TERHUBUNG ke bagas-ai dan BISA melakukan aksi NYATA di laptop saya "
+        "(baca/tulis/hapus file di proyek, jalankan perintah & Python, cari web, "
+        "olah media, ingat fakta, dll) lewat TOOLS — sama seperti agent lokal.\n\n"
+        "CARA MEMAKAI TOOL: keluarkan satu atau beberapa blok PERSIS seperti ini "
+        "(boleh diapit teks penjelasan singkat):\n"
+        "[[TOOL]]\n"
+        '{\"tool\": \"<nama_tool>\", \"args\": { ... }}\n'
+        "[[/TOOL]]\n\n"
+        "Aturan:\n"
+        "1. JSON di dalam blok HARUS valid (escape newline & kutip di dalam string).\n"
+        "2. Boleh beberapa blok [[TOOL]] sekaligus bila langkahnya independen.\n"
+        "3. Setelah kamu mengirim tool, aku EKSEKUSI di laptop lalu kirim balik "
+        "hasilnya dengan penanda [[HASIL ...]]. Lanjutkan berdasarkan hasil itu.\n"
+        "4. Kalau tugas SUDAH SELESAI dan kamu tak butuh tool lagi, jawab BIASA "
+        "(tanpa blok [[TOOL]]) sebagai jawaban akhir untuk saya.\n"
+        "5. Untuk menulis/mengubah file proyek, pakai tool write_file (jangan "
+        "cuma menampilkan kode) supaya perubahannya BENAR-BENAR tersimpan.\n\n"
+        f"TOOL yang tersedia:\n{tools_text}"
+    )
+
+
+def _parse_web_tool_calls(text: str) -> list[dict]:
+    """Ambil daftar {'name','arguments'} dari blok [[TOOL]] pada balasan AI web."""
+    calls = []
+    for m in _WEB_TOOL_RE.finditer(text or ""):
+        raw = m.group(1)
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        name = obj.get("tool") or obj.get("name")
+        args = obj.get("args") or obj.get("arguments") or {}
+        if name and isinstance(args, dict):
+            calls.append({"name": name, "arguments": args})
+    return calls
 
 
 def _est_tokens(text: str) -> int:
@@ -216,6 +282,8 @@ class Agent:
             return self._run_connector(
                 user_input, cancel_event=cancel_event,
                 on_status=on_status, on_token=on_token,
+                on_tool=on_tool, on_message=on_message,
+                on_tool_result=on_tool_result, on_notice=on_notice,
             )
         self.memory.add_user(user_input)
         self.tokens_last = Usage()
@@ -245,31 +313,29 @@ class Agent:
         cancel_event: Any = None,
         on_status: Callable[[str], None] | None = None,
         on_token: Callable[[str], None] | None = None,
+        on_tool: Callable[[str, dict[str, Any]], None] | None = None,
+        on_message: Callable[[str], None] | None = None,
+        on_tool_result: Callable[[str, str], None] | None = None,
+        on_notice: Callable[[str], None] | None = None,
     ) -> str:
-        """Teruskan giliran ke AI web (browser) alih-alih ke API NVIDIA.
+        """Jalankan giliran lewat AI web (browser) sebagai AGENT penuh.
 
-        Web-AI menyimpan konteks percakapannya SENDIRI di dalam sesi browser;
-        memory bagas-ai tetap mencatat transkrip agar tampil di UI, tersimpan di
-        sesi, dan tetap nyambung bila nanti pengguna berganti ke model NVIDIA.
+        AI web tak punya function-calling, jadi kita ajari ia memakai TOOLS lewat
+        protokol teks (_web_tool_protocol): ia menuliskan blok [[TOOL]]{...}[[/TOOL]],
+        bagas-ai MENGEKSEKUSI tool itu sungguhan di laptop (mesin tool yang sama
+        dengan model NVIDIA), lalu mengirim balik hasilnya — berulang sampai AI web
+        menjawab tanpa blok tool (jawaban akhir). Dengan begitu Claude/Qwen web bisa
+        mengedit file, menjalankan perintah, mencari web, dll — setara model NVIDIA.
+
+        Web-AI menyimpan konteks percakapannya SENDIRI di sesi browser; memory
+        bagas-ai tetap mencatat transkrip agar tampil di UI & tersimpan.
         """
         from . import connectors  # impor tunda: Playwright opsional
 
         self.memory.add_user(user_input)
         self.tokens_last = Usage()
         self.tokens_live = 0
-        prompt_text = str(user_input)
-
-        # Sertakan KONTEKS laptop/proyek (OS, peta proyek, memory) SEKALI di pesan
-        # pertama sesi web ini — supaya Claude/Qwen web sadar konteks mesin seperti
-        # model NVIDIA (yang menerimanya via system prompt tiap panggilan).
-        include_ctx = not self._web_ctx_sent
-        if include_ctx:
-            try:
-                ctx = prompts.build_web_context()
-            except Exception:  # noqa: BLE001
-                ctx = ""
-            if ctx:
-                prompt_text = ctx + "\n\n----------\n\n" + prompt_text
+        user_text = str(user_input)
 
         if not connectors.playwright_available():
             answer = (
@@ -283,16 +349,79 @@ class Agent:
             self._persist()
             return answer
 
-        try:
-            answer = connectors.get_connector(self.model_spec.connector).send(
-                prompt_text,
-                on_status=on_status,
-                on_token=on_token,
+        # Pesan PERTAMA sesi web memuat: protokol tool + konteks laptop/proyek
+        # (keduanya SEKALI saja — AI web mengingatnya sepanjang chat).
+        include_ctx = not self._web_ctx_sent
+        first_msg = user_text
+        if include_ctx:
+            preamble = _web_tool_protocol()
+            try:
+                ctx = prompts.build_web_context()
+            except Exception:  # noqa: BLE001
+                ctx = ""
+            if ctx:
+                preamble += "\n\n" + ctx
+            first_msg = preamble + "\n\n==========\nPERMINTAAN SAYA:\n" + user_text
+
+        conn = connectors.get_connector(self.model_spec.connector)
+        prompt_chars = 0
+        answer = ""
+
+        def _send(msg: str) -> str:
+            nonlocal prompt_chars
+            prompt_chars += len(msg)
+            return conn.send(
+                msg, on_status=on_status, on_token=on_token,
                 cancel_event=cancel_event,
             )
-            # Konteks berhasil terkirim -> jangan ulangi di giliran berikutnya.
+
+        try:
+            reply = _send(first_msg)
             if include_ctx:
                 self._web_ctx_sent = True
+
+            steps = 0
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise llm.Cancelled()
+                calls = _parse_web_tool_calls(reply)
+                if not calls or steps >= _WEB_MAX_STEPS:
+                    # Tak ada tool -> ini jawaban AKHIR. Bersihkan sisa penanda.
+                    answer = _WEB_TOOL_RE.sub("", reply).strip() or reply.strip()
+                    if steps >= _WEB_MAX_STEPS and calls:
+                        answer += ("\n\n_(batas langkah tool tercapai — sebagian "
+                                   "aksi mungkin belum tuntas.)_")
+                    break
+
+                # Narasi sebelum tool (teks di luar blok [[TOOL]]).
+                narration = _WEB_TOOL_RE.sub("", reply).strip()
+                if narration and on_message:
+                    on_message(narration)
+
+                # Eksekusi tiap tool & kumpulkan hasil untuk dikirim balik.
+                result_blocks = []
+                for c in calls:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise llm.Cancelled()
+                    name, args = c["name"], c["arguments"]
+                    if on_tool:
+                        on_tool(name, args)
+                    result = tools.execute(name, args)
+                    if on_tool_result:
+                        on_tool_result(name, result)
+                    steps += 1
+                    clipped = result if len(result) <= _WEB_RESULT_CAP else (
+                        result[:_WEB_RESULT_CAP] + "\n…[hasil dipotong]")
+                    result_blocks.append(
+                        f"[[HASIL {name}]]\n{clipped}\n[[/HASIL]]")
+
+                follow = (
+                    "\n\n".join(result_blocks)
+                    + "\n\nLanjutkan tugas berdasarkan hasil di atas. Kalau perlu "
+                    "tool lagi, keluarkan blok [[TOOL]] berikutnya; kalau sudah "
+                    "SELESAI, beri jawaban akhir biasa (tanpa blok tool)."
+                )
+                reply = _send(follow)
         except llm.Cancelled:
             self.memory.repair_dangling_tools()
             self._persist()
@@ -304,8 +433,9 @@ class Agent:
 
         self.memory.add_assistant_text(answer)
         # Web-AI tak melaporkan token; estimasi kasar agar tampilan tetap masuk akal.
-        self.tokens_last.add_raw(_est_tokens(prompt_text), _est_tokens(answer))
-        self.tokens_session.add_raw(_est_tokens(prompt_text), _est_tokens(answer))
+        self.tokens_last.add_raw(_est_tokens(" " * prompt_chars), _est_tokens(answer))
+        self.tokens_session.add_raw(
+            _est_tokens(" " * prompt_chars), _est_tokens(answer))
         self.tokens_live = self.tokens_last.total
         self._persist()
         return answer
