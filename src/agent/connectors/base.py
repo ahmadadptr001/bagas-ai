@@ -33,6 +33,12 @@ class WebConnector:
     message_selector: str = "" # wadah pesan JAWABAN (diambil yang terakhir)
     input_is_contenteditable: bool = False
     submit_key: str = "Enter"  # tombol kirim
+    # Penanda URL halaman LOGIN/AUTH: selama URL page mengandung salah satu ini,
+    # user pasti BELUM login — jangan pernah dicap "siap" walau ada elemen input
+    # yang kebetulan cocok selector (inilah sumber salah-deteksi sebelumnya).
+    login_url_markers: tuple[str, ...] = (
+        "login", "signin", "sign-in", "sign_in", "oauth", "/auth", "sso",
+    )
 
     # Batas waktu (detik).
     login_timeout: float = 300.0     # tunggu pengguna menyelesaikan login
@@ -198,10 +204,10 @@ class WebConnector:
         # Opt-in: headless sejati (mungkin diblok anti-bot di sebagian situs).
         if config.CONNECTOR_HEADLESS:
             page = h.page_for(self.service, headless=True)
-            if self._input_ready(page, 1500):
+            if self._chat_ready(page, 1500):
                 return page, False
             self._goto(page)
-            if not self._input_ready(page, 10000):
+            if not self._chat_ready(page, 10000):
                 raise BrowserError(
                     "mode headless belum siap (kemungkinan diblok anti-bot / "
                     "belum login). Hapus CONNECTOR_HEADLESS agar login via jendela."
@@ -210,17 +216,19 @@ class WebConnector:
 
         # Default: jendela TAMPIL (lolos Cloudflare) lalu di-minimize.
         page = h.page_for(self.service, headless=False)
-        # Sudah di percakapan aktif? Lanjutkan (jangan buka chat baru tiap giliran).
-        if self._input_ready(page, 1500):
+        # Sudah di percakapan aktif & login? Lanjutkan (jangan buka chat baru).
+        if self._chat_ready(page, 1500):
             self._minimize(page)
             return page, False
 
         self._goto(page)
         did_login = False
-        if not self._input_ready(page, 8000):
+        if not self._chat_ready(page, 8000):
+            # BELUM login (masih di halaman login/auth) -> user HARUS sign-in
+            # sungguhan di jendela; kita menunggu sampai benar-benar masuk chat.
             status(
-                "🔐 Silakan LOGIN di jendela Chrome yang terbuka "
-                "(termasuk CAPTCHA/2FA). Menunggu…"
+                "🔐 Silakan SIGN-IN di jendela Chrome yang terbuka "
+                "(email/Google + kode/CAPTCHA). Aku tunggu sampai selesai…"
             )
             self._wait_login(page, check_cancel)
             status("login berhasil ✓ — jendela diminimalkan, lanjut di terminal")
@@ -248,22 +256,57 @@ class WebConnector:
             raise BrowserError(f"gagal membuka {self.chat_url}: {exc}") from exc
 
     def _wait_login(self, page: Any, check_cancel: Callable[[], None]) -> None:
+        """Tunggu pengguna BENAR-BENAR menyelesaikan sign-in di jendela Chrome."""
         deadline = time.time() + self.login_timeout
         while time.time() < deadline:
             check_cancel()
-            if self._input_ready(page, 2000):
+            try:
+                if page.is_closed():
+                    raise BrowserError(
+                        "jendela Chrome ditutup sebelum login selesai. "
+                        "Pilih ulang modelnya untuk mencoba lagi."
+                    )
+            except BrowserError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+            if self._chat_ready(page, 2000):
                 return
-            page.wait_for_timeout(1500)
+            try:
+                page.wait_for_timeout(1000)
+            except Exception:  # noqa: BLE001 - page mati saat menunggu
+                raise BrowserError(
+                    "jendela Chrome tertutup saat menunggu login. Coba lagi."
+                )
         raise BrowserError(
             "login tidak selesai dalam waktu yang ditentukan. Coba lagi."
         )
 
-    def _input_ready(self, page: Any, timeout_ms: int) -> bool:
-        """True bila kotak input terlihat (indikator halaman chat siap/login OK)."""
+    def _on_login_page(self, page: Any) -> bool:
+        """True bila page sedang di halaman login/auth (claude.ai/login, Google
+        sign-in, dsb) — dipastikan lewat URL, bukan tebakan elemen."""
         try:
-            page.wait_for_selector(
-                self.input_selector, timeout=timeout_ms, state="visible"
-            )
-            return True
+            url = (page.url or "").lower()
         except Exception:  # noqa: BLE001
             return False
+        return any(m in url for m in self.login_url_markers)
+
+    def _chat_ready(self, page: Any, timeout_ms: int) -> bool:
+        """Deteksi KETAT bahwa halaman chat siap & user SUDAH login:
+        (1) URL BUKAN halaman login/auth, dan (2) kotak input chat terlihat.
+        Halaman login yang kebetulan punya elemen mirip input tak akan lolos."""
+        deadline = time.time() + timeout_ms / 1000.0
+        while True:
+            if not self._on_login_page(page):
+                try:
+                    el = page.query_selector(self.input_selector)
+                    if el is not None and el.is_visible():
+                        return True
+                except Exception:  # noqa: BLE001 - DOM/page sedang transisi
+                    pass
+            if time.time() >= deadline:
+                return False
+            try:
+                page.wait_for_timeout(250)
+            except Exception:  # noqa: BLE001
+                return False
