@@ -79,6 +79,14 @@ class ClaudeConnector(WebConnector):
     file_input_selector = 'input[type="file"]'
     # Penanda "sedang mengetik": atribut data-is-streaming="true" (verified).
     streaming_selector = '[data-is-streaming="true"]'
+    # Tombol "stop" hanya ada SELAMA Claude membalas — sinyal paling andal bahwa
+    # respons masih berjalan (atribut data-is-streaming sempat hilang saat fase
+    # berpikir, sehingga tak cukup diandalkan sendirian).
+    stop_selectors = (
+        '[data-testid="stop-button"]',
+        'button[aria-label*="Stop"]',
+        'button[aria-label*="stop"]',
+    )
     # Saat Claude masih BERPIKIR, satu-satunya teks yang terbaca adalah indikator
     # "Thought for 2s" (kadang berulang). Itu BUKAN jawaban — kalau dianggap
     # jawaban, giliran berhenti dini & usulan tool tak pernah terbaca.
@@ -126,26 +134,6 @@ class ClaudeConnector(WebConnector):
         ("Effort: Extra", ("Effort", "Extra"), "usaha berpikir ekstra"),
         ("Effort: Max", ("Effort", "Max"), "usaha berpikir maksimum"),
     )
-
-    # Tombol "stop" hanya ada SELAMA Claude membalas — sinyal paling andal bahwa
-    # respons masih berjalan (atribut data-is-streaming sempat hilang saat fase
-    # berpikir, sehingga tak cukup diandalkan sendirian).
-    _STOP_SELECTORS = (
-        '[data-testid="stop-button"]',
-        'button[aria-label*="Stop"]',
-        'button[aria-label*="stop"]',
-    )
-
-    def _is_done(self, page: Any) -> bool:
-        try:
-            if page.query_selector('[data-is-streaming="true"]') is not None:
-                return False
-            for sel in self._STOP_SELECTORS:
-                if page.query_selector(sel) is not None:
-                    return False
-            return True
-        except Exception:  # noqa: BLE001
-            return True
 
     # ---- pengelolaan percakapan (agar chat tak menumpuk di akun) ----
     def supports_chat_admin(self) -> bool:

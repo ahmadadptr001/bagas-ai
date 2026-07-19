@@ -265,8 +265,16 @@ class WebConnector:
     #     varian model & mode berpikir dari terminal via /effort). Tiap aksi =
     #     (label tampil, urutan teks yang diklik berurutan, deskripsi). Urutan
     #     >1 elemen dipakai untuk menu bertingkat (mis. buka "Effort" lalu "High").
-    web_model_button: str = ""   # tombol pembuka menu (diklik dulu bila ada)
-    web_actions: tuple[tuple[str, tuple[str, ...], str], ...] = ()
+    # Tombol pembuka menu BAWAAN (dipakai bila aksi tak menyebut tombolnya
+    # sendiri). Situs bisa punya LEBIH DARI SATU kontrol — mis. chat.qwen.ai
+    # menaruh pemilih model di ATAS dan pemilih mode di dekat kotak input —
+    # jadi tiap aksi boleh menentukan tombol pembukanya sendiri (elemen ke-4).
+    web_model_button: str = ""
+    # (label, urutan teks yang diklik, keterangan[, selector tombol pembuka])
+    web_actions: tuple[tuple, ...] = ()
+    # Selector tombol "berhenti" yang HANYA ada selagi situs menjawab. Penanda
+    # paling andal bahwa balasan masih berjalan.
+    stop_selectors: tuple[str, ...] = ()
 
     # Batas waktu (detik).
     login_timeout: float = 300.0     # tunggu pengguna menyelesaikan login
@@ -425,24 +433,38 @@ class WebConnector:
         )
 
     def set_web_option(self, label: str) -> str:
-        """Klik OPSI di UI web (varian model / mode berpikir) — dipakai /effort.
+        """Klik OPSI di UI web (varian model / mode) — dipakai /effort.
         `label` = label aksi dari web_options() (mis. "Sonnet 5", "Effort: High")."""
-        path = next((p for lbl, p, _ in self.web_actions if lbl == label), None)
-        if path is None:
+        entry = next((a for a in self.web_actions if a[0] == label), None)
+        if entry is None:
             raise BrowserError(f"opsi '{label}' tak dikenal untuk {self.label}")
+        path = entry[1]
+        # Tombol pembuka khusus aksi ini (bila ada) — penting untuk situs yang
+        # kontrolnya tersebar di beberapa tempat.
+        opener = entry[3] if len(entry) > 3 and entry[3] else self.web_model_button
         return hub().submit(
-            lambda h: self._set_action_on_hub(h, label, path),
+            lambda h: self._set_action_on_hub(h, label, path, opener),
             timeout=self.login_timeout + 60,
         )
 
     def web_options(self) -> list[tuple[str, str]]:
         """Daftar (label, deskripsi) opsi web yang bisa dikendalikan program."""
-        return [(lbl, desc) for lbl, _path, desc in self.web_actions]
+        return [(a[0], a[2]) for a in self.web_actions]
 
     # ---- hook opsional untuk subclass ----
     def _is_done(self, page: Any) -> bool:
-        """Petunjuk KHUSUS-situs bahwa balasan sudah tuntas (mis. indikator
-        streaming hilang). Default True -> murni andalkan kestabilan teks."""
+        """Balasan sudah tuntas? Dua penanda dipakai bila situs menyediakannya:
+        indikator streaming hilang DAN tombol "berhenti" tak lagi ada. Tanpa
+        keduanya, jatuh ke True -> murni mengandalkan kestabilan teks."""
+        try:
+            if self.streaming_selector and \
+                    page.query_selector(self.streaming_selector) is not None:
+                return False
+            for sel in self.stop_selectors:
+                if page.query_selector(sel) is not None:
+                    return False
+        except Exception:  # noqa: BLE001
+            return True
         return True
 
     # ---- internal (berjalan DI thread hub) ----
@@ -610,21 +632,17 @@ class WebConnector:
                 return md
         return last
 
-    def _set_action_on_hub(self, h: Any, label: str, path: tuple[str, ...]) -> str:
-        """Klik aksi UI (varian model / effort). Buka tombol menu bila ada, lalu
+    def _set_action_on_hub(self, h: Any, label: str, path: tuple[str, ...],
+                           opener: str = "") -> str:
+        """Klik aksi UI (varian model / mode). Buka tombol menunya bila ada, lalu
         klik tiap teks di `path` berurutan (dukungan menu bertingkat)."""
         page, _ = self._acquire_ready_page(h, lambda m: None, lambda: None)
 
-        opened = False
-        if self.web_model_button:
-            try:
-                btn = page.query_selector(self.web_model_button)
-                if btn is not None and btn.is_visible():
-                    btn.click()
-                    opened = True
-                    page.wait_for_timeout(600)
-            except Exception:  # noqa: BLE001
-                opened = False
+        opened = self._open_menu(page, opener) if opener else False
+        if opener and not opened:
+            raise BrowserError(
+                f"menu untuk '{label}' tak mau terbuka di {self.label} "
+                f"(tombol: {opener}).")
 
         try:
             for i, text in enumerate(path):
@@ -647,6 +665,35 @@ class WebConnector:
             pass
         return f"'{label}' dipilih di {self.label}"
 
+    # Elemen item menu di situs-situs ini (dipakai untuk memastikan menu sudah
+    # BENAR-BENAR terbuka sebelum item-nya diklik).
+    _MENU_ITEM = '[role="menuitem"], [role="menuitemradio"], [role="option"]'
+
+    def _open_menu(self, page: Any, opener: str) -> bool:
+        """Klik tombol pembuka lalu TUNGGU item menunya muncul.
+
+        Jeda tetap tidak cukup: tepat setelah jawaban selesai, UI situs kadang
+        masih sibuk sehingga klik pertama tak terdaftar dan menu tak terbuka —
+        gejalanya 'opsi tak bisa diklik' yang muncul kadang-kadang. Karena itu
+        kemunculan menu ditunggu, dan pembuka diklik ulang sekali bila perlu."""
+        for _ in range(2):
+            try:
+                btn = page.query_selector(opener)
+                if btn is None or not btn.is_visible():
+                    return False
+                self._click_element(btn)   # jendela di latar -> fallback dispatch
+            except Exception:  # noqa: BLE001
+                return False
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                try:
+                    if page.query_selector(self._MENU_ITEM) is not None:
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(150)
+        return False
+
     def _click_menu_text(self, page: Any, text: str) -> None:
         """Klik item menu (menuitem/menuitemradio/option) yang memuat `text`.
         Diutamakan item menu agar tak salah klik elemen lain berteks sama."""
@@ -660,7 +707,20 @@ class WebConnector:
             loc.scroll_into_view_if_needed(timeout=1500)
         except Exception:  # noqa: BLE001
             pass
-        loc.click(timeout=4000)
+        self._click_element(loc)
+
+    @staticmethod
+    def _click_element(loc: Any) -> None:
+        """Klik elemen; bila klik mouse nyata gagal, kirim event klik langsung.
+
+        Browser connector berjalan DI LATAR dengan jendela tersembunyi, dan di
+        keadaan itu klik mouse sungguhan tak bisa melakukan hit-test sehingga
+        selalu kehabisan waktu (terbukti: klik biasa GAGAL, dispatch BERHASIL).
+        Klik nyata tetap dicoba lebih dulu karena paling setia meniru pengguna."""
+        try:
+            loc.click(timeout=4000)
+        except Exception:  # noqa: BLE001
+            loc.dispatch_event("click")
 
     # ---- pembacaan pesan (multi-kandidat, tahan perubahan layout) ----
     def _msg_selectors(self) -> tuple[str, ...]:
