@@ -17,12 +17,38 @@ dipakai, sehingga bagas-ai tetap jalan normal walau Playwright belum terpasang.
 from __future__ import annotations
 
 import queue
+import subprocess
+import sys
 import threading
 from typing import Any, Callable
 
 from .. import config
 
 _PROFILE_ROOT = config.CONFIG_HOME / "browser"
+
+
+def _kill_profile_browsers() -> None:
+    """Bunuh proses Chrome/Chromium yang memakai folder profil connector.
+
+    Dipakai saat hub MACET: Chrome yang tertinggal MENGUNCI profil (Chrome
+    menolak profil yang sedang dipakai proses lain), sehingga peluncuran ulang
+    ikut menggantung. Best-effort; hanya Windows."""
+    if sys.platform != "win32":
+        return
+    try:
+        marker = str(_PROFILE_ROOT).replace("'", "")
+        ps = (
+            "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%'\" | "
+            "Where-Object { $_.CommandLine -like '*" + marker + "*' } | "
+            "ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force "
+            "-ErrorAction Stop } catch {} }"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, timeout=25,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class BrowserError(RuntimeError):
@@ -61,6 +87,10 @@ class BrowserHub:
         self._pw: Any = None
         # service -> (context, page)
         self._ctx: dict[str, tuple[Any, Any]] = {}
+        # True bila sebuah job MACET melewati timeout -> hub ini tak bisa
+        # dipercaya lagi (thread-nya mungkin menggantung); hub() akan
+        # menggantinya dengan hub baru + membunuh Chrome profil yang tersisa.
+        self.poisoned = False
 
     # --- sisi pemanggil (thread mana pun) ---
     def _ensure_thread(self) -> None:

@@ -2,12 +2,15 @@
 
 Satu WebConnector = satu situs (Claude, Qwen, dst). Tiap subclass cukup mengisi
 SELECTOR & URL situsnya; algoritma kirim + tunggu-jawaban ada di sini dan dibuat
-TAHAN-BANTING: alih-alih bergantung pada sinyal "selesai mengetik" yang berbeda
-tiap situs & sering berubah, kita memantau TEKS balasan terakhir sampai BERHENTI
-bertambah (stabil beberapa kali cek). Cara ini bertahan walau layout situs
-berubah — yang perlu dijaga hanyalah selektor kotak input & wadah pesan.
+TAHAN-BANTING:
+  - Deteksi login KETAT: URL bukan halaman login/auth DAN kotak input terlihat
+    (halaman login yang kebetulan punya elemen mirip input tak akan lolos).
+  - Pembacaan jawaban memakai BEBERAPA kandidat selector + pemantauan teks
+    sampai STABIL (berhenti bertambah) — bertahan walau layout situs berubah.
+  - SEMUA operasi dibatasi waktu & bisa dibatalkan (cancel_event) — tak ada
+    yang boleh menggantung selamanya (lihat juga timeout submit di browser.py).
 
-Login: pertama kali dipakai, browser TAMPIL (headed) dan pengguna login manual
+Login: pertama kali dipakai, jendela Chrome TAMPIL dan pengguna sign-in manual
 (termasuk CAPTCHA/2FA). Sesi disimpan permanen (persistent context), jadi
 berikutnya otomatis. Semua aksi Playwright dijalankan di thread hub (browser.py).
 """
@@ -30,7 +33,9 @@ class WebConnector:
     label: str = ""            # nama tampilan (mis. "Claude (web)")
     chat_url: str = ""         # halaman chat / sesi baru
     input_selector: str = ""   # kotak input (textarea / contenteditable)
-    message_selector: str = "" # wadah pesan JAWABAN (diambil yang terakhir)
+    # Wadah pesan JAWABAN — boleh SATU selector (str) atau BEBERAPA kandidat
+    # (tuple); dicoba berurutan, yang pertama menghasilkan teks dipakai.
+    message_selector: str | tuple[str, ...] = ""
     input_is_contenteditable: bool = False
     submit_key: str = "Enter"  # tombol kirim
     # Penanda URL halaman LOGIN/AUTH: selama URL page mengandung salah satu ini,
@@ -39,10 +44,19 @@ class WebConnector:
     login_url_markers: tuple[str, ...] = (
         "login", "signin", "sign-in", "sign_in", "oauth", "/auth", "sso",
     )
+    # Selector penanda "sedang mengetik/streaming" (bila situs punya).
+    streaming_selector: str = ""
+
+    # --- Tombol yang bisa DIKLIK program di UI web (permintaan pengguna:
+    #     ganti varian model & mode berpikir situs dari terminal, via /effort).
+    web_model_button: str = ""                 # tombol pembuka menu model di situs
+    web_model_options: tuple[str, ...] = ()    # teks item varian model di menu
+    web_effort_options: tuple[str, ...] = ()   # teks item mode berpikir/effort
 
     # Batas waktu (detik).
     login_timeout: float = 300.0     # tunggu pengguna menyelesaikan login
     answer_timeout: float = 300.0    # tunggu jawaban selesai
+    start_timeout: float = 90.0      # tunggu jawaban MULAI muncul
     # Berapa kali cek berturut-turut teks tak berubah -> dianggap selesai.
     _stable_needed: int = 5
     _poll_ms: int = 400
@@ -60,7 +74,8 @@ class WebConnector:
 
         Return True bila proses login baru saja dilakukan (False = sesi lama)."""
         return hub().submit(
-            lambda h: self._connect_on_hub(h, on_status, cancel_event)
+            lambda h: self._connect_on_hub(h, on_status, cancel_event),
+            timeout=self.login_timeout + 90,
         )
 
     def send(
@@ -73,16 +88,48 @@ class WebConnector:
     ) -> str:
         """Kirim prompt ke situs & kembalikan teks jawaban (lewat thread hub)."""
         return hub().submit(
-            lambda h: self._send_on_hub(h, prompt, on_status, on_token, cancel_event)
+            lambda h: self._send_on_hub(h, prompt, on_status, on_token, cancel_event),
+            timeout=self.login_timeout + self.answer_timeout + 120,
         )
+
+    def set_web_option(self, text: str) -> str:
+        """Klik OPSI di UI web (varian model / mode berpikir) — dipakai /effort.
+        `text` = teks item yang tampil di situs (mis. "Opus", "Extended thinking")."""
+        return hub().submit(
+            lambda h: self._set_option_on_hub(h, text),
+            timeout=self.login_timeout + 60,
+        )
+
+    def web_options(self) -> list[tuple[str, str]]:
+        """Daftar (teks-klik, deskripsi) opsi web yang bisa dikendalikan program."""
+        out = [(m, f"varian model: {m}") for m in self.web_model_options]
+        out += [(e, f"mode berpikir: {e}") for e in self.web_effort_options]
+        return out
 
     # ---- hook opsional untuk subclass ----
     def _is_done(self, page: Any) -> bool:
-        """Petunjuk KHUSUS-situs bahwa balasan sudah tuntas (mis. tombol stop
-        hilang). Default True -> murni andalkan kestabilan teks."""
+        """Petunjuk KHUSUS-situs bahwa balasan sudah tuntas (mis. indikator
+        streaming hilang). Default True -> murni andalkan kestabilan teks."""
         return True
 
     # ---- internal (berjalan DI thread hub) ----
+    def _connect_on_hub(
+        self, h: Any, on_status: StatusCb | None, cancel_event: Any
+    ) -> bool:
+        from .. import llm  # impor tunda: hindari siklus impor
+
+        def status(msg: str) -> None:
+            if on_status:
+                on_status(msg)
+
+        def check_cancel() -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise llm.Cancelled()
+
+        status(f"menghubungkan ke {self.label}…")
+        _, did_login = self._acquire_ready_page(h, status, check_cancel)
+        return did_login
+
     def _send_on_hub(
         self,
         h: Any,
@@ -119,21 +166,30 @@ class WebConnector:
                 "Situs mungkin berubah layout."
             )
         box.click()
-        before = len(page.query_selector_all(self.message_selector))
+        counts_before = self._msg_counts(page)
         if self.input_is_contenteditable:
             page.keyboard.insert_text(prompt)
         else:
             box.fill(prompt)
         page.keyboard.press(self.submit_key)
 
-        # --- tunggu balasan baru muncul ---
-        status(f"{self.label} sedang menjawab…")
+        # --- tunggu jawaban MULAI (streaming muncul / jumlah pesan bertambah) ---
+        status(f"{self.label} sedang berpikir…")
         t0 = time.time()
-        while len(page.query_selector_all(self.message_selector)) <= before:
+        started = False
+        while time.time() - t0 < self.start_timeout:
             check_cancel()
-            if time.time() - t0 > 60:
-                break  # mungkin situs memakai ulang wadah yang sama
+            if self._answer_started(page, counts_before):
+                started = True
+                break
             page.wait_for_timeout(300)
+        if not started and not self._read_last_message(page):
+            raise BrowserError(
+                f"balasan tak terdeteksi dari {self.label} — kemungkinan selector "
+                "pesan usang untuk layout situs sekarang. Laporkan/perbarui "
+                "message_selector di connectors/"
+                f"{self.service}.py."
+            )
 
         # --- pantau teks balasan terakhir sampai stabil ---
         last = ""
@@ -142,19 +198,14 @@ class WebConnector:
         deadline = time.time() + self.answer_timeout
         while time.time() < deadline:
             check_cancel()
-            els = page.query_selector_all(self.message_selector)
-            if not els:
-                page.wait_for_timeout(self._poll_ms)
-                continue
-            try:
-                cur = (els[-1].inner_text() or "").strip()
-            except Exception:  # noqa: BLE001 - DOM sempat berganti saat dibaca
+            cur = self._read_last_message(page)
+            if not cur:
                 page.wait_for_timeout(self._poll_ms)
                 continue
             if on_token and len(cur) > emitted:
                 on_token(cur[emitted:])
                 emitted = len(cur)
-            if cur and cur == last:
+            if cur == last:
                 stable += 1
                 if stable >= self._stable_needed and self._is_done(page):
                     break
@@ -170,23 +221,83 @@ class WebConnector:
             )
         return last
 
-    def _connect_on_hub(
-        self, h: Any, on_status: StatusCb | None, cancel_event: Any
-    ) -> bool:
-        from .. import llm  # impor tunda: hindari siklus impor
+    def _set_option_on_hub(self, h: Any, text: str) -> str:
+        """Klik opsi (varian model / effort) di UI web: buka tombol menu model
+        bila ada, lalu klik item ber-teks `text` (cocok sebagian, tanpa peduli
+        huruf besar/kecil)."""
+        page, _ = self._acquire_ready_page(h, lambda m: None, lambda: None)
 
-        def status(msg: str) -> None:
-            if on_status:
-                on_status(msg)
+        opened = False
+        if self.web_model_button:
+            try:
+                btn = page.query_selector(self.web_model_button)
+                if btn is not None and btn.is_visible():
+                    btn.click()
+                    opened = True
+                    page.wait_for_timeout(500)
+            except Exception:  # noqa: BLE001
+                opened = False
 
-        def check_cancel() -> None:
-            if cancel_event is not None and cancel_event.is_set():
-                raise llm.Cancelled()
+        try:
+            page.get_by_text(text, exact=False).first.click(timeout=4000)
+        except Exception:
+            try:
+                page.click(f"text={text}", timeout=3000)
+            except Exception as exc:
+                if opened:
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:  # noqa: BLE001
+                        pass
+                raise BrowserError(
+                    f"opsi '{text}' tak ditemukan di UI {self.label} — "
+                    "situs mungkin berubah layout / teksnya beda bahasa."
+                ) from exc
+        page.wait_for_timeout(300)
+        try:  # tutup menu bila masih terbuka
+            page.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        return f"'{text}' dipilih di {self.label}"
 
-        status(f"menghubungkan ke {self.label}…")
-        _, did_login = self._acquire_ready_page(h, status, check_cancel)
-        return did_login
+    # ---- pembacaan pesan (multi-kandidat, tahan perubahan layout) ----
+    def _msg_selectors(self) -> tuple[str, ...]:
+        sel = self.message_selector
+        return (sel,) if isinstance(sel, str) else tuple(sel)
 
+    def _msg_counts(self, page: Any) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for sel in self._msg_selectors():
+            try:
+                out[sel] = len(page.query_selector_all(sel))
+            except Exception:  # noqa: BLE001
+                out[sel] = 0
+        return out
+
+    def _answer_started(self, page: Any, counts_before: dict[str, int]) -> bool:
+        if self.streaming_selector:
+            try:
+                if page.query_selector(self.streaming_selector) is not None:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        now = self._msg_counts(page)
+        return any(now.get(s, 0) > n for s, n in counts_before.items())
+
+    def _read_last_message(self, page: Any) -> str:
+        """Teks pesan jawaban TERAKHIR — kandidat selector dicoba berurutan."""
+        for sel in self._msg_selectors():
+            try:
+                els = page.query_selector_all(sel)
+                if els:
+                    txt = (els[-1].inner_text() or "").strip()
+                    if txt:
+                        return txt
+            except Exception:  # noqa: BLE001 - DOM sedang transisi
+                continue
+        return ""
+
+    # ---- kesiapan halaman & login ----
     def _acquire_ready_page(
         self, h: Any, status: StatusCb, check_cancel: Callable[[], None]
     ) -> tuple[Any, bool]:
@@ -204,10 +315,10 @@ class WebConnector:
         # Opt-in: headless sejati (mungkin diblok anti-bot di sebagian situs).
         if config.CONNECTOR_HEADLESS:
             page = h.page_for(self.service, headless=True)
-            if self._chat_ready(page, 1500):
+            if self._chat_ready(page, 1500, check_cancel):
                 return page, False
             self._goto(page)
-            if not self._chat_ready(page, 10000):
+            if not self._chat_ready(page, 10000, check_cancel):
                 raise BrowserError(
                     "mode headless belum siap (kemungkinan diblok anti-bot / "
                     "belum login). Hapus CONNECTOR_HEADLESS agar login via jendela."
@@ -217,13 +328,13 @@ class WebConnector:
         # Default: jendela TAMPIL (lolos Cloudflare) lalu di-minimize.
         page = h.page_for(self.service, headless=False)
         # Sudah di percakapan aktif & login? Lanjutkan (jangan buka chat baru).
-        if self._chat_ready(page, 1500):
+        if self._chat_ready(page, 1500, check_cancel):
             self._minimize(page)
             return page, False
 
         self._goto(page)
         did_login = False
-        if not self._chat_ready(page, 8000):
+        if not self._chat_ready(page, 8000, check_cancel):
             # BELUM login (masih di halaman login/auth) -> user HARUS sign-in
             # sungguhan di jendela; kita menunggu sampai benar-benar masuk chat.
             status(
@@ -235,19 +346,6 @@ class WebConnector:
             did_login = True
         self._minimize(page)
         return page, did_login
-
-    def _minimize(self, page: Any) -> None:
-        """Sembunyikan jendela browser (minimize) via CDP — pengguna cukup pakai
-        terminal. Diam-diam gagal bila tak didukung."""
-        try:
-            cdp = page.context.new_cdp_session(page)
-            info = cdp.send("Browser.getWindowForTarget")
-            cdp.send("Browser.setWindowBounds", {
-                "windowId": info["windowId"],
-                "bounds": {"windowState": "minimized"},
-            })
-        except Exception:  # noqa: BLE001
-            pass
 
     def _goto(self, page: Any) -> None:
         try:
@@ -270,7 +368,7 @@ class WebConnector:
                 raise
             except Exception:  # noqa: BLE001
                 pass
-            if self._chat_ready(page, 2000):
+            if self._chat_ready(page, 2000, check_cancel):
                 return
             try:
                 page.wait_for_timeout(1000)
@@ -291,12 +389,19 @@ class WebConnector:
             return False
         return any(m in url for m in self.login_url_markers)
 
-    def _chat_ready(self, page: Any, timeout_ms: int) -> bool:
+    def _chat_ready(
+        self,
+        page: Any,
+        timeout_ms: int,
+        check_cancel: Callable[[], None] | None = None,
+    ) -> bool:
         """Deteksi KETAT bahwa halaman chat siap & user SUDAH login:
         (1) URL BUKAN halaman login/auth, dan (2) kotak input chat terlihat.
         Halaman login yang kebetulan punya elemen mirip input tak akan lolos."""
         deadline = time.time() + timeout_ms / 1000.0
         while True:
+            if check_cancel is not None:
+                check_cancel()
             if not self._on_login_page(page):
                 try:
                     el = page.query_selector(self.input_selector)
@@ -310,3 +415,16 @@ class WebConnector:
                 page.wait_for_timeout(250)
             except Exception:  # noqa: BLE001
                 return False
+
+    def _minimize(self, page: Any) -> None:
+        """Sembunyikan jendela browser (minimize) via CDP — pengguna cukup pakai
+        terminal. Diam-diam gagal bila tak didukung."""
+        try:
+            cdp = page.context.new_cdp_session(page)
+            info = cdp.send("Browser.getWindowForTarget")
+            cdp.send("Browser.setWindowBounds", {
+                "windowId": info["windowId"],
+                "bounds": {"windowState": "minimized"},
+            })
+        except Exception:  # noqa: BLE001
+            pass
