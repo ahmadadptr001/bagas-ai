@@ -193,6 +193,15 @@ class Agent:
         # Connector web: apakah konteks laptop/proyek sudah dikirim ke sesi web
         # ini (dikirim SEKALI sbg preamble pesan pertama; AI web ingat sepanjang chat).
         self._web_ctx_sent = False
+        # Percakapan AI web yang DILANJUTKAN (dari sesi tersimpan / menu pilih
+        # sesi). Bila ada, giliran pertama membuka chat itu — bukan chat baru —
+        # sehingga konteks proyek yang sudah ada di sana tak perlu dikirim ulang.
+        self._web_chat_id = ""
+        if session is not None:
+            saved = (getattr(session, "web_chats", None) or {}).get(
+                self.model_spec.connector or "")
+            if saved:
+                self.use_web_chat(saved)
 
         # Token SESI bersifat persisten: saat --resume, lanjutkan hitungan
         # sesi sebelumnya (bukan mulai dari nol).
@@ -270,6 +279,35 @@ class Agent:
         self._escalations += 1
         return f"model {old} → {spec.label} ({reason})"
 
+    # --- kaitan sesi terminal <-> percakapan di AI web ---
+    def use_web_chat(self, chat_id: str) -> None:
+        """Sambungkan sesi ini ke percakapan AI web yang SUDAH ADA.
+
+        Konteks proyek & protokol tool sudah tersimpan di percakapan itu, jadi
+        tak dikirim ulang (hemat & AI web langsung 'ingat' proyeknya)."""
+        self._web_chat_id = chat_id or ""
+        self._web_ctx_sent = bool(chat_id)
+
+    def start_new_web_chat(self) -> None:
+        """Lupakan kaitan chat web -> giliran berikutnya membuat chat BARU."""
+        self._web_chat_id = ""
+        self._web_ctx_sent = False
+        if self.session is not None:
+            svc = self.model_spec.connector
+            if svc and svc in getattr(self.session, "web_chats", {}):
+                self.session.web_chats.pop(svc, None)
+
+    def _link_web_chat(self, chat_id: str) -> None:
+        """Catat chat web ini sebagai milik sesi terminal saat ini (1 sesi
+        terminal = 1 percakapan browser, juga dipakai saat --resume)."""
+        self._web_chat_id = chat_id
+        svc = self.model_spec.connector
+        if self.session is not None and svc and chat_id:
+            try:
+                self.session.web_chats[svc] = chat_id
+            except AttributeError:  # sesi lama tanpa atribut ini
+                self.session.web_chats = {svc: chat_id}
+
     def refresh_system_prompt(self) -> None:
         """Bangun ulang system prompt (mis. setelah add-dir) & pasang ke memory."""
         self.memory.set_system(prompts.build_system_prompt())
@@ -277,6 +315,9 @@ class Agent:
     # --- sesi ---
     def reset(self) -> None:
         self.memory.reset()
+        # Riwayat dikosongkan -> percakapan AI web lama tak lagi mewakili sesi
+        # ini; giliran berikutnya memulai chat baru di situs.
+        self.start_new_web_chat()
         self._persist()
 
     def _persist(self) -> None:
@@ -418,13 +459,14 @@ class Agent:
             selama giliran berjalan, bukan melompat di akhir."""
             self.tokens_live = (prompt_chars + reply_chars) // 4
 
-        def _send(msg: str, new_chat: bool = False) -> str:
+        def _send(msg: str, new_chat: bool = False, open_chat_id: str = "") -> str:
             nonlocal prompt_chars, reply_chars
             prompt_chars += len(msg)
             _sync_tokens()
             out = conn.send(
                 msg, on_status=on_status, on_token=on_token,
                 cancel_event=cancel_event, new_chat=new_chat,
+                open_chat_id=open_chat_id,
                 complete_when=_web_reply_complete,
             )
             reply_chars += len(out or "")
@@ -432,19 +474,28 @@ class Agent:
             return out
 
         try:
-            # Pesan pertama sesi: mulai CHAT BARU di situs supaya AI web tidak
-            # terbawa konteks percakapan sebelumnya (mis. proyek lain).
-            reply = _send(first_msg, new_chat=include_ctx)
+            # SATU sesi terminal = SATU percakapan browser:
+            #  - sudah punya kaitan chat (sesi lanjutan / --resume) -> BUKA chat itu
+            #  - belum punya -> mulai chat BARU lalu catat kaitannya
+            first_of_session = not self._web_ctx_sent or bool(self._web_chat_id)
+            reply = _send(
+                first_msg,
+                new_chat=include_ctx,
+                open_chat_id=self._web_chat_id if first_of_session else "",
+            )
             if include_ctx:
                 self._web_ctx_sent = True
-                # Catat percakapan baru ini + rapikan chat lama buatan bagas-ai
+            if first_of_session:
+                # Catat kaitan sesi<->chat + rapikan chat lama buatan bagas-ai
                 # supaya tak menumpuk di akun (chat pribadi tak tersentuh).
                 try:
                     chat_id = getattr(conn, "last_chat_id", "")
                     if chat_id:
-                        conn.record_chat(chat_id, user_text[:80])
-                        if config.CONNECTOR_KEEP_CHATS > 0:
-                            conn.prune_own_chats(config.CONNECTOR_KEEP_CHATS)
+                        self._link_web_chat(chat_id)
+                        if include_ctx:  # percakapan yang BARU dibuat
+                            conn.record_chat(chat_id, user_text[:80])
+                            if config.CONNECTOR_KEEP_CHATS > 0:
+                                conn.prune_own_chats(config.CONNECTOR_KEEP_CHATS)
                 except Exception:  # noqa: BLE001 - bersih-bersih tak boleh menggagalkan giliran
                     pass
 

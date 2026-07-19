@@ -56,6 +56,7 @@ class ClaudeConnector(WebConnector):
     service = "claude"
     label = "Claude (web)"
     chat_url = "https://claude.ai/new"
+    chat_url_template = "https://claude.ai/chat/{id}"
     # Kotak input Claude = editor ProseMirror (contenteditable), bukan textarea.
     input_selector = 'div[contenteditable="true"]'
     input_is_contenteditable = True

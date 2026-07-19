@@ -182,8 +182,20 @@ class WebConnector:
 
     # Pola menangkap ID percakapan dari URL (mis. claude.ai/chat/<uuid>).
     chat_id_pattern: str = r"/chat/([0-9a-fA-F-]{16,})"
+    # Template URL untuk MEMBUKA percakapan lama (lanjut chat yang sudah ada).
+    chat_url_template: str = ""
     # ID percakapan yang terakhir dipakai (diisi tiap kali send selesai).
     last_chat_id: str = ""
+
+    def chat_url_for(self, chat_id: str) -> str:
+        """URL percakapan lama. "" bila situs ini tak mendukung."""
+        if not (self.chat_url_template and chat_id):
+            return ""
+        return self.chat_url_template.format(id=chat_id)
+
+    def supports_resume(self) -> bool:
+        """True bila percakapan lama bisa dibuka lagi (untuk --resume)."""
+        return bool(self.chat_url_template)
 
     # ---- catatan chat yang DIBUAT bagas-ai (agar penghapusan aman) ----
     def _registry_path(self):
@@ -286,6 +298,7 @@ class WebConnector:
         on_token: TokenCb | None = None,
         cancel_event: Any = None,
         new_chat: bool = False,
+        open_chat_id: str = "",
         complete_when: Callable[[str], bool] | None = None,
     ) -> str:
         """Kirim prompt ke situs & kembalikan teks jawaban (lewat thread hub).
@@ -294,13 +307,17 @@ class WebConnector:
         — dipakai pada pesan pertama tiap sesi bagas-ai supaya AI web tak terbawa
         konteks percakapan sebelumnya.
 
+        `open_chat_id` = LANJUTKAN percakapan lama dengan ID itu (dipakai saat
+        --resume / memilih sesi dari menu), sehingga konteks proyek yang sudah
+        dikirim di chat tersebut tak perlu diulang.
+
         `complete_when(teks)` (opsional) = syarat TAMBAHAN bahwa balasan sudah
         utuh. Dipakai pemanggil untuk menahan kesimpulan 'selesai' saat balasan
         masih setengah dirender (mis. blok usulan tool belum tertutup)."""
         return hub().submit(
             lambda h: self._send_on_hub(
                 h, prompt, on_status, on_token, cancel_event, new_chat,
-                complete_when),
+                complete_when, open_chat_id),
             timeout=self.login_timeout + self.answer_timeout + 120,
         )
 
@@ -352,6 +369,7 @@ class WebConnector:
         cancel_event: Any,
         new_chat: bool = False,
         complete_when: Callable[[str], bool] | None = None,
+        open_chat_id: str = "",
     ) -> str:
         from .. import llm  # untuk llm.Cancelled (impor tunda: hindari siklus)
 
@@ -365,7 +383,8 @@ class WebConnector:
 
         status("menyiapkan sesi browser…")
         page, _ = self._acquire_ready_page(
-            h, status, check_cancel, force_new_chat=new_chat)
+            h, status, check_cancel, force_new_chat=new_chat,
+            open_chat_id=open_chat_id)
 
         # --- kirim prompt ---
         check_cancel()
@@ -566,7 +585,7 @@ class WebConnector:
     # ---- kesiapan halaman & login ----
     def _acquire_ready_page(
         self, h: Any, status: StatusCb, check_cancel: Callable[[], None],
-        force_new_chat: bool = False,
+        force_new_chat: bool = False, open_chat_id: str = "",
     ) -> tuple[Any, bool]:
         """Kembalikan (page siap-pakai yang SUDAH login, apakah login BARU terjadi).
 
@@ -595,16 +614,20 @@ class WebConnector:
         # Default: jendela TAMPIL (lolos Cloudflare) lalu di-minimize.
         page = h.page_for(self.service, headless=False)
         # Sudah di percakapan aktif & login? Lanjutkan (jangan buka chat baru) —
-        # KECUALI diminta memulai percakapan BARU (pesan pertama sesi bagas-ai),
-        # supaya AI web tak terbawa konteks chat sebelumnya.
+        # KECUALI diminta MEMBUKA chat lama tertentu (lanjut sesi) atau memulai
+        # percakapan BARU, supaya AI web tak terbawa konteks chat yang salah.
+        target = self.chat_url_for(open_chat_id)
         if self._chat_ready(page, 1500, check_cancel):
-            if force_new_chat:
+            if target and not self._on_chat(page, open_chat_id):
+                self._goto(page, target)  # lanjutkan percakapan lama
+                self._chat_ready(page, 10000, check_cancel)
+            elif force_new_chat and not target:
                 self._goto(page)          # buka chat baru (chat_url)
                 self._chat_ready(page, 8000, check_cancel)
             self._minimize(page)
             return page, False
 
-        self._goto(page)
+        self._goto(page, target or None)
         did_login = False
         if not self._chat_ready(page, 8000, check_cancel):
             # BELUM login (masih di halaman login/auth) -> user HARUS sign-in
@@ -619,11 +642,16 @@ class WebConnector:
         self._minimize(page)
         return page, did_login
 
-    def _goto(self, page: Any) -> None:
+    def _on_chat(self, page: Any, chat_id: str) -> bool:
+        """True bila halaman sedang membuka percakapan `chat_id`."""
+        return bool(chat_id) and self.current_chat_id(page) == chat_id
+
+    def _goto(self, page: Any, url: str | None = None) -> None:
+        dest = url or self.chat_url
         try:
-            page.goto(self.chat_url, wait_until="domcontentloaded", timeout=45000)
+            page.goto(dest, wait_until="domcontentloaded", timeout=45000)
         except Exception as exc:  # noqa: BLE001
-            raise BrowserError(f"gagal membuka {self.chat_url}: {exc}") from exc
+            raise BrowserError(f"gagal membuka {dest}: {exc}") from exc
 
     def _wait_login(self, page: Any, check_cancel: Callable[[], None]) -> None:
         """Tunggu pengguna BENAR-BENAR menyelesaikan sign-in di jendela Chrome."""

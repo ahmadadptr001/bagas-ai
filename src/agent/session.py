@@ -40,12 +40,17 @@ class Session:
         messages: list[dict[str, Any]] | None = None,
         created: float | None = None,
         tokens: dict[str, int] | None = None,
+        web_chats: dict[str, str] | None = None,
     ) -> None:
         self.id = session_id
         self.project_root = project_root
         self.messages = messages or []
         self.created = created or time.time()
         self.updated = time.time()
+        # Kaitan ke percakapan di AI web: {service: chat_id}. Dipakai agar
+        # `--resume` menyambung ke chat yang SAMA di situs — konteks proyek &
+        # protokol tool sudah ada di sana, jadi tak perlu dikirim ulang.
+        self.web_chats: dict[str, str] = dict(web_chats or {})
         # Token kumulatif SESI ini (persisten lintas --resume).
         self.tokens = {"prompt": 0, "completion": 0}
         if tokens:
@@ -74,6 +79,7 @@ class Session:
             "created": self.created,
             "updated": self.updated,
             "tokens": self.tokens,
+            "web_chats": self.web_chats,
             "messages": messages,
         }
         self.path.write_text(
@@ -96,6 +102,7 @@ class Session:
             data.get("messages", []),
             data.get("created"),
             data.get("tokens"),
+            data.get("web_chats"),
         )
         s.updated = data.get("updated", s.created)
         return s

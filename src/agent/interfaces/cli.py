@@ -1124,6 +1124,7 @@ def main(resume: bool = False) -> None:
             cancel_event.set()
 
         if result["login"] is not None:
+            _pick_web_chat(connectors.get_connector(spec.connector))
             if result["login"]:
                 console.print(
                     f"  [#a6e3a1]✓ login berhasil — terhubung ke "
@@ -1139,6 +1140,83 @@ def main(resume: bool = False) -> None:
                else f"gagal: {err}")
         console.print(f"  [yellow]⚠ koneksi {_esc(spec.label)} {_esc(str(why))}[/]")
         _revert_model(prev_model_id)
+
+    def _pick_web_chat(conn) -> None:
+        """Menu PILIH SESI di AI web setelah model web dipilih.
+
+        Melanjutkan percakapan lama berarti konteks proyek yang sudah dikirim di
+        sana tetap dipakai — AI web tak perlu 'membaca ulang' proyek dari nol
+        (berguna untuk --resume). Satu sesi terminal terikat ke satu chat."""
+        if not conn.supports_resume():
+            return
+        rows = conn.own_chats()
+        linked = getattr(agent, "_web_chat_id", "")
+        if not rows and not linked:
+            return  # belum ada chat lama -> langsung chat baru saja
+
+        def _when(ts) -> str:
+            try:
+                return time.strftime("%d/%m %H:%M", time.localtime(float(ts)))
+            except (TypeError, ValueError):
+                return ""
+
+        choices = [Choice("__new__", "✨ Mulai percakapan BARU di web")]
+        for r in rows[:15]:
+            mark = "  ← terpakai sesi ini" if r.get("id") == linked else ""
+            title = (r.get("title") or "(tanpa judul)")[:52]
+            choices.append(Choice(r["id"], f"{title:<54}{_when(r.get('ts'))}{mark}"))
+        try:
+            sel = inquirer.select(
+                message="Lanjutkan percakapan web yang mana?",
+                choices=choices, pointer="❯", default=linked or "__new__",
+                long_instruction="Melanjutkan chat lama = konteks proyek tak perlu "
+                                 "dikirim ulang.",
+            ).execute()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if sel == "__new__":
+            agent.start_new_web_chat()
+            console.print("  [dim]→ percakapan web BARU akan dibuat saat kamu "
+                          "mengirim pesan pertama.[/dim]")
+            return
+        agent.use_web_chat(sel)
+        title = next((r.get("title") for r in rows if r.get("id") == sel), sel)
+        console.print(f"  [#a6e3a1]✓ melanjutkan:[/] [bold]{_esc(str(title))}[/] "
+                      f"[dim]— konteks proyek sudah ada di percakapan itu.[/]")
+
+    def _delete_web_chats_of(sessions_deleted: list) -> None:
+        """Hapus percakapan AI web milik sesi terminal yang baru saja dihapus
+        (satu sesi terminal = satu percakapan browser)."""
+        pairs: dict[str, list[str]] = {}
+        for s in sessions_deleted:
+            for svc, cid in (getattr(s, "web_chats", None) or {}).items():
+                if cid:
+                    pairs.setdefault(svc, []).append(cid)
+        if not pairs:
+            return
+        try:
+            from .. import connectors
+            if not connectors.playwright_available():
+                return
+        except Exception:  # noqa: BLE001
+            return
+        total = sum(len(v) for v in pairs.values())
+
+        def _do() -> int:
+            n = 0
+            for svc, ids in pairs.items():
+                try:
+                    conn = connectors.get_connector(svc)
+                    if conn.supports_chat_admin():
+                        n += conn.delete_chats(ids)
+                        conn.forget_chats(set(ids))
+                except Exception:  # noqa: BLE001 - lanjut ke service berikutnya
+                    pass
+            return n
+
+        n, err = _web_busy(f"menghapus {total} percakapan web terkait…", _do)
+        if err is None and n:
+            console.print(f"  [dim]🌐 {n} percakapan di AI web ikut dihapus.[/dim]")
 
     def _revert_model(prev_model_id: str) -> None:
         # Jangan "kembali" ke model web lain (sama-sama butuh koneksi) — pakai
@@ -1875,8 +1953,9 @@ def main(resume: bool = False) -> None:
                 if inquirer.confirm(
                         message=f"Hapus sesi {s.id} ({session_mod.user_msg_count(s)} pesan)?",
                         default=False).execute():
-                    session_mod.delete(s)
-                    console.print("[green]✓ 1 sesi dihapus.[/green]")
+                    if session_mod.delete(s):
+                        console.print("[green]✓ 1 sesi dihapus.[/green]")
+                        _delete_web_chats_of([s])
                 return
             choices = [Choice(s.path.name,
                               f"{s.id}  ({session_mod.user_msg_count(s)} pesan)"
@@ -1887,9 +1966,12 @@ def main(resume: bool = False) -> None:
                                        instruction="(spasi pilih, enter konfirmasi)").execute()
         except (KeyboardInterrupt, EOFError):
             return
-        count = sum(1 for s in sessions if s.path.name in picked and session_mod.delete(s))
-        console.print(f"[green]✓ {count} sesi dihapus.[/green]" if count
+        removed = [s for s in sessions
+                   if s.path.name in picked and session_mod.delete(s)]
+        console.print(f"[green]✓ {len(removed)} sesi dihapus.[/green]" if removed
                       else "[dim](tidak ada yang dihapus)[/dim]")
+        # Satu sesi terminal = satu percakapan browser -> ikut dihapus.
+        _delete_web_chats_of(removed)
 
     def show_help() -> None:
         c = "#94e2d5"
@@ -2450,6 +2532,13 @@ def main(resume: bool = False) -> None:
             tg_service["svc"].stop()
         except Exception:  # noqa: BLE001
             pass
+    # Tutup browser connector dengan RAPI supaya Chrome tak mengira dirinya
+    # crash & menawarkan "Restore pages?" saat dipakai lagi.
+    try:
+        from ..connectors import browser as _br
+        _br.shutdown()
+    except Exception:  # noqa: BLE001
+        pass
     console.clear()
     console.print("\n  [#cba6f7]⬢ bagas-ai[/]  [dim]— sampai jumpa! 👋[/dim]\n")
 

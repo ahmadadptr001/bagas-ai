@@ -16,6 +16,9 @@ dipakai, sehingga bagas-ai tetap jalan normal walau Playwright belum terpasang.
 """
 from __future__ import annotations
 
+import atexit
+import json
+import logging
 import queue
 import shutil
 import subprocess
@@ -30,9 +33,103 @@ from .. import config
 _PROFILE_ROOT = config.CONFIG_HOME / "browser"
 
 
+class _PlaywrightNoiseFilter(logging.Filter):
+    """Sembunyikan galat INTERNAL Playwright yang tak berarti bagi pengguna.
+
+    Saat sebuah panggilan Playwright ditinggalkan (mis. peluncuran pertama gagal
+    lalu diulang, atau proses berakhir), loop internalnya mencetak traceback
+    "SyncBase._sync ... 'NoneType' object has no attribute 'switch'". Itu murni
+    derau: tak memengaruhi hasil, tapi terlihat menakutkan di terminal."""
+
+    _NOISE = ("SyncBase._sync", "has no attribute 'switch'")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            text = record.getMessage() + str(getattr(record, "exc_text", "") or "")
+            exc = getattr(record, "exc_info", None)
+            if exc and exc[1] is not None:
+                text += repr(exc[1])
+        except Exception:  # noqa: BLE001
+            return True
+        return not any(n in text for n in self._NOISE)
+
+
+logging.getLogger("asyncio").addFilter(_PlaywrightNoiseFilter())
+
+
 def profile_dir(service: str) -> "Path":
     """Folder profil login persisten milik sebuah service."""
     return _PROFILE_ROOT / service
+
+
+def _mark_profile_clean(service: str) -> None:
+    """Tandai profil Chrome sebagai 'ditutup normal'.
+
+    Chrome menampilkan dialog "Restore pages?" bila sesi sebelumnya TIDAK
+    berakhir bersih — dan itu yang terjadi setiap kali prosesnya kita hentikan
+    paksa atau proses bagas-ai berakhir tanpa menutup browser. Menyetel ulang
+    penanda di Preferences membuat peluncuran berikutnya bersih tanpa dialog."""
+    prefs = profile_dir(service) / "Default" / "Preferences"
+    try:
+        data = json.loads(prefs.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    prof = data.get("profile")
+    if not isinstance(prof, dict):
+        prof = {}
+        data["profile"] = prof
+    prof["exit_type"] = "Normal"
+    prof["exited_cleanly"] = True
+    try:
+        prefs.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _shutdown_on_hub(hub: "BrowserHub") -> None:
+    """Tutup context lalu hentikan driver Playwright (di thread hub)."""
+    hub.close_all()
+    try:
+        if hub._pw is not None:
+            hub._pw.stop()
+            hub._pw = None
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def shutdown(timeout: float = 8.0) -> None:
+    """Tutup SEMUA browser connector dengan RAPI (dipanggil saat bagas-ai keluar).
+
+    Penutupan rapi = Chrome menulis status 'keluar normal', sehingga tidak lagi
+    menawarkan "Restore pages?" saat dipakai lagi. Driver Playwright ikut
+    dihentikan supaya tak ada callback menggantung saat proses berakhir."""
+    global _HUB
+    with _HUB_LOCK:
+        h = _HUB
+        _HUB = None
+    if h is None or not h._started:
+        return
+    try:
+        h.submit(_shutdown_on_hub, timeout=timeout)
+    except Exception:  # noqa: BLE001 - keluar tetap harus mulus
+        pass
+    try:
+        h._q.put(None)  # akhiri loop thread hub
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _shutdown_atexit() -> None:
+    """Jaring pengaman bila proses berakhir tanpa sempat memanggil shutdown().
+    Sengaja SENYAP: saat interpreter membongkar diri, Playwright bisa melempar
+    error yang tak berguna bagi pengguna."""
+    try:
+        shutdown(timeout=5.0)
+    except BaseException:  # noqa: BLE001
+        pass
+
+
+atexit.register(_shutdown_atexit)
 
 
 def forget_profile(service: str) -> bool:
@@ -82,6 +179,10 @@ def _kill_profile_browsers(service: str | None = None) -> None:
                 (target / name).unlink()
             except OSError:
                 pass
+        # Proses tadi dimatikan PAKSA -> tanpa ini Chrome berikutnya menawarkan
+        # "Restore pages?".
+        if service:
+            _mark_profile_clean(service)
     except Exception:  # noqa: BLE001
         pass
 
@@ -188,6 +289,15 @@ class BrowserHub:
 
         prof = _PROFILE_ROOT / service
         prof.mkdir(parents=True, exist_ok=True)
+        # Sisa Chrome dari proses sebelumnya masih MENGUNCI profil -> peluncuran
+        # pertama gagal lalu diulang (lambat + memunculkan galat Playwright yang
+        # membingungkan). Adanya file kunci = pertanda; bereskan lebih dulu.
+        if any((prof / n).exists()
+               for n in ("lockfile", "SingletonLock", "SingletonSocket")):
+            _kill_profile_browsers(service)
+        # Bersihkan penanda crash sisa sesi sebelumnya sebelum meluncurkan,
+        # supaya Chrome tak menampilkan tawaran "Restore pages?".
+        _mark_profile_clean(service)
         ctx = self._launch(str(prof), headless, service)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         self._ctx[service] = (ctx, page)
@@ -202,6 +312,13 @@ class BrowserHub:
                 ctx.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def close_all(self) -> None:
+        """Tutup RAPI semua context (HARUS di thread hub). Dipakai saat keluar
+        agar Chrome berakhir normal & tak menawarkan 'Restore pages?'."""
+        for svc in list(self._ctx):
+            self.drop(svc)
+            _mark_profile_clean(svc)
 
     @staticmethod
     def _alive(page: Any) -> bool:
@@ -229,6 +346,12 @@ class BrowserHub:
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--start-maximized",
+                # Jangan pernah menawarkan/memulihkan tab sesi sebelumnya —
+                # connector selalu membuka halaman chat sendiri.
+                "--hide-crash-restore-bubble",
+                "--disable-session-crashed-bubble",
+                "--no-first-run",
+                "--no-default-browser-check",
                 # Jendela connector di-MINIMIZE setelah login; flag ini mencegah
                 # Chrome menahan/throttle render saat jendela tersembunyi, agar
                 # token jawaban tetap masuk ke DOM & terbaca realtime.
