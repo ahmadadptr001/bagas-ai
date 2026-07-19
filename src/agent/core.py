@@ -641,6 +641,16 @@ class Agent:
             self.memory.repair_dangling_tools()
             self._persist()
             raise
+        except connectors.WebLimitError as exc:
+            # Kuota situs habis — sampaikan apa adanya (termasuk kapan pulih)
+            # dan tawarkan jalan keluar, jangan sekadar "gagal".
+            answer = (
+                f"⛔ **{self.model_spec.label} sedang kena batas pemakaian.**\n\n"
+                f"> {exc}\n\n"
+                "Tunggu sampai waktu itu, atau ketik `/model` untuk pindah ke "
+                "model NVIDIA (gratis & tanpa browser) supaya bisa lanjut kerja "
+                "sekarang."
+            )
         except connectors.BrowserError as exc:
             answer = f"[Connector {self.model_spec.label}] {exc}"
         except Exception as exc:  # noqa: BLE001 - laporkan apa adanya, jangan crash REPL

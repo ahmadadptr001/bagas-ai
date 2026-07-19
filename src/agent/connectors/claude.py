@@ -80,6 +80,18 @@ class ClaudeConnector(WebConnector):
     # "Thought for 2s" (kadang berulang). Itu BUKAN jawaban — kalau dianggap
     # jawaban, giliran berhenti dini & usulan tool tak pernah terbaca.
     noise_pattern = r"(?:Thought for[^\n]*\s*)+"
+    # Pemberitahuan limit claude.ai — bentuk aslinya diverifikasi langsung:
+    # "You are out of free messages until 12:10 AM". Varian lain disertakan
+    # karena teksnya berbeda antar paket/kondisi.
+    limit_patterns = (
+        r"out of free messages",
+        r"message limit reached",
+        r"reached your (usage|message) limit",
+        r"usage limit",
+        r"you'?ve hit your limit",
+        r"limit will reset",
+        r"try again later",
+    )
 
     # Tombol/opsi UI yang bisa diklik program lewat /effort (DIVERIFIKASI live):
     #   tombol pemilih model: data-testid="model-selector-dropdown"

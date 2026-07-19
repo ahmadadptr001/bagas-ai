@@ -22,7 +22,24 @@ import time
 from typing import Any, Callable
 
 from .. import config
-from .browser import BrowserError, hub, profile_dir
+from .browser import BrowserError, WebLimitError, hub, profile_dir
+
+# Cari teks pendek di halaman yang cocok salah satu pola (dipakai mendeteksi
+# pemberitahuan LIMIT pemakaian, mis. "You are out of free messages until ...").
+JS_FIND_TEXT = r"""
+(patterns) => {
+  const res = patterns.map(p => new RegExp(p, 'i'));
+  for (const el of document.querySelectorAll('div,span,p,h1,h2,h3')) {
+    const t = (el.innerText || '').trim();
+    if (!t || t.length > 220) continue;
+    if (el.querySelector('div,span,p')) continue;   // hanya elemen terdalam
+    for (const r of res) {
+      if (r.test(t)) return t.replace(/\s+/g, ' ').slice(0, 180);
+    }
+  }
+  return "";
+}
+"""
 
 StatusCb = Callable[[str], None]
 TokenCb = Callable[[str], None]
@@ -179,6 +196,10 @@ class WebConnector:
     )
     # Selector penanda "sedang mengetik/streaming" (bila situs punya).
     streaming_selector: str = ""
+    # Pola teks pemberitahuan LIMIT pemakaian di situs. Sering baru MUNCUL
+    # setelah prompt dikirim — tanpa deteksi ini bagas-ai menunggu jawaban yang
+    # memang tak akan datang, lalu gagal dengan pesan yang membingungkan.
+    limit_patterns: tuple[str, ...] = ()
     # Teks yang BUKAN jawaban (chrome UI situs), mis. indikator berpikir
     # "Thought for 2s". Bila SELURUH teks yang terbaca hanya ini, artinya jawaban
     # BELUM muncul — jangan dianggap sebagai balasan (akar bug: giliran berhenti
@@ -410,6 +431,8 @@ class WebConnector:
 
         # --- kirim prompt ---
         check_cancel()
+        # Sudah kena limit sebelum mengetik? Jangan buang waktu mengirim.
+        self._raise_if_limited(page)
         status(f"mengetik pesan ke {self.label}…")
         try:
             box = page.wait_for_selector(
@@ -437,6 +460,9 @@ class WebConnector:
         started = False
         while time.time() - t0 < self.start_timeout:
             check_cancel()
+            # Limit paling sering baru MUNCUL tepat setelah prompt dikirim —
+            # laporkan segera daripada menunggu jawaban yang tak akan datang.
+            self._raise_if_limited(page)
             if self._answer_started(page, counts_before, text_before):
                 started = True
                 break
@@ -449,6 +475,7 @@ class WebConnector:
                 break
             page.wait_for_timeout(300)
         if not started and not self._read_last_message(page):
+            self._raise_if_limited(page)   # penyebab paling umum
             raise BrowserError(
                 f"balasan tak terdeteksi dari {self.label} — kemungkinan selector "
                 "pesan usang untuk layout situs sekarang. Laporkan/perbarui "
@@ -620,6 +647,20 @@ class WebConnector:
                 continue
         return ""
 
+    def detect_limit(self, page: Any) -> str:
+        """Teks pemberitahuan LIMIT bila sedang tampil di halaman, else ""."""
+        if not self.limit_patterns:
+            return ""
+        try:
+            return page.evaluate(JS_FIND_TEXT, list(self.limit_patterns)) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _raise_if_limited(self, page: Any) -> None:
+        msg = self.detect_limit(page)
+        if msg:
+            raise WebLimitError(msg)
+
     def _read_code_blocks(self, page: Any) -> list[str]:
         """Isi MENTAH semua blok kode pada balasan terakhir (apa adanya)."""
         try:
@@ -679,22 +720,22 @@ class WebConnector:
             elif force_new_chat and not target:
                 self._goto(page)          # buka chat baru (chat_url)
                 self._chat_ready(page, 8000, check_cancel)
-            self._minimize(page)
+            self._background(page)
             return page, False
 
         self._goto(page, target or None)
         did_login = False
         if not self._chat_ready(page, 8000, check_cancel):
-            # BELUM login (masih di halaman login/auth) -> user HARUS sign-in
-            # sungguhan di jendela; kita menunggu sampai benar-benar masuk chat.
+            # BELUM login -> jendela harus TERLIHAT supaya pengguna bisa sign-in.
+            self._foreground(page)
             status(
                 "🔐 Silakan SIGN-IN di jendela Chrome yang terbuka "
                 "(email/Google + kode/CAPTCHA). Aku tunggu sampai selesai…"
             )
             self._wait_login(page, check_cancel)
-            status("login berhasil ✓ — jendela diminimalkan, lanjut di terminal")
+            status("login berhasil ✓ — browser lanjut di latar, kerja di terminal")
             did_login = True
-        self._minimize(page)
+        self._background(page)
         return page, did_login
 
     def _on_chat(self, page: Any, chat_id: str) -> bool:
@@ -771,15 +812,39 @@ class WebConnector:
             except Exception:  # noqa: BLE001
                 return False
 
-    def _minimize(self, page: Any) -> None:
-        """Sembunyikan jendela browser (minimize) via CDP — pengguna cukup pakai
-        terminal. Diam-diam gagal bila tak didukung."""
-        try:
+    def _background(self, page: Any) -> None:
+        """Jalankan browser DI LATAR: jendelanya disembunyikan sepenuhnya (tak
+        muncul di taskbar), prosesnya tetap hidup & merender normal sehingga
+        jawaban tetap terbaca. Pengguna cukup memakai terminal.
+
+        Bukan headless: Cloudflare menolak sesi headless. Bila penyembunyian
+        jendela tak didukung, jatuh ke minimize lewat CDP."""
+        from .browser import set_windows_visible
+
+        if set_windows_visible(self.service, False):
+            return
+        try:  # cadangan: minimalkan lewat CDP
             cdp = page.context.new_cdp_session(page)
             info = cdp.send("Browser.getWindowForTarget")
             cdp.send("Browser.setWindowBounds", {
                 "windowId": info["windowId"],
                 "bounds": {"windowState": "minimized"},
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _foreground(self, page: Any) -> None:
+        """Tampilkan kembali jendela browser (dipakai saat pengguna harus login)."""
+        from .browser import set_windows_visible
+
+        if set_windows_visible(self.service, True):
+            return
+        try:
+            cdp = page.context.new_cdp_session(page)
+            info = cdp.send("Browser.getWindowForTarget")
+            cdp.send("Browser.setWindowBounds", {
+                "windowId": info["windowId"],
+                "bounds": {"windowState": "normal"},
             })
         except Exception:  # noqa: BLE001
             pass

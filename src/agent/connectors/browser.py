@@ -62,6 +62,85 @@ def profile_dir(service: str) -> "Path":
     return _PROFILE_ROOT / service
 
 
+def _chrome_pids(service: str) -> set[int]:
+    """PID proses Chrome yang memakai profil connector `service` (Windows)."""
+    if sys.platform != "win32":
+        return set()
+    try:
+        marker = str(profile_dir(service)).replace("'", "")
+        ps = (
+            "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%'\" | "
+            "Where-Object { $_.CommandLine -like '*" + marker + "*' } | "
+            "ForEach-Object { $_.ProcessId }"
+        )
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=25,
+        )
+        return {int(x) for x in (out.stdout or "").split() if x.strip().isdigit()}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+# service -> daftar HWND yang KITA sembunyikan. Dipakai agar saat ditampilkan
+# lagi (mis. perlu login) hanya jendela itu yang kembali — bukan jendela bantu
+# internal Chrome yang memang seharusnya tak terlihat.
+_HIDDEN_WINDOWS: dict[str, list[int]] = {}
+
+
+def set_windows_visible(service: str, visible: bool) -> int:
+    """Sembunyikan / tampilkan JENDELA browser milik `service` (Windows).
+
+    Dipakai agar connector benar-benar berjalan DI LATAR: setelah login, jendela
+    Chrome disembunyikan sepenuhnya (tak ada di taskbar) — bukan sekadar
+    di-minimize — sementara prosesnya tetap hidup & merender normal. Jendela
+    ditampilkan lagi hanya saat pengguna perlu login. Return jumlah jendela yang
+    diubah (0 bila tak didukung)."""
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        SW_HIDE, SW_SHOWNOACTIVATE = 0, 4
+
+        if visible:
+            # Kembalikan HANYA jendela yang tadi kita sembunyikan.
+            hwnds = _HIDDEN_WINDOWS.pop(service, [])
+            for hwnd in hwnds:
+                try:
+                    user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOWNOACTIVATE)
+                except Exception:  # noqa: BLE001
+                    pass
+            return len(hwnds)
+
+        pids = _chrome_pids(service)
+        if not pids:
+            return 0
+        hidden: list[int] = []
+        WNDENUMPROC = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, _lparam):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            # Hanya jendela NYATA yang sedang terlihat (punya judul) — jendela
+            # bantu internal Chrome dibiarkan apa adanya.
+            if (pid.value in pids and user32.IsWindowVisible(hwnd)
+                    and user32.GetWindowTextLengthW(hwnd) > 0):
+                user32.ShowWindow(hwnd, SW_HIDE)
+                hidden.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+        if hidden:
+            _HIDDEN_WINDOWS[service] = hidden
+        return len(hidden)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _mark_profile_clean(service: str) -> None:
     """Tandai profil Chrome sebagai 'ditutup normal'.
 
@@ -189,6 +268,14 @@ def _kill_profile_browsers(service: str | None = None) -> None:
 
 class BrowserError(RuntimeError):
     """Kegagalan terkait browser/connector (login gagal, timeout, dsb)."""
+
+
+class WebLimitError(BrowserError):
+    """Layanan AI web sedang MEMBATASI pemakaian (kuota/limit pesan habis).
+
+    Dibedakan dari kegagalan lain supaya bagas-ai bisa memberi tahu pengguna
+    dengan jelas (termasuk kapan bisa dipakai lagi) alih-alih menunggu jawaban
+    yang memang tak akan datang."""
 
 
 def playwright_available() -> bool:
