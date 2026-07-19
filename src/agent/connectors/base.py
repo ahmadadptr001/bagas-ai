@@ -517,30 +517,31 @@ class WebConnector:
         # Sudah kena limit sebelum mengetik? Jangan buang waktu mengirim.
         self._raise_if_limited(page)
         status(f"mengetik pesan ke {self.label}…")
+        # Locator (bukan ElementHandle): situs merender ulang komposernya —
+        # mis. setelah ganti model lewat /effort — sehingga handle lama jadi
+        # basi ("Element is not attached to the DOM"). Locator dicari ulang
+        # setiap kali dipakai, jadi kebal terhadap render ulang itu.
+        inp = page.locator(self.input_selector).first
         try:
-            box = page.wait_for_selector(
-                self.input_selector, state="visible", timeout=8000
-            )
+            inp.wait_for(state="visible", timeout=8000)
         except Exception:  # noqa: BLE001
-            box = None
-        if box is None:
             raise BrowserError(
                 f"kotak input tak ditemukan ({self.input_selector}). "
                 "Situs mungkin berubah layout."
             )
-        box.click()
+        self._focus_input(inp)
         # Lampiran diunggah SEBELUM teks dikirim — kalau Enter ditekan lebih
         # dulu, pesan terkirim tanpa gambarnya.
         if attachments:
             status(f"mengunggah {len(attachments)} lampiran…")
             self._attach_files(page, attachments, check_cancel)
-            box.click()
+            self._focus_input(inp)
         counts_before = self._msg_counts(page)
         text_before = self._read_last_message(page)
         if self.input_is_contenteditable:
             page.keyboard.insert_text(prompt)
         else:
-            box.fill(prompt)
+            inp.fill(prompt)
         page.keyboard.press(self.submit_key)
 
         # --- tunggu jawaban MULAI (streaming muncul / jumlah pesan bertambah) ---
@@ -708,6 +709,27 @@ class WebConnector:
         except Exception:  # noqa: BLE001
             pass
         self._click_element(loc)
+
+    @staticmethod
+    def _focus_input(inp: Any) -> None:
+        """Fokuskan kotak input tanpa bergantung pada klik mouse.
+
+        `focus()` memanggil DOM focus() langsung sehingga tak perlu hit-test —
+        aman saat jendela browser berjalan tersembunyi di latar, tempat klik
+        mouse sungguhan selalu kehabisan waktu. Klik tetap dicoba sebagai
+        cadangan bila situs baru membuka komposernya saat diklik."""
+        try:
+            inp.focus(timeout=4000)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            inp.click(timeout=4000)
+        except Exception:  # noqa: BLE001
+            try:
+                inp.dispatch_event("click")
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     def _click_element(loc: Any) -> None:

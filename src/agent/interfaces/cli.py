@@ -1717,7 +1717,10 @@ def main(resume: bool = False) -> None:
                 f"  [dim]{_esc(spec.label)} tak punya tombol model/berpikir yang "
                 "bisa diatur dari sini.[/dim]")
             return
-        choices = [Choice(text, f"{text}  [dim]—  {desc}[/dim]")
+        # inquirer TIDAK memproses markup rich — tulis polos, kalau tidak tag
+        # seperti [dim] ikut tampil mentah di layar.
+        width = max((len(t) for t, _ in opts), default=0)
+        choices = [Choice(text, f"{text:<{width}}  —  {desc}")
                    for text, desc in opts]
         try:
             sel = inquirer.select(
