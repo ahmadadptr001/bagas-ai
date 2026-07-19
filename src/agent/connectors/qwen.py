@@ -16,6 +16,14 @@ class QwenConnector(WebConnector):
     # Qwen memakai textarea untuk input.
     input_selector = "textarea"
     input_is_contenteditable = False
-    # Jawaban Qwen dirender sebagai markdown di wadah .markdown-body.
-    message_selector = ".markdown-body"
+    # Jawaban Qwen dirender sebagai markdown — beberapa kandidat wadah.
+    message_selector = (
+        ".markdown-body",
+        "[class*='markdown']",
+        "[class*='messageContent']",
+    )
     submit_key = "Enter"
+    # Qwen: kontrol UI (mode berpikir/varian) belum diverifikasi ke situs live,
+    # jadi /effort untuk Qwen web belum menawarkan tombol (dikosongkan agar tak
+    # memberi opsi yang gagal). Bisa diisi setelah dicek langsung ke chat.qwen.ai.
+    web_actions = ()

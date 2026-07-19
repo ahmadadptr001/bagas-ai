@@ -1027,39 +1027,60 @@ def main(resume: bool = False) -> None:
     def process_web(text: str) -> None:
         """Giliran memakai CONNECTOR web-AI (Claude/Qwen web via browser).
 
-        Tak ada tool/streaming API NVIDIA — cukup tampilkan status browser +
-        pratinjau jawaban yang mengalir, lalu cetak jawaban final sbg markdown."""
+        Tampilan SAMA seperti giliran model NVIDIA: satu baris status hidup
+        (spinner + fase 'berpikir'/'menjawab' + waktu berjalan + 'Ctrl+C batal'),
+        lalu jawaban final dicetak sebagai markdown. Tak ada tool/streaming API —
+        proses & jawaban seluruhnya tampil di TERMINAL (browser di latar)."""
         turn_start = time.time()
-        console.print()
-        console.print(
-            f"  [bold #f9e2af]🌐 {_esc(agent.model_spec.label)}[/]"
-            f"  [dim](via browser)[/]"
-        )
-        state = {"status": "menyiapkan browser…", "partial": ""}
+        FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        # Fase awal 'berpikir' (mirip NVIDIA); connector memperbarui via on_status
+        # jadi 'sedang menjawab…' begitu jawaban mulai mengalir.
+        state = {"phase": "menyiapkan sesi", "cancelling": False}
         result: dict = {"answer": None, "error": None}
         cancel_event = threading.Event()
 
         def on_status(msg: str) -> None:
-            state["status"] = msg
-
-        def on_token(piece: str) -> None:
-            state["partial"] += piece
+            # Ringkas jadi kata-fase pendek agar segaris dengan gaya status NVIDIA.
+            m = msg.lower()
+            if "menjawab" in m:
+                state["phase"] = "menjawab"
+            elif "berpikir" in m or "thinking" in m:
+                state["phase"] = "berpikir"
+            elif "login" in m or "sign-in" in m or "sign in" in m:
+                state["phase"] = "menunggu login di jendela Chrome"
+            elif "mengetik" in m:
+                state["phase"] = "mengirim pesan"
+            else:
+                state["phase"] = msg.strip().rstrip("…") or state["phase"]
 
         def worker() -> None:
             try:
                 result["answer"] = agent.run(
-                    text, cancel_event=cancel_event,
-                    on_status=on_status, on_token=on_token,
+                    text, cancel_event=cancel_event, on_status=on_status,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
 
         def render():
-            rows = [Text.from_markup(f"  [#94e2d5]◐[/] [dim]{_esc(state['status'])}[/]")]
-            prev = state["partial"].strip()
-            if prev:
-                rows.append(Padding(Text(prev[-1500:], style="#7f849c"), (0, 3, 0, 3)))
-            return Group(*rows)
+            el = time.time() - turn_start
+            frame = FRAMES[int(el * 10) % len(FRAMES)]
+            if state["cancelling"]:
+                return _oneline(Text.from_markup(
+                    f"  [bold #f38ba8]{frame}[/] [#f38ba8]membatalkan…[/]"
+                    f"   [dim italic]Ctrl+C lagi = paksa[/]"))
+            t = Text()
+            t.append(f"  {frame} ", style="bold #cba6f7")
+            t.append(state["phase"], style="#cba6f7")
+            t.append(f"  {_fmt_elapsed(el)}", style="bold #89b4fa")
+            t.append("   [#45475a]•[/]  ", style="")
+            t.append_text(Text.from_markup("[#94e2d5]🌐 via browser[/]"))
+            t.append("     Ctrl+C batal", style="dim italic")
+            return _oneline(t)
+
+        # Header bot SEKALI (sama seperti giliran biasa).
+        console.print()
+        console.print("  [bold #89b4fa]🤖 bagas-ai[/] "
+                      f"[dim]· {_esc(agent.model_spec.label)}[/]")
 
         wt = threading.Thread(target=worker, daemon=True)
         interrupted = False
@@ -1075,26 +1096,40 @@ def main(resume: bool = False) -> None:
                         if not interrupted:
                             interrupted = True
                             cancel_event.set()
-                            state["status"] = "membatalkan…"
+                            state["cancelling"] = True
                         else:
                             break
-                live.update(render())
         except KeyboardInterrupt:
             interrupted = True
             cancel_event.set()
+
+        # Ctrl+C: beri worker jeda singkat untuk lepas lewat cancel_event; bila
+        # masih menggantung (mis. macet di dalam browser), RESET hub agar giliran
+        # berikutnya tak ikut mengantre di belakang job yang macet (akar bug
+        # 'tiap Ctrl+C lalu chat baru, sesi browser nyangkut tak selesai').
+        if interrupted and wt.is_alive():
+            wt.join(timeout=2.0)
+            if wt.is_alive():
+                try:
+                    from ..connectors import browser as _br
+                    _br.reset_hub()
+                except Exception:  # noqa: BLE001
+                    pass
 
         err = result["error"]
         ans = (result["answer"] or "").strip()
         if isinstance(err, (KeyboardInterrupt, llm.Cancelled)) or (
                 interrupted and not ans):
-            console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
+            console.print("  [yellow]◼ dibatalkan[/yellow]\n")
         elif err is not None:
-            console.print(f"\n  [red]✖ error:[/red] {err}\n")
+            console.print(f"  [red]✖ error:[/red] {_esc(str(err))}\n")
         elif ans:
             console.print(Padding(_md(ans), (0, 3, 1, 3)))
             console.print(Padding(Text.from_markup(
-                f"[dim]{_fmt_elapsed(time.time() - turn_start)} · via browser[/]"),
+                f"[dim]{_fmt_elapsed(time.time() - turn_start)} · 🌐 via browser[/]"),
                 (0, 3, 1, 3)))
+        else:
+            console.print("  [yellow]tak ada jawaban.[/yellow]\n")
 
     def _connect_web(prev_model_id: str) -> None:
         """Alur CONNECT saat model web DIPILIH (bukan saat pesan pertama):
@@ -1611,6 +1646,11 @@ def main(resume: bool = False) -> None:
         return None
 
     def pick_effort() -> None:
+        # Model web (Claude/Qwen web): /effort MENGKLIK tombol di UI situsnya
+        # (ganti varian model & mode berpikir web), bukan parameter API.
+        if agent.model_spec.is_web:
+            pick_web_option()
+            return
         if not agent.model_spec.supports_effort():
             console.print(
                 f"  [dim]Model [bold]{agent.model_spec.label}[/bold] menjawab langsung "
@@ -1632,6 +1672,69 @@ def main(resume: bool = False) -> None:
             console.print(f"  [green]✓ Mode berpikir: [bold]{title}[/bold][/green]")
         except (KeyboardInterrupt, EOFError):
             pass
+
+    def pick_web_option() -> None:
+        """/effort untuk model web: pilih tombol di UI situs (varian model /
+        mode berpikir) lalu program yang mengekliknya di browser."""
+        spec = agent.model_spec
+        try:
+            from .. import connectors
+            conn = connectors.get_connector(spec.connector)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]connector tak siap: {_esc(str(exc))}[/red]")
+            return
+        opts = conn.web_options()
+        if not opts:
+            console.print(
+                f"  [dim]{_esc(spec.label)} tak punya tombol model/berpikir yang "
+                "bisa diatur dari sini.[/dim]")
+            return
+        choices = [Choice(text, f"{text}  [dim]—  {desc}[/dim]")
+                   for text, desc in opts]
+        try:
+            sel = inquirer.select(
+                message=f"Tombol {spec.label} (diklik di UI web)",
+                choices=choices, pointer="❯",
+                long_instruction="Program akan mengklik tombol ini langsung di situsnya.",
+            ).execute()
+        except (KeyboardInterrupt, EOFError):
+            return
+
+        state = {"msg": f"mengklik '{sel}' di {spec.label}…"}
+        result: dict = {"ok": None, "error": None}
+
+        def worker() -> None:
+            try:
+                result["ok"] = conn.set_web_option(sel)
+            except BaseException as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        wt = threading.Thread(target=worker, daemon=True)
+        FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        try:
+            with Live(_oneline(Text()), console=console, refresh_per_second=10,
+                      transient=True) as live:
+                wt.start()
+                while wt.is_alive():
+                    frame = FRAMES[int(time.time() * 10) % len(FRAMES)]
+                    live.update(_oneline(Text.from_markup(
+                        f"  [#cba6f7]{frame}[/] [dim]{_esc(state['msg'])}[/]")))
+                    wt.join(timeout=0.1)
+        except KeyboardInterrupt:
+            wt.join(timeout=2.0)
+            if wt.is_alive():
+                try:
+                    from ..connectors import browser as _br
+                    _br.reset_hub()
+                except Exception:  # noqa: BLE001
+                    pass
+            console.print("  [yellow]◼ dibatalkan[/yellow]\n")
+            return
+
+        if result["error"] is not None:
+            console.print(f"  [yellow]⚠ {_esc(str(result['error']))}[/yellow]\n")
+        else:
+            console.print(f"  [#a6e3a1]✓ {_esc(str(result['ok']))}[/]\n")
 
     def delete_sessions() -> None:
         sessions = session_mod.list_sessions()

@@ -27,16 +27,19 @@ from .. import config
 _PROFILE_ROOT = config.CONFIG_HOME / "browser"
 
 
-def _kill_profile_browsers() -> None:
+def _kill_profile_browsers(service: str | None = None) -> None:
     """Bunuh proses Chrome/Chromium yang memakai folder profil connector.
 
-    Dipakai saat hub MACET: Chrome yang tertinggal MENGUNCI profil (Chrome
-    menolak profil yang sedang dipakai proses lain), sehingga peluncuran ulang
-    ikut menggantung. Best-effort; hanya Windows."""
+    Chrome yang tertinggal MENGUNCI folder profil (Chrome menolak profil yang
+    sedang dipakai proses lain), sehingga peluncuran ulang IKUT MENGGANTUNG —
+    inilah 'pembukaan sesi browser nyangkut' setelah Ctrl+C/crash. Dengan
+    `service`, hanya Chrome untuk profil itu yang dibunuh (sesi lain aman);
+    tanpa `service`, seluruh profil connector. Best-effort; hanya Windows."""
     if sys.platform != "win32":
         return
     try:
-        marker = str(_PROFILE_ROOT).replace("'", "")
+        target = _PROFILE_ROOT / service if service else _PROFILE_ROOT
+        marker = str(target).replace("'", "").replace("\\", "\\\\")
         ps = (
             "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%'\" | "
             "Where-Object { $_.CommandLine -like '*" + marker + "*' } | "
@@ -102,12 +105,20 @@ class BrowserHub:
     def submit(
         self, fn: Callable[["BrowserHub"], Any], timeout: float | None = None
     ) -> Any:
-        """Jalankan fn(hub) DI thread hub, kembalikan hasilnya (blocking)."""
+        """Jalankan fn(hub) DI thread hub, kembalikan hasilnya (blocking).
+
+        Bila melewati `timeout`, hub ini ditandai POISONED: job yang macet masih
+        menduduki thread hub, jadi hub berikutnya harus dibuat baru (lihat hub())
+        agar giliran-giliran selanjutnya tak ikut mengantre di belakang job macet
+        itu selamanya."""
         self._ensure_thread()
         job = _Job(fn)
         self._q.put(job)
         if not job.done.wait(timeout):
-            raise BrowserError("aksi browser melebihi batas waktu")
+            self.poisoned = True
+            raise BrowserError(
+                "aksi browser melebihi batas waktu — sesi direset, coba lagi."
+            )
         if job.error is not None:
             raise job.error
         return job.result
@@ -137,7 +148,11 @@ class BrowserHub:
             ctx, page = entry
             if self._alive(page):
                 return page
-            self.drop(service)  # page/context mati (mis. jendela ditutup) -> buang
+            # page/context mati (mis. jendela ditutup / crash). Buang, lalu
+            # PASTIKAN tak ada Chrome sisa yang masih mengunci profil ini —
+            # kalau ada, launch berikutnya akan menggantung.
+            self.drop(service)
+            _kill_profile_browsers(service)
 
         prof = _PROFILE_ROOT / service
         prof.mkdir(parents=True, exist_ok=True)
@@ -201,9 +216,26 @@ _HUB_LOCK = threading.Lock()
 
 
 def hub() -> BrowserHub:
-    """Singleton hub browser (dibuat saat pertama dipakai)."""
+    """Singleton hub browser (dibuat saat pertama dipakai).
+
+    Bila hub sebelumnya POISONED (ada job yang macet melewati timeout — mis.
+    setelah Ctrl+C di tengah pembukaan sesi), buat hub BARU dan bunuh Chrome
+    profil yang mungkin tertinggal & mengunci profil. Ini menyembuhkan gejala
+    'tiap Ctrl+C lalu chat baru, pembukaan sesi browser nyangkut tak selesai'."""
     global _HUB
     with _HUB_LOCK:
+        if _HUB is not None and _HUB.poisoned:
+            _kill_profile_browsers()  # lepaskan kunci profil sebelum hub baru
+            _HUB = None
         if _HUB is None:
             _HUB = BrowserHub()
         return _HUB
+
+
+def reset_hub() -> None:
+    """Paksa hub dibuang & Chrome profil dibunuh (dipakai saat pemulihan error).
+    Hub baru dibuat otomatis pada pemakaian berikutnya lewat hub()."""
+    global _HUB
+    with _HUB_LOCK:
+        _HUB = None
+    _kill_profile_browsers()

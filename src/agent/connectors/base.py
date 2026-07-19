@@ -47,11 +47,12 @@ class WebConnector:
     # Selector penanda "sedang mengetik/streaming" (bila situs punya).
     streaming_selector: str = ""
 
-    # --- Tombol yang bisa DIKLIK program di UI web (permintaan pengguna:
-    #     ganti varian model & mode berpikir situs dari terminal, via /effort).
-    web_model_button: str = ""                 # tombol pembuka menu model di situs
-    web_model_options: tuple[str, ...] = ()    # teks item varian model di menu
-    web_effort_options: tuple[str, ...] = ()   # teks item mode berpikir/effort
+    # --- Aksi UI yang bisa DIKLIK program di situs (permintaan pengguna: ganti
+    #     varian model & mode berpikir dari terminal via /effort). Tiap aksi =
+    #     (label tampil, urutan teks yang diklik berurutan, deskripsi). Urutan
+    #     >1 elemen dipakai untuk menu bertingkat (mis. buka "Effort" lalu "High").
+    web_model_button: str = ""   # tombol pembuka menu (diklik dulu bila ada)
+    web_actions: tuple[tuple[str, tuple[str, ...], str], ...] = ()
 
     # Batas waktu (detik).
     login_timeout: float = 300.0     # tunggu pengguna menyelesaikan login
@@ -92,19 +93,20 @@ class WebConnector:
             timeout=self.login_timeout + self.answer_timeout + 120,
         )
 
-    def set_web_option(self, text: str) -> str:
+    def set_web_option(self, label: str) -> str:
         """Klik OPSI di UI web (varian model / mode berpikir) — dipakai /effort.
-        `text` = teks item yang tampil di situs (mis. "Opus", "Extended thinking")."""
+        `label` = label aksi dari web_options() (mis. "Sonnet 5", "Effort: High")."""
+        path = next((p for lbl, p, _ in self.web_actions if lbl == label), None)
+        if path is None:
+            raise BrowserError(f"opsi '{label}' tak dikenal untuk {self.label}")
         return hub().submit(
-            lambda h: self._set_option_on_hub(h, text),
+            lambda h: self._set_action_on_hub(h, label, path),
             timeout=self.login_timeout + 60,
         )
 
     def web_options(self) -> list[tuple[str, str]]:
-        """Daftar (teks-klik, deskripsi) opsi web yang bisa dikendalikan program."""
-        out = [(m, f"varian model: {m}") for m in self.web_model_options]
-        out += [(e, f"mode berpikir: {e}") for e in self.web_effort_options]
-        return out
+        """Daftar (label, deskripsi) opsi web yang bisa dikendalikan program."""
+        return [(lbl, desc) for lbl, _path, desc in self.web_actions]
 
     # ---- hook opsional untuk subclass ----
     def _is_done(self, page: Any) -> bool:
@@ -191,6 +193,10 @@ class WebConnector:
                 f"{self.service}.py."
             )
 
+        # Jawaban sudah MULAI mengalir -> ubah fase jadi "menjawab" (bukan diam
+        # di "berpikir"), supaya terminal mencerminkan keadaan sebenarnya.
+        status(f"{self.label} sedang menjawab…")
+
         # --- pantau teks balasan terakhir sampai stabil ---
         last = ""
         emitted = 0
@@ -221,10 +227,9 @@ class WebConnector:
             )
         return last
 
-    def _set_option_on_hub(self, h: Any, text: str) -> str:
-        """Klik opsi (varian model / effort) di UI web: buka tombol menu model
-        bila ada, lalu klik item ber-teks `text` (cocok sebagian, tanpa peduli
-        huruf besar/kecil)."""
+    def _set_action_on_hub(self, h: Any, label: str, path: tuple[str, ...]) -> str:
+        """Klik aksi UI (varian model / effort). Buka tombol menu bila ada, lalu
+        klik tiap teks di `path` berurutan (dukungan menu bertingkat)."""
         page, _ = self._acquire_ready_page(h, lambda m: None, lambda: None)
 
         opened = False
@@ -234,31 +239,45 @@ class WebConnector:
                 if btn is not None and btn.is_visible():
                     btn.click()
                     opened = True
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(600)
             except Exception:  # noqa: BLE001
                 opened = False
 
         try:
-            page.get_by_text(text, exact=False).first.click(timeout=4000)
-        except Exception:
-            try:
-                page.click(f"text={text}", timeout=3000)
-            except Exception as exc:
-                if opened:
-                    try:
-                        page.keyboard.press("Escape")
-                    except Exception:  # noqa: BLE001
-                        pass
-                raise BrowserError(
-                    f"opsi '{text}' tak ditemukan di UI {self.label} — "
-                    "situs mungkin berubah layout / teksnya beda bahasa."
-                ) from exc
-        page.wait_for_timeout(300)
+            for i, text in enumerate(path):
+                self._click_menu_text(page, text)
+                # Jeda antar-tingkat agar submenu sempat muncul.
+                page.wait_for_timeout(500 if i < len(path) - 1 else 250)
+        except Exception as exc:
+            if opened:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:  # noqa: BLE001
+                    pass
+            raise BrowserError(
+                f"opsi '{label}' tak bisa diklik di UI {self.label} — "
+                "situs mungkin berubah layout / teksnya beda."
+            ) from exc
         try:  # tutup menu bila masih terbuka
             page.keyboard.press("Escape")
         except Exception:  # noqa: BLE001
             pass
-        return f"'{text}' dipilih di {self.label}"
+        return f"'{label}' dipilih di {self.label}"
+
+    def _click_menu_text(self, page: Any, text: str) -> None:
+        """Klik item menu (menuitem/menuitemradio/option) yang memuat `text`.
+        Diutamakan item menu agar tak salah klik elemen lain berteks sama."""
+        esc = text.replace('"', '\\"')
+        loc = page.locator(
+            f'[role="menuitemradio"]:has-text("{esc}"), '
+            f'[role="menuitem"]:has-text("{esc}"), '
+            f'[role="option"]:has-text("{esc}")'
+        ).first
+        try:
+            loc.scroll_into_view_if_needed(timeout=1500)
+        except Exception:  # noqa: BLE001
+            pass
+        loc.click(timeout=4000)
 
     # ---- pembacaan pesan (multi-kandidat, tahan perubahan layout) ----
     def _msg_selectors(self) -> tuple[str, ...]:
