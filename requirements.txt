@@ -10,3 +10,7 @@ python-dotenv>=1.0.0
 tenacity>=8.2.0
 pydantic>=2.0.0
 requests>=2.31.0
+# Opsional: fitur CONNECTOR web-AI (/model claude-web, qwen-web) — otomasi
+# browser ke claude.ai / chat.qwen.ai. Setelah install, jalankan sekali:
+#   playwright install chromium
+playwright>=1.40.0

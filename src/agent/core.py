@@ -189,6 +189,8 @@ class Agent:
         on_retry: Callable[[int, float, Exception], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
         on_notice: Callable[[str], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         """Proses satu giliran (streaming). Kembalikan teks jawaban final.
 
@@ -202,7 +204,16 @@ class Agent:
         `on_retry(percobaan, tunggu, exc)` dipanggil saat NVIDIA rate-limit dan
         bagas-ai menunggu lalu MELANJUTKAN langkah yang sama.
         Bila `cancel_event` diset di tengah jalan, melempar llm.Cancelled.
+
+        Bila model aktif adalah CONNECTOR web (mis. Claude/Qwen web), giliran ini
+        TIDAK memakai API NVIDIA maupun tool-calling — melainkan diteruskan ke
+        situs webnya lewat browser (`on_status`/`on_token` untuk progres & teks).
         """
+        if self.model_spec.is_web:
+            return self._run_connector(
+                user_input, cancel_event=cancel_event,
+                on_status=on_status, on_token=on_token,
+            )
         self.memory.add_user(user_input)
         self.tokens_last = Usage()
         self.tokens_live = 0
@@ -223,6 +234,63 @@ class Agent:
             self.memory.repair_dangling_tools()
             self._persist()
             raise
+
+    def _run_connector(
+        self,
+        user_input: Any,
+        *,
+        cancel_event: Any = None,
+        on_status: Callable[[str], None] | None = None,
+        on_token: Callable[[str], None] | None = None,
+    ) -> str:
+        """Teruskan giliran ke AI web (browser) alih-alih ke API NVIDIA.
+
+        Web-AI menyimpan konteks percakapannya SENDIRI di dalam sesi browser;
+        memory bagas-ai tetap mencatat transkrip agar tampil di UI, tersimpan di
+        sesi, dan tetap nyambung bila nanti pengguna berganti ke model NVIDIA.
+        """
+        from . import connectors  # impor tunda: Playwright opsional
+
+        self.memory.add_user(user_input)
+        self.tokens_last = Usage()
+        self.tokens_live = 0
+        prompt_text = str(user_input)
+
+        if not connectors.playwright_available():
+            answer = (
+                "Fitur connector web butuh Playwright + browser Chromium yang "
+                "belum terpasang. Jalankan:\n\n"
+                "    pip install playwright\n"
+                "    playwright install chromium\n\n"
+                "lalu coba lagi. Atau kembali ke model NVIDIA dengan /model."
+            )
+            self.memory.add_assistant_text(answer)
+            self._persist()
+            return answer
+
+        try:
+            answer = connectors.get_connector(self.model_spec.connector).send(
+                prompt_text,
+                on_status=on_status,
+                on_token=on_token,
+                cancel_event=cancel_event,
+            )
+        except llm.Cancelled:
+            self.memory.repair_dangling_tools()
+            self._persist()
+            raise
+        except connectors.BrowserError as exc:
+            answer = f"[Connector {self.model_spec.label}] {exc}"
+        except Exception as exc:  # noqa: BLE001 - laporkan apa adanya, jangan crash REPL
+            answer = f"[Connector {self.model_spec.label}] gagal: {exc}"
+
+        self.memory.add_assistant_text(answer)
+        # Web-AI tak melaporkan token; estimasi kasar agar tampilan tetap masuk akal.
+        self.tokens_last.add_raw(_est_tokens(prompt_text), _est_tokens(answer))
+        self.tokens_session.add_raw(_est_tokens(prompt_text), _est_tokens(answer))
+        self.tokens_live = self.tokens_last.total
+        self._persist()
+        return answer
 
     def _run_loop(
         self,

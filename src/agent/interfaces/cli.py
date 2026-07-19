@@ -1024,11 +1024,87 @@ def main(resume: bool = False) -> None:
         for k in sorted(steps):
             show_expand(k)
 
+    def process_web(text: str) -> None:
+        """Giliran memakai CONNECTOR web-AI (Claude/Qwen web via browser).
+
+        Tak ada tool/streaming API NVIDIA — cukup tampilkan status browser +
+        pratinjau jawaban yang mengalir, lalu cetak jawaban final sbg markdown."""
+        turn_start = time.time()
+        console.print()
+        console.print(
+            f"  [bold #f9e2af]🌐 {_esc(agent.model_spec.label)}[/]"
+            f"  [dim](via browser)[/]"
+        )
+        state = {"status": "menyiapkan browser…", "partial": ""}
+        result: dict = {"answer": None, "error": None}
+        cancel_event = threading.Event()
+
+        def on_status(msg: str) -> None:
+            state["status"] = msg
+
+        def on_token(piece: str) -> None:
+            state["partial"] += piece
+
+        def worker() -> None:
+            try:
+                result["answer"] = agent.run(
+                    text, cancel_event=cancel_event,
+                    on_status=on_status, on_token=on_token,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        def render():
+            rows = [Text.from_markup(f"  [#94e2d5]◐[/] [dim]{_esc(state['status'])}[/]")]
+            prev = state["partial"].strip()
+            if prev:
+                rows.append(Padding(Text(prev[-1500:], style="#7f849c"), (0, 3, 0, 3)))
+            return Group(*rows)
+
+        wt = threading.Thread(target=worker, daemon=True)
+        interrupted = False
+        try:
+            with Live(render(), console=console, refresh_per_second=12,
+                      transient=True) as live:
+                wt.start()
+                while wt.is_alive():
+                    try:
+                        live.update(render())
+                        wt.join(timeout=0.1)
+                    except KeyboardInterrupt:
+                        if not interrupted:
+                            interrupted = True
+                            cancel_event.set()
+                            state["status"] = "membatalkan…"
+                        else:
+                            break
+                live.update(render())
+        except KeyboardInterrupt:
+            interrupted = True
+            cancel_event.set()
+
+        err = result["error"]
+        ans = (result["answer"] or "").strip()
+        if isinstance(err, (KeyboardInterrupt, llm.Cancelled)) or (
+                interrupted and not ans):
+            console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
+        elif err is not None:
+            console.print(f"\n  [red]✖ error:[/red] {err}\n")
+        elif ans:
+            console.print(Padding(_md(ans), (0, 3, 1, 3)))
+            console.print(Padding(Text.from_markup(
+                f"[dim]{_fmt_elapsed(time.time() - turn_start)} · via browser[/]"),
+                (0, 3, 1, 3)))
+
     def process(text: str) -> None:
         """Jalankan satu giliran INLINE (tanpa layar-penuh, tetap di alur terminal
         biasa). Seluruh giliran dirender di satu region rich.Live yang hidup &
         membeku jadi riwayat saat selesai. Hasil langkah bisa dibuka/tutup realtime
         dengan Ctrl+R. Ctrl+C membatalkan. Bila gagal, jatuh ke process_classic."""
+        # Model connector web (browser) punya alur sendiri (tanpa tool/API NVIDIA).
+        if agent.model_spec.is_web:
+            process_web(text)
+            return
         steps.clear()
         step_ctr["n"] = 0
         cur_step.clear()
@@ -1934,7 +2010,8 @@ def main(resume: bool = False) -> None:
         s = agent.tokens_session
         total = grand["base"] + s.total
         spec = agent.model_spec
-        kind = "🧠" if spec.reasoning else ("🖼" if spec.multimodal else "🤖")
+        kind = ("🌐" if spec.is_web else
+                "🧠" if spec.reasoning else ("🖼" if spec.multimodal else "🤖"))
         eff = f" <eff>◇ {agent.effort}</eff>" if agent.effort else ""
         sep = " <sep>│</sep> "
         return HTML(

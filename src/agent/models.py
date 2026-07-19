@@ -49,6 +49,15 @@ class ModelSpec:
     multimodal: bool = False  # bisa memproses gambar/video
     reasoning_style: str | None = None  # None | "nemotron" | "gpt_oss"
     note: str = ""  # keterangan singkat (kecepatan/keunggulan)
+    # Bila diisi (mis. "claude", "qwen"), model ini BUKAN model NVIDIA melainkan
+    # CONNECTOR ke AI web berbasis browser (lihat agent/connectors). Chat diarahkan
+    # ke situsnya lewat Playwright, bukan ke endpoint NVIDIA.
+    connector: str = ""
+
+    @property
+    def is_web(self) -> bool:
+        """True bila model ini connector web-AI (butuh browser + login), bukan API."""
+        return bool(self.connector)
 
     @property
     def reasoning(self) -> bool:
@@ -208,6 +217,21 @@ MODELS: dict[str, ModelSpec] = {
         multimodal=True,
         note="Khusus analisis gambar — deskripsi & tanya-jawab foto",
     ),
+    # --- Connector web-AI (via browser; butuh login sekali) ---
+    # Ini BUKAN model NVIDIA: chat diarahkan ke situs webnya lewat otomasi
+    # browser (Playwright). Jendela browser akan tampil untuk login pertama kali.
+    "claude-web": ModelSpec(
+        id="web/claude",
+        label="Claude (web)",
+        connector="claude",
+        note="Via browser claude.ai — butuh akun & login sekali (bukan NVIDIA)",
+    ),
+    "qwen-web": ModelSpec(
+        id="web/qwen",
+        label="Qwen (web)",
+        connector="qwen",
+        note="Via browser chat.qwen.ai — butuh akun & login sekali (bukan NVIDIA)",
+    ),
 }
 
 _ORDER = list(MODELS.keys())
@@ -265,7 +289,9 @@ def random_fallback(exclude: set[str] | frozenset[str] = frozenset()) -> ModelSp
     pool = [
         spec
         for spec in MODELS.values()
-        if spec.id not in exclude and not (spec.multimodal and not spec.reasoning)
+        if spec.id not in exclude
+        and not spec.connector  # connector web (browser) jangan dipakai auto-fallback
+        and not (spec.multimodal and not spec.reasoning)
     ]
     return random.choice(pool) if pool else None
 
@@ -281,6 +307,8 @@ def list_text(current_id: str | None = None) -> str:
     for i, key in enumerate(_ORDER, start=1):
         spec = MODELS[key]
         tags = []
+        if spec.connector:
+            tags.append("🌐 web (butuh login browser)")
         if spec.multimodal:
             tags.append("multimodal")
         if spec.reasoning:
