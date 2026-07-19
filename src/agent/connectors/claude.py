@@ -74,6 +74,9 @@ class ClaudeConnector(WebConnector):
     )
     submit_key = "Enter"
     read_as_markdown = True  # jawaban Claude penuh markdown (list/tabel/kode)
+    # Lampiran gambar (mis. screenshot untuk debug visual) — input file-nya
+    # tersembunyi, tapi set_input_files tetap bekerja (diverifikasi live).
+    file_input_selector = 'input[type="file"]'
     # Penanda "sedang mengetik": atribut data-is-streaming="true" (verified).
     streaming_selector = '[data-is-streaming="true"]'
     # Saat Claude masih BERPIKIR, satu-satunya teks yang terbaca adalah indikator
@@ -83,14 +86,27 @@ class ClaudeConnector(WebConnector):
     # Pemberitahuan limit claude.ai — bentuk aslinya diverifikasi langsung:
     # "You are out of free messages until 12:10 AM". Varian lain disertakan
     # karena teksnya berbeda antar paket/kondisi.
+    #
+    # SENGAJA SPESIFIK. Pola longgar seperti "usage limit" atau "try again later"
+    # pernah dipakai dan berbahaya: jawaban Claude sendiri (mis. menjelaskan cara
+    # menangani error 429) memuat frasa itu, sehingga giliran dibatalkan padahal
+    # kuota normal. Frasa di bawah hanya muncul pada pemberitahuan situs.
     limit_patterns = (
         r"out of free messages",
+        r"out of messages until",
         r"message limit reached",
-        r"reached your (usage|message) limit",
-        r"usage limit",
-        r"you'?ve hit your limit",
-        r"limit will reset",
-        r"try again later",
+        r"you'?(ve| have) reached your (usage|message|daily) limit",
+        r"daily limit reached",
+        r"limit resets at",
+        r"limit will reset at",
+    )
+    # Area PERCAKAPAN tak ikut dipindai — pemberitahuan limit selalu di luar
+    # gelembung pesan, sedangkan isi pesan bisa saja membahas rate limit.
+    limit_exclude_selectors = (
+        "div[data-is-streaming]",
+        '[data-testid="user-message"]',
+        ".standard-markdown",
+        ".font-claude-response",
     )
 
     # Tombol/opsi UI yang bisa diklik program lewat /effort (DIVERIFIKASI live):

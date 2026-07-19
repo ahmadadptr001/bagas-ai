@@ -62,17 +62,28 @@ def profile_dir(service: str) -> "Path":
     return _PROFILE_ROOT / service
 
 
+def _ps_profile_query(target: "Path") -> str:
+    """Potongan PowerShell: proses Chrome yang memakai folder profil `target`.
+
+    Dipakai bersama oleh pencarian PID & pembunuhan proses supaya aturan
+    pencocokannya HANYA ada di satu tempat (dulu duplikat, dan bug backslash
+    sempat membuat salah satunya tak pernah cocok)."""
+    # -like memakai backslash secara LITERAL. Jangan meng-escape (menggandakan)
+    # backslash — polanya jadi tak pernah cocok.
+    marker = str(target).replace("'", "")
+    return (
+        "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%'\" | "
+        "Where-Object { $_.CommandLine -like '*" + marker + "*' }"
+    )
+
+
 def _chrome_pids(service: str) -> set[int]:
     """PID proses Chrome yang memakai profil connector `service` (Windows)."""
     if sys.platform != "win32":
         return set()
     try:
-        marker = str(profile_dir(service)).replace("'", "")
-        ps = (
-            "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%'\" | "
-            "Where-Object { $_.CommandLine -like '*" + marker + "*' } | "
-            "ForEach-Object { $_.ProcessId }"
-        )
+        ps = _ps_profile_query(profile_dir(service)) + \
+            " | ForEach-Object { $_.ProcessId }"
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
             capture_output=True, text=True, timeout=25,
@@ -80,6 +91,46 @@ def _chrome_pids(service: str) -> set[int]:
         return {int(x) for x in (out.stdout or "").split() if x.strip().isdigit()}
     except Exception:  # noqa: BLE001
         return set()
+
+
+# user32 dengan argtypes LENGKAP, dibuat sekali. Tanpa argtypes, HWND yang
+# dilewatkan sebagai int Python dimarshal jadi C int 32-bit dan bisa TERPOTONG
+# di Windows 64-bit sehingga jendela salah/gagal disembunyikan.
+_U32: dict[str, Any] = {}
+
+
+def _user32() -> Any:
+    """Kembalikan (dll, tipe HWND, tipe callback enum) atau None bila tak ada."""
+    if sys.platform != "win32":
+        return None
+    if "dll" in _U32:
+        return _U32["dll"]
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.WinDLL("user32", use_last_error=True)
+        proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        u.EnumWindows.argtypes = [proc, wintypes.LPARAM]
+        u.EnumWindows.restype = wintypes.BOOL
+        u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.ShowWindow.restype = wintypes.BOOL
+        u.IsWindow.argtypes = [wintypes.HWND]
+        u.IsWindow.restype = wintypes.BOOL
+        u.IsWindowVisible.argtypes = [wintypes.HWND]
+        u.IsWindowVisible.restype = wintypes.BOOL
+        u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        u.GetWindowTextLengthW.restype = ctypes.c_int
+        u.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        _U32.update(dll=u, proc=proc, hwnd=wintypes.HWND,
+                    dword=wintypes.DWORD, byref=ctypes.byref)
+        return u
+    except Exception:  # noqa: BLE001
+        _U32["dll"] = None
+        return None
 
 
 # service -> daftar HWND yang KITA sembunyikan. Dipakai agar saat ditampilkan
@@ -96,44 +147,51 @@ def set_windows_visible(service: str, visible: bool) -> int:
     di-minimize — sementara prosesnya tetap hidup & merender normal. Jendela
     ditampilkan lagi hanya saat pengguna perlu login. Return jumlah jendela yang
     diubah (0 bila tak didukung)."""
-    if sys.platform != "win32":
+    u = _user32()
+    if u is None:
         return 0
+    HWND, DWORD, byref = _U32["hwnd"], _U32["dword"], _U32["byref"]
+    SW_HIDE, SW_SHOWNOACTIVATE = 0, 4
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        SW_HIDE, SW_SHOWNOACTIVATE = 0, 4
-
         if visible:
-            # Kembalikan HANYA jendela yang tadi kita sembunyikan.
-            hwnds = _HIDDEN_WINDOWS.pop(service, [])
-            for hwnd in hwnds:
-                try:
-                    user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOWNOACTIVATE)
-                except Exception:  # noqa: BLE001
-                    pass
-            return len(hwnds)
+            # Kembalikan HANYA jendela yang tadi kita sembunyikan, dan HANYA
+            # yang handle-nya masih hidup. Handle basi (browser sudah diluncurkan
+            # ulang) TIDAK boleh dihitung: kalau dihitung, pemanggil mengira
+            # jendela sudah tampil lalu melewati cadangan CDP — pengguna disuruh
+            # login ke jendela yang sebenarnya masih tersembunyi.
+            shown = 0
+            for h in _HIDDEN_WINDOWS.pop(service, []):
+                hw = HWND(h)
+                if u.IsWindow(hw):
+                    u.ShowWindow(hw, SW_SHOWNOACTIVATE)
+                    shown += 1
+            return shown
+
+        # Sudah tersembunyi dari panggilan sebelumnya & jendelanya masih itu-itu
+        # juga? Tak ada yang perlu dikerjakan — hindari spawn PowerShell yang
+        # mahal (~0,7 dtk) pada SETIAP pengiriman pesan.
+        prev = _HIDDEN_WINDOWS.get(service) or []
+        if prev and all(u.IsWindow(HWND(h)) and not u.IsWindowVisible(HWND(h))
+                        for h in prev):
+            return len(prev)
 
         pids = _chrome_pids(service)
         if not pids:
             return 0
         hidden: list[int] = []
-        WNDENUMPROC = ctypes.WINFUNCTYPE(
-            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
         def _cb(hwnd, _lparam):
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            pid = DWORD()
+            u.GetWindowThreadProcessId(hwnd, byref(pid))
             # Hanya jendela NYATA yang sedang terlihat (punya judul) — jendela
             # bantu internal Chrome dibiarkan apa adanya.
-            if (pid.value in pids and user32.IsWindowVisible(hwnd)
-                    and user32.GetWindowTextLengthW(hwnd) > 0):
-                user32.ShowWindow(hwnd, SW_HIDE)
+            if (pid.value in pids and u.IsWindowVisible(hwnd)
+                    and u.GetWindowTextLengthW(hwnd) > 0):
+                u.ShowWindow(hwnd, SW_HIDE)
                 hidden.append(int(hwnd))
             return True
 
-        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+        u.EnumWindows(_U32["proc"](_cb), 0)
         if hidden:
             _HIDDEN_WINDOWS[service] = hidden
         return len(hidden)
@@ -188,14 +246,23 @@ def shutdown(timeout: float = 8.0) -> None:
         _HUB = None
     if h is None or not h._started:
         return
+    closed = True
     try:
         h.submit(_shutdown_on_hub, timeout=timeout)
     except Exception:  # noqa: BLE001 - keluar tetap harus mulus
-        pass
+        closed = False
     try:
         h._q.put(None)  # akhiri loop thread hub
     except Exception:  # noqa: BLE001
         pass
+    if not closed:
+        # Penutupan rapi gagal. Chrome yang masih hidup TIDAK boleh ditinggalkan
+        # dalam keadaan tersembunyi: tanpa jendela & tanpa entri taskbar,
+        # pengguna hanya bisa menutupnya lewat Task Manager. Tampilkan lagi,
+        # lalu hentikan prosesnya.
+        for svc in list(_HIDDEN_WINDOWS):
+            set_windows_visible(svc, True)
+        _kill_profile_browsers()
 
 
 def _shutdown_atexit() -> None:
@@ -237,14 +304,14 @@ def _kill_profile_browsers(service: str | None = None) -> None:
         return
     try:
         target = _PROFILE_ROOT / service if service else _PROFILE_ROOT
-        # PENTING: -like memakai backslash secara LITERAL. Jangan meng-escape
-        # (menggandakan) backslash — polanya jadi tak pernah cocok & proses
-        # Chrome yang mengunci profil tak pernah terbunuh.
-        marker = str(target).replace("'", "")
-        ps = (
-            "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%'\" | "
-            "Where-Object { $_.CommandLine -like '*" + marker + "*' } | "
-            "ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force "
+        # Jendela yang tercatat tersembunyi ikut dilupakan — prosesnya mati,
+        # handle-nya tak berlaku lagi.
+        if service:
+            _HIDDEN_WINDOWS.pop(service, None)
+        else:
+            _HIDDEN_WINDOWS.clear()
+        ps = _ps_profile_query(target) + (
+            " | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force "
             "-ErrorAction Stop } catch {} }"
         )
         subprocess.run(
@@ -392,6 +459,9 @@ class BrowserHub:
 
     def drop(self, service: str) -> None:
         """Tutup & lupakan context sebuah service (HARUS di thread hub)."""
+        # Jendela context ini akan lenyap -> jangan simpan handle basi yang bisa
+        # menipu set_windows_visible pada peluncuran berikutnya.
+        _HIDDEN_WINDOWS.pop(service, None)
         entry = self._ctx.pop(service, None)
         if entry is not None:
             ctx, _ = entry

@@ -12,6 +12,7 @@ from . import memory_tool  # noqa: F401,E402
 from . import media  # noqa: F401,E402
 from . import scripts_tool  # noqa: F401,E402
 from . import interact_tool  # noqa: F401,E402
+from . import screen  # noqa: F401,E402
 
 # vision.py sengaja TIDAK diimpor sebagai tool fungsi (dipakai langsung oleh
 # antarmuka), jadi tidak didaftarkan di sini.

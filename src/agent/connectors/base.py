@@ -19,25 +19,63 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from .. import config
-from .browser import BrowserError, WebLimitError, hub, profile_dir
+from .browser import (
+    BrowserError, WebLimitError, hub, profile_dir, set_windows_visible,
+)
 
 # Cari teks pendek di halaman yang cocok salah satu pola (dipakai mendeteksi
 # pemberitahuan LIMIT pemakaian, mis. "You are out of free messages until ...").
+#
+# Dua hal penting:
+#  - `exclude`: bagian PERCAKAPAN dilewati. Tanpa ini, jawaban AI yang kebetulan
+#    membahas rate limit ("usage limit", dll) dikira pemberitahuan limit — dan
+#    karena jawaban lama tetap ada di DOM, chat itu jadi terblokir selamanya.
+#  - tidak lagi melewati elemen yang punya anak: banner limit sering dibungkus
+#    markup bersarang. Yang diambil adalah kecocokan TERPENDEK (paling spesifik).
 JS_FIND_TEXT = r"""
-(patterns) => {
-  const res = patterns.map(p => new RegExp(p, 'i'));
-  for (const el of document.querySelectorAll('div,span,p,h1,h2,h3')) {
+(args) => {
+  const pats = (args.patterns || []).map(p => new RegExp(p, 'i'));
+  if (!pats.length) return "";
+  // Jalur cepat: sekali baca teks halaman. Kalau tak ada pola yang cocok sama
+  // sekali, tak perlu memeriksa elemen satu per satu (ini kasus normal).
+  const body = document.body ? (document.body.innerText || '') : '';
+  if (!pats.some(r => r.test(body))) return "";
+
+  const skips = [];
+  for (const sel of (args.exclude || [])) {
+    try {
+      for (const el of document.querySelectorAll(sel)) skips.push(el);
+    } catch (e) { /* selector tak sah -> abaikan */ }
+  }
+  const excluded = (el) => skips.some(s => s.contains(el));
+
+  let best = "";
+  for (const el of document.querySelectorAll('div,span,p,h1,h2,h3,a,button')) {
     const t = (el.innerText || '').trim();
     if (!t || t.length > 220) continue;
-    if (el.querySelector('div,span,p')) continue;   // hanya elemen terdalam
-    for (const r of res) {
-      if (r.test(t)) return t.replace(/\s+/g, ' ').slice(0, 180);
-    }
+    if (excluded(el)) continue;
+    if (!pats.some(r => r.test(t))) continue;
+    const clean = t.replace(/\s+/g, ' ').slice(0, 180);
+    if (!best || clean.length < best.length) best = clean;
   }
-  return "";
+  return best;
+}
+"""
+
+# Hitung pratinjau lampiran di AREA KOMPOSER (naik beberapa tingkat dari kotak
+# input). Saat unggahan selesai, situs menyisipkan <img> pratinjau di sana —
+# inilah penanda "lampiran siap" yang dipakai sebelum pesan dikirim.
+JS_ATTACH_COUNT = r"""
+(selector) => {
+  const box = document.querySelector(selector);
+  if (!box) return 0;
+  let root = box;
+  for (let i = 0; i < 6 && root.parentElement; i++) root = root.parentElement;
+  return root.querySelectorAll('img').length;
 }
 """
 
@@ -200,6 +238,18 @@ class WebConnector:
     # setelah prompt dikirim — tanpa deteksi ini bagas-ai menunggu jawaban yang
     # memang tak akan datang, lalu gagal dengan pesan yang membingungkan.
     limit_patterns: tuple[str, ...] = ()
+    # Bagian halaman yang TIDAK boleh ikut dipindai saat mencari pemberitahuan
+    # limit — biasanya wadah pesan percakapan, karena jawaban AI sendiri bisa
+    # membahas "rate limit" dan itu bukan tanda kuota habis.
+    limit_exclude_selectors: tuple[str, ...] = ()
+    # Jarak minimal antar-pemeriksaan limit (detik). Pemeriksaan memindai DOM,
+    # jadi jangan dijalankan tiap putaran polling (300 ms).
+    limit_poll_seconds: float = 2.0
+    # Input file untuk MELAMPIRKAN gambar (mis. screenshot) ke pesan. Kosong =
+    # situs ini tak mendukung lampiran.
+    file_input_selector: str = ""
+    # Batas waktu menunggu unggahan selesai (detik).
+    attach_timeout: float = 90.0
     # Teks yang BUKAN jawaban (chrome UI situs), mis. indikator berpikir
     # "Thought for 2s". Bila SELURUH teks yang terbaca hanya ini, artinya jawaban
     # BELUM muncul — jangan dianggap sebagai balasan (akar bug: giliran berhenti
@@ -343,8 +393,12 @@ class WebConnector:
         new_chat: bool = False,
         open_chat_id: str = "",
         complete_when: Callable[[str], bool] | None = None,
+        attachments: list[str] | None = None,
     ) -> str:
         """Kirim prompt ke situs & kembalikan teks jawaban (lewat thread hub).
+
+        `attachments` = daftar path file (mis. screenshot) yang DILAMPIRKAN ke
+        pesan ini, sehingga AI web bisa benar-benar MELIHAT gambarnya.
 
         `new_chat=True` memulai PERCAKAPAN BARU di situs (buang konteks chat lama)
         — dipakai pada pesan pertama tiap sesi bagas-ai supaya AI web tak terbawa
@@ -360,8 +414,9 @@ class WebConnector:
         return hub().submit(
             lambda h: self._send_on_hub(
                 h, prompt, on_status, on_token, cancel_event, new_chat,
-                complete_when, open_chat_id),
-            timeout=self.login_timeout + self.answer_timeout + 120,
+                complete_when, open_chat_id, list(attachments or [])),
+            timeout=self.login_timeout + self.answer_timeout
+            + (self.attach_timeout if attachments else 0) + 120,
         )
 
     def set_web_option(self, label: str) -> str:
@@ -413,6 +468,7 @@ class WebConnector:
         new_chat: bool = False,
         complete_when: Callable[[str], bool] | None = None,
         open_chat_id: str = "",
+        attachments: list[str] | None = None,
     ) -> str:
         from .. import llm  # untuk llm.Cancelled (impor tunda: hindari siklus)
 
@@ -446,6 +502,12 @@ class WebConnector:
                 "Situs mungkin berubah layout."
             )
         box.click()
+        # Lampiran diunggah SEBELUM teks dikirim — kalau Enter ditekan lebih
+        # dulu, pesan terkirim tanpa gambarnya.
+        if attachments:
+            status(f"mengunggah {len(attachments)} lampiran…")
+            self._attach_files(page, attachments, check_cancel)
+            box.click()
         counts_before = self._msg_counts(page)
         text_before = self._read_last_message(page)
         if self.input_is_contenteditable:
@@ -458,11 +520,15 @@ class WebConnector:
         status(f"{self.label} sedang berpikir…")
         t0 = time.time()
         started = False
+        next_limit_check = 0.0
         while time.time() - t0 < self.start_timeout:
             check_cancel()
             # Limit paling sering baru MUNCUL tepat setelah prompt dikirim —
             # laporkan segera daripada menunggu jawaban yang tak akan datang.
-            self._raise_if_limited(page)
+            # Dijeda (bukan tiap 300 ms) karena pemeriksaannya memindai DOM.
+            if time.time() >= next_limit_check:
+                next_limit_check = time.time() + self.limit_poll_seconds
+                self._raise_if_limited(page)
             if self._answer_started(page, counts_before, text_before):
                 started = True
                 break
@@ -647,12 +713,58 @@ class WebConnector:
                 continue
         return ""
 
+    def supports_attachments(self) -> bool:
+        """True bila situs ini bisa menerima lampiran file dari bagas-ai."""
+        return bool(self.file_input_selector)
+
+    def _attach_files(self, page: Any, paths: list[str],
+                      check_cancel: Callable[[], None]) -> None:
+        """Unggah file ke komposer & TUNGGU sampai pratinjaunya muncul.
+
+        Menunggu itu penting: menekan Enter saat unggahan belum selesai
+        mengirim pesan TANPA gambar."""
+        if not self.supports_attachments():
+            raise BrowserError(
+                f"{self.label} belum mendukung lampiran file dari bagas-ai.")
+        exist = [p for p in paths if Path(p).is_file()]
+        if not exist:
+            return
+        before = self._attach_count(page)
+        try:
+            page.set_input_files(self.file_input_selector, exist)
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(f"gagal melampirkan file: {exc}") from exc
+
+        deadline = time.time() + self.attach_timeout
+        while time.time() < deadline:
+            check_cancel()
+            if self._attach_count(page) >= before + len(exist):
+                page.wait_for_timeout(400)   # beri jeda agar unggahan tuntas
+                return
+            page.wait_for_timeout(400)
+        raise BrowserError(
+            f"unggahan lampiran ke {self.label} tak selesai dalam "
+            f"{self.attach_timeout:.0f} detik.")
+
+    def _attach_count(self, page: Any) -> int:
+        """Jumlah pratinjau lampiran yang terlihat di komposer."""
+        try:
+            return int(page.evaluate(JS_ATTACH_COUNT, self.input_selector) or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
     def detect_limit(self, page: Any) -> str:
-        """Teks pemberitahuan LIMIT bila sedang tampil di halaman, else ""."""
+        """Teks pemberitahuan LIMIT bila sedang tampil di halaman, else "".
+
+        Area percakapan DIKECUALIKAN supaya jawaban AI yang membahas rate limit
+        tidak dikira kuota habis."""
         if not self.limit_patterns:
             return ""
         try:
-            return page.evaluate(JS_FIND_TEXT, list(self.limit_patterns)) or ""
+            return page.evaluate(JS_FIND_TEXT, {
+                "patterns": list(self.limit_patterns),
+                "exclude": list(self.limit_exclude_selectors),
+            }) or ""
         except Exception:  # noqa: BLE001
             return ""
 
@@ -819,8 +931,6 @@ class WebConnector:
 
         Bukan headless: Cloudflare menolak sesi headless. Bila penyembunyian
         jendela tak didukung, jatuh ke minimize lewat CDP."""
-        from .browser import set_windows_visible
-
         if set_windows_visible(self.service, False):
             return
         try:  # cadangan: minimalkan lewat CDP
@@ -835,8 +945,6 @@ class WebConnector:
 
     def _foreground(self, page: Any) -> None:
         """Tampilkan kembali jendela browser (dipakai saat pengguna harus login)."""
-        from .browser import set_windows_visible
-
         if set_windows_visible(self.service, True):
             return
         try:

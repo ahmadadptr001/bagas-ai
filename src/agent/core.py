@@ -28,6 +28,9 @@ _WEB_TOOL_RE = re.compile(
 # Pagar blok kode markdown (```json / ```): AI web sering merender usulan tool
 # sebagai blok kode, jadi pagarnya harus dibuang sebelum JSON di-parse.
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*")
+# Penanda dari tool yang MENGHASILKAN GAMBAR (lihat tools/screen.py). File-nya
+# dilampirkan ke pesan berikutnya supaya AI web benar-benar bisa MELIHATnya.
+_IMAGE_MARK_RE = re.compile(r"^\[GAMBAR\][ \t]+(.+?)[ \t]*$", re.MULTILINE)
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
 _WEB_MAX_STEPS = 24
 # Batas panjang hasil tool yang dikirim balik ke AI web (hemat & fokus).
@@ -100,6 +103,19 @@ def _web_tool_protocol() -> str:
         "minta maaf atau menjelaskan panjang lebar.\n"
         "8. Untuk membaca file, pakai read_file (bukan perintah shell seperti "
         "Get-Content/cat) supaya hasilnya rapi & utuh.\n\n"
+        "HEMAT LANGKAH — ini penting, jangan buang giliran:\n"
+        "- JANGAN membaca ulang file yang isinya SUDAH ada di percakapan ini.\n"
+        "- Pakai peta proyek di bawah untuk tahu file mana yang relevan; jangan "
+        "menjelajah folder satu per satu untuk hal yang sudah terlihat di peta.\n"
+        "- JANGAN memverifikasi ulang langkah yang hasilnya sudah kukirim dan "
+        "jelas berhasil (mis. membaca ulang file yang baru saja kamu tulis).\n"
+        "- Gabungkan langkah-langkah yang saling bebas dalam SATU balasan "
+        "(beberapa blok [[TOOL]] sekaligus), jangan satu per satu bergiliran.\n"
+        "- Begitu informasinya cukup, langsung beri jawaban akhir. Jangan "
+        "menambah langkah yang tak mengubah kesimpulan.\n"
+        "- Ada tool take_screenshot untuk melihat layar pengguna saat debug "
+        "tampilan; gambarnya otomatis terlampir ke pesan berikutnya sehingga "
+        "kamu bisa melihatnya sendiri.\n\n"
         f"LANGKAH yang bisa diusulkan (tanda * = wajib):\n{tools_text}"
     )
 
@@ -179,6 +195,18 @@ def _strip_web_markers(text: str) -> str:
     # Sisa pagar kode kosong akibat blok yang dibuang.
     out = re.sub(r"^\s*```[a-zA-Z0-9_+-]*\s*$", "", out, flags=re.MULTILINE)
     return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+def _take_image_marks(result: str) -> tuple[str, list[str]]:
+    """Pisahkan penanda [GAMBAR] dari hasil tool.
+
+    Return (teks tanpa penanda, daftar path gambar). Path-nya dilampirkan ke
+    pesan berikutnya, jadi tak perlu ikut dikirim sebagai teks."""
+    paths = [m.group(1).strip() for m in _IMAGE_MARK_RE.finditer(result or "")]
+    if not paths:
+        return result, []
+    cleaned = _IMAGE_MARK_RE.sub("", result or "").rstrip()
+    return cleaned, paths
 
 
 def _web_reply_complete(text: str) -> bool:
@@ -529,7 +557,8 @@ class Agent:
             selama giliran berjalan, bukan melompat di akhir."""
             self.tokens_live = (prompt_chars + reply_chars) // 4
 
-        def _send(msg: str, new_chat: bool = False, open_chat_id: str = "") -> str:
+        def _send(msg: str, new_chat: bool = False, open_chat_id: str = "",
+                  attachments: list[str] | None = None) -> str:
             nonlocal prompt_chars, reply_chars
             prompt_chars += len(msg)
             _sync_tokens()
@@ -538,6 +567,7 @@ class Agent:
                 cancel_event=cancel_event, new_chat=new_chat,
                 open_chat_id=open_chat_id,
                 complete_when=_web_reply_complete,
+                attachments=attachments,
             )
             reply_chars += len(out or "")
             _sync_tokens()
@@ -615,6 +645,7 @@ class Agent:
 
                 # Eksekusi tiap tool & kumpulkan hasil untuk dikirim balik.
                 result_blocks = []
+                images: list[str] = []
                 for c in calls:
                     if cancel_event is not None and cancel_event.is_set():
                         raise llm.Cancelled()
@@ -625,8 +656,16 @@ class Agent:
                     if on_tool_result:
                         on_tool_result(name, result)
                     steps += 1
-                    clipped = result if len(result) <= _WEB_RESULT_CAP else (
-                        result[:_WEB_RESULT_CAP] + "\n…[hasil dipotong]")
+                    # Tool yang menghasilkan GAMBAR (mis. screenshot): file-nya
+                    # dilampirkan ke pesan berikutnya supaya AI web melihatnya
+                    # sendiri, bukan cuma diberi tahu path-nya.
+                    text_result, imgs = _take_image_marks(result)
+                    if imgs and conn.supports_attachments():
+                        images.extend(imgs)
+                        text_result += ("\n(gambar terlampir pada pesan ini — "
+                                        "lihat langsung, jangan minta dikirim ulang)")
+                    clipped = text_result if len(text_result) <= _WEB_RESULT_CAP \
+                        else (text_result[:_WEB_RESULT_CAP] + "\n…[hasil dipotong]")
                     result_blocks.append(
                         f"[[HASIL {name}]]\n{clipped}\n[[/HASIL]]")
 
@@ -636,7 +675,7 @@ class Agent:
                     "tool lagi, keluarkan blok [[TOOL]] berikutnya; kalau sudah "
                     "SELESAI, beri jawaban akhir biasa (tanpa blok tool)."
                 )
-                reply = _send(follow)
+                reply = _send(follow, attachments=images)
         except llm.Cancelled:
             self.memory.repair_dangling_tools()
             self._persist()
