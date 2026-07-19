@@ -159,11 +159,12 @@ COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "300"))
 AUTO_SYNTAX_CHECK: bool = _get_bool("AUTO_SYNTAX_CHECK", True)
 
 # --- Connector web-AI (fitur /model claude-web, qwen-web via browser) ---
-# Chat berjalan di LATAR (headless=true default) supaya seluruh proses & jawaban
-# tampil di TERMINAL — browser hanya MUNCUL sekali saat perlu LOGIN. Set
-# CONNECTOR_HEADLESS=false untuk memaksa jendela selalu tampil (jalan keluar bila
-# mode latar diblok anti-bot mis. Cloudflare).
-CONNECTOR_HEADLESS: bool = _get_bool("CONNECTOR_HEADLESS", True)
+# Default (false): jendela Chrome MUNCUL sekali untuk login lalu DI-MINIMIZE —
+# semua proses & jawaban tampil di TERMINAL, pengguna tak menyentuh browser.
+# Jendela tetap ada (bukan headless) karena Cloudflare (mis. claude.ai) menolak
+# sesi headless. Set CONNECTOR_HEADLESS=true untuk memaksa headless sejati (tanpa
+# jendela sama sekali) — hanya cocok untuk situs yang lolos tanpa Cloudflare.
+CONNECTOR_HEADLESS: bool = _get_bool("CONNECTOR_HEADLESS", False)
 # Pakai Google CHROME asli (channel="chrome") alih-alih Chromium bawaan Playwright
 # — lebih jarang terdeteksi/di-blok (mis. Cloudflare claude.ai) & lebih familiar.
 # Bila Chrome tak terpasang, otomatis fallback ke Chromium bawaan. Kosongkan

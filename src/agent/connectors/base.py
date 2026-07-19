@@ -154,46 +154,58 @@ class WebConnector:
     ) -> Any:
         """Kembalikan page siap-pakai yang SUDAH login.
 
-        Alur sesuai konsep connector: chat berjalan di LATAR (headless) sehingga
-        seluruh proses & jawaban tampil di TERMINAL, bukan browser. Browser hanya
-        MUNCUL sekali saat perlu LOGIN, lalu ditutup & dilanjutkan di latar.
-        (CONNECTOR_HEADLESS=false memaksa jendela selalu tampil — jalan keluar
-        bila mode latar diblokir anti-bot.)
+        Konsep connector: browser MUNCUL sekali untuk LOGIN, lalu MINGGIR
+        (di-minimize) — seluruh proses & jawaban tampil di TERMINAL, pengguna tak
+        menyentuh browser lagi. Kenapa bukan headless: situs seperti claude.ai
+        pakai Cloudflare, dan clearance-nya terikat fingerprint browser TAMPIL —
+        di headless ditolak. Jadi jendela tetap ada tapi disembunyikan (minimize).
+
+        CONNECTOR_HEADLESS=true = paksa headless sejati (tak tampil sama sekali)
+        untuk situs yang memang lolos tanpa Cloudflare (mis. sebagian akun Qwen).
         """
-        chat_headless = config.CONNECTOR_HEADLESS
-
-        page = h.page_for(self.service, headless=chat_headless)
-        self._goto(page)
-        if self._input_ready(page, 8000):
-            return page  # sudah login -> langsung jalan (di latar)
-
-        # Belum login -> pastikan jendela TAMPIL untuk login manual.
-        if chat_headless:
-            status("belum login → membuka Chrome untuk login (sekali saja)…")
-            h.drop(self.service)
-            page = h.page_for(self.service, headless=False)
-            self._goto(page)
-
-        status(
-            "🔐 Silakan LOGIN di jendela Chrome yang terbuka "
-            "(termasuk CAPTCHA/2FA). Menunggu…"
-        )
-        self._wait_login(page, check_cancel)
-
-        if chat_headless:
-            # Sesi login tersimpan -> tutup jendela & lanjut di LATAR (terminal).
-            status("login berhasil ✓ — lanjut di terminal (browser di latar)")
-            h.drop(self.service)
+        # Opt-in: headless sejati (mungkin diblok anti-bot di sebagian situs).
+        if config.CONNECTOR_HEADLESS:
             page = h.page_for(self.service, headless=True)
+            if self._input_ready(page, 1500):
+                return page
             self._goto(page)
-            if not self._input_ready(page, 15000):
+            if not self._input_ready(page, 10000):
                 raise BrowserError(
-                    "login OK tapi sesi mode-latar belum siap (mungkin diblok "
-                    "anti-bot). Coba lagi, atau set CONNECTOR_HEADLESS=false."
+                    "mode headless belum siap (kemungkinan diblok anti-bot / "
+                    "belum login). Hapus CONNECTOR_HEADLESS agar login via jendela."
                 )
-        else:
-            status("login berhasil ✓")
+            return page
+
+        # Default: jendela TAMPIL (lolos Cloudflare) lalu di-minimize.
+        page = h.page_for(self.service, headless=False)
+        # Sudah di percakapan aktif? Lanjutkan (jangan buka chat baru tiap giliran).
+        if self._input_ready(page, 1500):
+            self._minimize(page)
+            return page
+
+        self._goto(page)
+        if not self._input_ready(page, 8000):
+            status(
+                "🔐 Silakan LOGIN di jendela Chrome yang terbuka "
+                "(termasuk CAPTCHA/2FA). Menunggu…"
+            )
+            self._wait_login(page, check_cancel)
+            status("login berhasil ✓ — jendela diminimalkan, lanjut di terminal")
+        self._minimize(page)
         return page
+
+    def _minimize(self, page: Any) -> None:
+        """Sembunyikan jendela browser (minimize) via CDP — pengguna cukup pakai
+        terminal. Diam-diam gagal bila tak didukung."""
+        try:
+            cdp = page.context.new_cdp_session(page)
+            info = cdp.send("Browser.getWindowForTarget")
+            cdp.send("Browser.setWindowBounds", {
+                "windowId": info["windowId"],
+                "bounds": {"windowState": "minimized"},
+            })
+        except Exception:  # noqa: BLE001
+            pass
 
     def _goto(self, page: Any) -> None:
         try:

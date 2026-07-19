@@ -147,6 +147,12 @@ class BrowserHub:
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--start-maximized",
+                # Jendela connector di-MINIMIZE setelah login; flag ini mencegah
+                # Chrome menahan/throttle render saat jendela tersembunyi, agar
+                # token jawaban tetap masuk ke DOM & terbaca realtime.
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
             ],
         )
         channel = config.CONNECTOR_BROWSER_CHANNEL
