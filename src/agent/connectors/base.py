@@ -16,12 +16,13 @@ berikutnya otomatis. Semua aksi Playwright dijalankan di thread hub (browser.py)
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any, Callable
 
 from .. import config
-from .browser import BrowserError, hub
+from .browser import BrowserError, hub, profile_dir
 
 StatusCb = Callable[[str], None]
 TokenCb = Callable[[str], None]
@@ -179,7 +180,88 @@ class WebConnector:
     _stable_needed: int = 5
     _poll_ms: int = 400
 
+    # Pola menangkap ID percakapan dari URL (mis. claude.ai/chat/<uuid>).
+    chat_id_pattern: str = r"/chat/([0-9a-fA-F-]{16,})"
+    # ID percakapan yang terakhir dipakai (diisi tiap kali send selesai).
+    last_chat_id: str = ""
+
+    # ---- catatan chat yang DIBUAT bagas-ai (agar penghapusan aman) ----
+    def _registry_path(self):
+        """File catatan chat buatan bagas-ai untuk service ini."""
+        return config.CONFIG_HOME / "browser" / f"{self.service}_chats.json"
+
+    def own_chats(self) -> list[dict]:
+        """Daftar chat yang DIBUAT bagas-ai (terbaru dulu). Dipakai agar fitur
+        bersih-bersih tak pernah menyentuh percakapan pribadi pengguna."""
+        try:
+            data = json.loads(self._registry_path().read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _save_own_chats(self, rows: list[dict]) -> None:
+        p = self._registry_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(rows[:500], ensure_ascii=False),
+                         encoding="utf-8")
+        except OSError:
+            pass
+
+    def record_chat(self, chat_id: str, title: str = "") -> None:
+        """Catat satu chat baru buatan bagas-ai."""
+        if not chat_id:
+            return
+        rows = [r for r in self.own_chats() if r.get("id") != chat_id]
+        rows.insert(0, {"id": chat_id, "title": (title or "")[:80],
+                        "ts": time.time()})
+        self._save_own_chats(rows)
+
+    def forget_chats(self, ids: set[str]) -> None:
+        """Buang beberapa chat dari catatan (setelah dihapus di situs)."""
+        self._save_own_chats([r for r in self.own_chats()
+                              if r.get("id") not in ids])
+
+    def current_chat_id(self, page: Any) -> str:
+        """ID percakapan yang sedang terbuka (dari URL), "" bila tak dikenali."""
+        try:
+            m = re.search(self.chat_id_pattern, page.url or "")
+            return m.group(1) if m else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
     # ---- API publik ----
+    def supports_chat_admin(self) -> bool:
+        """True bila connector ini bisa mendaftar & menghapus chat di situs."""
+        return False
+
+    def list_chats(self) -> list[dict]:
+        """Semua percakapan di akun situs: [{id, title, created, updated}]."""
+        raise BrowserError(
+            f"{self.label} belum mendukung pengelolaan chat dari bagas-ai.")
+
+    def delete_chats(self, ids: list[str]) -> int:
+        """Hapus percakapan berdasarkan ID; kembalikan jumlah yang terhapus."""
+        raise BrowserError(
+            f"{self.label} belum mendukung penghapusan chat dari bagas-ai.")
+
+    def prune_own_chats(self, keep: int) -> int:
+        """Hapus chat LAMA buatan bagas-ai, sisakan `keep` yang terbaru.
+        Hanya menyentuh chat yang tercatat dibuat bagas-ai."""
+        if keep < 0 or not self.supports_chat_admin():
+            return 0
+        rows = self.own_chats()
+        extra = rows[keep:]
+        if not extra:
+            return 0
+        ids = [r["id"] for r in extra if r.get("id")]
+        try:
+            n = self.delete_chats(ids)
+        except BrowserError:
+            return 0
+        self.forget_chats(set(ids))
+        return n
+
     def connect(
         self,
         *,
@@ -356,6 +438,9 @@ class WebConnector:
                 stable = 0
                 last = cur
             page.wait_for_timeout(self._poll_ms)
+
+        # Catat ID percakapan yang sedang dipakai (untuk fitur bersih-bersih).
+        self.last_chat_id = self.current_chat_id(page)
 
         if not last:
             raise BrowserError(

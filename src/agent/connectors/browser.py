@@ -17,14 +17,36 @@ dipakai, sehingga bagas-ai tetap jalan normal walau Playwright belum terpasang.
 from __future__ import annotations
 
 import queue
+import shutil
 import subprocess
 import sys
 import threading
+import time
+from pathlib import Path
 from typing import Any, Callable
 
 from .. import config
 
 _PROFILE_ROOT = config.CONFIG_HOME / "browser"
+
+
+def profile_dir(service: str) -> "Path":
+    """Folder profil login persisten milik sebuah service."""
+    return _PROFILE_ROOT / service
+
+
+def forget_profile(service: str) -> bool:
+    """LOGOUT total: tutup browser service ini lalu HAPUS folder profilnya
+    (cookie & sesi login ikut terhapus). True bila folder benar-benar hilang."""
+    try:
+        reset_hub()  # buang hub + bunuh Chrome yang memegang profil
+    except Exception:  # noqa: BLE001
+        pass
+    _kill_profile_browsers(service)
+    time.sleep(1.0)  # beri OS waktu melepas kunci file
+    prof = profile_dir(service)
+    shutil.rmtree(prof, ignore_errors=True)
+    return not prof.exists()
 
 
 def _kill_profile_browsers(service: str | None = None) -> None:

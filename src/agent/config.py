@@ -170,6 +170,12 @@ CONNECTOR_HEADLESS: bool = _get_bool("CONNECTOR_HEADLESS", False)
 # Bila Chrome tak terpasang, otomatis fallback ke Chromium bawaan. Kosongkan
 # ("") untuk memaksa Chromium bawaan.
 CONNECTOR_BROWSER_CHANNEL: str = os.getenv("CONNECTOR_BROWSER_CHANNEL", "chrome").strip()
+# Tiap sesi bagas-ai membuat SATU percakapan baru di situs AI web, jadi lama-lama
+# menumpuk. Batas ini menyimpan hanya N percakapan TERBARU yang dibuat bagas-ai;
+# sisanya dihapus otomatis. HANYA menyentuh chat buatan bagas-ai (tercatat di
+# ~/.bagasai/browser/<service>_chats.json) — percakapan pribadimu tak disentuh.
+# 0 = jangan pernah hapus otomatis (bersihkan manual lewat /web).
+CONNECTOR_KEEP_CHATS: int = int(os.getenv("CONNECTOR_KEEP_CHATS", "20"))
 
 ENV_FILE = CONFIG_HOME / ".env"
 

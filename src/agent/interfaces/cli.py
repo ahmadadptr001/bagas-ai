@@ -108,6 +108,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("delete", "hapus sesi"),
     ("reset", "kosongkan riwayat"),
     ("clear", "bersihkan layar"),
+    ("web", "kelola sesi AI web (hapus chat menumpuk / logout)"),
     ("bot", "hidup/matikan bot Telegram di sesi ini"),
     ("permissions-bot", "atur izin siapa yang boleh kontrol via Telegram"),
     ("review", "cari bug & kesalahan sistem di seluruh proyek"),
@@ -1685,6 +1686,184 @@ def main(resume: bool = False) -> None:
         else:
             console.print(f"  [#a6e3a1]✓ {_esc(str(result['ok']))}[/]\n")
 
+    def _web_service_pick() -> str:
+        """Pilih service web mana yang dikelola (kalau lebih dari satu punya
+        profil login tersimpan). Return "" bila batal / tak ada."""
+        from ..connectors import browser as _br
+        svcs = []
+        for _, _key, spec in models.catalog():
+            if spec.connector and spec.connector not in svcs:
+                if _br.profile_dir(spec.connector).exists():
+                    svcs.append(spec.connector)
+        if not svcs:
+            console.print("  [dim]belum ada sesi AI web (belum pernah login).[/dim]\n")
+            return ""
+        if len(svcs) == 1:
+            return svcs[0]
+        try:
+            return inquirer.select(
+                message="Kelola sesi web milik layanan mana?",
+                choices=[Choice(s, s) for s in svcs], pointer="❯").execute()
+        except (KeyboardInterrupt, EOFError):
+            return ""
+
+    def _web_busy(msg: str, fn):
+        """Jalankan aksi browser dengan baris status hidup (bisa Ctrl+C)."""
+        result: dict = {"val": None, "err": None}
+
+        def worker() -> None:
+            try:
+                result["val"] = fn()
+            except BaseException as exc:  # noqa: BLE001
+                result["err"] = exc
+
+        wt = threading.Thread(target=worker, daemon=True)
+        FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        try:
+            with Live(_oneline(Text()), console=console, refresh_per_second=10,
+                      transient=True) as live:
+                wt.start()
+                while wt.is_alive():
+                    frame = FRAMES[int(time.time() * 10) % len(FRAMES)]
+                    live.update(_oneline(Text.from_markup(
+                        f"  [#cba6f7]{frame}[/] [dim]{_esc(msg)}[/]")))
+                    wt.join(timeout=0.1)
+        except KeyboardInterrupt:
+            _reset_web_hub_if_stuck(wt)
+            console.print("  [yellow]◼ dibatalkan[/yellow]\n")
+            return None, KeyboardInterrupt()
+        return result["val"], result["err"]
+
+    def manage_web_sessions() -> None:
+        """/web — kelola sesi AI web: hapus percakapan yang menumpuk di akun,
+        atau logout (hapus profil login browser)."""
+        from .. import connectors
+        from ..connectors import browser as _br
+
+        if not connectors.playwright_available():
+            console.print("  [yellow]⚠ Connector butuh Playwright.[/]\n")
+            return
+        svc = _web_service_pick()
+        if not svc:
+            return
+        conn = connectors.get_connector(svc)
+        own = conn.own_chats()
+        console.print(
+            f"  [dim]Layanan:[/] [bold]{_esc(conn.label)}[/]   "
+            f"[dim]chat tercatat dibuat bagas-ai:[/] [#94e2d5]{len(own)}[/]\n")
+
+        choices = [
+            Choice("prune", "🧹 Hapus chat lama buatan bagas-ai (sisakan N terbaru)"),
+            Choice("pick", "🗂  Pilih chat untuk dihapus (daftar dari akun)"),
+            Choice("allown", "🧨 Hapus SEMUA chat buatan bagas-ai"),
+            Choice("logout", "🔌 Logout & hapus profil login browser"),
+            Choice("cancel", "↩ Batal"),
+        ]
+        try:
+            act = inquirer.select(message=f"Kelola sesi {conn.label}",
+                                  choices=choices, pointer="❯").execute()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if act == "cancel":
+            return
+
+        if act == "logout":
+            try:
+                if not inquirer.confirm(
+                        message=f"Hapus profil login {conn.label}? "
+                                "(harus login ulang nanti)", default=False).execute():
+                    return
+            except (KeyboardInterrupt, EOFError):
+                return
+            ok = _br.forget_profile(svc)
+            console.print(
+                f"  [#a6e3a1]✓ profil {_esc(conn.label)} dihapus — login ulang "
+                f"saat dipakai lagi.[/]\n" if ok else
+                f"  [yellow]⚠ sebagian file profil masih terkunci; tutup Chrome "
+                f"lalu coba lagi.[/]\n")
+            return
+
+        if not conn.supports_chat_admin():
+            console.print(f"  [yellow]⚠ {_esc(conn.label)} belum mendukung "
+                          "pengelolaan chat dari bagas-ai.[/]\n")
+            return
+
+        if act == "prune":
+            if not own:
+                console.print("  [dim]belum ada chat buatan bagas-ai.[/dim]\n")
+                return
+            try:
+                keep_s = inquirer.text(
+                    message="Sisakan berapa chat terbaru?", default="10").execute()
+                keep = max(0, int(str(keep_s).strip() or "10"))
+            except (KeyboardInterrupt, EOFError, ValueError):
+                return
+            if len(own) <= keep:
+                console.print(f"  [dim]tak ada yang perlu dihapus "
+                              f"({len(own)} <= {keep}).[/dim]\n")
+                return
+            n, err = _web_busy(f"menghapus {len(own) - keep} chat lama…",
+                               lambda: conn.prune_own_chats(keep))
+            if err is None:
+                console.print(f"  [#a6e3a1]✓ {n} chat lama dihapus, "
+                              f"{keep} terbaru disimpan.[/]\n")
+            elif not isinstance(err, KeyboardInterrupt):
+                console.print(f"  [yellow]⚠ {_esc(str(err))}[/]\n")
+            return
+
+        if act == "allown":
+            if not own:
+                console.print("  [dim]belum ada chat buatan bagas-ai.[/dim]\n")
+                return
+            try:
+                if not inquirer.confirm(
+                        message=f"Hapus SEMUA {len(own)} chat buatan bagas-ai "
+                                f"di {conn.label}?", default=False).execute():
+                    return
+            except (KeyboardInterrupt, EOFError):
+                return
+            n, err = _web_busy(f"menghapus {len(own)} chat…",
+                               lambda: conn.prune_own_chats(0))
+            if err is None:
+                console.print(f"  [#a6e3a1]✓ {n} chat dihapus.[/]\n")
+            elif not isinstance(err, KeyboardInterrupt):
+                console.print(f"  [yellow]⚠ {_esc(str(err))}[/]\n")
+            return
+
+        # act == "pick": ambil daftar chat dari akun lalu pilih yang mau dihapus.
+        chats, err = _web_busy("mengambil daftar chat dari akun…", conn.list_chats)
+        if err is not None:
+            if not isinstance(err, KeyboardInterrupt):
+                console.print(f"  [yellow]⚠ {_esc(str(err))}[/]\n")
+            return
+        if not chats:
+            console.print("  [dim]tak ada chat di akun ini.[/dim]\n")
+            return
+        own_ids = {r.get("id") for r in own}
+        opts = []
+        for c in chats[:80]:
+            mark = " [dibuat bagas-ai]" if c.get("id") in own_ids else ""
+            when = str(c.get("updated") or c.get("created") or "")[:10]
+            opts.append(Choice(c["id"],
+                               f"{(c.get('title') or '')[:56]:<58}{when}{mark}"))
+        try:
+            picked = inquirer.checkbox(
+                message=f"Pilih chat untuk DIHAPUS ({len(chats)} total)",
+                choices=opts, pointer="❯",
+                instruction="(spasi pilih, enter konfirmasi)").execute()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if not picked:
+            console.print("  [dim](tidak ada yang dihapus)[/dim]\n")
+            return
+        n, err = _web_busy(f"menghapus {len(picked)} chat…",
+                           lambda: conn.delete_chats(list(picked)))
+        if err is None:
+            conn.forget_chats(set(picked))
+            console.print(f"  [#a6e3a1]✓ {n} chat dihapus.[/]\n")
+        elif not isinstance(err, KeyboardInterrupt):
+            console.print(f"  [yellow]⚠ {_esc(str(err))}[/]\n")
+
     def delete_sessions() -> None:
         sessions = session_mod.list_sessions()
         if not sessions:
@@ -1888,6 +2067,8 @@ def main(resume: bool = False) -> None:
                 _connect_web(prev)
         elif action == "effort":
             _with_console(pick_effort)
+        elif action == "web":
+            _with_console(manage_web_sessions)
         elif action == "dirs":
             show_dirs()
         elif action == "delete":
@@ -2089,6 +2270,7 @@ def main(resume: bool = False) -> None:
                          Choice("effort", "🎚 Mode / effort"),
                          Choice("new", "✨ Sesi baru"),
                          Choice("delete", "🗑 Hapus sesi"),
+                         Choice("web", "🌐 Sesi AI web (hapus chat / logout)"),
                          Choice("memory", "🧠 Memory"),
                          Choice("scripts", "📜 Scripts"),
                          Choice("reset", "🧹 Reset riwayat"),

@@ -8,6 +8,48 @@ from __future__ import annotations
 from typing import Any
 
 from .base import WebConnector
+from .browser import BrowserError, hub
+
+# Kelola percakapan lewat API internal claude.ai, dijalankan DI DALAM halaman
+# yang sudah login (cookie ikut otomatis). Jauh lebih andal daripada mengeklik
+# menu satu per satu, dan cukup satu permintaan per percakapan.
+_JS_LIST_CHATS = r"""
+async () => {
+  const r = await fetch('/api/organizations', {credentials: 'include'});
+  if (!r.ok) return {error: 'organizations HTTP ' + r.status};
+  const orgs = await r.json();
+  if (!Array.isArray(orgs) || !orgs.length) return {error: 'organisasi tak ditemukan'};
+  const org = orgs[0].uuid;
+  const r2 = await fetch(`/api/organizations/${org}/chat_conversations`,
+                         {credentials: 'include'});
+  if (!r2.ok) return {error: 'chat_conversations HTTP ' + r2.status};
+  const chats = await r2.json();
+  return {org, chats: (Array.isArray(chats) ? chats : []).map(c => ({
+    id: c.uuid, title: c.name || '(tanpa judul)',
+    created: c.created_at, updated: c.updated_at,
+  }))};
+}
+"""
+
+_JS_DELETE_CHATS = r"""
+async (ids) => {
+  const r = await fetch('/api/organizations', {credentials: 'include'});
+  if (!r.ok) return {deleted: 0, error: 'organizations HTTP ' + r.status};
+  const orgs = await r.json();
+  if (!Array.isArray(orgs) || !orgs.length) return {deleted: 0, error: 'no org'};
+  const org = orgs[0].uuid;
+  let deleted = 0; const failed = [];
+  for (const id of ids) {
+    try {
+      const res = await fetch(
+        `/api/organizations/${org}/chat_conversations/${id}`,
+        {method: 'DELETE', credentials: 'include'});
+      if (res.ok || res.status === 404) deleted++; else failed.push(res.status);
+    } catch (e) { failed.push(String(e)); }
+  }
+  return {deleted, failed};
+}
+"""
 
 
 class ClaudeConnector(WebConnector):
@@ -75,3 +117,31 @@ class ClaudeConnector(WebConnector):
             return True
         except Exception:  # noqa: BLE001
             return True
+
+    # ---- pengelolaan percakapan (agar chat tak menumpuk di akun) ----
+    def supports_chat_admin(self) -> bool:
+        return True
+
+    def list_chats(self) -> list[dict]:
+        def job(h):
+            page, _ = self._acquire_ready_page(h, lambda m: None, lambda: None)
+            return page.evaluate(_JS_LIST_CHATS)
+
+        res = hub().submit(job, timeout=self.login_timeout + 60) or {}
+        if res.get("error"):
+            raise BrowserError(f"gagal membaca daftar chat: {res['error']}")
+        return res.get("chats", [])
+
+    def delete_chats(self, ids: list[str]) -> int:
+        ids = [i for i in (ids or []) if i]
+        if not ids:
+            return 0
+
+        def job(h):
+            page, _ = self._acquire_ready_page(h, lambda m: None, lambda: None)
+            return page.evaluate(_JS_DELETE_CHATS, ids)
+
+        res = hub().submit(job, timeout=self.login_timeout + 30 + len(ids) * 3) or {}
+        if res.get("error"):
+            raise BrowserError(f"gagal menghapus chat: {res['error']}")
+        return int(res.get("deleted", 0))

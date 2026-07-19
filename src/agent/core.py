@@ -437,6 +437,16 @@ class Agent:
             reply = _send(first_msg, new_chat=include_ctx)
             if include_ctx:
                 self._web_ctx_sent = True
+                # Catat percakapan baru ini + rapikan chat lama buatan bagas-ai
+                # supaya tak menumpuk di akun (chat pribadi tak tersentuh).
+                try:
+                    chat_id = getattr(conn, "last_chat_id", "")
+                    if chat_id:
+                        conn.record_chat(chat_id, user_text[:80])
+                        if config.CONNECTOR_KEEP_CHATS > 0:
+                            conn.prune_own_chats(config.CONNECTOR_KEEP_CHATS)
+                except Exception:  # noqa: BLE001 - bersih-bersih tak boleh menggagalkan giliran
+                    pass
 
             steps = 0
             while True:
