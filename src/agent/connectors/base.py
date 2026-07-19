@@ -16,6 +16,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from .. import config
 from .browser import BrowserError, hub
 
 StatusCb = Callable[[str], None]
@@ -32,7 +33,6 @@ class WebConnector:
     message_selector: str = "" # wadah pesan JAWABAN (diambil yang terakhir)
     input_is_contenteditable: bool = False
     submit_key: str = "Enter"  # tombol kirim
-    headless: bool = False     # headed lebih andal melawan anti-bot; login butuh ini
 
     # Batas waktu (detik).
     login_timeout: float = 300.0     # tunggu pengguna menyelesaikan login
@@ -80,14 +80,18 @@ class WebConnector:
             if cancel_event is not None and cancel_event.is_set():
                 raise llm.Cancelled()
 
-        status("membuka browser…")
-        page = h.page_for(self.service, self.headless)
-        self._ensure_ready(page, status, check_cancel)
+        status("menyiapkan sesi browser…")
+        page = self._acquire_ready_page(h, status, check_cancel)
 
         # --- kirim prompt ---
         check_cancel()
         status(f"mengetik pesan ke {self.label}…")
-        box = page.query_selector(self.input_selector)
+        try:
+            box = page.wait_for_selector(
+                self.input_selector, state="visible", timeout=8000
+            )
+        except Exception:  # noqa: BLE001
+            box = None
         if box is None:
             raise BrowserError(
                 f"kotak input tak ditemukan ({self.input_selector}). "
@@ -145,28 +149,63 @@ class WebConnector:
             )
         return last
 
-    def _ensure_ready(
-        self, page: Any, status: StatusCb, check_cancel: Callable[[], None]
-    ) -> None:
-        """Pastikan halaman chat siap & sudah login (bila belum, tunggu login)."""
+    def _acquire_ready_page(
+        self, h: Any, status: StatusCb, check_cancel: Callable[[], None]
+    ) -> Any:
+        """Kembalikan page siap-pakai yang SUDAH login.
+
+        Alur sesuai konsep connector: chat berjalan di LATAR (headless) sehingga
+        seluruh proses & jawaban tampil di TERMINAL, bukan browser. Browser hanya
+        MUNCUL sekali saat perlu LOGIN, lalu ditutup & dilanjutkan di latar.
+        (CONNECTOR_HEADLESS=false memaksa jendela selalu tampil — jalan keluar
+        bila mode latar diblokir anti-bot.)
+        """
+        chat_headless = config.CONNECTOR_HEADLESS
+
+        page = h.page_for(self.service, headless=chat_headless)
+        self._goto(page)
+        if self._input_ready(page, 8000):
+            return page  # sudah login -> langsung jalan (di latar)
+
+        # Belum login -> pastikan jendela TAMPIL untuk login manual.
+        if chat_headless:
+            status("belum login → membuka Chrome untuk login (sekali saja)…")
+            h.drop(self.service)
+            page = h.page_for(self.service, headless=False)
+            self._goto(page)
+
+        status(
+            "🔐 Silakan LOGIN di jendela Chrome yang terbuka "
+            "(termasuk CAPTCHA/2FA). Menunggu…"
+        )
+        self._wait_login(page, check_cancel)
+
+        if chat_headless:
+            # Sesi login tersimpan -> tutup jendela & lanjut di LATAR (terminal).
+            status("login berhasil ✓ — lanjut di terminal (browser di latar)")
+            h.drop(self.service)
+            page = h.page_for(self.service, headless=True)
+            self._goto(page)
+            if not self._input_ready(page, 15000):
+                raise BrowserError(
+                    "login OK tapi sesi mode-latar belum siap (mungkin diblok "
+                    "anti-bot). Coba lagi, atau set CONNECTOR_HEADLESS=false."
+                )
+        else:
+            status("login berhasil ✓")
+        return page
+
+    def _goto(self, page: Any) -> None:
         try:
-            page.goto(self.chat_url, wait_until="domcontentloaded")
+            page.goto(self.chat_url, wait_until="domcontentloaded", timeout=45000)
         except Exception as exc:  # noqa: BLE001
             raise BrowserError(f"gagal membuka {self.chat_url}: {exc}") from exc
 
-        if self._input_ready(page, 6000):
-            return
-
-        # Belum login / halaman login tampil -> minta pengguna login manual.
-        status(
-            "🔐 Silakan LOGIN di jendela browser yang terbuka "
-            "(termasuk CAPTCHA/2FA). Menunggu…"
-        )
+    def _wait_login(self, page: Any, check_cancel: Callable[[], None]) -> None:
         deadline = time.time() + self.login_timeout
         while time.time() < deadline:
             check_cancel()
             if self._input_ready(page, 2000):
-                status("login terdeteksi ✓")
                 return
             page.wait_for_timeout(1500)
         raise BrowserError(

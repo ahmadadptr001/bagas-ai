@@ -22,12 +22,6 @@ from typing import Any, Callable
 
 from .. import config
 
-# User-agent Chrome wajar supaya tidak langsung dicurigai sebagai bot.
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
-
 _PROFILE_ROOT = config.CONFIG_HOME / "browser"
 
 
@@ -111,28 +105,59 @@ class BrowserHub:
         entry = self._ctx.get(service)
         if entry is not None:
             ctx, page = entry
-            try:
-                _ = page.url  # memastikan page masih hidup
+            if self._alive(page):
                 return page
-            except Exception:  # noqa: BLE001 - context tertutup, buat ulang
-                self._ctx.pop(service, None)
-                try:
-                    ctx.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            self.drop(service)  # page/context mati (mis. jendela ditutup) -> buang
 
         prof = _PROFILE_ROOT / service
         prof.mkdir(parents=True, exist_ok=True)
-        ctx = self._pw.chromium.launch_persistent_context(
-            str(prof),
-            headless=headless,
-            args=["--disable-blink-features=AutomationControlled"],
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 900},
-        )
+        ctx = self._launch(str(prof), headless)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         self._ctx[service] = (ctx, page)
         return page
+
+    def drop(self, service: str) -> None:
+        """Tutup & lupakan context sebuah service (HARUS di thread hub)."""
+        entry = self._ctx.pop(service, None)
+        if entry is not None:
+            ctx, _ = entry
+            try:
+                ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _alive(page: Any) -> bool:
+        try:
+            if page.is_closed():
+                return False
+            _ = page.url
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _launch(self, user_data_dir: str, headless: bool) -> Any:
+        """Buka persistent context. Utamakan CHROME asli (channel="chrome") agar
+        lebih jarang di-blok anti-bot; fallback ke Chromium bawaan bila Chrome
+        tak terpasang. Tak meng-override user-agent -> pakai UA asli browser."""
+        opts = dict(
+            user_data_dir=user_data_dir,
+            headless=headless,
+            no_viewport=True,  # ikuti ukuran jendela asli (lebih natural)
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--start-maximized",
+            ],
+        )
+        channel = config.CONNECTOR_BROWSER_CHANNEL
+        if channel:
+            try:
+                return self._pw.chromium.launch_persistent_context(
+                    channel=channel, **opts
+                )
+            except Exception:  # noqa: BLE001 - Chrome tak ada -> Chromium bawaan
+                pass
+        return self._pw.chromium.launch_persistent_context(**opts)
 
 
 _HUB: BrowserHub | None = None
