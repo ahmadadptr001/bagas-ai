@@ -295,5 +295,38 @@ def build_system_prompt() -> str:
     return "\n".join(parts)
 
 
+def build_web_context() -> str:
+    """Konteks laptop & proyek untuk connector web-AI (Claude/Qwen web).
+
+    Beda dari build_system_prompt: TANPA instruksi tool/agent (AI web tak punya
+    tool bagas-ai) — hanya info OS, root project, folder tambahan, peta proyek,
+    dan memory, dibingkai sebagai konteks yang dititipkan pengguna. Dikirim SEKALI
+    sebagai preamble pesan pertama tiap sesi web (AI web mengingat sepanjang chat),
+    supaya jawabannya sadar konteks mesin & proyek seperti model NVIDIA."""
+    parts = [
+        "Berikut KONTEKS mesin & proyek saya. Pakai ini untuk memahami "
+        "pertanyaan-pertanyaan saya berikutnya di percakapan ini (tak perlu "
+        "membalas konteks ini sendiri):",
+        f"\n# Lingkungan\n"
+        f"- Sistem operasi: {osinfo.summary()}\n"
+        f"- Folder proyek aktif (root): {config.PROJECT_ROOT}",
+    ]
+    ws = workspace.as_prompt_block()
+    if ws:
+        parts.append("\n# Folder konteks tambahan\n" + ws)
+    pmap = projectindex.as_prompt_block()
+    if pmap:
+        parts.append(
+            "\n# Peta proyek (struktur & simbol kunci)\n"
+            "Ringkasan struktur proyek saya:\n" + pmap
+        )
+    mem = longmem.as_prompt_block()
+    if mem:
+        parts.append(
+            "\n# Hal yang perlu kamu ingat tentang saya\n" + mem
+        )
+    return "\n".join(parts)
+
+
 # Kompatibilitas: sebagian modul lama mengimpor SYSTEM_PROMPT.
 SYSTEM_PROMPT = BASE

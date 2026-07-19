@@ -79,6 +79,9 @@ class Agent:
         # Auto-fallback: model yang sudah dicoba & berapa kali naik-kelas (per giliran).
         self._tried_models: set[str] = set()
         self._escalations = 0
+        # Connector web: apakah konteks laptop/proyek sudah dikirim ke sesi web
+        # ini (dikirim SEKALI sbg preamble pesan pertama; AI web ingat sepanjang chat).
+        self._web_ctx_sent = False
 
         # Token SESI bersifat persisten: saat --resume, lanjutkan hitungan
         # sesi sebelumnya (bukan mulai dari nol).
@@ -256,6 +259,18 @@ class Agent:
         self.tokens_live = 0
         prompt_text = str(user_input)
 
+        # Sertakan KONTEKS laptop/proyek (OS, peta proyek, memory) SEKALI di pesan
+        # pertama sesi web ini — supaya Claude/Qwen web sadar konteks mesin seperti
+        # model NVIDIA (yang menerimanya via system prompt tiap panggilan).
+        include_ctx = not self._web_ctx_sent
+        if include_ctx:
+            try:
+                ctx = prompts.build_web_context()
+            except Exception:  # noqa: BLE001
+                ctx = ""
+            if ctx:
+                prompt_text = ctx + "\n\n----------\n\n" + prompt_text
+
         if not connectors.playwright_available():
             answer = (
                 "Fitur connector web butuh Playwright + browser Chromium yang "
@@ -275,6 +290,9 @@ class Agent:
                 on_token=on_token,
                 cancel_event=cancel_event,
             )
+            # Konteks berhasil terkirim -> jangan ulangi di giliran berikutnya.
+            if include_ctx:
+                self._web_ctx_sent = True
         except llm.Cancelled:
             self.memory.repair_dangling_tools()
             self._persist()
