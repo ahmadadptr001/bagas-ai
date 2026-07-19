@@ -232,6 +232,11 @@ class WebConnector:
     login_url_markers: tuple[str, ...] = (
         "login", "signin", "sign-in", "sign_in", "oauth", "/auth", "sso",
     )
+    # Selector yang HANYA ada saat BELUM login (mis. tombol "Log in"). Sebagian
+    # situs (chat.qwen.ai) menampilkan kotak input untuk TAMU di URL chat biasa,
+    # jadi "input terlihat" BUKAN bukti sudah masuk — tanpa penanda ini bagas-ai
+    # mengirim pesan yang tak pernah diproses lalu menunggu jawaban hampa.
+    logged_out_selector: str = ""
     # Selector penanda "sedang mengetik/streaming" (bila situs punya).
     streaming_selector: str = ""
     # Pola teks pemberitahuan LIMIT pemakaian di situs. Sering baru MUNCUL
@@ -897,6 +902,16 @@ class WebConnector:
             return False
         return any(m in url for m in self.login_url_markers)
 
+    def _looks_logged_out(self, page: Any) -> bool:
+        """True bila halaman menampilkan penanda BELUM login (mis. tombol
+        "Log in") walau kotak input tetap terlihat untuk tamu."""
+        if not self.logged_out_selector:
+            return False
+        try:
+            return page.query_selector(self.logged_out_selector) is not None
+        except Exception:  # noqa: BLE001
+            return False
+
     def _chat_ready(
         self,
         page: Any,
@@ -904,13 +919,15 @@ class WebConnector:
         check_cancel: Callable[[], None] | None = None,
     ) -> bool:
         """Deteksi KETAT bahwa halaman chat siap & user SUDAH login:
-        (1) URL BUKAN halaman login/auth, dan (2) kotak input chat terlihat.
-        Halaman login yang kebetulan punya elemen mirip input tak akan lolos."""
+        (1) URL BUKAN halaman login/auth, (2) tak ada penanda "belum login",
+        dan (3) kotak input chat terlihat. Halaman login yang kebetulan punya
+        elemen mirip input — atau halaman TAMU yang inputnya aktif tapi tak
+        memproses pesan — tak akan lolos."""
         deadline = time.time() + timeout_ms / 1000.0
         while True:
             if check_cancel is not None:
                 check_cancel()
-            if not self._on_login_page(page):
+            if not self._on_login_page(page) and not self._looks_logged_out(page):
                 try:
                     el = page.query_selector(self.input_selector)
                     if el is not None and el.is_visible():
