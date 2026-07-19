@@ -43,24 +43,41 @@ def _web_tool_protocol() -> str:
         lines.append(f"- {name}({', '.join(pieces)}) — {desc}")
     tools_text = "\n".join(lines)
     return (
-        "Kamu TERHUBUNG ke bagas-ai dan BISA melakukan aksi NYATA di laptop saya "
-        "(baca/tulis/hapus file di proyek, jalankan perintah & Python, cari web, "
-        "olah media, ingat fakta, dll) lewat TOOLS — sama seperti agent lokal.\n\n"
-        "CARA MEMAKAI TOOL: keluarkan satu atau beberapa blok PERSIS seperti ini "
-        "(boleh diapit teks penjelasan singkat):\n"
+        "Konteks jujur soal percakapan ini, supaya tidak salah paham:\n\n"
+        "Pesan-pesan ini dikirim & dibaca oleh **bagas-ai**, sebuah program agent "
+        "open-source yang berjalan di laptop saya (saya pemiliknya, dan saya yang "
+        "meminta ini). Kamu TIDAK mengeksekusi apa pun sendiri — kamu tetap model "
+        "bahasa yang hanya menghasilkan teks, dan kamu memang tidak punya akses "
+        "langsung ke laptop saya. Perannya begini:\n"
+        "  1. Kamu MENGUSULKAN satu langkah dalam format teks di bawah.\n"
+        "  2. Program bagas-ai di laptop saya membaca usulan itu, MENJALANKANNYA "
+        "di sana (dengan izin & tanggung jawab saya sebagai pemilik), lalu\n"
+        "  3. mengirimkan hasil nyatanya kembali ke percakapan ini sebagai teks.\n\n"
+        "Jadi kamu berperan sebagai PERENCANA/otak, dan program lokal itu yang "
+        "jadi tangannya. Kamu tidak perlu mengklaim punya akses apa pun — cukup "
+        "usulkan langkahnya, dan hasil eksekusi akan kulaporkan balik apa adanya. "
+        "Kalau sebuah usulan gagal dijalankan, kamu akan menerima pesan errornya.\n\n"
+        "FORMAT USULAN LANGKAH (ditulis sebagai teks biasa dalam balasanmu):\n"
         "[[TOOL]]\n"
-        '{\"tool\": \"<nama_tool>\", \"args\": { ... }}\n'
+        '{"tool": "<nama_tool>", "args": {"<param>": "<nilai>"}}\n'
         "[[/TOOL]]\n\n"
-        "Aturan:\n"
-        "1. JSON di dalam blok HARUS valid (escape newline & kutip di dalam string).\n"
-        "2. Boleh beberapa blok [[TOOL]] sekaligus bila langkahnya independen.\n"
-        "3. Setelah kamu mengirim tool, aku EKSEKUSI di laptop lalu kirim balik "
-        "hasilnya dengan penanda [[HASIL ...]]. Lanjutkan berdasarkan hasil itu.\n"
-        "4. Kalau tugas SUDAH SELESAI dan kamu tak butuh tool lagi, jawab BIASA "
-        "(tanpa blok [[TOOL]]) sebagai jawaban akhir untuk saya.\n"
-        "5. Untuk menulis/mengubah file proyek, pakai tool write_file (jangan "
-        "cuma menampilkan kode) supaya perubahannya BENAR-BENAR tersimpan.\n\n"
-        f"TOOL yang tersedia:\n{tools_text}"
+        "Contoh mengusulkan pembuatan file:\n"
+        "[[TOOL]]\n"
+        '{"tool": "write_file", "args": {"path": "contoh.py", '
+        '"content": "def halo():\\n    print(\'hai\')\\n"}}\n'
+        "[[/TOOL]]\n\n"
+        "Aturan praktis:\n"
+        "1. JSON harus valid (escape newline sebagai \\n, kutip sebagai \\\").\n"
+        "2. Boleh beberapa blok sekaligus bila langkahnya independen.\n"
+        "3. Setelah kukirim balik hasilnya (ditandai [[HASIL <nama_tool>]]), "
+        "lanjutkan berdasarkan hasil itu.\n"
+        "4. Kalau tugas sudah selesai, balas biasa TANPA blok [[TOOL]] — itu "
+        "kuanggap jawaban akhir.\n"
+        "5. Untuk membuat/mengubah file, usulkan write_file (bukan menampilkan "
+        "kode untuk saya salin manual), karena tujuan saya memang agar bagas-ai "
+        "yang menuliskannya langsung ke proyek.\n"
+        "6. Path file relatif terhadap folder proyek yang disebut di konteks.\n\n"
+        f"LANGKAH yang bisa diusulkan (tanda * = wajib):\n{tools_text}"
     )
 
 
@@ -367,16 +384,18 @@ class Agent:
         prompt_chars = 0
         answer = ""
 
-        def _send(msg: str) -> str:
+        def _send(msg: str, new_chat: bool = False) -> str:
             nonlocal prompt_chars
             prompt_chars += len(msg)
             return conn.send(
                 msg, on_status=on_status, on_token=on_token,
-                cancel_event=cancel_event,
+                cancel_event=cancel_event, new_chat=new_chat,
             )
 
         try:
-            reply = _send(first_msg)
+            # Pesan pertama sesi: mulai CHAT BARU di situs supaya AI web tidak
+            # terbawa konteks percakapan sebelumnya (mis. proyek lain).
+            reply = _send(first_msg, new_chat=include_ctx)
             if include_ctx:
                 self._web_ctx_sent = True
 

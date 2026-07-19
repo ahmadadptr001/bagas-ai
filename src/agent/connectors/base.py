@@ -197,10 +197,16 @@ class WebConnector:
         on_status: StatusCb | None = None,
         on_token: TokenCb | None = None,
         cancel_event: Any = None,
+        new_chat: bool = False,
     ) -> str:
-        """Kirim prompt ke situs & kembalikan teks jawaban (lewat thread hub)."""
+        """Kirim prompt ke situs & kembalikan teks jawaban (lewat thread hub).
+
+        `new_chat=True` memulai PERCAKAPAN BARU di situs (buang konteks chat lama)
+        — dipakai pada pesan pertama tiap sesi bagas-ai supaya AI web tak terbawa
+        konteks percakapan sebelumnya."""
         return hub().submit(
-            lambda h: self._send_on_hub(h, prompt, on_status, on_token, cancel_event),
+            lambda h: self._send_on_hub(
+                h, prompt, on_status, on_token, cancel_event, new_chat),
             timeout=self.login_timeout + self.answer_timeout + 120,
         )
 
@@ -250,6 +256,7 @@ class WebConnector:
         on_status: StatusCb | None,
         on_token: TokenCb | None,
         cancel_event: Any,
+        new_chat: bool = False,
     ) -> str:
         from .. import llm  # untuk llm.Cancelled (impor tunda: hindari siklus)
 
@@ -262,7 +269,8 @@ class WebConnector:
                 raise llm.Cancelled()
 
         status("menyiapkan sesi browser…")
-        page, _ = self._acquire_ready_page(h, status, check_cancel)
+        page, _ = self._acquire_ready_page(
+            h, status, check_cancel, force_new_chat=new_chat)
 
         # --- kirim prompt ---
         check_cancel()
@@ -445,7 +453,8 @@ class WebConnector:
 
     # ---- kesiapan halaman & login ----
     def _acquire_ready_page(
-        self, h: Any, status: StatusCb, check_cancel: Callable[[], None]
+        self, h: Any, status: StatusCb, check_cancel: Callable[[], None],
+        force_new_chat: bool = False,
     ) -> tuple[Any, bool]:
         """Kembalikan (page siap-pakai yang SUDAH login, apakah login BARU terjadi).
 
@@ -473,8 +482,13 @@ class WebConnector:
 
         # Default: jendela TAMPIL (lolos Cloudflare) lalu di-minimize.
         page = h.page_for(self.service, headless=False)
-        # Sudah di percakapan aktif & login? Lanjutkan (jangan buka chat baru).
+        # Sudah di percakapan aktif & login? Lanjutkan (jangan buka chat baru) —
+        # KECUALI diminta memulai percakapan BARU (pesan pertama sesi bagas-ai),
+        # supaya AI web tak terbawa konteks chat sebelumnya.
         if self._chat_ready(page, 1500, check_cancel):
+            if force_new_chat:
+                self._goto(page)          # buka chat baru (chat_url)
+                self._chat_ready(page, 8000, check_cancel)
             self._minimize(page)
             return page, False
 

@@ -220,6 +220,23 @@ def _fmt_elapsed(sec: float) -> str:
     return f"{d}d {h}h"
 
 
+def _web_phase(msg: str) -> str:
+    """Ringkas status connector web jadi KATA FASE pendek untuk baris status,
+    supaya tampilannya seragam dengan giliran model NVIDIA."""
+    m = (msg or "").lower()
+    if "menjawab" in m:
+        return "menjawab"
+    if "berpikir" in m:
+        return "berpikir"
+    if "login" in m or "sign-in" in m or "sign in" in m:
+        return "menunggu login di jendela Chrome"
+    if "mengetik" in m:
+        return "mengirim pesan"
+    if "menyiapkan" in m or "menghubungkan" in m:
+        return "menyiapkan sesi web"
+    return (msg or "").strip().rstrip("…") or "bekerja"
+
+
 def _oneline(t: Text) -> Text:
     """Baris untuk region live: JANGAN pernah wrap — wrap membuat tinggi region
     berubah antar-frame sehingga rich.Live menggambar ulang kacau (kedip/baris
@@ -386,6 +403,11 @@ class Status:
         self.tool = None
         self.phase = "berpikir"
 
+    def note_phase(self, text: str) -> None:
+        """Set fase status langsung (dipakai connector web: 'menjawab', dsb)."""
+        if self.tool is None and text:
+            self.phase = text
+
     def __rich__(self) -> Text:
         el = time.time() - self.start
         now = time.time()
@@ -540,6 +562,12 @@ class TurnView:
     def note_retry(self, wait: float, msg: str) -> None:
         self.retry_until = time.time() + wait
         self.retry_msg = msg
+
+    def note_phase(self, text: str) -> None:
+        """Set fase status langsung (dipakai connector web: 'menjawab', dsb).
+        Diabaikan saat ada tool berjalan supaya fase tool tak tertimpa."""
+        if self.tool is None and text:
+            self.phase = text
 
     def toggle(self) -> None:
         """Ctrl+R (cadangan): buka/tutup SEMUA hasil sekaligus."""
@@ -1024,112 +1052,20 @@ def main(resume: bool = False) -> None:
         for k in sorted(steps):
             show_expand(k)
 
-    def process_web(text: str) -> None:
-        """Giliran memakai CONNECTOR web-AI (Claude/Qwen web via browser).
-
-        Tampilan SAMA seperti giliran model NVIDIA: satu baris status hidup
-        (spinner + fase 'berpikir'/'menjawab' + waktu berjalan + 'Ctrl+C batal'),
-        lalu jawaban final dicetak sebagai markdown. Tak ada tool/streaming API —
-        proses & jawaban seluruhnya tampil di TERMINAL (browser di latar)."""
-        turn_start = time.time()
-        FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-        # Fase awal 'berpikir' (mirip NVIDIA); connector memperbarui via on_status
-        # jadi 'sedang menjawab…' begitu jawaban mulai mengalir.
-        state = {"phase": "menyiapkan sesi", "cancelling": False}
-        result: dict = {"answer": None, "error": None}
-        cancel_event = threading.Event()
-
-        def on_status(msg: str) -> None:
-            # Ringkas jadi kata-fase pendek agar segaris dengan gaya status NVIDIA.
-            m = msg.lower()
-            if "menjawab" in m:
-                state["phase"] = "menjawab"
-            elif "berpikir" in m or "thinking" in m:
-                state["phase"] = "berpikir"
-            elif "login" in m or "sign-in" in m or "sign in" in m:
-                state["phase"] = "menunggu login di jendela Chrome"
-            elif "mengetik" in m:
-                state["phase"] = "mengirim pesan"
-            else:
-                state["phase"] = msg.strip().rstrip("…") or state["phase"]
-
-        def worker() -> None:
+    def _reset_web_hub_if_stuck(wt: threading.Thread) -> None:
+        """Pasca-Ctrl+C pada giliran web: beri worker jeda singkat untuk lepas;
+        bila masih menggantung (macet di dalam browser), RESET hub agar giliran
+        berikutnya tak ikut mengantre di belakang job macet (akar bug 'tiap
+        Ctrl+C lalu chat baru, sesi browser nyangkut tak selesai')."""
+        if not wt.is_alive():
+            return
+        wt.join(timeout=2.0)
+        if wt.is_alive():
             try:
-                result["answer"] = agent.run(
-                    text, cancel_event=cancel_event, on_status=on_status,
-                )
-            except BaseException as exc:  # noqa: BLE001
-                result["error"] = exc
-
-        def render():
-            el = time.time() - turn_start
-            frame = FRAMES[int(el * 10) % len(FRAMES)]
-            if state["cancelling"]:
-                return _oneline(Text.from_markup(
-                    f"  [bold #f38ba8]{frame}[/] [#f38ba8]membatalkan…[/]"
-                    f"   [dim italic]Ctrl+C lagi = paksa[/]"))
-            t = Text()
-            t.append(f"  {frame} ", style="bold #cba6f7")
-            t.append(state["phase"], style="#cba6f7")
-            t.append(f"  {_fmt_elapsed(el)}", style="bold #89b4fa")
-            t.append("   [#45475a]•[/]  ", style="")
-            t.append_text(Text.from_markup("[#94e2d5]🌐 via browser[/]"))
-            t.append("     Ctrl+C batal", style="dim italic")
-            return _oneline(t)
-
-        # Header bot SEKALI (sama seperti giliran biasa).
-        console.print()
-        console.print("  [bold #89b4fa]🤖 bagas-ai[/] "
-                      f"[dim]· {_esc(agent.model_spec.label)}[/]")
-
-        wt = threading.Thread(target=worker, daemon=True)
-        interrupted = False
-        try:
-            with Live(render(), console=console, refresh_per_second=12,
-                      transient=True) as live:
-                wt.start()
-                while wt.is_alive():
-                    try:
-                        live.update(render())
-                        wt.join(timeout=0.1)
-                    except KeyboardInterrupt:
-                        if not interrupted:
-                            interrupted = True
-                            cancel_event.set()
-                            state["cancelling"] = True
-                        else:
-                            break
-        except KeyboardInterrupt:
-            interrupted = True
-            cancel_event.set()
-
-        # Ctrl+C: beri worker jeda singkat untuk lepas lewat cancel_event; bila
-        # masih menggantung (mis. macet di dalam browser), RESET hub agar giliran
-        # berikutnya tak ikut mengantre di belakang job yang macet (akar bug
-        # 'tiap Ctrl+C lalu chat baru, sesi browser nyangkut tak selesai').
-        if interrupted and wt.is_alive():
-            wt.join(timeout=2.0)
-            if wt.is_alive():
-                try:
-                    from ..connectors import browser as _br
-                    _br.reset_hub()
-                except Exception:  # noqa: BLE001
-                    pass
-
-        err = result["error"]
-        ans = (result["answer"] or "").strip()
-        if isinstance(err, (KeyboardInterrupt, llm.Cancelled)) or (
-                interrupted and not ans):
-            console.print("  [yellow]◼ dibatalkan[/yellow]\n")
-        elif err is not None:
-            console.print(f"  [red]✖ error:[/red] {_esc(str(err))}\n")
-        elif ans:
-            console.print(Padding(_md(ans), (0, 3, 1, 3)))
-            console.print(Padding(Text.from_markup(
-                f"[dim]{_fmt_elapsed(time.time() - turn_start)} · 🌐 via browser[/]"),
-                (0, 3, 1, 3)))
-        else:
-            console.print("  [yellow]tak ada jawaban.[/yellow]\n")
+                from ..connectors import browser as _br
+                _br.reset_hub()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _connect_web(prev_model_id: str) -> None:
         """Alur CONNECT saat model web DIPILIH (bukan saat pesan pertama):
@@ -1218,11 +1154,11 @@ def main(resume: bool = False) -> None:
         """Jalankan satu giliran INLINE (tanpa layar-penuh, tetap di alur terminal
         biasa). Seluruh giliran dirender di satu region rich.Live yang hidup &
         membeku jadi riwayat saat selesai. Hasil langkah bisa dibuka/tutup realtime
-        dengan Ctrl+R. Ctrl+C membatalkan. Bila gagal, jatuh ke process_classic."""
-        # Model connector web (browser) punya alur sendiri (tanpa tool/API NVIDIA).
-        if agent.model_spec.is_web:
-            process_web(text)
-            return
+        dengan Ctrl+R. Ctrl+C membatalkan. Bila gagal, jatuh ke process_classic.
+
+        Model CONNECTOR web (Claude/Qwen web) memakai jalur yang SAMA: ia kini
+        bisa memanggil tool (edit file, jalankan perintah, dll) lewat protokol
+        teks, jadi langkah-langkahnya tampil persis seperti model NVIDIA."""
         steps.clear()
         step_ctr["n"] = 0
         cur_step.clear()
@@ -1291,6 +1227,11 @@ def main(resume: bool = False) -> None:
             if cbs_alive["on"]:
                 view.note_retry(wait, f"percobaan ke-{attempt}")
 
+        def _on_status(msg: str) -> None:
+            """Status connector web (menyiapkan sesi / berpikir / menjawab)."""
+            if cbs_alive["on"]:
+                view.note_phase(_web_phase(msg))
+
         def _on_notice(msg: str) -> None:
             """bagas-ai naik-kelas / anti-macet otomatis — beri tahu pengguna.
             Deskripsi naik-kelas selalu memuat '→' (mis. 'effort a → b')."""
@@ -1309,6 +1250,7 @@ def main(resume: bool = False) -> None:
                     text, on_tool=_on_tool, on_message=_on_msg,
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
+                    on_status=_on_status,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
@@ -1448,6 +1390,9 @@ def main(resume: bool = False) -> None:
                     mouse.disable()
                 except Exception:  # noqa: BLE001
                     pass
+        # Giliran web yang dibatalkan: pastikan sesi browser tak tertinggal macet.
+        if interrupted and agent.model_spec.is_web:
+            _reset_web_hub_if_stuck(worker_thread)
 
         err = result["error"]
         ans = (result["answer"] or "").strip()
@@ -1539,6 +1484,7 @@ def main(resume: bool = False) -> None:
                     text, on_tool=on_tool, on_message=say,
                     on_retry=on_retry, cancel_event=cancel_event,
                     on_tool_result=finish_step,
+                    on_status=lambda m: status_obj.note_phase(_web_phase(m)),
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
@@ -1571,6 +1517,9 @@ def main(resume: bool = False) -> None:
             cancel_event.set()
         finally:
             live_holder["live"] = None
+        # Giliran web yang dibatalkan: pastikan sesi browser tak tertinggal macet.
+        if (interrupted or forced) and agent.model_spec.is_web:
+            _reset_web_hub_if_stuck(worker_thread)
 
         err = result["error"]
         if forced or interrupted or isinstance(err, (KeyboardInterrupt, llm.Cancelled)):
