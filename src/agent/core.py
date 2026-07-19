@@ -328,10 +328,28 @@ class Agent:
         return self.model_spec.id
 
     def set_model(self, name: str) -> str:
+        before = self.model_spec.connector
         self.model_spec = models.resolve(name)
         self.effort = self.model_spec.default_effort()
+        if self.model_spec.connector != before:
+            # Pindah layanan (mis. Claude web -> Qwen web, atau ke/dari model
+            # NVIDIA): state percakapan web TIDAK boleh terbawa. Tanpa ini,
+            # layanan baru dikira sudah menerima konteks (padahal chat-nya
+            # kosong) dan ID chat milik layanan lama ikut terbawa.
+            self._sync_web_state()
         prefs.save(model=self.model_spec.id, effort=self.effort)
         return self.model_spec.label
+
+    def _sync_web_state(self) -> None:
+        """Selaraskan kaitan chat web dengan LAYANAN yang sedang aktif."""
+        svc = self.model_spec.connector
+        saved = ""
+        if svc and self.session is not None:
+            saved = (getattr(self.session, "web_chats", None) or {}).get(svc, "")
+        self._web_chat_id = saved
+        # Konteks dianggap sudah terkirim HANYA bila kita menyambung chat lama
+        # milik layanan ini; chat baru selalu perlu konteks lagi.
+        self._web_ctx_sent = bool(saved)
 
     def set_effort(self, name: str) -> str | None:
         if not self.model_spec.supports_effort():
@@ -545,6 +563,20 @@ class Agent:
                 ctx = ""
             if ctx:
                 preamble += "\n\n" + ctx
+            # Riwayat percakapan sejauh ini (tanpa permintaan yang sedang
+            # dikirim) — supaya pindah model di tengah kerja tidak kehilangan
+            # konteks: chat di situs baru selalu mulai kosong.
+            try:
+                digest = prompts.build_transcript_digest(
+                    self.memory.messages[:-1])
+            except Exception:  # noqa: BLE001
+                digest = ""
+            if digest:
+                preamble += (
+                    "\n\n# Percakapan kami sebelum ini (dengan asisten lain)\n"
+                    "Lanjutkan dari sini — jangan mengulang yang sudah dibahas:\n"
+                    + digest
+                )
             first_msg = preamble + "\n\n==========\nPERMINTAAN SAYA:\n" + user_text
 
         conn = connectors.get_connector(self.model_spec.connector)

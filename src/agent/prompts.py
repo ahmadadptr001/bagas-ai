@@ -295,6 +295,53 @@ def build_system_prompt() -> str:
     return "\n".join(parts)
 
 
+def build_transcript_digest(
+    messages: list, max_turns: int = 14, max_chars: int = 5000,
+    per_msg: int = 700,
+) -> str:
+    """Ringkas percakapan sejauh ini agar model BARU bisa langsung menyambung.
+
+    Dipakai saat pengguna berpindah model di tengah kerja (mis. Claude web kena
+    limit lalu ganti ke Qwen, atau sebaliknya): AI web yang baru memulai chat
+    kosong di situsnya sendiri, jadi riwayat dari memory bagas-ai dikirim
+    sebagai ringkasan supaya konteksnya tidak hilang.
+
+    Hanya giliran user & jawaban asisten yang diambil (pesan sistem, hasil tool,
+    dan instruksi internal dilewati), dibatasi jumlah & panjangnya agar hemat.
+    """
+    rows: list[tuple[str, str]] = []
+    for m in messages or []:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        text = content.strip()
+        # Lewati instruksi internal & preamble yang bukan ucapan pengguna.
+        if not text or text.startswith("[SISTEM]") or text.startswith("[[HASIL"):
+            continue
+        if "PERMINTAAN SAYA:" in text:          # pesan pertama sesi web
+            text = text.split("PERMINTAAN SAYA:", 1)[1].strip()
+        if len(text) > per_msg:
+            text = text[:per_msg].rstrip() + " …"
+        rows.append(("Saya" if role == "user" else "Kamu/AI", text))
+
+    rows = rows[-max_turns:]
+    if not rows:
+        return ""
+    out: list[str] = []
+    total = 0
+    for who, text in reversed(rows):           # jaga giliran TERBARU bila dipotong
+        piece = f"{who}: {text}"
+        if total + len(piece) > max_chars:
+            break
+        out.append(piece)
+        total += len(piece)
+    out.reverse()
+    return "\n\n".join(out)
+
+
 def build_web_context() -> str:
     """Konteks laptop & proyek untuk connector web-AI (Claude/Qwen web).
 
