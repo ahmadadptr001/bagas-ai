@@ -23,8 +23,16 @@ from .tools import base as tools
 # huruf kecil), jadi polanya dibuat longgar — kalau tidak, penanda lolos ke layar.
 _OPEN_MARK = r"\[\[\s*TOOL\s*\]\]"
 _CLOSE_MARK = r"\[\[\s*/\s*TOOL\s*\]\]"
+# Sebagian model punya format pemanggilan tool BAWAAN dan memakainya walau
+# diminta memakai penanda kita — Qwen, misalnya, mengeluarkan
+# <tool_call>{...}</tool_call>. Menerima kedua bentuk jauh lebih murah daripada
+# memaksa model mengubah kebiasaannya, dan isinya sama-sama JSON.
+_ALT_OPEN = r"<\s*tool_call\s*>"
+_ALT_CLOSE = r"<\s*/\s*tool_call\s*>"
 _WEB_TOOL_RE = re.compile(
-    _OPEN_MARK + r"(.*?)" + _CLOSE_MARK, re.DOTALL | re.IGNORECASE)
+    _OPEN_MARK + r"(.*?)" + _CLOSE_MARK
+    + r"|" + _ALT_OPEN + r"(.*?)" + _ALT_CLOSE,
+    re.DOTALL | re.IGNORECASE)
 # Pagar blok kode markdown (```json / ```): AI web sering merender usulan tool
 # sebagai blok kode, jadi pagarnya harus dibuang sebelum JSON di-parse.
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*")
@@ -125,9 +133,27 @@ def _web_tool_protocol() -> str:
 _BAD_ESCAPE_RE = re.compile(r'\\(?![\\/"bfnrtu]|u[0-9a-fA-F]{4})')
 
 
+# Artefak PERENDERAN yang membuat JSON tak sah. Situs menata blok kode dengan
+# spasi non-breaking & tanda kutip tipografis; JSON standar menolak keduanya,
+# sehingga usulan tool yang sebenarnya benar gagal dibaca.
+_JSON_ARTIFACTS = {
+    "\xa0": " ", " ": " ", " ": " ", " ": " ", "​": "",
+    "﻿": "", "“": '"', "”": '"', "‘": "'", "’": "'",
+}
+
+
+def _clean_json_text(raw: str) -> str:
+    """Ganti artefak perenderan agar JSON-nya bisa dibaca apa adanya."""
+    for buruk, baik in _JSON_ARTIFACTS.items():
+        if buruk in raw:
+            raw = raw.replace(buruk, baik)
+    return raw
+
+
 def _json_tool_obj(raw: str) -> dict | None:
     """Baca satu objek tool JSON dari teks. Bila gagal karena escape rusak
     (efek perenderan markdown), coba perbaiki lalu baca ulang."""
+    raw = _clean_json_text(raw or "")
     start = raw.find("{")
     if start < 0:
         return None
@@ -155,7 +181,8 @@ def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
     """
     calls: list[dict] = []
     for m in _WEB_TOOL_RE.finditer(text or ""):
-        body = _FENCE_RE.sub("", m.group(1) or "").strip()
+        # group(1) = bentuk [[TOOL]]…[[/TOOL]], group(2) = <tool_call>…</tool_call>
+        body = _FENCE_RE.sub("", m.group(1) or m.group(2) or "").strip()
         obj = _json_tool_obj(body)
         if obj is not None:
             calls.append({"name": str(obj.get("tool") or obj.get("name")),
@@ -163,7 +190,8 @@ def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
 
     # Cadangan: sebagian/seluruh usulan gagal dibaca dari teks -> pakai isi
     # mentah blok kode (byte apa adanya, tak tersentuh perenderan markdown).
-    n_markers = (text or "").count("[[TOOL]]")
+    n_markers = len(re.findall(_OPEN_MARK, text or "", re.IGNORECASE)) + \
+        len(re.findall(_ALT_OPEN, text or "", re.IGNORECASE))
     if code_blocks and len(calls) < n_markers:
         from_code: list[dict] = []
         for raw in code_blocks:
@@ -175,13 +203,35 @@ def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
         if len(from_code) > len(calls):
             calls = from_code
 
+    # Cadangan 2: sebagian model menulis usulan sebagai JSON BIASA tanpa penanda
+    # apa pun (Qwen kerap begitu meski protokolnya sudah dijelaskan). Diterima
+    # HANYA bila objeknya benar-benar berbentuk panggilan tool (punya nama tool
+    # DAN args) dan balasannya nyaris tak berisi teks lain — supaya penjelasan
+    # yang KEBETULAN memuat contoh JSON tidak ikut dieksekusi.
+    if not calls:
+        for raw in list(code_blocks or ()) + [text or ""]:
+            obj = _json_tool_obj(str(raw))
+            if obj is None:
+                continue
+            args = obj.get("args") or obj.get("arguments")
+            if not isinstance(args, dict):
+                continue
+            sisa = _FENCE_RE.sub("", str(raw))
+            sisa = re.sub(r"\{.*\}", "", sisa, flags=re.DOTALL).strip()
+            if len(sisa) > 80:      # ada prosa panjang -> kemungkinan penjelasan
+                continue
+            calls.append({"name": str(obj.get("tool") or obj.get("name")),
+                          "arguments": args})
+            break
+
     return [c for c in calls if c["name"] and isinstance(c["arguments"], dict)]
 
 
 # Penanda protokol yang boleh SAJA tersisa di teks (mis. blok rusak / tak
 # berpasangan). Semuanya dibuang sebelum jawaban ditampilkan ke pengguna.
 _WEB_MARKER_RE = re.compile(
-    _OPEN_MARK + r"|" + _CLOSE_MARK + r"|\[\[\s*/?\s*HASIL[^\]]*\]\]",
+    _OPEN_MARK + r"|" + _CLOSE_MARK + r"|" + _ALT_OPEN + r"|" + _ALT_CLOSE
+    + r"|\[\[\s*/?\s*HASIL[^\]]*\]\]",
     re.IGNORECASE)
 
 
@@ -218,8 +268,10 @@ def _web_reply_complete(text: str) -> bool:
     dianggap 'belum selesai' — dulu itu membuat penungguan berjalan sampai batas
     waktu 5 menit dan terminal terlihat macet."""
     t = text or ""
-    opens = len(re.findall(_OPEN_MARK, t, re.IGNORECASE))
-    closes = len(re.findall(_CLOSE_MARK, t, re.IGNORECASE))
+    opens = (len(re.findall(_OPEN_MARK, t, re.IGNORECASE))
+             + len(re.findall(_ALT_OPEN, t, re.IGNORECASE)))
+    closes = (len(re.findall(_CLOSE_MARK, t, re.IGNORECASE))
+              + len(re.findall(_ALT_CLOSE, t, re.IGNORECASE)))
     return opens <= closes
 
 

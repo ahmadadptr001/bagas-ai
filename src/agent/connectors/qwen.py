@@ -45,12 +45,20 @@ class QwenConnector(WebConnector):
     )
 
     # --- jawaban ---
-    # `[class*="markdown"]` memberi teks jawaban BERSIH ("8821"), sedangkan
-    # wadah `assistant` masih tercampur "Thinking completed".
+    # PENTING — urutan ini hasil pengukuran, jangan dibalik:
+    #   [class*='answer']    -> SATU elemen per pesan, isinya UTUH.
+    #   [class*='assistant'] -> juga utuh, tapi tercampur "Thinking completed"
+    #                           (disaring noise_pattern) — dipakai bila yang
+    #                           pertama hilang karena situs berubah.
+    #   [class*='markdown']  -> JANGAN didahulukan: itu per-PARAGRAF (terukur 19
+    #                           elemen untuk satu jawaban), sehingga yang terbaca
+    #                           cuma potongan terakhir — gejalanya jawaban mulai
+    #                           di tengah kalimat, dan blok tool cuma terbaca
+    #                           "[[/TOOL]]" sehingga usulan langkah hilang.
     message_selector = (
-        "[class*='markdown']",
         "[class*='answer']",
-        "[class*='response-message']",
+        "[class*='assistant']",
+        "[class*='markdown']",
     )
     read_as_markdown = True
     # Tombol Stop hanya ada selagi Qwen menjawab -> penanda paling andal.
