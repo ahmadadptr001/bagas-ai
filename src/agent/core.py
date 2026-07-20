@@ -324,6 +324,51 @@ def _take_image_marks(result: str) -> tuple[str, list[str]]:
     return cleaned, paths
 
 
+def _strip_tool_json(text: str) -> str:
+    """Buang objek JSON USULAN TOOL yang ditulis tanpa penanda.
+
+    Sebagian model menulis usulannya sebagai blok kode polos. Tanpa dibuang,
+    JSON mentahnya tercetak ke layar sebagai 'narasi' di setiap putaran dan
+    memenuhi terminal."""
+    out = text or ""
+    i = 0
+    while True:
+        mulai = out.find("{", i)
+        if mulai < 0:
+            return re.sub(r"\n{3,}", "\n\n", out).strip()
+        # Cari kurung penutup yang berpasangan (abaikan kurung di dalam string).
+        depth, j, dalam_string, escape = 0, mulai, False, False
+        while j < len(out):
+            ch = out[j]
+            if dalam_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    dalam_string = False
+            elif ch == '"':
+                dalam_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= len(out):
+            return re.sub(r"\n{3,}", "\n\n", out).strip()
+        blok = out[mulai:j + 1]
+        if _json_tool_obj(blok) is not None:
+            # Buang blok + label bahasa/nomor baris yang menempel sebelumnya.
+            depan = re.sub(r"(?:```[a-zA-Z0-9_+-]*|\b[a-z]{2,10}\d*)\s*$", "",
+                           out[:mulai])
+            out = depan + out[j + 1:]
+            i = len(depan)
+        else:
+            i = mulai + 1
+
+
 def _web_reply_complete(text: str) -> bool:
     """False HANYA bila balasan tampak masih ditulis: ada pembuka [[TOOL]] yang
     belum ditutup. Dipakai agar bagas-ai tak menganggap balasan selesai saat blok
@@ -750,10 +795,17 @@ class Agent:
 
             steps = 0
             repairs = 0   # berapa kali minta AI web mengirim ulang blok rusak
+            # Jaring anti-ulang, sama seperti jalur model NVIDIA: hasil langkah
+            # di-cache per (nama+argumen). Tanpa ini AI web bisa mengulang
+            # langkah yang PERSIS SAMA berpuluh kali sampai batas langkah habis
+            # — boros kuota & tak menghasilkan apa pun.
+            seen_tools: dict[str, str] = {}
+            dup_hits = 0
+            force_final = False
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise llm.Cancelled()
-                calls = _parse_web_tool_calls(
+                calls = [] if force_final else _parse_web_tool_calls(
                     reply, getattr(conn, "last_code_blocks", ()))
 
                 # Ada penanda [[TOOL]] tapi isinya tak terbaca (rusak saat
@@ -770,8 +822,10 @@ class Agent:
                     continue
 
                 if not calls or steps >= _WEB_MAX_STEPS:
-                    # Tak ada tool -> ini jawaban AKHIR. Bersihkan sisa penanda.
-                    answer = _strip_web_markers(reply)
+                    # Tak ada tool -> ini jawaban AKHIR. Bersihkan sisa penanda
+                    # DAN usulan JSON tanpa penanda (mis. saat model tetap
+                    # mengulang padahal sudah diminta menyimpulkan).
+                    answer = _strip_tool_json(_strip_web_markers(reply))
                     if not answer:
                         # Seluruh balasan hanya berupa blok/penanda yang tak
                         # terbaca. Tampilkan CUPLIKAN aslinya — tanpa itu tak
@@ -795,8 +849,10 @@ class Agent:
                                    "aksi mungkin belum tuntas.)_")
                     break
 
-                # Narasi sebelum tool (teks di luar blok [[TOOL]]).
-                narration = _strip_web_markers(reply)
+                # Narasi sebelum tool = teks di luar blok tool. JSON usulan yang
+                # ditulis TANPA penanda juga dibuang, kalau tidak ia tercetak
+                # mentah ke layar tiap putaran.
+                narration = _strip_tool_json(_strip_web_markers(reply))
                 if narration and on_message:
                     on_message(narration)
 
@@ -809,9 +865,24 @@ class Agent:
                     name, args = c["name"], c["arguments"]
                     if on_tool:
                         on_tool(name, args)
-                    result = tools.execute(name, args)
-                    if on_tool_result:
-                        on_tool_result(name, result)
+                    kunci = name + "::" + json.dumps(
+                        args, sort_keys=True, ensure_ascii=False, default=str)
+                    if kunci in seen_tools:
+                        # Langkah PERSIS SAMA sudah pernah dijalankan: kembalikan
+                        # hasil yang sama + tegur, jangan eksekusi ulang.
+                        dup_hits += 1
+                        result = (
+                            "[SISTEM] Kamu SUDAH menjalankan langkah ini dengan "
+                            "argumen yang sama persis; hasilnya identik dengan di "
+                            "bawah. JANGAN mengulanginya — pakai hasil ini lalu "
+                            "lanjut ke langkah BERIKUTNYA atau berikan jawaban "
+                            "akhir.\n\n" + seen_tools[kunci]
+                        )
+                    else:
+                        result = tools.execute(name, args)
+                        seen_tools[kunci] = result
+                        if on_tool_result:
+                            on_tool_result(name, result)
                     steps += 1
                     # Tool yang menghasilkan GAMBAR (mis. screenshot): file-nya
                     # dilampirkan ke pesan berikutnya supaya AI web melihatnya
@@ -832,6 +903,19 @@ class Agent:
                     "tool lagi, keluarkan blok [[TOOL]] berikutnya; kalau sudah "
                     "SELESAI, beri jawaban akhir biasa (tanpa blok tool)."
                 )
+                if dup_hits >= config.MAX_DUPLICATE_TOOL_CALLS:
+                    # Terjebak mengulang langkah yang sama: matikan tool dan
+                    # paksa menyimpulkan, daripada memutar sampai batas langkah.
+                    force_final = True
+                    follow += (
+                        "\n\n[SISTEM] Kamu terus mengulang langkah yang sama. "
+                        "STOP memakai tool. Berikan jawaban akhir dalam teks "
+                        "biasa: jelaskan JUJUR apa yang sudah selesai, apa yang "
+                        "belum, dan langkah tersisa yang perlu dilakukan."
+                    )
+                    if on_notice:
+                        on_notice("langkah yang sama berulang — beralih ke "
+                                  "kesimpulan")
                 reply = _send(follow, attachments=images)
         except llm.Cancelled:
             self.memory.repair_dangling_tools()
