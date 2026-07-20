@@ -92,6 +92,21 @@ TokenCb = Callable[[str], None]
 # rusak oleh perenderan markdown situs (sumber bug "perintah salah path").
 JS_CODE_BLOCKS = r"""
 (selectors) => {
+  // Buang GUTTER nomor baris sebelum mengambil teks: situs menampilkan nomor
+  // baris sebagai elemen tersendiri di dalam <pre>, dan bila ikut terbaca
+  // kodenya tampil sebagai deretan angka ("html215216217218").
+  const GUTTER = /line-?number|linenos|gutter|code-?line-?no/i;
+  const teks = (pre) => {
+    const salinan = pre.cloneNode(true);
+    for (const n of salinan.querySelectorAll('*')) {
+      const cls = (typeof n.className === 'string') ? n.className : '';
+      if (GUTTER.test(cls) || GUTTER.test(n.getAttribute('data-testid') || '')) {
+        n.remove();
+      }
+    }
+    const code = salinan.querySelector('code');
+    return ((code ? code.textContent : salinan.textContent) || '');
+  };
   let el = null;
   for (const s of selectors) {
     const nodes = document.querySelectorAll(s);
@@ -99,10 +114,7 @@ JS_CODE_BLOCKS = r"""
   }
   if (!el) return [];
   const out = [];
-  for (const pre of el.querySelectorAll('pre')) {
-    const code = pre.querySelector('code');
-    out.push((code ? code.textContent : pre.textContent) || '');
-  }
+  for (const pre of el.querySelectorAll('pre')) out.push(teks(pre));
   return out;
 }
 """
@@ -148,7 +160,19 @@ JS_TO_MARKDOWN = r"""
       const m = codeEl.className.match(/language-([\w+-]+)/);
       if (m) lang = m[1];
     }
-    const code = (codeEl ? codeEl.textContent : pre.textContent).replace(/\n$/, "");
+    // Buang gutter nomor baris; tanpa ini isi blok kode tampil sebagai
+    // deretan angka saja.
+    const GUTTER = /line-?number|linenos|gutter|code-?line-?no/i;
+    const salinan = pre.cloneNode(true);
+    for (const n of salinan.querySelectorAll("*")) {
+      const cls = (typeof n.className === "string") ? n.className : "";
+      if (GUTTER.test(cls) || GUTTER.test(n.getAttribute("data-testid") || "")) {
+        n.remove();
+      }
+    }
+    const inner = salinan.querySelector("code");
+    const code = ((inner ? inner.textContent : salinan.textContent) || "")
+                   .replace(/\n$/, "");
     return "\n```" + lang + "\n" + code + "\n```\n\n";
   }
   function ser(node) {

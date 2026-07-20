@@ -39,6 +39,14 @@ _FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*")
 # Penanda dari tool yang MENGHASILKAN GAMBAR (lihat tools/screen.py). File-nya
 # dilampirkan ke pesan berikutnya supaya AI web benar-benar bisa MELIHATnya.
 _IMAGE_MARK_RE = re.compile(r"^\[GAMBAR\][ \t]+(.+?)[ \t]*$", re.MULTILINE)
+# Pengingat singkat yang ditempel di TIAP giliran (selain yang pertama, yang
+# sudah memuat protokol penuh). Tanpa ini, percakapan panjang membuat AI web
+# lupa dan kembali menampilkan kode untuk disalin manual.
+_WEB_REMINDER = (
+    "[Pengingat: kalau permintaan ini perlu MENGUBAH file atau menjalankan "
+    "sesuatu, keluarkan blok [[TOOL]] — jangan menampilkan kode untuk kusalin "
+    "sendiri. Aku yang mengeksekusi dan mengirim balik hasilnya.]"
+)
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
 _WEB_MAX_STEPS = 24
 # Batas panjang hasil tool yang dikirim balik ke AI web (hemat & fokus).
@@ -322,6 +330,18 @@ def _take_image_marks(result: str) -> tuple[str, list[str]]:
         return result, []
     cleaned = _IMAGE_MARK_RE.sub("", result or "").rstrip()
     return cleaned, paths
+
+
+def _looks_like_unapplied_code(text: str) -> bool:
+    """True bila balasan menyajikan KODE untuk disalin manual, bukan menuliskannya.
+
+    Dipakai untuk menegur sekali: pengguna memakai connector ini supaya
+    perubahannya nyata di disk, bukan supaya kode ditempel di layar."""
+    t = text or ""
+    if "```" not in t and not re.search(r"^\s*(?:html|css|js|python)\d", t, re.M):
+        return False
+    # Cukup panjang untuk benar-benar berupa berkas/patch, bukan cuplikan sebaris.
+    return len(t) > 400
 
 
 def _strip_tool_json(text: str) -> str:
@@ -740,6 +760,12 @@ class Agent:
                     + digest
                 )
             first_msg = preamble + "\n\n==========\nPERMINTAAN SAYA:\n" + user_text
+        else:
+            # Percakapan panjang membuat AI web LUPA protokol dan kembali ke mode
+            # mengobrol: menampilkan kode di jawaban alih-alih menuliskannya.
+            # Pengingat singkat tiap giliran jauh lebih murah daripada mengirim
+            # ulang seluruh protokol.
+            first_msg = user_text + "\n\n" + _WEB_REMINDER
 
         conn = connectors.get_connector(self.model_spec.connector)
         prompt_chars = 0
@@ -802,6 +828,7 @@ class Agent:
             seen_tools: dict[str, str] = {}
             dup_hits = 0
             force_final = False
+            nudges = 0    # teguran "kode ditampilkan tapi tak ditulis ke file"
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise llm.Cancelled()
@@ -819,6 +846,21 @@ class Agent:
                         "dengan format persis:\n[[TOOL]]\n```json\n"
                         '{"tool": "...", "args": {...}}\n```\n[[/TOOL]]\n'
                         "Pakai garis miring biasa pada path, tanpa teks lain.")
+                    continue
+
+                # AI web menampilkan KODE tapi tak menuliskannya ke file: itu
+                # mode mengobrol, bukan mengerjakan. Tegur SEKALI per giliran —
+                # pengguna memakai connector ini justru agar perubahannya nyata.
+                if (not calls and not force_final and nudges < 1
+                        and steps == 0 and _looks_like_unapplied_code(reply)):
+                    nudges += 1
+                    reply = _send(
+                        "[SISTEM] Kamu menampilkan kode tapi tidak menuliskannya "
+                        "ke file, jadi tak ada yang berubah di laptopku. Kalau "
+                        "kode itu memang perlu diterapkan, keluarkan sekarang "
+                        "blok [[TOOL]] write_file untuk tiap file (isi LENGKAP, "
+                        "bukan potongan). Kalau memang hanya penjelasan, ulangi "
+                        "jawaban akhirmu tanpa blok tool.")
                     continue
 
                 if not calls or steps >= _WEB_MAX_STEPS:
