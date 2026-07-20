@@ -150,23 +150,88 @@ def _clean_json_text(raw: str) -> str:
     return raw
 
 
+def _escape_control_in_strings(raw: str) -> str:
+    """Escape baris-baru/tab MENTAH yang berada DI DALAM string JSON.
+
+    Ini penting: isi file selalu multi-baris, dan model biasanya menuliskan
+    baris-baru sungguhan di dalam "content" alih-alih \\n. JSON standar
+    melarangnya, sehingga usulan write_file DIAM-DIAM gagal dibaca — akibatnya
+    AI web seolah hanya bisa membaca & menjalankan perintah, tak pernah benar
+    benar mengubah file."""
+    out: list[str] = []
+    dalam_string = False
+    escape = False
+    for ch in raw:
+        if dalam_string:
+            if escape:
+                out.append(ch)
+                escape = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escape = True
+                continue
+            if ch == '"':
+                dalam_string = False
+                out.append(ch)
+                continue
+            if ch in "\n\r\t":
+                out.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}[ch])
+                continue
+            out.append(ch)
+            continue
+        if ch == '"':
+            dalam_string = True
+        out.append(ch)
+    return "".join(out)
+
+
 def _json_tool_obj(raw: str) -> dict | None:
-    """Baca satu objek tool JSON dari teks. Bila gagal karena escape rusak
-    (efek perenderan markdown), coba perbaiki lalu baca ulang."""
-    raw = _clean_json_text(raw or "")
-    start = raw.find("{")
+    """Baca satu objek tool JSON dari teks.
+
+    Beberapa perbaikan dicoba berurutan karena JSON yang ditulis model kerap
+    rusak oleh hal-hal yang di luar kendalinya: perenderan situs, baris-baru
+    mentah di dalam string, dan backslash yang kehilangan gandanya."""
+    start = (raw or "").find("{")
     if start < 0:
         return None
     body = raw[start:]
-    for candidate in (body, _BAD_ESCAPE_RE.sub(r"\\\\", body)):
+    # Urutan perbaikan sengaja dari yang PALING TIDAK mengubah isi: teks apa
+    # adanya dulu, baru normalisasi artefak render. Kalau dinormalkan lebih
+    # dulu, spasi non-breaking di DALAM isi file ikut jadi spasi biasa dan
+    # kode yang ditulis jadi berbeda dari yang dimaksud model.
+    bersih = _clean_json_text(body)
+    for candidate in (body,
+                      _escape_control_in_strings(body),
+                      bersih,
+                      _escape_control_in_strings(bersih),
+                      _BAD_ESCAPE_RE.sub(r"\\\\", bersih),
+                      _BAD_ESCAPE_RE.sub(
+                          r"\\\\", _escape_control_in_strings(bersih))):
         try:
             # raw_decode: berhenti di akhir objek JSON pertama, sisanya diabaikan.
             obj, _ = json.JSONDecoder().raw_decode(candidate)
         except ValueError:
             continue
         if isinstance(obj, dict) and (obj.get("tool") or obj.get("name")):
-            return obj
+            return _bersihkan_nilai(obj)
     return None
+
+
+def _bersihkan_nilai(obj: Any) -> Any:
+    """Bersihkan artefak render dari NILAI string hasil parsing.
+
+    Spasi non-breaking & kutip tipografis di dalam isi file selalu berasal dari
+    cara situs menata blok kode, bukan dari maksud model — kalau dibiarkan, ia
+    tertulis ke file sebagai karakter tak terlihat yang bikin kode rusak dan
+    sulit ditelusuri."""
+    if isinstance(obj, str):
+        return _clean_json_text(obj)
+    if isinstance(obj, dict):
+        return {k: _bersihkan_nilai(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_bersihkan_nilai(v) for v in obj]
+    return obj
 
 
 def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
