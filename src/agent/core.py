@@ -657,13 +657,21 @@ class Agent:
                     answer = _strip_web_markers(reply)
                     if not answer:
                         # Seluruh balasan hanya berupa blok/penanda yang tak
-                        # terbaca -> beri pesan jelas, jangan tampilkan penanda
-                        # mentah atau layar kosong.
+                        # terbaca. Tampilkan CUPLIKAN aslinya — tanpa itu tak
+                        # ada petunjuk apa pun untuk memperbaiki penyebabnya.
+                        # Cuplikan DISANITASI: pagar kode (```) akan menutup
+                        # blok lebih awal sehingga sisanya dirender kacau, dan
+                        # penanda protokol yang lolos ke memory ikut terbawa ke
+                        # ringkasan percakapan untuk model BERIKUTNYA.
+                        mentah = " ".join((reply or "").split())[:300]
+                        mentah = (mentah.replace("`", "'")
+                                        .replace("[[", "⟦").replace("]]", "⟧"))
                         answer = (
                             "Balasan dari AI web tak bisa kubaca sebagai langkah "
                             "yang sah (formatnya rusak saat dirender). Coba "
                             "kirim ulang permintaanmu, atau perjelas langkah "
-                            "yang kamu mau."
+                            "yang kamu mau.\n\n"
+                            f"Yang terbaca dari layar:\n```\n{mentah or '(kosong)'}\n```"
                         )
                     if steps >= _WEB_MAX_STEPS and calls:
                         answer += ("\n\n_(batas langkah tool tercapai — sebagian "

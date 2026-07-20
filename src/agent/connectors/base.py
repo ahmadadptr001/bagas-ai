@@ -217,7 +217,15 @@ class WebConnector:
     service: str = ""          # kunci internal & nama folder profil (mis. "claude")
     label: str = ""            # nama tampilan (mis. "Claude (web)")
     chat_url: str = ""         # halaman chat / sesi baru
-    input_selector: str = ""   # kotak input (textarea / contenteditable)
+    # Kotak input (textarea / contenteditable). Boleh SATU selector (str) atau
+    # BEBERAPA kandidat (tuple) yang dicoba BERURUTAN — kandidat pertama yang
+    # benar-benar terlihat & bisa diisi yang dipakai.
+    #
+    # Sengaja tuple, bukan satu string berkoma: daftar CSS berkoma TIDAK
+    # menentukan prioritas (yang terpilih adalah elemen paling awal di DOM,
+    # bukan yang paling spesifik), dan memecahnya sendiri dengan split(",")
+    # merusak selector yang memuat koma di dalam kutip/kurung.
+    input_selector: str | tuple[str, ...] = ""
     # Wadah pesan JAWABAN — boleh SATU selector (str) atau BEBERAPA kandidat
     # (tuple); dicoba berurutan, yang pertama menghasilkan teks dipakai.
     message_selector: str | tuple[str, ...] = ""
@@ -517,18 +525,9 @@ class WebConnector:
         # Sudah kena limit sebelum mengetik? Jangan buang waktu mengirim.
         self._raise_if_limited(page)
         status(f"mengetik pesan ke {self.label}…")
-        # Locator (bukan ElementHandle): situs merender ulang komposernya —
-        # mis. setelah ganti model lewat /effort — sehingga handle lama jadi
-        # basi ("Element is not attached to the DOM"). Locator dicari ulang
-        # setiap kali dipakai, jadi kebal terhadap render ulang itu.
-        inp = page.locator(self.input_selector).first
-        try:
-            inp.wait_for(state="visible", timeout=8000)
-        except Exception:  # noqa: BLE001
-            raise BrowserError(
-                f"kotak input tak ditemukan ({self.input_selector}). "
-                "Situs mungkin berubah layout."
-            )
+        # Mencari kotak input SEKALIGUS menunggu sampai bisa diisi (situs
+        # mengunci komposer selagi menjawab). Bisa dibatalkan dengan Ctrl+C.
+        inp = self._input_locator(page, check_cancel)
         self._focus_input(inp)
         # Lampiran diunggah SEBELUM teks dikirim — kalau Enter ditekan lebih
         # dulu, pesan terkirim tanpa gambarnya.
@@ -541,7 +540,9 @@ class WebConnector:
         if self.input_is_contenteditable:
             page.keyboard.insert_text(prompt)
         else:
-            inp.fill(prompt)
+            # Batas waktu eksplisit: kotak sudah dipastikan bisa diisi di atas,
+            # jadi tak perlu menunggu 30 detik bawaan Playwright lagi.
+            inp.fill(prompt, timeout=10000)
         page.keyboard.press(self.submit_key)
 
         # --- tunggu jawaban MULAI (streaming muncul / jumlah pesan bertambah) ---
@@ -710,26 +711,96 @@ class WebConnector:
             pass
         self._click_element(loc)
 
-    @staticmethod
-    def _focus_input(inp: Any) -> None:
-        """Fokuskan kotak input tanpa bergantung pada klik mouse.
+    def _input_selectors(self) -> tuple[str, ...]:
+        """Kandidat selector kotak input, urut dari yang paling spesifik."""
+        sel = self.input_selector
+        return (sel,) if isinstance(sel, str) else tuple(sel)
+
+    def _input_locator(self, page: Any, check_cancel: Callable[[], None] | None = None,
+                       timeout: float = 25.0) -> Any:
+        """Locator kotak input yang TERLIHAT dan BISA DIISI.
+
+        Kandidat dicoba BERURUTAN (paling spesifik dulu) dan yang dipakai adalah
+        yang pertama lolos kedua syarat. Ini penting karena:
+          - daftar CSS berkoma tidak menentukan prioritas: `.first` mengambil
+            elemen paling awal di DOM, yang bisa saja kotak pencarian sehingga
+            prompt diketik ke tempat yang salah;
+          - situs mengunci komposer selagi menjawab, jadi 'terlihat' saja belum
+            cukup — harus ditunggu sampai benar-benar bisa diisi.
+
+        Locator (bukan ElementHandle) dipakai agar kebal saat situs merender
+        ulang komposer, mis. sesudah ganti model lewat /effort.
+        """
+        deadline = time.time() + timeout
+        first_visible: Any = None
+        while True:
+            if check_cancel is not None:
+                check_cancel()
+            for sel in self._input_selectors():
+                loc = page.locator(f"{sel}:visible").first
+                try:
+                    if loc.count() == 0:
+                        continue
+                except Exception:  # noqa: BLE001 - selector tak sah / DOM sibuk
+                    continue
+                if first_visible is None:
+                    first_visible = loc
+                try:
+                    if loc.is_editable(timeout=1000):
+                        return loc
+                except Exception:  # noqa: BLE001
+                    continue
+            if time.time() >= deadline:
+                break
+            page.wait_for_timeout(300)
+
+        if first_visible is None:
+            raise BrowserError(
+                f"kotak input tak ditemukan ({', '.join(self._input_selectors())}). "
+                "Situs mungkin berubah layout."
+            )
+        raise BrowserError(
+            f"kotak input {self.label} terlihat tapi terkunci selama "
+            f"{timeout:.0f} detik — situs mungkin masih menjawab atau sesi "
+            "perlu dimuat ulang."
+        )
+
+    def _focus_input(self, inp: Any) -> None:
+        """Fokuskan kotak input dan PASTIKAN benar-benar fokus.
 
         `focus()` memanggil DOM focus() langsung sehingga tak perlu hit-test —
         aman saat jendela browser berjalan tersembunyi di latar, tempat klik
-        mouse sungguhan selalu kehabisan waktu. Klik tetap dicoba sebagai
-        cadangan bila situs baru membuka komposernya saat diklik."""
-        try:
-            inp.focus(timeout=4000)
-            return
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            inp.click(timeout=4000)
-        except Exception:  # noqa: BLE001
+        mouse sungguhan selalu kehabisan waktu. Klik dipakai sebagai cadangan
+        bila situs baru menyiapkan komposernya saat diklik.
+
+        Keberhasilannya DIPERIKSA: pada kotak contenteditable, teks diketik ke
+        elemen yang sedang fokus, jadi fokus yang gagal diam-diam akan mengirim
+        pesan KOSONG lalu gagal dengan pesan yang menyalahkan selector pesan."""
+        for percobaan in range(2):
             try:
-                inp.dispatch_event("click")
+                inp.focus(timeout=4000)
             except Exception:  # noqa: BLE001
-                pass
+                if percobaan == 0:
+                    self._click_element(inp)   # sebagian situs baru siap saat diklik
+                    continue
+            if self._is_focused(inp):
+                return
+            if percobaan == 0:
+                self._click_element(inp)
+        if not self._is_focused(inp):
+            raise BrowserError(
+                f"kotak input {self.label} tak bisa difokuskan — pesan tak akan "
+                "sampai. Coba kirim ulang; bila terus terjadi, buka jendela "
+                "browsernya (CONNECTOR_HEADLESS=false) untuk melihat keadaannya."
+            )
+
+    @staticmethod
+    def _is_focused(inp: Any) -> bool:
+        """True bila elemen ini yang sedang memegang fokus di halaman."""
+        try:
+            return bool(inp.evaluate("el => el === document.activeElement"))
+        except Exception:  # noqa: BLE001
+            return False
 
     @staticmethod
     def _click_element(loc: Any) -> None:
@@ -836,7 +907,8 @@ class WebConnector:
     def _attach_count(self, page: Any) -> int:
         """Jumlah pratinjau lampiran yang terlihat di komposer."""
         try:
-            return int(page.evaluate(JS_ATTACH_COUNT, self.input_selector) or 0)
+            return int(page.evaluate(
+                JS_ATTACH_COUNT, self._input_selectors()[0]) or 0)
         except Exception:  # noqa: BLE001
             return 0
 
@@ -945,7 +1017,7 @@ class WebConnector:
         dest = url or self.chat_url
         try:
             page.goto(dest, wait_until="domcontentloaded", timeout=45000)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise BrowserError(f"gagal membuka {dest}: {exc}") from exc
 
     def _wait_login(self, page: Any, check_cancel: Callable[[], None]) -> None:
@@ -1010,12 +1082,13 @@ class WebConnector:
             if check_cancel is not None:
                 check_cancel()
             if not self._on_login_page(page) and not self._looks_logged_out(page):
-                try:
-                    el = page.query_selector(self.input_selector)
-                    if el is not None and el.is_visible():
-                        return True
-                except Exception:  # noqa: BLE001 - DOM/page sedang transisi
-                    pass
+                for sel in self._input_selectors():
+                    try:
+                        el = page.query_selector(sel)
+                        if el is not None and el.is_visible():
+                            return True
+                    except Exception:  # noqa: BLE001 - DOM/page sedang transisi
+                        continue
             if time.time() >= deadline:
                 return False
             try:

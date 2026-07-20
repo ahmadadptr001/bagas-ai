@@ -28,7 +28,11 @@ class QwenConnector(WebConnector):
     chat_id_pattern = r"/c/([0-9a-fA-F-]{16,})"
 
     # --- input ---
-    input_selector = "textarea.message-input-textarea, textarea"
+    # Kandidat BERURUTAN: kelas spesifik dulu, `textarea` polos hanya cadangan
+    # bila situs mengganti nama kelasnya. (Dulu satu string berkoma — itu keliru:
+    # daftar CSS tak berprioritas, jadi kotak pencarian yang muncul lebih dulu di
+    # DOM bisa terpilih dan prompt diketik ke sana.)
+    input_selector = ("textarea.message-input-textarea", "textarea")
     input_is_contenteditable = False
     submit_key = "Enter"
 
