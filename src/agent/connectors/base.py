@@ -842,7 +842,7 @@ class WebConnector:
         counts_before = self._msg_counts(page)
         text_before = self._read_last_message(page)
         if self.input_is_contenteditable:
-            page.keyboard.insert_text(prompt)
+            self._ketik_contenteditable(page, inp, prompt)
         else:
             # Batas waktu eksplisit: kotak sudah dipastikan bisa diisi di atas,
             # jadi tak perlu menunggu 30 detik bawaan Playwright lagi.
@@ -1262,6 +1262,65 @@ class WebConnector:
             f"unggahan lampiran ke {self.label} tak selesai dalam "
             f"{self.attach_timeout:.0f} detik.")
 
+    # Taruh CARET di dalam elemen contenteditable, di akhir isinya.
+    #
+    # `focus()` saja TIDAK cukup: ia menjadikan elemen document.activeElement,
+    # tetapi tak menaruh titik sisip. Klik sungguhan menaruhnya — namun connector
+    # sering berjalan dengan jendela TERSEMBUNYI, dan di sana klik nyata gagal
+    # hit-test sehingga jatuh ke dispatch_event('click'), yang merupakan event
+    # SINTETIS dan sama sekali tak memindahkan caret. Range eksplisit bekerja di
+    # kedua keadaan.
+    _JS_TARUH_CARET = r"""
+    (el) => {
+      el.focus();
+      try {
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);            // titik sisip di AKHIR isi
+        const s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+        return true;
+      } catch (e) { return false; }
+    }
+    """
+
+    def _taruh_caret(self, inp: Any) -> None:
+        try:
+            inp.evaluate(self._JS_TARUH_CARET)
+        except Exception:  # noqa: BLE001 - dinilai lewat pemeriksaan isi kotak
+            pass
+
+    def _ketik_contenteditable(self, page: Any, inp: Any, prompt: str) -> None:
+        """Ketik ke editor contenteditable & PASTIKAN teksnya benar-benar masuk.
+
+        TERBUKTI di kimi.com: tanpa caret, Input.insertText tak mendarat di mana
+        pun. Gejalanya paling menyesatkan — tak ada galat sama sekali, kotak
+        input tetap KOSONG, situs tak pernah menerima apa-apa, lalu giliran diam
+        di "berpikir" sampai batas waktu habis.
+
+        Karena itu hasilnya DIPERIKSA, bukan diasumsikan: caret ditaruh dulu,
+        lalu isi kotak dibaca kembali. Bila masih kosong, dicoba sekali lagi
+        dengan klik sungguhan lebih dulu (berguna pada situs yang baru
+        menyiapkan editornya saat disentuh). Kalau tetap gagal, lebih baik
+        berhenti dengan pesan jelas daripada menunggu jawaban yang tak akan
+        datang."""
+        for percobaan in range(2):
+            if percobaan:
+                self._click_element(inp)
+                page.wait_for_timeout(150)
+            self._taruh_caret(inp)
+            page.keyboard.insert_text(prompt)
+            page.wait_for_timeout(150)
+            if self._input_text(inp):
+                return
+        raise BrowserError(
+            f"teks tak mau masuk ke kotak input {self.label} — editornya "
+            "mungkin menolak pengetikan terprogram. Coba kirim ulang; bila "
+            "terus terjadi, periksa input_selector di connectors/"
+            f"{self.service}.py."
+        )
+
     def _submit(self, page: Any, inp: Any) -> None:
         """Kirim pesan, dan PASTIKAN benar-benar terkirim.
 
@@ -1270,6 +1329,10 @@ class WebConnector:
         sudah kosong = terkirim; kalau masih berisi, tombol kirim diklik sebagai
         cadangan. Tanpa tombol kirim yang dikenal, perilakunya sama seperti
         dulu — tekan Enter lalu biarkan penantian jawaban yang menilai."""
+        if self.input_is_contenteditable:
+            # Editor kaya memperbarui keadaan internalnya lewat event; menekan
+            # Enter pada tik yang sama bisa mengirim keadaan yang belum sinkron.
+            page.wait_for_timeout(200)
         page.keyboard.press(self.submit_key)
         if not self.send_button_selector:
             return
