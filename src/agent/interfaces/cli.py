@@ -233,7 +233,12 @@ def _web_phase(msg: str) -> str:
         return "menunggu login di jendela Chrome"
     if "mengetik" in m:
         return "mengirim pesan"
-    if "menyiapkan" in m or "menghubungkan" in m:
+    # Sengaja hanya menangkap frasa UMUM-nya. Status yang lebih spesifik
+    # ("menyiapkan jendela Chrome", "membuka percakapan baru", "menunggu giliran
+    # browser sebelumnya selesai") dibiarkan lewat apa adanya lewat baris
+    # terakhir — justru ketepatan itulah gunanya, supaya jeda panjang di fase
+    # browser punya penjelasan alih-alih terlihat diam tanpa sebab.
+    if "menyiapkan sesi" in m or "menghubungkan" in m:
         return "menyiapkan sesi web"
     return (msg or "").strip().rstrip("…") or "bekerja"
 

@@ -355,13 +355,18 @@ def playwright_available() -> bool:
 
 
 class _Job:
-    __slots__ = ("fn", "result", "error", "done")
+    __slots__ = ("fn", "result", "error", "done", "started")
 
     def __init__(self, fn: Callable[["BrowserHub"], Any]) -> None:
         self.fn = fn
         self.result: Any = None
         self.error: BaseException | None = None
         self.done = threading.Event()
+        # Dibedakan dari `done`: menandai job sudah MULAI dijalankan thread hub.
+        # Tanpa ini, "job berat yang sah" dan "job yang mengantre di belakang
+        # job MACET" terlihat sama persis dari sisi pemanggil — dan yang kedua
+        # itulah yang membuat terminal diam tanpa penjelasan.
+        self.started = threading.Event()
 
 
 class BrowserHub:
@@ -381,6 +386,8 @@ class BrowserHub:
         # dipercaya lagi (thread-nya mungkin menggantung); hub() akan
         # menggantinya dengan hub baru + membunuh Chrome profil yang tersisa.
         self.poisoned = False
+        # True selama thread hub menjalankan sebuah job (lihat busy()).
+        self._sedang_jalan = False
 
     # --- sisi pemanggil (thread mana pun) ---
     def _ensure_thread(self) -> None:
@@ -389,18 +396,56 @@ class BrowserHub:
                 self._thread.start()
                 self._started = True
 
+    def busy(self) -> bool:
+        """True bila thread hub sedang sibuk.
+
+        Antrean saja TIDAK cukup: job yang sedang BERJALAN sudah diambil dari
+        antrean, sehingga `_q.empty()` bernilai True justru pada saat hub paling
+        sibuk — kebalikan dari yang dimaksud."""
+        return self._sedang_jalan or not self._q.empty()
+
     def submit(
-        self, fn: Callable[["BrowserHub"], Any], timeout: float | None = None
+        self,
+        fn: Callable[["BrowserHub"], Any],
+        timeout: float | None = None,
+        *,
+        queue_timeout: float = 120.0,
+        on_wait: Callable[[], None] | None = None,
     ) -> Any:
         """Jalankan fn(hub) DI thread hub, kembalikan hasilnya (blocking).
 
-        Bila melewati `timeout`, hub ini ditandai POISONED: job yang macet masih
-        menduduki thread hub, jadi hub berikutnya harus dibuat baru (lihat hub())
-        agar giliran-giliran selanjutnya tak ikut mengantre di belakang job macet
-        itu selamanya."""
+        MENUNGGU ANTREAN dipisahkan dari MENUNGGU HASIL, dan itu penting:
+        thread hub cuma SATU, jadi job yang macet membuat semua giliran
+        berikutnya mengantre di belakangnya. Dulu keduanya dihitung dalam satu
+        `timeout` yang untuk pengiriman pesan bernilai 12 menit — sehingga
+        pengguna melihat terminal DIAM belasan menit tanpa penjelasan, tanpa
+        browser terbuka, seolah programnya rusak.
+
+        Sekarang: bila job belum MULAI dalam 3 detik, `on_wait` dipanggil supaya
+        pemanggil bisa memberi tahu pengguna bahwa giliran sebelumnya belum
+        lepas. Bila belum mulai juga sampai `queue_timeout`, hub ditandai
+        POISONED dan galatnya menyebut sebabnya — jauh lebih berguna daripada
+        menggantung.
+
+        `timeout` tetap berlaku untuk job yang SUDAH berjalan."""
         self._ensure_thread()
         job = _Job(fn)
         self._q.put(job)
+
+        if not job.started.wait(3.0):
+            if on_wait is not None:
+                try:
+                    on_wait()
+                except Exception:  # noqa: BLE001 - sekadar pemberitahuan
+                    pass
+            sisa = max(0.0, queue_timeout - 3.0)
+            if not job.started.wait(sisa):
+                self.poisoned = True
+                raise BrowserError(
+                    "giliran browser sebelumnya belum lepas setelah "
+                    f"{queue_timeout:.0f} detik — sesi direset. Coba kirim lagi."
+                )
+
         if not job.done.wait(timeout):
             self.poisoned = True
             raise BrowserError(
@@ -419,11 +464,14 @@ class BrowserHub:
             job = self._q.get()
             if job is None:
                 break
+            job.started.set()
+            self._sedang_jalan = True
             try:
                 job.result = job.fn(self)
             except BaseException as exc:  # noqa: BLE001 - diteruskan ke pemanggil
                 job.error = exc
             finally:
+                self._sedang_jalan = False
                 job.done.set()
 
     def page_for(self, service: str, headless: bool) -> Any:

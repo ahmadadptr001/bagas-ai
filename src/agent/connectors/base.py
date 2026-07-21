@@ -722,6 +722,10 @@ class WebConnector:
                 mengalir = True
                 on_token(chunk)
 
+        def _antre() -> None:
+            if on_status:
+                on_status("menunggu giliran browser sebelumnya selesai…")
+
         def _sekali() -> str:
             return hub().submit(
                 lambda h: self._send_on_hub(
@@ -729,6 +733,7 @@ class WebConnector:
                     complete_when, open_chat_id, list(attachments or [])),
                 timeout=self.login_timeout + self.answer_timeout
                 + (self.attach_timeout if attachments else 0) + 120,
+                on_wait=_antre,
             )
 
         try:
@@ -1491,7 +1496,15 @@ class WebConnector:
             return page, False
 
         # Default: jendela TAMPIL (lolos Cloudflare) lalu di-minimize.
+        #
+        # page_for bisa memakan BELASAN DETIK bila Chrome harus diluncurkan
+        # (apalagi kalau profilnya masih dikunci proses sisa, yang berarti
+        # membunuhnya dulu). Tanpa kabar apa pun di sini, terminal terlihat diam
+        # tanpa sebab dan tanpa jendela yang muncul — persis kesan "programnya
+        # tak melakukan apa-apa".
+        status("menyiapkan jendela Chrome…")
         page = h.page_for(self.service, headless=False)
+        status("menunggu halaman siap…")
         # Sudah di percakapan aktif & login? Lanjutkan (jangan buka chat baru) —
         # KECUALI diminta MEMBUKA chat lama tertentu (lanjut sesi) atau memulai
         # percakapan BARU, supaya AI web tak terbawa konteks chat yang salah.
@@ -1504,6 +1517,7 @@ class WebConnector:
                 # Tombol "chat baru" milik situs lebih murah daripada memuat
                 # ulang seluruh SPA. Kalau tombolnya tak ada/berubah, jatuh ke
                 # navigasi biasa yang selalu bekerja.
+                status("membuka percakapan baru…")
                 if not (self.new_chat_selector
                         and self._click_new_chat(page, check_cancel)):
                     self._goto(page)      # buka chat baru (chat_url)
