@@ -1,9 +1,14 @@
 """Connector kimi.com (web) — Kimi (Moonshot AI).
 
-Selektor di bawah DIPETAKAN LANGSUNG ke www.kimi.com pada sesi nyata (2026-07-21,
-di project agrishield): pesan uji dikirim, DOM-nya dibaca, jumlah elemen &
-perubahan kelas selama streaming DIUKUR. Yang belum terverifikasi ditandai
-eksplisit di komentarnya — jangan dianggap sudah terbukti.
+Selektor di bawah DIPETAKAN LANGSUNG ke www.kimi.com pada sesi nyata yang sudah
+login: pesan uji dikirim, DOM-nya dibaca, jumlah elemen & perubahan kelas selama
+streaming DIUKUR, lalu hasil bacaan kode produksi dibandingkan dengan isi
+halaman. Yang belum terverifikasi ditandai eksplisit di komentarnya — jangan
+dianggap sudah terbukti.
+
+Satu artefak kecil yang MASIH ADA: tabel dirender dengan label "Table  Copy" di
+atasnya, dan potongan itu ikut terbawa ke jawaban. Kelas pembungkusnya belum
+dipetakan, jadi sengaja TIDAK ditebak-tebak di strip_selectors.
 
 Kalau layout situs berubah & jawaban tak lagi terbaca, cukup sesuaikan selektor
 DI FILE INI; sisanya (kirim, tunggu, streaming, lampiran) ditangani base.py.
@@ -20,11 +25,10 @@ class KimiConnector(WebConnector):
     service = "kimi"
     label = "Kimi (web)"
     chat_url = "https://www.kimi.com/"
-    # BELUM DIVERIFIKASI: bentuk URL percakapan diduga /chat/<id> dengan id
-    # alfanumerik (bukan UUID heksadesimal seperti claude.ai, jadi pola bawaan
-    # base.py takkan cocok). Aman bila ternyata meleset — pola yang tak cocok
-    # membuat current_chat_id kosong, dan bagas-ai cukup tak melanjutkan chat
-    # lama alih-alih membuka URL yang salah. Perbaiki di sini bila terlihat beda.
+    # DIVERIFIKASI live: URL percakapan berbentuk
+    #   https://www.kimi.com/chat/19f846c6-95e2-8d84-8000-09ac082f8780?chat_enter_method=home
+    # Pola di bawah membacanya utuh dan berhenti tepat sebelum `?` (tanda tanya
+    # tak masuk kelas karakter), jadi lanjut-chat & --resume bekerja.
     chat_url_template = "https://www.kimi.com/chat/{id}"
     chat_id_pattern = r"/chat/([A-Za-z0-9_-]{8,})"
 
@@ -87,21 +91,28 @@ class KimiConnector(WebConnector):
     logged_in_selector = ".user-profile-trigger"
 
     # --- jawaban ---
-    # DIUKUR pada sesi nyata: untuk SATU jawaban 381 karakter, jumlah elemen yang
-    # cocok adalah segment-assistant=4, markdown=4, chat-content=6. `.markdown`
-    # di Kimi memuat jawaban UTUH (berbeda dari Qwen, di mana markdown terpecah
-    # per-paragraf sehingga tak boleh didahulukan), jadi aman ditaruh di depan.
+    # SELEKTOR KELAS (token utuh), BUKAN `[class*=...]`. Ini bukan selera:
+    # DIUKUR pada percakapan nyata berisi 3 jawaban asisten —
+    #   [class*="segment-assistant"] -> 9 elemen
+    #   .segment-assistant           -> 3 elemen  (tepat satu per jawaban)
+    #   [class*="markdown"]          -> 12 elemen
+    #   .markdown                    -> 4 elemen
+    # Pencocokan SUBSTRING ikut menangkap `segment-assistant-actions-content`
+    # (bilah tombol di bawah tiap jawaban), yang letaknya SESUDAH isi jawaban.
+    # Pada jawaban yang punya tombol "Reference", bilah itu TIDAK kosong,
+    # sehingga aturan "ambil kecocokan terakhir yang ada isinya" pun memilih
+    # bilahnya: jawaban 2.020 karakter TERUKUR terbaca sebagai "Reference"
+    # saja — 9 karakter. Dengan token kelas, jawaban yang sama terbaca utuh.
     #
-    # Pembacaan selalu mengambil kecocokan TERAKHIR YANG ADA ISINYA (lihat
-    # _JS_PILIH_ELEMEN & _read_last_message di base.py) — WAJIB, karena elemen
-    # `segment-assistant` paling akhir di Kimi adalah wadah KOSONG untuk giliran
-    # berikutnya, dan mengambilnya mentah-mentah membuat jawaban terbaca "".
+    # Kandidat longgar tetap disimpan di urutan belakang sebagai jaring pengaman
+    # bila situs mengganti nama kelasnya; selama yang pertama cocok, ia tak
+    # pernah terpakai.
     message_selector = (
+        ".segment-assistant",
+        ".markdown",
+        ".chat-content",
         '[class*="segment-assistant"]',
-        '[class*="markdown"]',
-        '[class*="chat-content"]',
         "[class*='assistant']",
-        "[class*='answer']",
     )
     read_as_markdown = True
     # DIUKUR selama satu jawaban 5.954 karakter (158 sampel berturut-turut):
@@ -118,20 +129,38 @@ class KimiConnector(WebConnector):
     )
     # Saat masih berpikir, satu-satunya teks yang muncul adalah indikator ini.
     noise_pattern = r"(?:(?:Thinking|Berpikir|思考)[^\n]*\s*)+"
-    # BLOK BERPIKIR mode reasoning: Kimi menaruh proses berpikirnya DI DALAM
-    # wadah jawaban, jadi tanpa ini ia ikut tampil di jawaban akhir. Pada jalur
-    # agent bagas-ai itu lebih dari sekadar berisik — blok [[TOOL]] yang baru
-    # DIRENCANAKAN di dalam proses berpikir bisa ikut terbaca lalu dieksekusi.
+    # Bagian yang ADA DI DALAM wadah jawaban tapi BUKAN jawaban. DIPETAKAN dari
+    # DOM sungguhan, bukan ditebak dari nama:
     #
-    # Pola menargetkan CLASS (bukan teks) agar jawaban biasa tak salah terbuang,
-    # dan base.py punya pengaman: bila pembuangan malah mengosongkan jawaban, ia
-    # DIBATALKAN. BELUM diverifikasi ke DOM Kimi mode-reasoning — kalau blok
-    # berpikir masih bocor ATAU jawaban malah hilang, sesuaikan daftar ini.
-    thinking_selectors = (
-        '[class*="thinking"]',
+    #   toolcall-container thinking-container   -> blok BERPIKIR (mode reasoning)
+    #   toolcall-container toolcall-web_search  -> blok PENCARIAN WEB
+    #       ("Search / <kueri> / 5 results" + daftar rujukan)
+    #   upgrade-membership                      -> banner promo yang DISISIPKAN
+    #       ke dalam jawaban, mis. "High demand. Switched to K2.6 Instant for
+    #       speed. Upgrade to use K2.6 Thinking."
+    #   segment-assistant-actions*              -> bilah tombol (Copy, Reference)
+    #
+    # Keduanya yang pertama sekeluarga `toolcall-container`, jadi SATU pola
+    # menutup dua kebocoran sekaligus. TERUKUR pada jawaban 2.517 karakter:
+    # sesudah disaring tinggal 2.060 karakter dan ketiga jejak khas blok
+    # pencarian ("… logo simbol", "5 results", "Reference") hilang seluruhnya
+    # sementara tabel & isi jawabannya utuh. Pada jawaban mode berpikir, 976
+    # karakter menyusut jadi 118 — sisanya memang penalaran.
+    #
+    # Ini lebih dari sekadar kerapian: pada jalur agent, blok [[TOOL]] yang cuma
+    # DIRENCANAKAN di dalam proses berpikir bisa ikut terbaca lalu BENAR-BENAR
+    # dieksekusi (lihat JS_CODE_BLOCKS di base.py).
+    #
+    # Semua menargetkan CLASS, bukan teks, agar jawaban biasa tak salah terbuang;
+    # base.py juga punya pengaman: penyaringan yang malah mengosongkan jawaban
+    # DIBATALKAN.
+    strip_selectors = (
+        '[class*="toolcall-container"]',
+        '[class*="segment-assistant-actions"]',
+        ".upgrade-membership",
+        # Cadangan bila situs mengganti penamaan wadah tool-nya.
+        '[class*="thinking-container"]',
         '[class*="reasoning"]',
-        '[class*="thought"]',
-        '[class*="chain-of-thought"]',
     )
 
     # --- lampiran (mis. screenshot untuk debug visual) ---
@@ -158,10 +187,37 @@ class KimiConnector(WebConnector):
     # cocok dengan jawaban AI yang kebetulan membahas rate limit).
     limit_patterns = ()
 
-    # /effort SENGAJA belum diisi: kontrol model & mode berpikir Kimi belum
-    # pernah dipetakan ke DOM, dan menebak selektornya hanya menghasilkan
-    # "opsi tak bisa diklik" yang membingungkan. Petakan dulu, baru isi
-    # web_model_button & web_actions seperti di claude.py/qwen.py.
+    # --- /effort: pemilih model + usaha berpikir ---
+    # DIPETAKAN LANGSUNG pada sesi login. Berbeda dari Qwen yang kontrolnya
+    # tersebar di dua tempat, Kimi menaruh SEMUANYA di balik satu pembuka
+    # `.current-model` (berlabel mis. "K2.6 Standard") di baris komposer:
+    #   .model-item   -> "K2.6" (obrolan cepat) | "K3" (andalan) | "K3 Swarm"
+    #   .effort-item  -> "Thinking effort" -> submenu .effort-option:
+    #                    "Standard" | "High"
+    # Tak ada toggle "berpikir" tersendiri — usaha berpikir adalah submenu di
+    # dalam pemilih model, jadi bentuknya path-klik dua tingkat seperti Claude.
+    #
+    # PENTING: item menu Kimi TIDAK memakai role ARIA — TERUKUR
+    # [role=menuitem]=0, [role=menuitemradio]=0, [role=option]=0. Karena itu
+    # menu_item_selector di bawah WAJIB ditimpa; dengan daftar ARIA bawaan,
+    # base menganggap menunya tak pernah terbuka.
+    _BTN_MODEL = ".current-model"
+    # Urutan penting: `.effort-option` didahulukan supaya "Standard"/"High"
+    # mengenai pilihan di submenu, bukan `.effort-item` induknya yang teksnya
+    # juga memuat nilai terpilih ("Thinking effort Standard").
+    menu_item_selector = (".effort-option", ".effort-item", ".model-item",
+                          ".toolkit-item")
+    web_model_button = _BTN_MODEL
+    web_actions = (
+        ("K2.6", ("K2.6",), "obrolan cepat, balasan singkat", _BTN_MODEL),
+        ("K3", ("K3",), "chat & agent, model andalan", _BTN_MODEL),
+        ("K3 Swarm", ("K3 Swarm",),
+         "pencarian masif & pemrosesan borongan", _BTN_MODEL),
+        ("Thinking effort: Standard", ("Thinking effort", "Standard"),
+         "usaha berpikir standar", _BTN_MODEL),
+        ("Thinking effort: High", ("Thinking effort", "High"),
+         "usaha berpikir tinggi", _BTN_MODEL),
+    )
 
     def _upload(self, page: Any, paths: list[str]) -> None:
         """Lampirkan file, meniru persis yang dilakukan pengguna.

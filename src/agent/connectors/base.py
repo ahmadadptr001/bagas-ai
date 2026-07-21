@@ -138,20 +138,20 @@ _JS_BANTU = r"""
       return g.display === 'none' || g.visibility === 'hidden';
     } catch (e) { return false; }
   }
-  function dalamBerpikir(node, akar, thinking) {
-    for (const s of (thinking || [])) {
+  function dalamBerpikir(node, akar, buang) {
+    for (const s of (buang || [])) {
       let a;
       try { a = node.closest(s); } catch (e) { continue; }
       if (a && akar.contains(a)) return true;
     }
     return false;
   }
-  function teksTanpaBerpikir(node, thinking) {
+  function teksTanpaBerpikir(node, buang) {
     const asli = (node.innerText || '');
-    if (!thinking || !thinking.length) return asli;
+    if (!buang || !buang.length) return asli;
     const diubah = [];
     try {
-      for (const s of thinking) {
+      for (const s of buang) {
         let n;
         try { n = node.querySelectorAll(s); } catch (e) { continue; }
         for (const t of n) { diubah.push([t, t.style.display]); t.style.display = 'none'; }
@@ -179,7 +179,7 @@ JS_CODE_BLOCKS = r"""
 (args) => {
 """ + _JS_BANTU + r"""
   const selectors = args.selectors || [];
-  const thinking = args.thinking || [];
+  const buang = args.buang || [];
   // Buang GUTTER nomor baris sebelum mengambil teks: situs menampilkan nomor
   // baris sebagai elemen tersendiri di dalam <pre>, dan bila ikut terbaca
   // kodenya tampil sebagai deretan angka ("html215216217218").
@@ -199,7 +199,7 @@ JS_CODE_BLOCKS = r"""
   if (!el) return [];
   const out = [];
   for (const pre of el.querySelectorAll('pre')) {
-    if (thinking.length && dalamBerpikir(pre, el, thinking)) continue;
+    if (buang.length && dalamBerpikir(pre, el, buang)) continue;
     out.push(teks(pre));
   }
   return out;
@@ -221,7 +221,7 @@ JS_LAST_TEXT = r"""
 (args) => {
 """ + _JS_BANTU + r"""
   const selectors = args.selectors || [];
-  const thinking = args.thinking || [];
+  const buang = args.buang || [];
   let noise = null;
   if (args.noise) {
     try { noise = new RegExp('^(?:' + args.noise + ')$', 's'); } catch (e) { noise = null; }
@@ -230,7 +230,7 @@ JS_LAST_TEXT = r"""
     let nodes;
     try { nodes = document.querySelectorAll(s); } catch (e) { continue; }
     for (let i = nodes.length - 1; i >= 0; i--) {
-      const t = teksTanpaBerpikir(nodes[i], thinking).trim();
+      const t = teksTanpaBerpikir(nodes[i], buang).trim();
       if (!t) continue;
       if (noise && noise.test(t)) continue;
       return t;
@@ -248,7 +248,7 @@ JS_TO_MARKDOWN = r"""
 (args) => {
 """ + _JS_BANTU + r"""
   const selectors = args.selectors || [];
-  const thinking = args.thinking || [];
+  const buang = args.buang || [];
   const el = pilihTerakhirBerisi(selectors);
   if (!el) return "";
 
@@ -258,7 +258,7 @@ JS_TO_MARKDOWN = r"""
   // ikut terbaca (lihat _JS_BANTU). Melewatinya di sini menjaga node tetap
   // hidup, jadi seluruh heuristik di bawah yang bersandar pada innerText —
   // termasuk ambang pembungkus blok kode — tetap memakai teks TERENDER.
-  let lewati = thinking;
+  let lewati = buang;
 
   function listItems(listEl, ordered) {
     let out = ""; let i = 1;
@@ -361,22 +361,34 @@ JS_TO_MARKDOWN = r"""
       } else if (tag === "li") {
         out += ser(ch);
       } else {
-        // Wadah code-block (div pembungkus dg header bahasa + tombol salin):
-        // kalau elemen ini memuat <pre> dan sisa teksnya PENDEK (cuma label
-        // bahasa/salin), emit kode-nya saja supaya label tak bocor jadi teks.
+        // PEMBUNGKUS BER-BILAH-ALAT: <div> yang isinya cuma SATU blok (<pre>
+        // atau <table>) ditambah bilah kecil berisi label + tombol salin.
+        // Bilah itu bukan bagian jawaban, jadi emit bloknya saja — kalau tidak,
+        // labelnya bocor jadi teks. TERUKUR di kimi.com: blok kode dibungkus
+        // dengan label bahasa + "Copy", dan tabel dibungkus
+        // `div.table.markdown-table` berisi "Table\nCopy\n" (11 karakter) di
+        // atas tabelnya.
         //
-        // Syarat "tak ada elemen prosa" WAJIB ada di samping ambang 40 karakter.
-        // TERUJI: wadah jawaban yang isinya kalimat PENDEK + satu blok kode
+        // Syarat "tak ada elemen prosa LAIN" WAJIB ada di samping ambang 40
+        // karakter. TERUJI: wadah jawaban yang isinya kalimat PENDEK + satu blok
         // (mis. "Selesai, ini hasilnya:" lalu kodenya — bentuk paling lazim di
         // jalur agent) ikut lolos ambang itu, sehingga kalimatnya DIBUANG dan
-        // yang tampil cuma blok kodenya. Pembungkus code-block sungguhan tak
-        // pernah memuat <p>/<ul>/heading, jadi syarat ini tak melemahkannya.
-        const pre = ch.querySelector ? ch.querySelector("pre") : null;
-        if (pre) {
-          const extra = (ch.innerText || "").length - (pre.innerText || "").length;
-          const prosa = ch.querySelector("p,ul,ol,h1,h2,h3,h4,h5,h6,table,blockquote");
-          if (extra < 40 && !prosa) { out += codeFence(pre); continue; }
-        }
+        // yang tampil cuma bloknya. Pembungkus sungguhan tak pernah memuat
+        // <p>/<ul>/heading, jadi syarat ini tak melemahkannya.
+        const bungkusPendek = (sel, prosaLain) => {
+          const inti = ch.querySelector ? ch.querySelector(sel) : null;
+          if (!inti) return null;
+          if ((ch.innerText || "").length - (inti.innerText || "").length >= 40) {
+            return null;
+          }
+          return ch.querySelector(prosaLain) ? null : inti;
+        };
+        const pre = bungkusPendek(
+          "pre", "p,ul,ol,h1,h2,h3,h4,h5,h6,table,blockquote");
+        if (pre) { out += codeFence(pre); continue; }
+        const tabel = bungkusPendek(
+          "table", "p,ul,ol,h1,h2,h3,h4,h5,h6,pre,blockquote");
+        if (tabel) { out += "\n" + table(tabel); continue; }
         out += ser(ch);
       }
     }
@@ -498,7 +510,7 @@ class WebConnector:
     # yang cuma DIRENCANAKAN lalu ikut dieksekusi. Menargetkan CLASS/atribut
     # (bukan teks) agar jawaban biasa tak salah terbuang; pembuangan yang malah
     # mengosongkan jawaban DIBATALKAN otomatis (lihat JS_TO_MARKDOWN & _el_text).
-    thinking_selectors: tuple[str, ...] = ()
+    strip_selectors: tuple[str, ...] = ()
 
     # --- Aksi UI yang bisa DIKLIK program di situs (permintaan pengguna: ganti
     #     varian model & mode berpikir dari terminal via /effort). Tiap aksi =
@@ -511,6 +523,20 @@ class WebConnector:
     web_model_button: str = ""
     # (label, urutan teks yang diklik, keterangan[, selector tombol pembuka])
     web_actions: tuple[tuple, ...] = ()
+    # Kandidat selector ITEM MENU — dipakai untuk memastikan menu benar-benar
+    # terbuka DAN untuk mengeklik pilihannya. Bawaannya pola ARIA yang lazim.
+    #
+    # Wajib bisa ditimpa: TERUKUR di kimi.com, `[role="menuitem"]`,
+    # `[role="menuitemradio"]`, dan `[role="option"]` semuanya NOL — menunya
+    # tersusun dari <div> biasa (.model-item, .effort-option). Dengan daftar
+    # ARIA yang dipatok mati, menu situs seperti itu selalu dianggap "tak mau
+    # terbuka" dan /effort mustahil bekerja di sana.
+    #
+    # Tuple, bukan string berkoma, dengan alasan yang sama seperti
+    # input_selector: kandidat harus dicoba BERURUTAN menurut kekhususannya.
+    menu_item_selector: str | tuple[str, ...] = (
+        '[role="menuitemradio"]', '[role="menuitem"]', '[role="option"]',
+    )
     # Selector tombol "berhenti" yang HANYA ada selagi situs menjawab. Penanda
     # paling andal bahwa balasan masih berjalan.
     stop_selectors: tuple[str, ...] = ()
@@ -948,9 +974,9 @@ class WebConnector:
             pass
         return f"'{label}' dipilih di {self.label}"
 
-    # Elemen item menu di situs-situs ini (dipakai untuk memastikan menu sudah
-    # BENAR-BENAR terbuka sebelum item-nya diklik).
-    _MENU_ITEM = '[role="menuitem"], [role="menuitemradio"], [role="option"]'
+    def _menu_items(self) -> tuple[str, ...]:
+        """Kandidat selector ITEM MENU, urut dari yang paling spesifik."""
+        return self._as_selectors(self.menu_item_selector)
 
     def _open_menu(self, page: Any, opener: str) -> bool:
         """Klik tombol pembuka lalu TUNGGU item menunya muncul.
@@ -970,7 +996,7 @@ class WebConnector:
             deadline = time.time() + 3.0
             while time.time() < deadline:
                 try:
-                    if page.query_selector(self._MENU_ITEM) is not None:
+                    if page.query_selector(", ".join(self._menu_items())) is not None:
                         return True
                 except Exception:  # noqa: BLE001
                     pass
@@ -978,19 +1004,34 @@ class WebConnector:
         return False
 
     def _click_menu_text(self, page: Any, text: str) -> None:
-        """Klik item menu (menuitem/menuitemradio/option) yang memuat `text`.
-        Diutamakan item menu agar tak salah klik elemen lain berteks sama."""
+        """Klik ITEM MENU yang memuat `text`.
+
+        Kandidat menu_item_selector dicoba BERURUTAN, dan yang pertama
+        benar-benar ada yang dipakai — bukan digabung jadi satu daftar berkoma,
+        karena di daftar berkoma `.first` mengambil elemen paling awal di DOM
+        alih-alih yang paling spesifik. Itu penting di situs yang menu induk dan
+        submenunya sama-sama memuat teks yang dicari (mis. kimi.com: item
+        "Thinking effort" ikut memuat kata "Standard" milik submenunya).
+
+        Dibatasi ke item menu supaya tak salah mengeklik elemen lain berteks
+        sama di halaman."""
         esc = text.replace('"', '\\"')
-        loc = page.locator(
-            f'[role="menuitemradio"]:has-text("{esc}"), '
-            f'[role="menuitem"]:has-text("{esc}"), '
-            f'[role="option"]:has-text("{esc}")'
-        ).first
-        try:
-            loc.scroll_into_view_if_needed(timeout=1500)
-        except Exception:  # noqa: BLE001
-            pass
-        self._click_element(loc)
+        for kandidat in self._menu_items():
+            loc = page.locator(f'{kandidat}:has-text("{esc}")').first
+            try:
+                if loc.count() == 0:
+                    continue
+            except Exception:  # noqa: BLE001 - selector tak sah -> kandidat lain
+                continue
+            try:
+                loc.scroll_into_view_if_needed(timeout=1500)
+            except Exception:  # noqa: BLE001
+                pass
+            self._click_element(loc)
+            return
+        raise BrowserError(
+            f"item menu '{text}' tak ditemukan "
+            f"({', '.join(self._menu_items())})")
 
     @staticmethod
     def _as_selectors(sel: str | tuple[str, ...]) -> tuple[str, ...]:
@@ -1171,7 +1212,7 @@ class WebConnector:
         try:
             teks = page.evaluate(JS_LAST_TEXT, {
                 "selectors": list(self._msg_selectors()),
-                "thinking": list(self.thinking_selectors),
+                "buang": list(self.strip_selectors),
                 "noise": self.noise_pattern,
             })
         except Exception:  # noqa: BLE001 - DOM sedang transisi
@@ -1292,7 +1333,7 @@ class WebConnector:
         try:
             out = page.evaluate(JS_CODE_BLOCKS, {
                 "selectors": list(self._msg_selectors()),
-                "thinking": list(self.thinking_selectors),
+                "buang": list(self.strip_selectors),
             })
             return [str(x) for x in (out or [])]
         except Exception:  # noqa: BLE001
@@ -1305,7 +1346,7 @@ class WebConnector:
         try:
             md = page.evaluate(JS_TO_MARKDOWN, {
                 "selectors": list(self._msg_selectors()),
-                "thinking": list(self.thinking_selectors),
+                "buang": list(self.strip_selectors),
             })
             return (md or "").strip()
         except Exception:  # noqa: BLE001
