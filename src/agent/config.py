@@ -165,6 +165,12 @@ AUTO_SYNTAX_CHECK: bool = _get_bool("AUTO_SYNTAX_CHECK", True)
 # sesi headless. Set CONNECTOR_HEADLESS=true untuk memaksa headless sejati (tanpa
 # jendela sama sekali) — hanya cocok untuk situs yang lolos tanpa Cloudflare.
 CONNECTOR_HEADLESS: bool = _get_bool("CONNECTOR_HEADLESS", False)
+# Biarkan jendela browser TERLIHAT untuk SEMUA connector (jangan disembunyikan
+# ke latar sesudah login). Berguna saat ingin MENGAMATI seluruh proses menjawab
+# — langkah berpikir, pencarian web, pengetikan jawaban — bukan cuma hasil
+# akhirnya di terminal. Tiap connector juga bisa meminta ini sendiri lewat
+# atribut `show_window` (Kimi memakainya secara bawaan).
+CONNECTOR_SHOW: bool = _get_bool("CONNECTOR_SHOW", False)
 # Pakai Google CHROME asli (channel="chrome") alih-alih Chromium bawaan Playwright
 # — lebih jarang terdeteksi/di-blok (mis. Cloudflare claude.ai) & lebih familiar.
 # Bila Chrome tak terpasang, otomatis fallback ke Chromium bawaan. Kosongkan

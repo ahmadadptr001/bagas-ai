@@ -541,6 +541,14 @@ class WebConnector:
     # paling andal bahwa balasan masih berjalan.
     stop_selectors: tuple[str, ...] = ()
 
+    # Biarkan jendela browser TERLIHAT, jangan disembunyikan ke latar. Dipakai
+    # untuk situs yang prosesnya memang ingin DIAMATI langsung — mis. Kimi, yang
+    # menampilkan langkah berpikir & pencarian web selagi menjawab, dan itu
+    # tak terlihat sama sekali kalau jendelanya disembunyikan.
+    #
+    # Bisa dipaksa untuk SEMUA situs lewat CONNECTOR_SHOW=true di .env.
+    show_window: bool = False
+
     # Batas waktu (detik).
     login_timeout: float = 300.0     # tunggu pengguna menyelesaikan login
     answer_timeout: float = 300.0    # tunggu jawaban selesai
@@ -1589,13 +1597,24 @@ class WebConnector:
             except Exception:  # noqa: BLE001
                 return False
 
+    def _tampilkan_saja(self) -> bool:
+        """Jendela situs ini sengaja DIBIARKAN TERLIHAT?"""
+        return bool(self.show_window or config.CONNECTOR_SHOW)
+
     def _background(self, page: Any) -> None:
         """Jalankan browser DI LATAR: jendelanya disembunyikan sepenuhnya (tak
         muncul di taskbar), prosesnya tetap hidup & merender normal sehingga
         jawaban tetap terbaca. Pengguna cukup memakai terminal.
 
         Bukan headless: Cloudflare menolak sesi headless. Bila penyembunyian
-        jendela tak didukung, jatuh ke minimize lewat CDP."""
+        jendela tak didukung, jatuh ke minimize lewat CDP.
+
+        DILEWATI bila situs ini ditandai show_window (atau CONNECTOR_SHOW=true):
+        jendelanya justru dipastikan TERLIHAT, supaya seluruh proses menjawab
+        bisa diamati langsung."""
+        if self._tampilkan_saja():
+            self._foreground(page)
+            return
         if set_windows_visible(self.service, False):
             return
         try:  # cadangan: minimalkan lewat CDP
