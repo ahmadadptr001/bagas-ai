@@ -66,12 +66,28 @@ JS_FIND_TEXT = r"""
 }
 """
 
-# Hitung pratinjau lampiran di AREA KOMPOSER (naik beberapa tingkat dari kotak
-# input). Saat unggahan selesai, situs menyisipkan <img> pratinjau di sana —
-# inilah penanda "lampiran siap" yang dipakai sebelum pesan dikirim.
+# Hitung KARTU LAMPIRAN yang sudah menempel di komposer — penanda "lampiran
+# siap" yang dipakai sebelum pesan dikirim.
+#
+# Dua cara, sesuai apa yang diketahui connector-nya:
+#   1. `card` diisi (attach_item_selector) -> hitung kartunya LANGSUNG. Ini yang
+#      paling akurat, dan satu-satunya yang bekerja di situs yang menaruh
+#      pratinjau DI LUAR pohon kotak input.
+#   2. `card` kosong -> cara lama: hitung <img> beberapa tingkat di atas kotak
+#      input. Dipertahankan sebagai cadangan untuk connector yang belum
+#      memetakan kartunya (mis. claude.ai, tempat cara ini terbukti bekerja).
+#
+# Kenapa cara 1 perlu ada: di chat.qwen.ai cara 2 TERUKUR selalu 0 — pratinjaunya
+# bukan keturunan kotak input (ditelusuri 11 tingkat ke atas pun nihil), sehingga
+# penantian tak pernah terpenuhi dan unggahan dinyatakan gagal padahal file-nya
+# sudah menempel.
 JS_ATTACH_COUNT = r"""
-(selector) => {
-  const box = document.querySelector(selector);
+(args) => {
+  if (args.card) {
+    try { return document.querySelectorAll(args.card).length; }
+    catch (e) { return 0; }
+  }
+  const box = document.querySelector(args.input);
   if (!box) return 0;
   let root = box;
   for (let i = 0; i < 6 && root.parentElement; i++) root = root.parentElement;
@@ -83,15 +99,87 @@ StatusCb = Callable[[str], None]
 TokenCb = Callable[[str], None]
 
 
-# Serializer DOM -> Markdown (dijalankan DI HALAMAN). inner_text() membuang
-# struktur (bullet, tabel, heading, blok kode) sehingga jawaban tampil polos di
-# terminal; ini merekonstruksi markdown dari HTML yang sudah dirender situs agar
-# rich bisa menampilkannya rapi (list, tabel, kode, bold, tautan).
+# Rutin bersama yang DISISIPKAN ke tiap skrip halaman di bawah.
+#
+# pilihTerakhirBerisi — ambil kecocokan TERAKHIR YANG ADA ISINYA, bukan sekadar
+# yang paling akhir. TERUKUR di kimi.com: `[class*='segment-assistant']` juga
+# menangkap BILAH TOMBOL AKSI (`segment-assistant-actions-content`) yang teksnya
+# kosong dan berada SESUDAH isi jawaban. Mengambil nodes[nodes.length-1] berarti
+# memilih bilah kosong itu, sehingga jawaban terbaca "" dan dinyatakan tak ada.
+#
+# teksTanpaBerpikir — innerText sebuah elemen dengan BLOK BERPIKIR disembunyikan
+# sementara. Sengaja MENYEMBUNYIKAN di tempat lalu memulihkannya, BUKAN memakai
+# cloneNode: pada node yang TIDAK TERPASANG di dokumen, innerText merosot jadi
+# semantik textContent — TERUJI di chromium, teks ber-`display:none` yang benar
+# disembunyikan oleh node hidup justru IKUT TERBACA pada klon. Akibatnya label
+# sr-only, tooltip, dan panel berpikir yang sedang diciutkan malah bocor ke
+# jawaban — kebalikan dari tujuan penyaringan ini. Pemulihan gaya dijamin lewat
+# `finally`, dan tak ada cat ulang di antaranya karena seluruhnya sinkron.
+_JS_BANTU = r"""
+  function pilihTerakhirBerisi(selectors) {
+    for (const s of (selectors || [])) {
+      let nodes;
+      try { nodes = document.querySelectorAll(s); } catch (e) { continue; }
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if ((nodes[i].innerText || '').trim()) return nodes[i];
+      }
+    }
+    return null;
+  }
+  function cocokSalahSatu(node, selectors) {
+    for (const s of (selectors || [])) {
+      try { if (node.matches(s)) return true; } catch (e) { /* tak sah */ }
+    }
+    return false;
+  }
+  function tersembunyi(el) {
+    try {
+      const g = getComputedStyle(el);
+      return g.display === 'none' || g.visibility === 'hidden';
+    } catch (e) { return false; }
+  }
+  function dalamBerpikir(node, akar, thinking) {
+    for (const s of (thinking || [])) {
+      let a;
+      try { a = node.closest(s); } catch (e) { continue; }
+      if (a && akar.contains(a)) return true;
+    }
+    return false;
+  }
+  function teksTanpaBerpikir(node, thinking) {
+    const asli = (node.innerText || '');
+    if (!thinking || !thinking.length) return asli;
+    const diubah = [];
+    try {
+      for (const s of thinking) {
+        let n;
+        try { n = node.querySelectorAll(s); } catch (e) { continue; }
+        for (const t of n) { diubah.push([t, t.style.display]); t.style.display = 'none'; }
+      }
+      if (!diubah.length) return asli;
+      const bersih = (node.innerText || '');
+      // PENGAMAN: bila penyaringan malah mengosongkan jawaban, berarti
+      // selektornya salah menangkap seluruh jawaban -> batalkan.
+      return bersih.trim() ? bersih : asli;
+    } finally {
+      for (const d of diubah) d[0].style.display = d[1];
+    }
+  }
+"""
+
 # Ambil ISI MENTAH tiap blok kode pada balasan terakhir. Dipakai untuk membaca
 # usulan tool: textContent = byte apa adanya, jadi backslash & escape JSON TIDAK
 # rusak oleh perenderan markdown situs (sumber bug "perintah salah path").
+#
+# Blok kode yang berada DI DALAM blok berpikir DILEWATI. Ini bukan kerapian:
+# jalur agent memakai daftar ini sebagai CADANGAN saat usulan tool gagal dibaca
+# dari teks, jadi sebuah [[TOOL]] yang cuma DIRENCANAKAN model di dalam proses
+# berpikirnya — lalu diurungkan — bisa ikut terbaca dan BENAR-BENAR DIEKSEKUSI.
 JS_CODE_BLOCKS = r"""
-(selectors) => {
+(args) => {
+""" + _JS_BANTU + r"""
+  const selectors = args.selectors || [];
+  const thinking = args.thinking || [];
   // Buang GUTTER nomor baris sebelum mengambil teks: situs menampilkan nomor
   // baris sebagai elemen tersendiri di dalam <pre>, dan bila ikut terbaca
   // kodenya tampil sebagai deretan angka ("html215216217218").
@@ -107,26 +195,70 @@ JS_CODE_BLOCKS = r"""
     const code = salinan.querySelector('code');
     return ((code ? code.textContent : salinan.textContent) || '');
   };
-  let el = null;
-  for (const s of selectors) {
-    const nodes = document.querySelectorAll(s);
-    if (nodes.length) { el = nodes[nodes.length - 1]; break; }
-  }
+  const el = pilihTerakhirBerisi(selectors);
   if (!el) return [];
   const out = [];
-  for (const pre of el.querySelectorAll('pre')) out.push(teks(pre));
+  for (const pre of el.querySelectorAll('pre')) {
+    if (thinking.length && dalamBerpikir(pre, el, thinking)) continue;
+    out.push(teks(pre));
+  }
   return out;
 }
 """
 
-JS_TO_MARKDOWN = r"""
-(selectors) => {
-  let el = null;
-  for (const s of selectors) {
-    const nodes = document.querySelectorAll(s);
-    if (nodes.length) { el = nodes[nodes.length - 1]; break; }
+# Teks jawaban TERAKHIR sebagai teks polos — dipakai untuk polling kestabilan.
+#
+# Seluruh pemindaian dilakukan DI HALAMAN dalam SATU panggilan. Sebelumnya
+# Python menelusuri elemen satu per satu dan memanggil evaluate untuk masing
+# masing, sehingga satu putaran polling (tiap 400 ms selama jawaban berlangsung)
+# bisa memakan beberapa perjalanan bolak-balik CDP. Sekalian ini menghapus
+# masalah handle BASI: elemen tak lagi menyeberangi batas proses, jadi DOM yang
+# dirender ulang di tengah jalan tak bisa lagi menggagalkan seluruh pemindaian.
+#
+# `noise` = pola teks yang BUKAN jawaban (mis. indikator "Thinking…"); elemen
+# yang isinya hanya itu dilewati, persis seperti pemeriksaan di Python.
+JS_LAST_TEXT = r"""
+(args) => {
+""" + _JS_BANTU + r"""
+  const selectors = args.selectors || [];
+  const thinking = args.thinking || [];
+  let noise = null;
+  if (args.noise) {
+    try { noise = new RegExp('^(?:' + args.noise + ')$', 's'); } catch (e) { noise = null; }
   }
+  for (const s of selectors) {
+    let nodes;
+    try { nodes = document.querySelectorAll(s); } catch (e) { continue; }
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const t = teksTanpaBerpikir(nodes[i], thinking).trim();
+      if (!t) continue;
+      if (noise && noise.test(t)) continue;
+      return t;
+    }
+  }
+  return "";
+}
+"""
+
+# Serializer DOM -> Markdown (dijalankan DI HALAMAN). inner_text() membuang
+# struktur (bullet, tabel, heading, blok kode) sehingga jawaban tampil polos di
+# terminal; ini merekonstruksi markdown dari HTML yang sudah dirender situs agar
+# rich bisa menampilkannya rapi (list, tabel, kode, bold, tautan).
+JS_TO_MARKDOWN = r"""
+(args) => {
+""" + _JS_BANTU + r"""
+  const selectors = args.selectors || [];
+  const thinking = args.thinking || [];
+  const el = pilihTerakhirBerisi(selectors);
   if (!el) return "";
+
+  // BLOK BERPIKIR (mode reasoning/"ahli") DILEWATI SAAT SERIALISASI — bukan
+  // dibuang dari sebuah klon. Klon yang tak terpasang di dokumen membuat
+  // innerText merosot jadi textContent, sehingga isi ber-`display:none` justru
+  // ikut terbaca (lihat _JS_BANTU). Melewatinya di sini menjaga node tetap
+  // hidup, jadi seluruh heuristik di bawah yang bersandar pada innerText —
+  // termasuk ambang pembungkus blok kode — tetap memakai teks TERENDER.
+  let lewati = thinking;
 
   function listItems(listEl, ordered) {
     let out = ""; let i = 1;
@@ -183,6 +315,18 @@ JS_TO_MARKDOWN = r"""
       const tag = ch.tagName.toLowerCase();
       // Buang chrome UI (tombol salin/svg) yang bukan isi jawaban.
       if (tag === "button" || tag === "svg") continue;
+      // Lewati blok berpikir beserta seluruh isinya.
+      if (lewati.length && cocokSalahSatu(ch, lewati)) continue;
+      // Lewati yang TIDAK TERENDER (display:none / visibility:hidden).
+      //
+      // Serializer ini memungut simpul teks lewat textContent, yang tak peduli
+      // CSS — jadi tanpa pemeriksaan ini teks sr-only, tooltip, dan panel yang
+      // sedang diciutkan ikut masuk ke jawaban. Jalur teks polos memakai
+      // innerText dan sudah membuangnya sejak dulu, sehingga dua jalur
+      // pembacaan yang sama bisa memberi jawaban BERBEDA untuk balasan yang
+      // sama. Aman dilakukan di sini karena node-nya HIDUP (tak diklon):
+      // getComputedStyle pada node terlepas tak menghasilkan apa-apa.
+      if (ch.nodeType === 1 && tersembunyi(ch)) continue;
       if (/^h[1-6]$/.test(tag)) {
         out += "\n" + "#".repeat(+tag[1]) + " " + (ch.innerText || "").trim() + "\n\n";
       } else if (tag === "p") {
@@ -220,17 +364,34 @@ JS_TO_MARKDOWN = r"""
         // Wadah code-block (div pembungkus dg header bahasa + tombol salin):
         // kalau elemen ini memuat <pre> dan sisa teksnya PENDEK (cuma label
         // bahasa/salin), emit kode-nya saja supaya label tak bocor jadi teks.
+        //
+        // Syarat "tak ada elemen prosa" WAJIB ada di samping ambang 40 karakter.
+        // TERUJI: wadah jawaban yang isinya kalimat PENDEK + satu blok kode
+        // (mis. "Selesai, ini hasilnya:" lalu kodenya — bentuk paling lazim di
+        // jalur agent) ikut lolos ambang itu, sehingga kalimatnya DIBUANG dan
+        // yang tampil cuma blok kodenya. Pembungkus code-block sungguhan tak
+        // pernah memuat <p>/<ul>/heading, jadi syarat ini tak melemahkannya.
         const pre = ch.querySelector ? ch.querySelector("pre") : null;
         if (pre) {
           const extra = (ch.innerText || "").length - (pre.innerText || "").length;
-          if (extra < 40) { out += codeFence(pre); continue; }
+          const prosa = ch.querySelector("p,ul,ol,h1,h2,h3,h4,h5,h6,table,blockquote");
+          if (extra < 40 && !prosa) { out += codeFence(pre); continue; }
         }
         out += ser(ch);
       }
     }
     return out;
   }
-  return ser(el).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const rapikan = (s) => s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  let hasil = rapikan(ser(el));
+  // PENGAMAN: selektor berpikir yang salah menangkap SELURUH jawaban akan
+  // menyisakan hasil kosong -> ulangi tanpa penyaringan, lebih baik ada blok
+  // berpikir yang bocor daripada jawaban hilang sama sekali.
+  if (!hasil && lewati.length) {
+    lewati = [];
+    hasil = rapikan(ser(el));
+  }
+  return hasil;
 }
 """
 
@@ -241,6 +402,18 @@ class WebConnector:
     service: str = ""          # kunci internal & nama folder profil (mis. "claude")
     label: str = ""            # nama tampilan (mis. "Claude (web)")
     chat_url: str = ""         # halaman chat / sesi baru
+    # Tombol "chat baru" milik situs. Bila diisi, memulai percakapan baru cukup
+    # MENGEKLIKNYA alih-alih memuat ulang seluruh SPA — jauh lebih cepat dan tak
+    # membuang sesi yang sudah hangat. Kosong = selalu lewat navigasi URL.
+    # Kegagalan tak fatal: pemanggil jatuh ke navigasi biasa.
+    #
+    # Boleh SATU selector (str) atau BEBERAPA kandidat (tuple) yang dicoba
+    # BERURUTAN. Pakai tuple bila ada lebih dari satu kandidat — TERBUKTI di
+    # kimi.com: `[aria-label="New Chat"]` ternyata menempel pada LOGO situs, dan
+    # dalam satu daftar berkoma `.first` mengambil elemen paling awal di DOM
+    # (bukan yang paling spesifik), sehingga yang terklik bisa logo, bukan
+    # tombolnya.
+    new_chat_selector: str | tuple[str, ...] = ""
     # Kotak input (textarea / contenteditable). Boleh SATU selector (str) atau
     # BEBERAPA kandidat (tuple) yang dicoba BERURUTAN — kandidat pertama yang
     # benar-benar terlihat & bisa diisi yang dipakai.
@@ -255,6 +428,12 @@ class WebConnector:
     message_selector: str | tuple[str, ...] = ""
     input_is_contenteditable: bool = False
     submit_key: str = "Enter"  # tombol kirim
+    # Tombol KIRIM di komposer, dipakai sebagai CADANGAN bila Enter ternyata tak
+    # men-submit. Itu bukan kemungkinan teoretis: di chat.qwen.ai dengan lampiran
+    # TERUKUR Enter tak mengirim apa pun — prompt tertinggal di kotak, lalu
+    # giliran gagal dengan "balasan tak terdeteksi" yang menyesatkan (seolah
+    # selector jawabannya yang salah, padahal pesannya belum pernah berangkat).
+    send_button_selector: str = ""
     # True = jawaban FINAL direkonstruksi jadi Markdown dari HTML (agar list,
     # tabel, heading, blok kode tampil rapi di terminal), bukan teks polos.
     read_as_markdown: bool = False
@@ -269,6 +448,20 @@ class WebConnector:
     # jadi "input terlihat" BUKAN bukti sudah masuk — tanpa penanda ini bagas-ai
     # mengirim pesan yang tak pernah diproses lalu menunggu jawaban hampa.
     logged_out_selector: str = ""
+    # Selector yang HANYA ada saat SUDAH login (mis. tombol profil akun).
+    #
+    # BUKTI POSITIF, dan itu jauh lebih kuat daripada sekadar "tak ada tombol
+    # Log in". TERUKUR di kimi.com: sesudah goto, kotak input sudah terlihat
+    # pada detik 6,9 sementara tombol "Log In" baru dirender pada detik 11,1 —
+    # ADA JENDELA 4,2 DETIK di mana halaman TAMU lolos sebagai "sudah login",
+    # lalu prompt diketik ke kotak tamu, dikirim, dan tak pernah diproses.
+    #
+    # Menunggu load-state BUKAN jalan keluarnya: pada situs yang sama
+    # `networkidle` baru tiba di detik 31,3 dan `load` malah kehabisan waktu 30
+    # detik — terlalu mahal untuk dipasang di tiap navigasi.
+    #
+    # Kosong = connector tak berpendapat, perilakunya sama seperti sebelumnya.
+    logged_in_selector: str = ""
     # Selector penanda "sedang mengetik/streaming" (bila situs punya).
     streaming_selector: str = ""
     # Pola teks pemberitahuan LIMIT pemakaian di situs. Sering baru MUNCUL
@@ -285,6 +478,13 @@ class WebConnector:
     # Input file untuk MELAMPIRKAN gambar (mis. screenshot) ke pesan. Kosong =
     # situs ini tak mendukung lampiran.
     file_input_selector: str = ""
+    # KARTU pratinjau lampiran di komposer — penanda "file sudah benar-benar
+    # menempel". Bila diisi, inilah yang dihitung; kosong = pakai cara lama
+    # (menghitung <img> di sekitar kotak input). Sebisanya pilih selector yang
+    # MENGECUALIKAN kartu yang masih mengunggah (mis. `:not(.loading)`): kartunya
+    # muncul seketika, dan mengirim saat itu berarti pesan berangkat sebelum
+    # gambarnya selesai terunggah.
+    attach_item_selector: str = ""
     # Batas waktu menunggu unggahan selesai (detik).
     attach_timeout: float = 90.0
     # Teks yang BUKAN jawaban (chrome UI situs), mis. indikator berpikir
@@ -292,6 +492,13 @@ class WebConnector:
     # BELUM muncul — jangan dianggap sebagai balasan (akar bug: giliran berhenti
     # lebih awal & mengembalikan "Thought for 2s" alih-alih jawaban asli).
     noise_pattern: str = ""
+    # Wadah BLOK BERPIKIR (mode reasoning/"ahli"). Sebagian situs menaruh proses
+    # berpikirnya DI DALAM wadah jawaban, jadi tanpa ini ia ikut terbaca sebagai
+    # bagian jawaban — dan pada jalur agent, isinya bisa memuat blok [[TOOL]]
+    # yang cuma DIRENCANAKAN lalu ikut dieksekusi. Menargetkan CLASS/atribut
+    # (bukan teks) agar jawaban biasa tak salah terbuang; pembuangan yang malah
+    # mengosongkan jawaban DIBATALKAN otomatis (lihat JS_TO_MARKDOWN & _el_text).
+    thinking_selectors: tuple[str, ...] = ()
 
     # --- Aksi UI yang bisa DIKLIK program di situs (permintaan pengguna: ganti
     #     varian model & mode berpikir dari terminal via /effort). Tiap aksi =
@@ -315,6 +522,15 @@ class WebConnector:
     # Berapa kali cek berturut-turut teks tak berubah -> dianggap selesai.
     _stable_needed: int = 5
     _poll_ms: int = 400
+    # Tenggat menunggu halaman siap SESUDAH bernavigasi. Sengaja jauh lebih
+    # longgar daripada jalur cepat (1,5 detik untuk halaman yang sudah terbuka):
+    # SPA butuh waktu boot. TERUKUR di kimi.com pada sesi yang SUDAH LOGIN —
+    # kotak input terlihat pada 0,11 detik, tetapi bukti-positif login
+    # (.user-profile-trigger) baru pada 3,02 detik. Dengan tenggat yang terlalu
+    # ketat, sesi yang sehat justru divonis "belum login" lalu jendela login
+    # muncul tanpa perlu. 15 detik memberi kelonggaran ~5x dari yang terukur,
+    # dan hanya benar-benar terpakai saat halaman memang belum siap.
+    _NAV_READY_MS: int = 15000
 
     # Pola menangkap ID percakapan dari URL (mis. claude.ai/chat/<uuid>).
     chat_id_pattern: str = r"/chat/([0-9a-fA-F-]{16,})"
@@ -455,14 +671,44 @@ class WebConnector:
 
         `complete_when(teks)` (opsional) = syarat TAMBAHAN bahwa balasan sudah
         utuh. Dipakai pemanggil untuk menahan kesimpulan 'selesai' saat balasan
-        masih setengah dirender (mis. blok usulan tool belum tertutup)."""
-        return hub().submit(
-            lambda h: self._send_on_hub(
-                h, prompt, on_status, on_token, cancel_event, new_chat,
-                complete_when, open_chat_id, list(attachments or [])),
-            timeout=self.login_timeout + self.answer_timeout
-            + (self.attach_timeout if attachments else 0) + 120,
-        )
+        masih setengah dirender (mis. blok usulan tool belum tertutup).
+
+        PULIH SEKALI bila tab-nya mati sebelum sempat mengalirkan teks apa pun.
+        Kematian tab itu terjadi sesekali & acak (prosesnya Chrome tetap hidup,
+        hanya tab-nya hilang), dan tanpa pemulihan ia muncul ke pengguna sebagai
+        kegagalan penuh. Sengaja HANYA bila BELUM ada teks yang diteruskan ke
+        on_token: kalau jawaban sudah separuh tampil di terminal, mengulang
+        berarti mencetaknya dua kali — lebih baik gagal jujur & biarkan pengguna
+        mengirim ulang."""
+        mengalir = False
+        _token: TokenCb | None = None
+        if on_token is not None:
+            def _token(chunk: str) -> None:      # noqa: F811 - hanya bila dipakai
+                nonlocal mengalir
+                mengalir = True
+                on_token(chunk)
+
+        def _sekali() -> str:
+            return hub().submit(
+                lambda h: self._send_on_hub(
+                    h, prompt, on_status, _token, cancel_event, new_chat,
+                    complete_when, open_chat_id, list(attachments or [])),
+                timeout=self.login_timeout + self.answer_timeout
+                + (self.attach_timeout if attachments else 0) + 120,
+            )
+
+        try:
+            return _sekali()
+        except Exception as exc:  # noqa: BLE001 - hanya kematian tab yang diulang
+            if mengalir or not self._is_dead_target(exc):
+                raise
+        if on_status:
+            on_status(f"tab {self.label} mati, mengulang…")
+        # Context zombie-nya TIDAK dibuang di sini: hub.page_for sudah memeriksa
+        # halaman masih hidup atau tidak, lalu membuang & meluncurkan ulang
+        # sendiri. Membuang manual di sini hanya menambah satu siklus
+        # bunuh-luncur di atas yang sudah dilakukan _acquire_ready_page.
+        return _sekali()
 
     def set_web_option(self, label: str) -> str:
         """Klik OPSI di UI web (varian model / mode) — dipakai /effort.
@@ -567,7 +813,7 @@ class WebConnector:
             # Batas waktu eksplisit: kotak sudah dipastikan bisa diisi di atas,
             # jadi tak perlu menunggu 30 detik bawaan Playwright lagi.
             inp.fill(prompt, timeout=10000)
-        page.keyboard.press(self.submit_key)
+        self._submit(page, inp)
 
         # --- tunggu jawaban MULAI (streaming muncul / jumlah pesan bertambah) ---
         status(f"{self.label} sedang berpikir…")
@@ -614,7 +860,18 @@ class WebConnector:
         while time.time() < deadline:
             check_cancel()
             cur = self._read_last_message(page)
-            if not cur:
+            # Yang terbaca masih BALASAN LAMA? Wadah pesan yang baru sering
+            # belum berisi apa-apa untuk beberapa saat (di kimi.com bilah tombol
+            # aksi ikut cocok selector dan teksnya kosong), sehingga pemindaian
+            # mundur jatuh ke pesan SEBELUMNYA. Tanpa penjaga ini, seluruh
+            # jawaban lama diteruskan ke on_token sebagai "jawaban" giliran ini,
+            # lalu `emitted` telanjur sepanjang teks lama sehingga jawaban yang
+            # asli tampil terpotong di tengah kata.
+            #
+            # Penjaganya dilepas begitu situs berhenti menjawab, supaya balasan
+            # yang KEBETULAN sama persis dengan sebelumnya tak menggantung
+            # sampai batas waktu.
+            if not cur or (cur == text_before and self._is_generating(page)):
                 page.wait_for_timeout(self._poll_ms)
                 continue
             if on_token and len(cur) > emitted:
@@ -735,10 +992,20 @@ class WebConnector:
             pass
         self._click_element(loc)
 
+    @staticmethod
+    def _as_selectors(sel: str | tuple[str, ...]) -> tuple[str, ...]:
+        """Normalkan atribut selector (str ATAU tuple) jadi tuple kandidat.
+
+        Satu tempat saja, supaya aturan "kandidat dicoba BERURUTAN" tak perlu
+        ditulis ulang di tiap pemakai — dan kalau aturannya berubah, tak ada
+        salinan yang tertinggal."""
+        if not sel:
+            return ()
+        return (sel,) if isinstance(sel, str) else tuple(sel)
+
     def _input_selectors(self) -> tuple[str, ...]:
         """Kandidat selector kotak input, urut dari yang paling spesifik."""
-        sel = self.input_selector
-        return (sel,) if isinstance(sel, str) else tuple(sel)
+        return self._as_selectors(self.input_selector) or ("",)
 
     def _input_locator(self, page: Any, check_cancel: Callable[[], None] | None = None,
                        timeout: float = 25.0) -> Any:
@@ -841,8 +1108,7 @@ class WebConnector:
 
     # ---- pembacaan pesan (multi-kandidat, tahan perubahan layout) ----
     def _msg_selectors(self) -> tuple[str, ...]:
-        sel = self.message_selector
-        return (sel,) if isinstance(sel, str) else tuple(sel)
+        return self._as_selectors(self.message_selector)
 
     def _msg_counts(self, page: Any) -> dict[str, int]:
         out: dict[str, int] = {}
@@ -853,6 +1119,24 @@ class WebConnector:
                 out[sel] = 0
         return out
 
+    def _is_generating(self, page: Any) -> bool:
+        """Situs sedang AKTIF menghasilkan jawaban? Ditandai indikator streaming
+        ATAU adanya tombol "berhenti" — penanda paling andal bahwa AI sudah mulai
+        bekerja, termasuk saat ia menjalankan kode/analisis dan teks jawabannya
+        belum sempat muncul. Tanpa ini, fase kerja panjang salah dibaca sebagai
+        "balasan tak terdeteksi" dan gagal di start_timeout padahal AI-nya
+        normal, hanya sedang berpikir lama."""
+        try:
+            if self.streaming_selector and \
+                    page.query_selector(self.streaming_selector) is not None:
+                return True
+            for sel in self.stop_selectors:
+                if page.query_selector(sel) is not None:
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
     def _answer_started(self, page: Any, counts_before: dict[str, int],
                         text_before: str = "") -> bool:
         """Balasan baru sudah mulai muncul?
@@ -860,12 +1144,8 @@ class WebConnector:
         Tiga petunjuk dicoba — cukup salah satu. Tanpa petunjuk teks, situs yang
         MEMAKAI ULANG wadah pesan yang sama (jumlahnya tak bertambah) membuat
         bagas-ai menunggu sia-sia sampai batas waktu & terasa macet."""
-        if self.streaming_selector:
-            try:
-                if page.query_selector(self.streaming_selector) is not None:
-                    return True
-            except Exception:  # noqa: BLE001
-                pass
+        if self._is_generating(page):
+            return True
         now = self._msg_counts(page)
         if any(now.get(s, 0) > n for s, n in counts_before.items()):
             return True
@@ -883,17 +1163,20 @@ class WebConnector:
     def _read_last_message(self, page: Any) -> str:
         """Teks pesan jawaban TERAKHIR — kandidat selector dicoba berurutan.
         Dipakai untuk deteksi kestabilan (poll), jadi sengaja teks polos & cepat.
-        Teks yang cuma indikator berpikir dilewati (bukan jawaban)."""
-        for sel in self._msg_selectors():
-            try:
-                els = page.query_selector_all(sel)
-                if els:
-                    txt = (els[-1].inner_text() or "").strip()
-                    if txt and not self._is_noise(txt):
-                        return txt
-            except Exception:  # noqa: BLE001 - DOM sedang transisi
-                continue
-        return ""
+        Teks yang cuma indikator berpikir dilewati (bukan jawaban).
+
+        Seluruh pemindaian dikerjakan DI HALAMAN dalam SATU evaluate (lihat
+        JS_LAST_TEXT): tiap putaran polling hanya sekali bolak-balik, dan tak ada
+        handle elemen yang bisa jadi basi saat situs merender ulang DOM."""
+        try:
+            teks = page.evaluate(JS_LAST_TEXT, {
+                "selectors": list(self._msg_selectors()),
+                "thinking": list(self.thinking_selectors),
+                "noise": self.noise_pattern,
+            })
+        except Exception:  # noqa: BLE001 - DOM sedang transisi
+            return ""
+        return (teks or "").strip()
 
     def supports_attachments(self) -> bool:
         """True bila situs ini bisa menerima lampiran file dari bagas-ai."""
@@ -913,7 +1196,9 @@ class WebConnector:
             return
         before = self._attach_count(page)
         try:
-            page.set_input_files(self.file_input_selector, exist)
+            self._upload(page, exist)
+        except BrowserError:
+            raise      # connector sudah menjelaskan sendiri apa yang gagal
         except Exception as exc:  # noqa: BLE001
             raise BrowserError(f"gagal melampirkan file: {exc}") from exc
 
@@ -928,11 +1213,57 @@ class WebConnector:
             f"unggahan lampiran ke {self.label} tak selesai dalam "
             f"{self.attach_timeout:.0f} detik.")
 
-    def _attach_count(self, page: Any) -> int:
-        """Jumlah pratinjau lampiran yang terlihat di komposer."""
+    def _submit(self, page: Any, inp: Any) -> None:
+        """Kirim pesan, dan PASTIKAN benar-benar terkirim.
+
+        Menekan Enter saja tidak cukup di semua keadaan (lihat
+        send_button_selector). Karena itu hasilnya DIPERIKSA: kotak input yang
+        sudah kosong = terkirim; kalau masih berisi, tombol kirim diklik sebagai
+        cadangan. Tanpa tombol kirim yang dikenal, perilakunya sama seperti
+        dulu — tekan Enter lalu biarkan penantian jawaban yang menilai."""
+        page.keyboard.press(self.submit_key)
+        if not self.send_button_selector:
+            return
+        # Diperiksa DULU baru menunggu: pada jalur normal (Enter memang bekerja)
+        # kotaknya sudah kosong seketika, jadi tak ada jeda yang ditambahkan ke
+        # tiap pengiriman. Dulu urutannya terbalik dan setiap giliran membayar
+        # 500 ms percuma — pada satu sesi agent 24 langkah itu 12 detik.
+        for _ in range(6):          # ~3 detik
+            if not self._input_text(inp):
+                return              # kotak kosong -> pesan sudah berangkat
+            page.wait_for_timeout(500)
         try:
-            return int(page.evaluate(
-                JS_ATTACH_COUNT, self._input_selectors()[0]) or 0)
+            btn = page.locator(self.send_button_selector).first
+            if btn.count():
+                self._click_element(btn)
+        except Exception:  # noqa: BLE001 - biarkan penantian jawaban yang menilai
+            pass
+
+    @staticmethod
+    def _input_text(inp: Any) -> str:
+        """Isi kotak input saat ini (textarea maupun contenteditable)."""
+        try:
+            return (inp.evaluate(
+                "el => (el.value !== undefined ? el.value : el.innerText) || ''"
+            ) or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _upload(self, page: Any, paths: list[str]) -> None:
+        """Serahkan file ke situs. Default: isi langsung input file-nya.
+
+        Situs yang input file-nya BARU DIBUAT saat menu lampiran dibuka
+        meng-override ini (lihat KimiConnector) — di situs seperti itu
+        set_input_files pada input yang sudah ada tak berpengaruh apa pun."""
+        page.set_input_files(self.file_input_selector, paths)
+
+    def _attach_count(self, page: Any) -> int:
+        """Jumlah kartu/pratinjau lampiran yang sudah menempel di komposer."""
+        try:
+            return int(page.evaluate(JS_ATTACH_COUNT, {
+                "card": self.attach_item_selector,
+                "input": self._input_selectors()[0],
+            }) or 0)
         except Exception:  # noqa: BLE001
             return 0
 
@@ -959,22 +1290,67 @@ class WebConnector:
     def _read_code_blocks(self, page: Any) -> list[str]:
         """Isi MENTAH semua blok kode pada balasan terakhir (apa adanya)."""
         try:
-            out = page.evaluate(JS_CODE_BLOCKS, list(self._msg_selectors()))
+            out = page.evaluate(JS_CODE_BLOCKS, {
+                "selectors": list(self._msg_selectors()),
+                "thinking": list(self.thinking_selectors),
+            })
             return [str(x) for x in (out or [])]
         except Exception:  # noqa: BLE001
             return []
 
     def _read_last_markdown(self, page: Any) -> str:
         """Jawaban TERAKHIR sebagai Markdown (list/tabel/heading/kode utuh),
-        direkonstruksi dari HTML yang dirender situs."""
+        direkonstruksi dari HTML yang dirender situs. Blok berpikir (mode
+        reasoning) dibuang di dalam JS_TO_MARKDOWN."""
         try:
-            md = page.evaluate(JS_TO_MARKDOWN, list(self._msg_selectors()))
+            md = page.evaluate(JS_TO_MARKDOWN, {
+                "selectors": list(self._msg_selectors()),
+                "thinking": list(self.thinking_selectors),
+            })
             return (md or "").strip()
         except Exception:  # noqa: BLE001
             return ""
 
     # ---- kesiapan halaman & login ----
+    # Ciri galat "browser/tab-nya sudah mati" dari Playwright. Dicocokkan lewat
+    # TEKS karena Playwright melaporkan semuanya sebagai Error generik — tak ada
+    # tipe khusus yang bisa ditangkap.
+    _DEAD_TARGET = ("has been closed", "target closed", "target crashed",
+                    "browser has been closed", "connection closed")
+
+    def _is_dead_target(self, exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return any(m in text for m in self._DEAD_TARGET)
+
     def _acquire_ready_page(
+        self, h: Any, status: StatusCb, check_cancel: Callable[[], None],
+        force_new_chat: bool = False, open_chat_id: str = "",
+    ) -> tuple[Any, bool]:
+        """Seperti _acquire_once, tapi PULIH sekali bila browsernya ternyata mati.
+
+        Context bisa mati kapan saja di antara dua pemeriksaan (Chrome ditutup,
+        profilnya direbut instance lain, tab-nya hilang). Tanpa percobaan ulang,
+        giliran yang kebetulan datang tepat sesudah itu gagal dengan galat
+        Playwright mentah — padahal cukup dibuang lalu diluncurkan ulang.
+
+        Sengaja menangkap Exception, bukan BrowserError saja: kematian target
+        justru paling sering muncul sebagai galat Playwright MENTAH dari
+        h.page_for/_launch (profil direbut Chrome sisa), yang bukan BrowserError
+        — kalau hanya BrowserError yang ditangkap, pemulihan ini tak pernah
+        jalan untuk kasus yang paling ia tuju. Penyaringnya tetap ketat lewat
+        _is_dead_target, jadi galat lain (termasuk pembatalan) tetap dilempar."""
+        try:
+            return self._acquire_once(
+                h, status, check_cancel, force_new_chat, open_chat_id)
+        except Exception as exc:  # noqa: BLE001 - disaring _is_dead_target
+            if not self._is_dead_target(exc):
+                raise
+        status("sesi browser mati, meluncurkan ulang…")
+        h.drop(self.service)
+        return self._acquire_once(
+            h, status, check_cancel, force_new_chat, open_chat_id)
+
+    def _acquire_once(
         self, h: Any, status: StatusCb, check_cancel: Callable[[], None],
         force_new_chat: bool = False, open_chat_id: str = "",
     ) -> tuple[Any, bool]:
@@ -995,7 +1371,7 @@ class WebConnector:
             if self._chat_ready(page, 1500, check_cancel):
                 return page, False
             self._goto(page)
-            if not self._chat_ready(page, 10000, check_cancel):
+            if not self._chat_ready(page, self._NAV_READY_MS, check_cancel):
                 raise BrowserError(
                     "mode headless belum siap (kemungkinan diblok anti-bot / "
                     "belum login). Hapus CONNECTOR_HEADLESS agar login via jendela."
@@ -1011,16 +1387,21 @@ class WebConnector:
         if self._chat_ready(page, 1500, check_cancel):
             if target and not self._on_chat(page, open_chat_id):
                 self._goto(page, target)  # lanjutkan percakapan lama
-                self._chat_ready(page, 10000, check_cancel)
+                self._chat_ready(page, self._NAV_READY_MS, check_cancel)
             elif force_new_chat and not target:
-                self._goto(page)          # buka chat baru (chat_url)
-                self._chat_ready(page, 8000, check_cancel)
+                # Tombol "chat baru" milik situs lebih murah daripada memuat
+                # ulang seluruh SPA. Kalau tombolnya tak ada/berubah, jatuh ke
+                # navigasi biasa yang selalu bekerja.
+                if not (self.new_chat_selector
+                        and self._click_new_chat(page, check_cancel)):
+                    self._goto(page)      # buka chat baru (chat_url)
+                    self._chat_ready(page, self._NAV_READY_MS, check_cancel)
             self._background(page)
             return page, False
 
         self._goto(page, target or None)
         did_login = False
-        if not self._chat_ready(page, 8000, check_cancel):
+        if not self._chat_ready(page, self._NAV_READY_MS, check_cancel):
             # BELUM login -> jendela harus TERLIHAT supaya pengguna bisa sign-in.
             self._foreground(page)
             status(
@@ -1032,6 +1413,37 @@ class WebConnector:
             did_login = True
         self._background(page)
         return page, did_login
+
+    def _click_new_chat(self, page: Any,
+                        check_cancel: Callable[[], None] | None = None) -> bool:
+        """Mulai percakapan baru lewat tombol situs. True bila berhasil & siap.
+
+        Kandidat dicoba BERURUTAN (paling spesifik dulu), dan yang pertama
+        benar-benar ada yang diklik — bukan yang kebetulan paling awal di DOM.
+
+        Visibilitas diperiksa PER ELEMEN, bukan dengan menempelkan `:visible` ke
+        selectornya: bila sebuah kandidat kebetulan ditulis berkoma, akhiran itu
+        hanya mengenai alternatif TERAKHIR, sehingga elemen tersembunyi dari
+        alternatif pertama tetap lolos lalu diklik sia-sia.
+
+        Sengaja mengembalikan bool alih-alih melempar: ini OPTIMASI, bukan
+        keharusan — kalau tombolnya berubah/hilang, pemanggil cukup jatuh ke
+        navigasi biasa."""
+        for kandidat in self._as_selectors(self.new_chat_selector):
+            try:
+                loc = page.locator(kandidat)
+                for i in range(min(loc.count(), 5)):
+                    tombol = loc.nth(i)
+                    if not tombol.is_visible():
+                        continue
+                    self._click_element(tombol)
+                    page.wait_for_timeout(800)
+                    if self._chat_ready(page, 8000, check_cancel):
+                        return True
+                    break        # tombolnya benar tapi belum siap -> navigasi biasa
+            except Exception:  # noqa: BLE001 - coba kandidat berikutnya
+                continue
+        return False
 
     def _on_chat(self, page: Any, chat_id: str) -> bool:
         """True bila halaman sedang membuka percakapan `chat_id`."""
@@ -1090,6 +1502,17 @@ class WebConnector:
         except Exception:  # noqa: BLE001
             return False
 
+    def _looks_logged_in(self, page: Any) -> bool:
+        """True bila ada BUKTI POSITIF sesi sudah login (mis. tombol profil).
+        Connector yang tak menyebutkan penandanya dianggap tak berpendapat —
+        True, sehingga perilakunya persis seperti sebelum bukti positif ada."""
+        if not self.logged_in_selector:
+            return True
+        try:
+            return page.query_selector(self.logged_in_selector) is not None
+        except Exception:  # noqa: BLE001
+            return False
+
     def _chat_ready(
         self,
         page: Any,
@@ -1098,14 +1521,19 @@ class WebConnector:
     ) -> bool:
         """Deteksi KETAT bahwa halaman chat siap & user SUDAH login:
         (1) URL BUKAN halaman login/auth, (2) tak ada penanda "belum login",
-        dan (3) kotak input chat terlihat. Halaman login yang kebetulan punya
-        elemen mirip input — atau halaman TAMU yang inputnya aktif tapi tak
-        memproses pesan — tak akan lolos."""
+        (3) ADA penanda sudah-login bila connector menyebutkannya, dan (4) kotak
+        input chat terlihat. Halaman login yang kebetulan punya elemen mirip
+        input — atau halaman TAMU yang inputnya aktif tapi tak memproses pesan —
+        tak akan lolos.
+
+        Syarat (3) ada karena (2) saja TIDAK cukup: penanda logout bisa belum
+        dirender saat halaman baru dibuka (lihat logged_in_selector)."""
         deadline = time.time() + timeout_ms / 1000.0
         while True:
             if check_cancel is not None:
                 check_cancel()
-            if not self._on_login_page(page) and not self._looks_logged_out(page):
+            if not self._on_login_page(page) and not self._looks_logged_out(page) \
+                    and self._looks_logged_in(page):
                 for sel in self._input_selectors():
                     try:
                         el = page.query_selector(sel)

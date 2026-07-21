@@ -158,7 +158,7 @@ COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "300"))
 # memverifikasi hasil ngoding-nya. Matikan dengan AUTO_SYNTAX_CHECK=false.
 AUTO_SYNTAX_CHECK: bool = _get_bool("AUTO_SYNTAX_CHECK", True)
 
-# --- Connector web-AI (fitur /model claude-web, qwen-web via browser) ---
+# --- Connector web-AI (fitur /model claude-web, qwen-web, kimi-web via browser) ---
 # Default (false): jendela Chrome MUNCUL sekali untuk login lalu DI-MINIMIZE —
 # semua proses & jawaban tampil di TERMINAL, pengguna tak menyentuh browser.
 # Jendela tetap ada (bukan headless) karena Cloudflare (mis. claude.ai) menolak

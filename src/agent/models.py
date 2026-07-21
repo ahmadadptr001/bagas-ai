@@ -232,6 +232,12 @@ MODELS: dict[str, ModelSpec] = {
         connector="qwen",
         note="Via browser chat.qwen.ai — butuh akun & login sekali (bukan NVIDIA)",
     ),
+    "kimi-web": ModelSpec(
+        id="web/kimi",
+        label="Kimi (web)",
+        connector="kimi",
+        note="Via browser kimi.com — butuh akun & login sekali (bukan NVIDIA)",
+    ),
 }
 
 _ORDER = list(MODELS.keys())

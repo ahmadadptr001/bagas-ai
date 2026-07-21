@@ -1,5 +1,5 @@
 """Connector web-AI: hubungkan bagas-ai ke antarmuka chat berbasis browser
-(claude.ai, chat.qwen.ai, dst) lewat otomasi browser (Playwright).
+(claude.ai, chat.qwen.ai, kimi.com, dst) lewat otomasi browser (Playwright).
 
 Dipakai sebagai "model": lihat models.py (pseudo-model dengan field `connector`)
 dan core.Agent._run_connector. Instance connector di-CACHE per-service supaya
@@ -10,11 +10,13 @@ from __future__ import annotations
 from .base import WebConnector
 from .browser import BrowserError, WebLimitError, playwright_available
 from .claude import ClaudeConnector
+from .kimi import KimiConnector
 from .qwen import QwenConnector
 
 # service -> kelas connector.
 _REGISTRY: dict[str, type[WebConnector]] = {
     "claude": ClaudeConnector,
+    "kimi": KimiConnector,
     "qwen": QwenConnector,
 }
 
