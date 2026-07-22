@@ -25,7 +25,17 @@ for _stream in (sys.stdout, sys.stderr):
 
 from . import config
 
-__version__ = "1.0.0"
+# Versi dibaca dari METADATA paket terpasang — SATU sumber kebenaran, yaitu
+# pyproject.toml (yang dinaikkan otomatis tiap commit oleh .githooks/pre-commit).
+# Dulu ditulis tangan di sini dan tak pernah ikut naik, jadi banner selamanya
+# bilang 1.0.0 padahal paketnya sudah jauh lebih baru — bikin sulit memastikan
+# sebuah pembaruan benar-benar terpasang.
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("bagasai")
+except Exception:  # noqa: BLE001 - belum terpasang / metadata rusak
+    __version__ = "0.0.0+dev"
 
 HELP = f"""\
 bagas-ai v{__version__} — AI agent serbaguna (NVIDIA free API)

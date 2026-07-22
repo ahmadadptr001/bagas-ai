@@ -14,10 +14,12 @@ benar-benar dijalankan ikut ter-update, bukan cuma repo-nya.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import site
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 from pathlib import Path
@@ -208,6 +210,96 @@ def _ensure_pip() -> None:
         pass
 
 
+def _purge_build(repo: Path) -> None:
+    """Buang artefak build sebelum pip membangun ulang.
+
+    setuptools memakai `build/lib/` sebagai CACHE: file cuma disalin ulang dari
+    `src/` bila sumbernya lebih baru. Bila build/ ketinggalan (mis. pernah ikut
+    ter-commit, atau timestamp-nya tersegarkan oleh checkout), pip membungkus
+    KODE LAMA tapi menyematkan nomor versi baru — update lapor sukses, versi naik,
+    isinya basi, dan --force-reinstall pun cuma memasang ulang wheel basi yang
+    sama. Membuang build/ membuat setiap pembaruan dibangun dari sumber apa adanya.
+    """
+    for nama in ("build", "dist"):
+        try:
+            shutil.rmtree(repo / nama)
+        except (OSError, FileNotFoundError):
+            pass
+    try:
+        for egg in (repo / "src").glob("*.egg-info"):
+            shutil.rmtree(egg, ignore_errors=True)
+    except OSError:
+        pass
+
+
+_SCRIPT_NAMES = ("bagas-ai", "bagasai", "bagas")
+
+
+def _script_dirs() -> list[Path]:
+    """Folder tempat console-script (bagasai.exe dkk) dipasang, untuk skema biasa
+    MAUPUN --user (Python Store memakai yang kedua)."""
+    dirs: list[Path] = []
+    for scheme in (None, os.name + "_user"):
+        try:
+            p = sysconfig.get_path("scripts") if scheme is None \
+                else sysconfig.get_path("scripts", scheme)
+        except Exception:  # noqa: BLE001
+            continue
+        if p:
+            d = Path(p)
+            if d not in dirs:
+                dirs.append(d)
+    return dirs
+
+
+def _liberate_scripts() -> list[tuple[Path, Path]]:
+    """Windows mengunci .exe yang SEDANG BERJALAN: pip tak bisa menimpa/menghapus
+    bagasai.exe saat update dijalankan DARI bagas-ai -> update gagal total.
+
+    Tapi Windows MENGIZINKAN file terkunci di-RENAME. Jadi exe-nya digeser dulu;
+    pip lalu menulis exe baru di tempat kosong, dan proses yang sedang jalan tetap
+    memakai file lama yang sudah pindah nama (dihapus pada update berikutnya).
+
+    Return daftar (asal, tujuan) supaya bisa dikembalikan bila pip tetap gagal.
+    """
+    if os.name != "nt":
+        return []
+    dipindah: list[tuple[Path, Path]] = []
+    stempel = time.strftime("%Y%m%d%H%M%S")
+    for d in _script_dirs():
+        if not d.is_dir():
+            continue
+        # Bersihkan sisa geseran update-update sebelumnya (kini tak lagi dipakai).
+        for sisa in d.glob("*.bagasai-old-*"):
+            try:
+                sisa.unlink()
+            except OSError:
+                pass
+        for nama in _SCRIPT_NAMES:
+            src = d / f"{nama}.exe"
+            if not src.exists():
+                continue
+            dst = d / f"{nama}.exe.bagasai-old-{stempel}"
+            try:
+                src.rename(dst)
+                dipindah.append((src, dst))
+            except OSError:
+                pass  # tak bisa digeser -> biar pip yang melapor apa adanya
+    return dipindah
+
+
+def _restore_scripts(dipindah: list[tuple[Path, Path]]) -> None:
+    """Kembalikan exe yang digeser — dipakai bila pip tetap gagal, supaya pengguna
+    tidak berakhir TANPA perintah bagas-ai sama sekali."""
+    for src, dst in dipindah:
+        if src.exists() or not dst.exists():
+            continue
+        try:
+            dst.rename(src)
+        except OSError:
+            pass
+
+
 def _reinstall(repo: Path) -> dict:
     """Pasang ulang dari `repo`, mempertahankan cara pasang asli (--user, editable)."""
     editable = _is_editable(repo)
@@ -227,6 +319,10 @@ def _reinstall(repo: Path) -> dict:
         # terpasang tak diutak-atik). Sumber kebenaran versi di sini adalah COMMIT
         # git, bukan string versi.
         target = ["--force-reinstall", "--no-deps", str(repo)]
+
+    _purge_build(repo)
+    # Geser exe yang mungkin sedang berjalan SEBELUM pip menyentuhnya (Windows).
+    digeser = _liberate_scripts() if not editable else []
 
     inst = _run(base + flags + target, repo, timeout=600)
     blob = (inst.stderr + inst.stdout).lower()
@@ -248,6 +344,10 @@ def _reinstall(repo: Path) -> dict:
         s in blob for s in ("winerror 32", "being used by another process",
                             "access is denied", "permission denied")
     )
+    # Gagal total -> kembalikan exe yang tadi digeser, jangan tinggalkan pengguna
+    # tanpa perintah `bagas-ai` sama sekali.
+    if inst.returncode != 0:
+        _restore_scripts(digeser)
     return {
         "ok": inst.returncode == 0,
         "locked": locked,
