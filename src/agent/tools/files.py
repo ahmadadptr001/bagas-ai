@@ -4,6 +4,7 @@ Dibatasi agar tidak keluar dari folder-folder yang diizinkan."""
 from __future__ import annotations
 
 import json as _json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -56,6 +57,85 @@ def _syntax_check(target: Path) -> str | None:
     return None
 
 
+# Penanda "sisanya biarkan seperti semula" — tanda PALING jelas bahwa yang
+# dikirim cuma potongan, bukan isi lengkap. Model menulisnya dengan sangat
+# beragam bentuk, jadi polanya dibuat longgar tapi tetap menuntut kata kuncinya.
+_ELIPSIS_RE = re.compile(
+    r"^[ \t]*(?://|#|/\*|<!--|--|;)?[ \t]*"
+    r"(?:\.\.\.|…)?[ \t]*"
+    r"(?:rest of|sisa|sisanya|selebihnya|remaining|unchanged|tetap sama|"
+    r"tidak berubah|tak berubah|kode lain|other code|existing code|"
+    r"keep existing|biarkan|dan seterusnya|dst\.?)"
+    r"[^\n]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Baris yang isinya HANYA elipsis (mis. "    ...") — juga khas potongan.
+_ELIPSIS_POLOS_RE = re.compile(r"^[ \t]*(?://|#|/\*|<!--)?[ \t]*(?:\.\.\.|…)[ \t]*"
+                               r"(?:\*/|-->)?[ \t]*$", re.MULTILINE)
+
+
+def _tolak_penimpaan_merusak(target: Path, baru: str) -> str | None:
+    """Pesan penolakan bila `baru` tampak POTONGAN, bukan isi lengkap file.
+
+    Ini bug paling merusak yang bisa terjadi di sini: write_file mengganti
+    SELURUH isi file, jadi ketika model hanya mengirim bagian yang ia ubah —
+    kebiasaan yang sangat lazim, apalagi bila ia berpikir "ini yang berubah" —
+    seluruh sisa file lenyap tanpa satu pun tanda. Kerusakannya senyap: sintaks
+    bisa saja tetap valid, dan baru ketahuan jauh kemudian saat ada yang hilang.
+
+    Dua sinyal dipakai, dan keduanya sengaja dipilih yang berpresisi tinggi
+    supaya penulisan ulang yang SAH tidak ikut terhalang:
+      1. penanda elipsis ("// ... sisanya tetap ...") — praktis tak pernah
+         muncul di berkas yang benar-benar lengkap;
+      2. penyusutan drastis pada berkas yang memang panjang.
+    Bila model memang sengaja memangkas, ia bisa mengulang dengan
+    allow_shrink=true — jadi ini menghambat kecelakaan, bukan niat.
+    """
+    try:
+        lama = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if not lama.strip():
+        return None
+
+    n_lama = len(lama.splitlines())
+    n_baru = len(baru.splitlines())
+
+    for pola, sebab in ((_ELIPSIS_RE, "penanda 'sisanya tetap'"),
+                        (_ELIPSIS_POLOS_RE, "baris berisi '...' saja")):
+        m = pola.search(baru)
+        if m:
+            return (
+                f"[DITOLAK] Isi yang dikirim tampaknya CUMA POTONGAN — ada "
+                f"{sebab}: {m.group(0).strip()[:70]!r}\n\n"
+                f"write_file MENGGANTI SELURUH isi file. Kalau ini ditulis, "
+                f"{n_lama} baris yang ada sekarang akan hilang dan diganti "
+                f"{n_baru} baris.\n\n"
+                "Pakai edit_file untuk mengubah bagian tertentu:\n"
+                '  {"tool": "edit_file", "args": {"path": "...", '
+                '"old_text": "potongan lama PERSIS", "new_text": "penggantinya"}}\n\n'
+                "Atau kirim ulang lewat write_file dengan isi file yang "
+                "BENAR-BENAR LENGKAP (tanpa penanda elipsis)."
+            )
+
+    # Penyusutan drastis. Ambang dipilih longgar supaya penulisan ulang yang sah
+    # (refactor besar, file digantikan total) tetap lolos: hanya berkas yang
+    # memang panjang, dan hanya bila isinya menyusut lebih dari separuh.
+    if n_lama >= 30 and n_baru < n_lama * 0.5:
+        return (
+            f"[DITOLAK] Isi baru jauh lebih pendek dari isi sekarang: "
+            f"{n_lama} baris -> {n_baru} baris (susut "
+            f"{100 - n_baru * 100 // max(n_lama, 1)}%).\n\n"
+            "Ini pola khas 'hanya mengirim bagian yang diubah', dan write_file "
+            "akan MENGHAPUS sisanya.\n\n"
+            "- Mau mengubah sebagian? Pakai edit_file (old_text/new_text).\n"
+            "- Memang sengaja memangkas file sebanyak itu? Baca dulu isi "
+            "lengkapnya dengan read_file, lalu ulangi write_file dengan "
+            "allow_shrink=true."
+        )
+    return None
+
+
 def _safe_path(path: str) -> Path:
     """Resolusikan `path` & pastikan berada di dalam salah satu root yang diizinkan.
 
@@ -102,15 +182,25 @@ def read_file(path: str) -> str:
 
 
 @tool
-def write_file(path: str, content: str) -> str:
-    """Tulis (atau timpa) sebuah file teks di root project atau folder konteks (add-dir). Sebelum menulis, pertimbangkan cek dulu apakah file sudah ada (read_file/list_dir) agar tidak menimpa tanpa perlu.
+def write_file(path: str, content: str, allow_shrink: bool = False) -> str:
+    """Tulis file BARU, atau timpa file lama dengan isi LENGKAP-nya. Untuk mengubah sebagian isi file yang sudah ada, pakai edit_file — bukan ini.
+
+    PERINGATAN: tool ini MENGGANTI SELURUH isi file. Bila kamu hanya mengirim
+    bagian yang kamu ubah, seluruh sisanya HILANG.
 
     path: relatif terhadap root project, atau path ABSOLUT untuk folder konteks.
+    allow_shrink: set true HANYA bila kamu memang sengaja memangkas file secara
+        besar-besaran dan sudah membaca isi lengkapnya lebih dulu.
     content: isi file.
     """
     target = _safe_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.is_file()
+    if existed and not allow_shrink:
+        tolak = _tolak_penimpaan_merusak(target, content)
+        if tolak:
+            return tolak
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     verb = "Ditimpa" if existed else "Dibuat"
     msg = f"{verb}: {_display(target)} ({len(content)} karakter)."
