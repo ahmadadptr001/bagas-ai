@@ -257,12 +257,20 @@ def _script_dirs() -> list[Path]:
 
 
 def _liberate_scripts() -> list[tuple[Path, Path]]:
-    """Windows mengunci .exe yang SEDANG BERJALAN: pip tak bisa menimpa/menghapus
-    bagasai.exe saat update dijalankan DARI bagas-ai -> update gagal total.
+    """Geser console-script yang TIDAK sedang berjalan supaya pip bebas menimpanya.
 
-    Tapi Windows MENGIZINKAN file terkunci di-RENAME. Jadi exe-nya digeser dulu;
-    pip lalu menulis exe baru di tempat kosong, dan proses yang sedang jalan tetap
-    memakai file lama yang sudah pindah nama (dihapus pada update berikutnya).
+    CATATAN PENTING (terukur, jangan diandalkan berlebihan): anggapan umum bahwa
+    "Windows mengizinkan exe yang sedang berjalan di-RENAME" TIDAK berlaku untuk
+    console-script buatan pip. Diuji langsung pada bagasai.exe yang sedang jalan:
+        rename GAGAL: [WinError 32] ... being used by another process
+    Exe-nya dipetakan sebagai image section tanpa FILE_SHARE_DELETE, jadi rename
+    ikut ditolak, bukan cuma tulis/hapus.
+
+    Fungsi ini tetap berguna: bagas-ai memasang TIGA nama (bagas-ai/bagasai/
+    bagas) sedangkan yang berjalan biasanya cuma satu, jadi dua sisanya bisa
+    digeser dan tak lagi menggagalkan pip. Untuk exe yang benar-benar sedang
+    berjalan, satu-satunya jalan yang jujur adalah memasang SESUDAH proses itu
+    keluar -> lihat _schedule_post_exit_install().
 
     Return daftar (asal, tujuan) supaya bisa dikembalikan bila pip tetap gagal.
     """
@@ -302,6 +310,83 @@ def _restore_scripts(dipindah: list[tuple[Path, Path]]) -> None:
             dst.rename(src)
         except OSError:
             pass
+
+
+_PENDING_LOG = "pembaruan_tertunda.log"
+
+
+def _schedule_post_exit_install(repo: Path, argv: list[str]) -> bool:
+    """Jadwalkan pemasangan untuk dijalankan BEGITU bagas-ai ini keluar.
+
+    Ini jawaban jujur atas exe-yang-terkunci: selama proses ini hidup, file
+    bagasai.exe TAK bisa ditimpa maupun di-rename (terbukti WinError 32 pada
+    keduanya). Menyuruh pengguna "tutup lalu jalankan update lagi" berarti
+    pembaruan gagal diam-diam berkali-kali — persis keluhan yang memicu seluruh
+    rangkaian perbaikan ini.
+
+    Maka sebuah proses PENDAMPING dilepas (detached): ia menunggu PID ini
+    hilang, baru menjalankan pip. Saat itu tak ada lagi yang mengunci exe, jadi
+    pemasangan tuntas tanpa campur tangan pengguna — cukup tutup bagas-ai
+    seperti biasa. Hasilnya ditulis ke log di CONFIG_HOME supaya kegagalan tetap
+    bisa ditelusuri, bukan lenyap tanpa jejak.
+
+    Return True bila pendamping berhasil dilepas."""
+    log = config.CONFIG_HOME / _PENDING_LOG
+    skrip = config.CONFIG_HOME / "pembaruan_tertunda.py"
+    kode = (
+        "import os, subprocess, sys, time\n"
+        f"induk = {os.getpid()}\n"
+        f"argv = {argv!r}\n"
+        f"log = {str(log)!r}\n"
+        f"cwd = {str(repo)!r}\n"
+        # Tunggu induk benar-benar keluar. Batas 15 menit supaya pendamping tak
+        # jadi proses abadi bila bagas-ai dibiarkan terbuka semalaman.
+        "batas = time.time() + 900\n"
+        "while time.time() < batas:\n"
+        "    try:\n"
+        "        os.kill(induk, 0)\n"
+        "    except OSError:\n"
+        "        break\n"
+        "    time.sleep(1.0)\n"
+        "else:\n"
+        "    sys.exit(0)\n"
+        "time.sleep(2.0)\n"   # beri Windows waktu melepas kunci image section
+        "try:\n"
+        "    r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,\n"
+        "                       timeout=900)\n"
+        "    teks = (r.stdout or '') + (r.stderr or '')\n"
+        "    hasil = 'SUKSES' if r.returncode == 0 else 'GAGAL'\n"
+        "except Exception as exc:\n"
+        "    teks, hasil = repr(exc), 'GAGAL'\n"
+        "try:\n"
+        "    open(log, 'w', encoding='utf-8').write(\n"
+        "        time.strftime('%Y-%m-%d %H:%M:%S') + ' ' + hasil + '\\n' + teks)\n"
+        "except OSError:\n"
+        "    pass\n"
+    )
+    try:
+        config.CONFIG_HOME.mkdir(parents=True, exist_ok=True)
+        skrip.write_text(kode, encoding="utf-8")
+    except OSError:
+        return False
+
+    # Lepas benar-benar terpisah: tak boleh ikut mati saat terminal bagas-ai
+    # ditutup, dan tak boleh menahan proses ini keluar.
+    bendera = 0
+    if os.name == "nt":
+        bendera = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                   | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    try:
+        subprocess.Popen(
+            [sys.executable, str(skrip)],
+            cwd=str(config.CONFIG_HOME), creationflags=bendera,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=(os.name != "nt"),
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _reinstall(repo: Path) -> dict:
@@ -356,9 +441,18 @@ def _reinstall(repo: Path) -> dict:
     # tanpa perintah `bagas-ai` sama sekali.
     if inst.returncode != 0:
         _restore_scripts(digeser)
+
+    # Terkunci oleh bagas-ai ini sendiri -> jadwalkan pemasangan begitu ia keluar.
+    # Tanpa ini pengguna cuma diberi tahu "tutup lalu ulangi", dan pada praktiknya
+    # pembaruan gagal diam-diam berkali-kali.
+    dijadwalkan = False
+    if locked:
+        dijadwalkan = _schedule_post_exit_install(repo, base + flags + target)
+
     return {
         "ok": inst.returncode == 0,
         "locked": locked,
+        "scheduled": dijadwalkan,
         "detail": "" if inst.returncode == 0 else (inst.stderr or inst.stdout).strip()[:200],
         "editable": editable,
     }
@@ -472,11 +566,18 @@ def apply() -> dict:
     _write_cache({"status": "up_to_date", "ts": time.time()})
     note = ""
     if not reinst["ok"] and reinst.get("locked"):
-        note = ("skrip bagas-ai sedang dipakai (kamu menjalankan update DARI "
-                "bagas-ai), jadi file .exe tak bisa ditimpa. "
-                + ("Kode sudah ter-update — cukup TUTUP lalu buka lagi bagas-ai."
-                   if reinst.get("editable") else
-                   "Tutup semua bagas-ai lalu jalankan `bagas-ai update` sekali lagi."))
+        if reinst.get("scheduled"):
+            note = ("skrip bagas-ai sedang dipakai (kamu menjalankan update DARI "
+                    "bagas-ai), jadi .exe-nya belum bisa ditimpa sekarang. "
+                    "Pemasangan SUDAH DIJADWALKAN dan akan berjalan sendiri "
+                    "begitu bagas-ai ditutup — cukup TUTUP lalu buka lagi, tak "
+                    f"perlu mengetik apa pun. (log: ~/.bagasai/{_PENDING_LOG})")
+        else:
+            note = ("skrip bagas-ai sedang dipakai (kamu menjalankan update DARI "
+                    "bagas-ai), jadi file .exe tak bisa ditimpa. "
+                    + ("Kode sudah ter-update — cukup TUTUP lalu buka lagi bagas-ai."
+                       if reinst.get("editable") else
+                       "Tutup semua bagas-ai lalu jalankan `bagas-ai update` sekali lagi."))
     return {
         "status": "updated",
         "pull": pull_out,
@@ -484,6 +585,9 @@ def apply() -> dict:
         # meng-update meski pip gagal menimpa .exe yang terkunci.
         "reinstalled": reinst["ok"] or bool(reinst.get("locked") and reinst.get("editable")),
         "locked": bool(reinst.get("locked")),
+        # Terkunci TAPI sudah dijadwalkan: pemasangan berjalan sendiri sesudah
+        # bagas-ai ditutup, jadi ini bukan kegagalan yang menuntut tindakan.
+        "scheduled": bool(reinst.get("scheduled")),
         "note": note,
         "pip_detail": reinst["detail"],
         "repo": str(repo),
