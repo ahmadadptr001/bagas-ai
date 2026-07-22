@@ -961,10 +961,22 @@ class WebConnector:
             # lalu `emitted` telanjur sepanjang teks lama sehingga jawaban yang
             # asli tampil terpotong di tengah kata.
             #
-            # Penjaganya dilepas begitu situs berhenti menjawab, supaya balasan
-            # yang KEBETULAN sama persis dengan sebelumnya tak menggantung
-            # sampai batas waktu.
-            if not cur or (cur == text_before and self._is_generating(page)):
+            # Dulu penjaga ini DILEPAS begitu situs berhenti menandai "sedang
+            # mengetik", supaya balasan yang kebetulan sama persis tak
+            # menggantung sampai batas waktu. Itu BUG BERAT dan terbukti di
+            # pemakaian nyata: kalau jawaban belum mulai sementara penanda
+            # generating tak terdeteksi (kimi.com kerap begitu), teks balasan
+            # LAMA langsung diterima sebagai jawaban giliran ini — pengguna
+            # bertanya hal baru tiga kali dan menerima jawaban identik yang sama
+            # persis, tanpa satu pun tanda bahwa ada yang salah.
+            #
+            # Penentunya kini JUMLAH ELEMEN PESAN, bukan penanda mengetik.
+            # Elemen balasan baru pasti bertambah begitu situs membuatnya, jadi
+            # balasan yang teksnya kebetulan sama TETAP diterima (tak menggantung)
+            # sementara teks basi tak pernah lolos. _msg_counts hanya dipanggil
+            # pada kasus ambigu (teks == balasan lama), jadi polling tetap murah.
+            if not cur or (cur == text_before
+                           and not self._ada_pesan_baru(page, counts_before)):
                 page.wait_for_timeout(self._poll_ms)
                 continue
             if on_token and len(cur) > emitted:
@@ -999,6 +1011,20 @@ class WebConnector:
         # Jawaban final ditentukan DULU: rekonstruksi Markdown dari HTML
         # (list/tabel/heading/kode utuh) bila diaktifkan; kalau gagal, pakai teks
         # polos yang sudah stabil.
+        # `last` kosong = loop di atas tak pernah menerima satu pun teks sebagai
+        # balasan giliran INI. Jangan jatuh ke _read_last_markdown: ia membaca
+        # elemen pesan terakhir apa adanya, yang dalam keadaan ini justru
+        # balasan LAMA — jalur inilah yang membuat jawaban basi tetap lolos ke
+        # pengguna meski penjaga di loop sudah menolaknya. Lebih baik gagal
+        # terang-terangan; pemanggil bisa mengirim ulang.
+        if not last:
+            raise BrowserError(
+                f"{self.label} tidak menghasilkan balasan baru untuk pesan ini "
+                "(yang terbaca di halaman masih jawaban sebelumnya). Kirim ulang; "
+                "bila berulang, periksa message_selector di connectors/"
+                f"{self.service}.py."
+            )
+
         final = ""
         if self.read_as_markdown:
             final = self._read_last_markdown(page) or ""
@@ -1338,6 +1364,20 @@ class WebConnector:
             return True
         cur = self._read_last_message(page)
         return bool(cur) and cur != text_before
+
+    def _ada_pesan_baru(self, page: Any, counts_before: dict[str, int]) -> bool:
+        """Situs sudah membuat elemen pesan BARU sejak prompt dikirim?
+
+        Ini satu-satunya petunjuk yang tak ambigu ketika teks yang terbaca sama
+        persis dengan balasan sebelumnya: penanda "sedang mengetik" bisa saja
+        tak terdeteksi, dan teks yang identik bisa berarti dua hal yang sangat
+        berbeda — balasan basi, atau jawaban baru yang kebetulan sama.
+        """
+        try:
+            now = self._msg_counts(page)
+        except Exception:  # noqa: BLE001 - DOM sibuk/berubah -> anggap belum ada
+            return False
+        return any(now.get(s, 0) > n for s, n in counts_before.items())
 
     def _is_noise(self, text: str) -> bool:
         """True bila teks HANYA chrome UI situs (mis. 'Thought for 2s'), bukan
