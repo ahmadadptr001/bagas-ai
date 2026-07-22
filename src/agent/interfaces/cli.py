@@ -515,6 +515,18 @@ class TurnView:
         self.phase = "berpikir"
         self.tool: str | None = None
         self.disp = 0.0
+        self.phase_since = self.start   # kapan fase SEKARANG mulai (untuk ETA)
+        # ETA connector web belajar dari riwayat waktu turn pengguna sendiri —
+        # jujur: deskripsi masa lalu, bukan janji. None bila bukan connector web
+        # ATAU sampel riwayat belum cukup (lalu UI sengaja tak menampilkan ETA).
+        self._web_service = getattr(agent.model_spec, "connector", "") or ""
+        self._web_med = None
+        if self._web_service:
+            try:
+                from .. import web_timing
+                self._web_med = web_timing.medians(self._web_service)
+            except Exception:  # noqa: BLE001
+                self._web_med = None
 
     # --- mutasi (dipanggil dari worker) ---
     def add_narasi(self, text: str) -> None:
@@ -547,6 +559,7 @@ class TurnView:
             self.all_steps.append(rec)
         self.tool = name
         self.phase = _PHASE.get(name, "bekerja")
+        self.phase_since = time.time()
         # Bekukan langkah lama ke riwayat agar region live tak tumbuh tanpa batas.
         for kind, val in self._overflow():
             if kind == "step" and self.commit:
@@ -564,6 +577,7 @@ class TurnView:
         rec["_nlines"] = sum(1 for ln in rec["_lines"] if ln.strip())
         self.tool = None
         self.phase = "berpikir"
+        self.phase_since = time.time()
 
     def note_retry(self, wait: float, msg: str) -> None:
         self.retry_until = time.time() + wait
@@ -572,8 +586,9 @@ class TurnView:
     def note_phase(self, text: str) -> None:
         """Set fase status langsung (dipakai connector web: 'menjawab', dsb).
         Diabaikan saat ada tool berjalan supaya fase tool tak tertimpa."""
-        if self.tool is None and text:
+        if self.tool is None and text and text != self.phase:
             self.phase = text
+            self.phase_since = time.time()   # patok waktu fase baru (untuk ETA)
 
     def toggle(self) -> None:
         """Ctrl+R (cadangan): buka/tutup SEMUA hasil sekaligus."""
@@ -721,13 +736,59 @@ class TurnView:
             f"[#89b4fa]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f9e2af]⚡ {tok}[/] "
             f"[dim]token[/]{effseg}{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
+        rows = [status]
+        # Baris ETA sadar-fase (hanya connector web dgn riwayat cukup).
+        eta = self._web_eta_line(now) if self._web_service else None
+        if eta is not None:
+            rows.append(eta)
         # Tips bergantian (tiap 10 dtk) — baru muncul setelah beberapa detik agar
         # giliran singkat tak sempat kedip-kedip tips.
         if el > 4:
             tip = _TIPS[int(el / 10) % len(_TIPS)]
-            return Group(status, _oneline(Text(f"  ✦ tips: {tip}",
-                                               style="dim italic")))
-        return status
+            rows.append(_oneline(Text(f"  ✦ tips: {tip}", style="dim italic")))
+        return rows[0] if len(rows) == 1 else Group(*rows)
+
+    @staticmethod
+    def _bar(frac: float, width: int = 12) -> str:
+        frac = max(0.0, min(frac, 1.0))
+        fill = int(round(frac * width))
+        return (f"[#a6e3a1]{'█' * fill}[/]"
+                f"[#45475a]{'░' * (width - fill)}[/]")
+
+    def _web_eta_line(self, now: float):
+        """Baris ETA SADAR-FASE untuk connector web — dijaga JUJUR:
+
+        - fase 'berpikir' (tak terprediksi): cuma hint deskriptif dari median
+          riwayat ('biasanya mulai menjawab ~Xs'), TANPA hitung-mundur;
+        - fase 'menjawab' (ada sinyal token nyata): bar + '≈Xs lagi (perkiraan)',
+          bar dibatasi 95% supaya tak pernah klaim 100% sebelum benar-benar
+          selesai; begitu lewat perkiraan ia berganti 'lebih lama dari biasanya…'
+          alih-alih angka yang meleset.
+
+        None -> tak ada baris (fase lain, atau sampel riwayat belum cukup)."""
+        med = self._web_med
+        if not med:
+            return None
+        ph_el = now - self.phase_since
+        if self.phase == "berpikir":
+            s = med["start"]
+            if ph_el <= max(s * 1.5, s + 3):
+                txt = f"biasanya mulai menjawab ~{s:.0f}s"
+            else:
+                txt = f"biasanya ~{s:.0f}s — kali ini agak lama, ditunggu ya"
+            return _oneline(Text.from_markup(f"     [dim #6c7086]{txt}[/]"))
+        if self.phase == "menjawab":
+            a = med["answer"]
+            eta = a - ph_el
+            if eta >= 1:
+                bar = self._bar(min(ph_el / a, 0.95) if a > 0 else 0.0)
+                tail = f"≈{eta:.0f}s lagi (perkiraan)"
+            else:
+                bar = self._bar(0.95)
+                tail = "lebih lama dari biasanya…"
+            return _oneline(Text.from_markup(
+                f"     {bar}  [dim #6c7086]{tail}[/]"))
+        return None
 
 
 # ---------------------------------------------------------------------------

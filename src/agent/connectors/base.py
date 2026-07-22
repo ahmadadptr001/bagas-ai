@@ -932,6 +932,7 @@ class WebConnector:
         # Jawaban sudah MULAI mengalir -> ubah fase jadi "menjawab" (bukan diam
         # di "berpikir"), supaya terminal mencerminkan keadaan sebenarnya.
         status(f"{self.label} sedang menjawab…")
+        _t_started = time.time()   # batas fase berpikir->menjawab (untuk ETA)
 
         # --- pantau teks balasan terakhir sampai stabil ---
         last = ""
@@ -983,6 +984,15 @@ class WebConnector:
                 stable = 0
                 last = cur
             page.wait_for_timeout(self._poll_ms)
+
+        # Rekam waktu NYATA turn ini -> dasar ETA yang jujur (lihat web_timing):
+        # start_latency = durasi fase berpikir, answer_dur = durasi fase menjawab.
+        try:
+            from .. import web_timing
+            web_timing.record(self.service, _t_started - t0,
+                              time.time() - _t_started)
+        except Exception:  # noqa: BLE001 - statistik tak boleh ganggu jawaban
+            pass
 
         # Catat ID percakapan yang sedang dipakai (untuk fitur bersih-bersih).
         self.last_chat_id = self.current_chat_id(page)
