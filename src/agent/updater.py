@@ -333,14 +333,21 @@ def _schedule_post_exit_install(repo: Path, argv: list[str]) -> bool:
     Return True bila pendamping berhasil dilepas."""
     log = config.CONFIG_HOME / _PENDING_LOG
     skrip = config.CONFIG_HOME / "pembaruan_tertunda.py"
+    # --quiet DIBUANG untuk jalur terjadwal: bila gagal, log HARUS memuat
+    # sebabnya. Terbukti perlu — log sebelumnya cuma berisi "GAGAL" tanpa satu
+    # baris pun penjelasan, sehingga kegagalan berulang mustahil ditelusuri.
+    bersih = [a for a in argv if a != "--quiet"]
+    exes = [str(d / f"{n}.exe") for d in _script_dirs() for n in _SCRIPT_NAMES]
     kode = (
         "import os, subprocess, sys, time\n"
         f"induk = {os.getpid()}\n"
-        f"argv = {argv!r}\n"
+        f"argv = {bersih!r}\n"
         f"log = {str(log)!r}\n"
         f"cwd = {str(repo)!r}\n"
-        # Tunggu induk benar-benar keluar. Batas 15 menit supaya pendamping tak
-        # jadi proses abadi bila bagas-ai dibiarkan terbuka semalaman.
+        f"exes = {exes!r}\n"
+        "catatan = []\n"
+        # 1) Tunggu induk keluar. Batas 15 menit supaya pendamping tak jadi
+        #    proses abadi bila bagas-ai dibiarkan terbuka semalaman.
         "batas = time.time() + 900\n"
         "while time.time() < batas:\n"
         "    try:\n"
@@ -350,17 +357,48 @@ def _schedule_post_exit_install(repo: Path, argv: list[str]) -> bool:
         "    time.sleep(1.0)\n"
         "else:\n"
         "    sys.exit(0)\n"
-        "time.sleep(2.0)\n"   # beri Windows waktu melepas kunci image section
-        "try:\n"
-        "    r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,\n"
-        "                       timeout=900)\n"
-        "    teks = (r.stdout or '') + (r.stderr or '')\n"
-        "    hasil = 'SUKSES' if r.returncode == 0 else 'GAGAL'\n"
-        "except Exception as exc:\n"
-        "    teks, hasil = repr(exc), 'GAGAL'\n"
+        # 2) Menunggu SATU pid saja TIDAK cukup, dan ini terbukti gagal di
+        #    pemakaian nyata: pengguna menutup bagas-ai lalu MEMBUKANYA LAGI,
+        #    dan instance baru mengunci exe yang sama sehingga pip tetap kena
+        #    WinError 32. Jadi tunggu sampai exe-nya benar-benar bisa dibuka
+        #    untuk ditulis — itu ukuran langsung "tak ada yang memakai".
+        "def bebas():\n"
+        "    for p in exes:\n"
+        "        if not os.path.exists(p):\n"
+        "            continue\n"
+        "        try:\n"
+        "            open(p, 'ab').close()\n"
+        "        except OSError:\n"
+        "            return False\n"
+        "    return True\n"
+        "tunggu = time.time() + 900\n"
+        "while time.time() < tunggu and not bebas():\n"
+        "    time.sleep(2.0)\n"
+        # 3) Tetap diulang beberapa kali: bagas-ai bisa dibuka lagi tepat di
+        #    sela antara pemeriksaan dan pemasangan.
+        "hasil = 'GAGAL'\n"
+        "for ke in range(6):\n"
+        "    if not bebas():\n"
+        "        catatan.append('percobaan %d: exe masih terkunci' % (ke + 1))\n"
+        "        time.sleep(20.0)\n"
+        "        continue\n"
+        "    try:\n"
+        "        r = subprocess.run(argv, cwd=cwd, capture_output=True,\n"
+        "                           text=True, timeout=900)\n"
+        "        keluaran = (r.stdout or '') + (r.stderr or '')\n"
+        "        if r.returncode == 0:\n"
+        "            hasil = 'SUKSES'\n"
+        "            catatan.append(keluaran[-2000:])\n"
+        "            break\n"
+        "        catatan.append('percobaan %d gagal:' % (ke + 1))\n"
+        "        catatan.append(keluaran[-2000:])\n"
+        "    except Exception as exc:\n"
+        "        catatan.append('percobaan %d error: %r' % (ke + 1, exc))\n"
+        "    time.sleep(20.0)\n"
         "try:\n"
         "    open(log, 'w', encoding='utf-8').write(\n"
-        "        time.strftime('%Y-%m-%d %H:%M:%S') + ' ' + hasil + '\\n' + teks)\n"
+        "        time.strftime('%Y-%m-%d %H:%M:%S') + ' ' + hasil + chr(10)\n"
+        "        + chr(10).join(catatan))\n"
         "except OSError:\n"
         "    pass\n"
     )
