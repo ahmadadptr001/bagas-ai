@@ -57,7 +57,7 @@ class Memory:
         percakapan sebelumnya meski barusan terjadi error). Yang diperbaiki:
         setiap `assistant.tool_calls` harus diikuti respons tool untuk SEMUA
         panggilannya, dalam URUTAN yang sama dengan tool_calls, tanpa disela
-        pesan lain — sesuai syarat API OpenAI/NVIDIA. Panggilan yang belum
+        pesan lain — warisan bentuk pesan gaya OpenAI. Panggilan yang belum
         dijawab diberi respons sintetis; respons asli yang tercecer/terbalik
         ditata ulang ke posisi & urutan yang benar.
         """

@@ -1,9 +1,11 @@
 """Wizard login/setup interaktif untuk bagas-ai.
 
-Dipanggil lewat `bagas-ai login` (atau `bagas-ai setup`). Meminta API key NVIDIA,
-MEMVALIDASINYA langsung ke endpoint, lalu opsional menghubungkan bot Telegram —
-semuanya disimpan ke ~/.bagasai/.env. Dirancang agar mulus dipakai di laptop
-baru setelah instalasi satu-perintah.
+Dipanggil lewat `bagas-ai login` (atau `bagas-ai setup`). Yang ditanyakan cuma
+bot Telegram — dan itu pun OPSIONAL, karena bagas-ai tak lagi punya kredensial
+wajib: seluruh modelnya berbasis browser dan memakai akun yang sudah kamu
+pakai sehari-hari, login-nya lewat jendela Chrome saat model pertama kali
+dipilih. Langkah "tempel API key NVIDIA" beserta validasinya ke endpoint sudah
+DIHAPUS bersama model ber-API-key.
 """
 from __future__ import annotations
 
@@ -19,27 +21,18 @@ from . import config
 
 # Urutan penulisan key di file .env (agar rapi & mudah dibaca manusia).
 _ENV_ORDER = [
-    "NVIDIA_API_KEY",
-    "NVIDIA_BASE_URL",
     "CHAT_MODEL",
-    "VISION_MODEL",
     "TELEGRAM_BOT_TOKEN",
     "MAX_TOOL_ITERATIONS",
-    "TEMPERATURE",
     "ALLOW_CODE_EXEC",
     "CODE_EXEC_TIMEOUT",
-    "RETRY_MAX_SECONDS",
 ]
 
 _DEFAULTS = {
-    "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
-    "CHAT_MODEL": "z-ai/glm-5.2",
-    "VISION_MODEL": "meta/llama-3.2-90b-vision-instruct",
+    "CHAT_MODEL": "web/kimi",
     "MAX_TOOL_ITERATIONS": "8",
-    "TEMPERATURE": "0.6",
     "ALLOW_CODE_EXEC": "true",
     "CODE_EXEC_TIMEOUT": "30",
-    "RETRY_MAX_SECONDS": "300",
 }
 
 
@@ -58,8 +51,8 @@ def _read_env(path: Path) -> dict[str, str]:
 def _write_env(path: Path, data: dict[str, str]) -> None:
     lines = [
         "# Konfigurasi bagas-ai — dibuat oleh 'bagas-ai login'.",
-        "# Ambil API key NVIDIA gratis di https://build.nvidia.com (Get API Key).",
-        "# 100% NVIDIA cloud; tidak ada model lokal.",
+        "# Tidak ada API key: semua model bagas-ai lewat browser (login sekali",
+        "# di jendela Chrome). TELEGRAM_BOT_TOKEN hanya perlu bila memakai bot.",
         "",
     ]
     for k in _ENV_ORDER:
@@ -70,40 +63,6 @@ def _write_env(path: Path, data: dict[str, str]) -> None:
             lines.append(f"{k}={v}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def validate_nvidia_key(key: str) -> tuple[bool, str]:
-    """Cek API key secara BENAR via chat completion mungil (butuh auth).
-
-    Catatan: endpoint /v1/models NVIDIA bersifat publik (tidak memeriksa auth),
-    jadi TIDAK bisa dipakai memvalidasi key. Chat completion mengembalikan
-    401/403 bila key salah, sehingga inilah cek yang sahih.
-    """
-    url = config.NVIDIA_BASE_URL.rstrip("/") + "/chat/completions"
-    body = {
-        "model": "meta/llama-3.1-8b-instruct",  # kecil & cepat
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 1,
-        "temperature": 0,
-    }
-    try:
-        r = requests.post(
-            url,
-            headers={"Authorization": "Bearer " + key},
-            json=body,
-            timeout=45,
-        )
-    except requests.RequestException as e:
-        return False, f"koneksi gagal: {str(e)[:80]}"
-    if r.status_code in (401, 403):
-        return False, "key ditolak (401/403) — pastikan key benar & diawali 'nvapi-'"
-    if r.status_code == 200:
-        return True, "autentikasi berhasil"
-    # 429/5xx = key kemungkinan valid tapi sedang sibuk; anggap lolos agar tak
-    # menghalangi setup, beri catatan.
-    if r.status_code == 429 or r.status_code >= 500:
-        return True, f"key diterima (server sibuk, HTTP {r.status_code})"
-    return False, f"HTTP {r.status_code}: {r.text[:80]}"
 
 
 def validate_telegram(token: str) -> tuple[bool, str]:
@@ -144,72 +103,27 @@ def _prompt_secret(console: Console, message: str) -> str:
 
 
 def run(console: Console | None = None) -> bool:
-    """Jalankan wizard login interaktif. Return True bila API key tersimpan valid."""
+    """Wizard setup interaktif. Return True bila konfigurasi tersimpan.
+
+    Dulu mengembalikan True hanya bila API key valid. Kini tak ada kredensial
+    wajib, jadi wizard selalu berhasil selama file .env bisa ditulis — satu-
+    satunya pertanyaan (bot Telegram) boleh dilewati."""
     console = console or Console()
     env = _read_env(config.ENV_FILE)
     for k, v in _DEFAULTS.items():
         env.setdefault(k, v)
 
     title = Text("bagas-ai", style="bold magenta")
-    title.append("  ·  login / setup", style="dim")
+    title.append("  ·  setup", style="dim")
     console.print(Panel(title, border_style="magenta", padding=(0, 2)))
     console.print(
-        "  [dim]Ambil API key gratis di[/dim] "
-        "[cyan]https://build.nvidia.com[/cyan] [dim](Get API Key, awalan[/dim] "
-        "[bold]nvapi-[/bold][dim]).[/dim]\n"
+        "  [dim]Tak ada API key yang perlu diisi.[/dim] Semua model bagas-ai "
+        "lewat [bold]browser[/bold]\n"
+        "  [dim]— login sekali di jendela Chrome saat kamu memilih model "
+        "lewat[/dim] [bold cyan]/model[/bold cyan][dim].[/dim]\n"
     )
 
-    # --- 1. NVIDIA API key ---
-    existing = env.get("NVIDIA_API_KEY", "")
-    if existing and not existing.startswith("nvapi-xxxx"):
-        tail = existing[-6:]
-        console.print(f"  [green]● Key tersimpan[/green] [dim]…{tail}[/dim]")
-        try:
-            from InquirerPy import inquirer  # type: ignore
-
-            if not inquirer.confirm(
-                message="Ganti API key NVIDIA?", default=False
-            ).execute():
-                key = existing
-            else:
-                key = ""
-        except Exception:
-            key = existing
-    else:
-        key = ""
-
-    empties = 0
-    while True:
-        if not key:
-            try:
-                key = _prompt_secret(console, "Tempel NVIDIA API key:").strip()
-            except (EOFError, KeyboardInterrupt):
-                console.print("\n  [yellow]Dibatalkan.[/yellow]")
-                return False
-        if not key:
-            empties += 1
-            if empties >= 3:
-                console.print("  [red]Tidak ada key dimasukkan. Batal.[/red]")
-                return False
-            console.print("  [red]Key kosong.[/red] Coba lagi.\n")
-            continue
-        console.print("  [dim]Memeriksa key ke NVIDIA…[/dim]")
-        ok, info = validate_nvidia_key(key)
-        if ok:
-            console.print(f"  [bold green]✓ Key valid[/bold green] [dim]({info})[/dim]\n")
-            env["NVIDIA_API_KEY"] = key
-            break
-        console.print(f"  [red]✗ Key gagal:[/red] {info}\n")
-        try:
-            from InquirerPy import inquirer  # type: ignore
-
-            if not inquirer.confirm(message="Coba key lain?", default=True).execute():
-                return False
-        except Exception:
-            return False
-        key = ""
-
-    # --- 2. Telegram (opsional) ---
+    # --- Telegram (opsional) ---
     want_tg = False
     try:
         from InquirerPy import inquirer  # type: ignore
@@ -233,7 +147,8 @@ def run(console: Console | None = None) -> bool:
             ok, info = validate_telegram(token)
             if ok:
                 console.print(
-                    f"  [bold green]✓ Bot terhubung[/bold green] [dim]({info})[/dim]\n"
+                    f"  [bold green]✓ Bot terhubung[/bold green] "
+                    f"[dim]({info})[/dim]\n"
                 )
                 env["TELEGRAM_BOT_TOKEN"] = token
                 break
@@ -248,7 +163,7 @@ def run(console: Console | None = None) -> bool:
             except Exception:
                 break
 
-    # --- 3. Simpan ---
+    # --- Simpan ---
     _write_env(config.ENV_FILE, env)
     console.print(f"  [green]✔ Konfigurasi disimpan:[/green] [dim]{config.ENV_FILE}[/dim]")
     console.print(

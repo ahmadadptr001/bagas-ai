@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from ..core import Agent
 
-app = FastAPI(title="AI Agent (NVIDIA)", version="1.0.0")
+app = FastAPI(title="bagas-ai", version="1.0.0")
 
 # Satu Agent per session_id (in-memory; hilang saat server restart).
 _sessions: dict[str, Agent] = {}

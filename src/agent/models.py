@@ -1,16 +1,22 @@
-"""Daftar model NVIDIA yang tersedia + util untuk memilih model.
+"""Daftar model yang tersedia + util untuk memilih model.
 
-Semua model DI-HOST NVIDIA (integrate.api.nvidia.com), bukan lokal. Setiap
-model di daftar ini sudah diverifikasi ADA di katalog `/v1/models` untuk key
-ini dan mendukung alur kerja bagas-ai (chat + tool-calling). Dipakai oleh
-perintah /model & /effort di CLI dan oleh Agent.
+bagas-ai kini bermodalkan DUA hal saja: bot Telegram dan model AI web lewat
+browser. Tidak ada lagi model berbayar/ber-API-key: seluruh entri di bawah
+adalah CONNECTOR ke antarmuka chat berbasis browser (lihat agent/connectors),
+dijalankan lewat Playwright memakai akun milik pengguna sendiri.
 
-Catatan penting: tiap keluarga model punya CARA mengaktifkan mode "thinking"
-yang berbeda, jadi ModelSpec menyimpan `reasoning_style`:
-  - "nemotron": kirim chat_template_kwargs.enable_thinking + reasoning_budget
-                (keluarga NVIDIA Nemotron).
-  - "gpt_oss" : kirim reasoning_effort = low/medium/high (OpenAI gpt-oss).
-  - None      : model biasa / yang bernalar sendiri tanpa parameter khusus.
+Dulu daftar ini berisi ~20 model yang di-host NVIDIA (integrate.api.nvidia.com)
+dan connector web cuma pelengkap. Itu DIHAPUS seluruhnya — beserta API key,
+endpoint, mode /effort ala API (Nemotron reasoning_budget & gpt-oss
+reasoning_effort), dan tool vision berbasis VLM. Yang tersisa sengaja
+sesederhana ini: satu jenis model, satu cara kerja.
+
+Konsekuensi yang disengaja:
+  - tak ada lagi kredensial yang perlu diisi saat instalasi;
+  - /effort tidak lagi mengirim parameter API, melainkan MENGKLIK tombol mode
+    berpikir di situsnya (lihat WebConnector.web_actions);
+  - gambar tidak lagi dianalisis lewat model vision terpisah, melainkan
+    DILAMPIRKAN ke percakapan web (lihat attachments di core._run_connector).
 """
 from __future__ import annotations
 
@@ -18,287 +24,98 @@ import random
 from dataclasses import dataclass
 
 
-# --- Level effort per gaya reasoning ---
-# Nemotron: nama -> reasoning_budget (token). 0 = thinking dimatikan.
-NEMOTRON_EFFORT: dict[str, int] = {
-    "langsung": 0,
-    "ringkas": 4096,
-    "seimbang": 16384,
-    "mendalam": 32768,
-}
-# gpt-oss: nama -> nilai reasoning_effort resmi OpenAI (low/medium/high).
-GPTOSS_EFFORT: dict[str, str] = {
-    "ringkas": "low",
-    "seimbang": "medium",
-    "mendalam": "high",
-}
-
-# Kosakata & penjelasan tiap level (untuk menu /effort) — (judul, deskripsi, ikon).
-EFFORT_INFO: dict[str, tuple[str, str, str]] = {
-    "langsung": ("Langsung", "tanpa mode berpikir — jawaban paling cepat", "⚡"),
-    "ringkas": ("Ringkas", "berpikir singkat — gesit & hemat token", "🌤"),
-    "seimbang": ("Seimbang", "nalar secukupnya — pas untuk kebanyakan tugas", "⚖"),
-    "mendalam": ("Mendalam", "berpikir penuh — untuk soal kompleks (lebih lambat)", "🔬"),
-}
-
-
 @dataclass(frozen=True)
 class ModelSpec:
-    id: str  # ID model persis untuk dikirim ke API NVIDIA
+    id: str  # ID internal, selalu berbentuk "web/<service>"
     label: str  # nama tampilan
-    multimodal: bool = False  # bisa memproses gambar/video
-    reasoning_style: str | None = None  # None | "nemotron" | "gpt_oss"
-    note: str = ""  # keterangan singkat (kecepatan/keunggulan)
-    # Bila diisi (mis. "claude", "qwen"), model ini BUKAN model NVIDIA melainkan
-    # CONNECTOR ke AI web berbasis browser (lihat agent/connectors). Chat diarahkan
-    # ke situsnya lewat Playwright, bukan ke endpoint NVIDIA.
+    # Nama service connector ("claude", "qwen", "kimi") -> agent/connectors.
+    # Selalu terisi: semua model bagas-ai kini berbasis browser.
     connector: str = ""
+    multimodal: bool = True  # semua situs AI web menerima lampiran gambar
+    note: str = ""  # keterangan singkat
 
     @property
     def is_web(self) -> bool:
-        """True bila model ini connector web-AI (butuh browser + login), bukan API."""
+        """True bila model ini connector web-AI (butuh browser + login)."""
         return bool(self.connector)
 
-    @property
-    def reasoning(self) -> bool:
-        """True bila model punya mode thinking yang bisa diatur via /effort."""
-        return self.reasoning_style is not None
 
-    def supports_effort(self) -> bool:
-        return self.reasoning_style is not None
-
-    def effort_options(self) -> dict[str, int | str]:
-        if self.reasoning_style == "nemotron":
-            return dict(NEMOTRON_EFFORT)
-        if self.reasoning_style == "gpt_oss":
-            return dict(GPTOSS_EFFORT)
-        return {}
-
-    def default_effort(self) -> str | None:
-        if self.reasoning_style in ("nemotron", "gpt_oss"):
-            return "seimbang"
-        return None
-
-    def effort_info(self) -> list[tuple[str, str, str, str]]:
-        """Daftar (kunci, judul, deskripsi, ikon) untuk menu /effort — terurut."""
-        out = []
-        for key in self.effort_options():
-            title, desc, icon = EFFORT_INFO.get(key, (key.capitalize(), "", "•"))
-            out.append((key, title, desc, icon))
-        return out
-
-    def extra_body_for(self, effort: str | None) -> dict | None:
-        """Parameter tambahan sesuai gaya reasoning & mode terpilih."""
-        if self.reasoning_style == "nemotron":
-            opts = NEMOTRON_EFFORT
-            budget = opts.get(effort or "seimbang", 16384)
-            if budget <= 0:
-                return {"chat_template_kwargs": {"enable_thinking": False}}
-            return {
-                "chat_template_kwargs": {"enable_thinking": True},
-                "reasoning_budget": budget,
-            }
-        if self.reasoning_style == "gpt_oss":
-            level = GPTOSS_EFFORT.get(effort or "seimbang", "medium")
-            return {"reasoning_effort": level}
-        return None
-
-
-# Alias pendek -> spesifikasi model. Urutan menentukan nomor pada /model.
-# Semua entri di bawah sudah diuji: ADA di katalog & bisa tool-calling.
+# Alias pendek -> spesifikasi. Urutan menentukan nomor pada /model.
 MODELS: dict[str, ModelSpec] = {
-    # --- Serba-guna (default & cepat) ---
-    "glm": ModelSpec(
-        id="z-ai/glm-5.2",
-        label="GLM-5.2",
-        note="Pilihan utama: jago agentic & coding — tugas kompleks banyak langkah",
+    "kimi-web": ModelSpec(
+        id="web/kimi",
+        label="Kimi (web)",
+        connector="kimi",
+        note="Via browser kimi.com — jago agentic & coding, konteks panjang",
     ),
-    "llama33": ModelSpec(
-        id="meta/llama-3.3-70b-instruct",
-        label="Meta Llama-3.3 70B",
-        note="Andal & seimbang — tugas umum sehari-hari",
-    ),
-    "llama4": ModelSpec(
-        id="meta/llama-4-maverick-17b-128e-instruct",
-        label="Meta Llama-4 Maverick",
-        multimodal=True,
-        note="Multimodal (teks+gambar) — analisis campuran teks & gambar",
-    ),
-    "llama31-70b": ModelSpec(
-        id="meta/llama-3.1-70b-instruct",
-        label="Meta Llama-3.1 70B",
-        note="Stabil & matang — tugas umum",
-    ),
-    "llama31-8b": ModelSpec(
-        id="meta/llama-3.1-8b-instruct",
-        label="Meta Llama-3.1 8B",
-        note="Sangat cepat & ringan — tanya-jawab singkat, hemat kuota",
-    ),
-    # --- Mistral ---
-    "mistral-large": ModelSpec(
-        id="mistralai/mistral-large-3-675b-instruct-2512",
-        label="Mistral-Large-3 675B",
-        note="Sangat pintar — penalaran mendalam & penulisan panjang",
-    ),
-    "mistral-medium": ModelSpec(
-        id="mistralai/mistral-medium-3.5-128b",
-        label="Mistral-Medium-3.5",
-        note="Seimbang cepat & pintar — serba bisa",
-    ),
-    "mistral-small": ModelSpec(
-        id="mistralai/mistral-small-4-119b-2603",
-        label="Mistral-Small-4",
-        note="Cepat — tugas ringan & respon kilat",
-    ),
-    "mistral-nemotron": ModelSpec(
-        id="mistralai/mistral-nemotron",
-        label="Mistral-Nemotron",
-        note="Efisien untuk agent & pemakaian tool",
-    ),
-    # --- Qwen ---
-    "qwen": ModelSpec(
-        id="qwen/qwen3.5-122b-a10b",
-        label="Qwen3.5 122B",
-        note="Penalaran & multibahasa kuat — matematika/analisis",
-    ),
-    "qwen-next": ModelSpec(
-        id="qwen/qwen3-next-80b-a3b-instruct",
-        label="Qwen3-Next 80B",
-        note="Efisien & konteks panjang — dokumen besar",
-    ),
-    # --- Agentic lain ---
-    "minimax": ModelSpec(
-        id="minimaxai/minimax-m3",
-        label="MiniMax-M3",
-        note="Penalaran panjang — perencanaan & pemecahan bertahap",
-    ),
-    # --- NVIDIA Nemotron (thinking via /effort) ---
-    "nemotron-ultra": ModelSpec(
-        id="nvidia/nemotron-3-ultra-550b-a55b",
-        label="Nemotron-3 Ultra 550B",
-        reasoning_style="nemotron",
-        note="Reasoning flagship — soal tersulit (atur kedalaman via /effort)",
-    ),
-    "nemotron-super": ModelSpec(
-        id="nvidia/nemotron-3-super-120b-a12b",
-        label="Nemotron-3 Super 120B",
-        reasoning_style="nemotron",
-        note="Reasoning kuat & lebih ringan dari Ultra",
-    ),
-    "nemotron49": ModelSpec(
-        id="nvidia/llama-3.3-nemotron-super-49b-v1.5",
-        label="Llama-3.3 Nemotron Super 49B",
-        reasoning_style="nemotron",
-        note="Reasoning seimbang berbasis Llama — hemat & pintar",
-    ),
-    "nemotron-nano": ModelSpec(
-        id="nvidia/nvidia-nemotron-nano-9b-v2",
-        label="Nemotron Nano 9B",
-        reasoning_style="nemotron",
-        note="Reasoning ringan & cepat — berpikir tanpa lambat",
-    ),
-    # --- OpenAI gpt-oss (thinking via reasoning_effort) ---
-    "gptoss120": ModelSpec(
-        id="openai/gpt-oss-120b",
-        label="GPT-OSS 120B",
-        reasoning_style="gpt_oss",
-        note="Reasoning gaya OpenAI — atur low/medium/high via /effort",
-    ),
-    "gptoss20": ModelSpec(
-        id="openai/gpt-oss-20b",
-        label="GPT-OSS 20B",
-        reasoning_style="gpt_oss",
-        note="Reasoning ringan & cepat",
-    ),
-    # --- Vision (analisis gambar; dipakai VISION_MODEL) ---
-    "llama-vision": ModelSpec(
-        id="meta/llama-3.2-90b-vision-instruct",
-        label="Llama-3.2 90B Vision",
-        multimodal=True,
-        note="Khusus analisis gambar — deskripsi & tanya-jawab foto",
-    ),
-    # --- Connector web-AI (via browser; butuh login sekali) ---
-    # Ini BUKAN model NVIDIA: chat diarahkan ke situs webnya lewat otomasi
-    # browser (Playwright). Jendela browser akan tampil untuk login pertama kali.
     "claude-web": ModelSpec(
         id="web/claude",
         label="Claude (web)",
         connector="claude",
-        note="Via browser claude.ai — butuh akun & login sekali (bukan NVIDIA)",
+        note="Via browser claude.ai — penalaran & penulisan kuat",
     ),
     "qwen-web": ModelSpec(
         id="web/qwen",
         label="Qwen (web)",
         connector="qwen",
-        note="Via browser chat.qwen.ai — butuh akun & login sekali (bukan NVIDIA)",
-    ),
-    "kimi-web": ModelSpec(
-        id="web/kimi",
-        label="Kimi (web)",
-        connector="kimi",
-        note="Via browser kimi.com — butuh akun & login sekali (bukan NVIDIA)",
+        note="Via browser chat.qwen.ai — multibahasa & cepat",
     ),
 }
 
 _ORDER = list(MODELS.keys())
 
+# Model bawaan bila tak ada preferensi tersimpan / preferensinya tak dikenal.
+DEFAULT_ID = MODELS[_ORDER[0]].id
+
 
 def resolve(name: str) -> ModelSpec:
-    """Cari ModelSpec dari alias, nomor (1..N), atau ID penuh.
-
-    Jika ID penuh tidak dikenal, tetap dibuat ModelSpec generik agar pengguna
-    bebas memakai model apa pun dari katalog NVIDIA.
-    """
+    """Cari ModelSpec dari alias, nomor (1..N), ID penuh, atau label."""
     key = name.strip().lower()
 
-    # Alias langsung.
     if key in MODELS:
         return MODELS[key]
 
-    # Nomor urut (1-based).
     if key.isdigit():
         idx = int(key) - 1
         if 0 <= idx < len(_ORDER):
             return MODELS[_ORDER[idx]]
 
-    # Cocokkan dengan ID penuh atau label.
     for spec in MODELS.values():
-        if key == spec.id.lower() or key == spec.label.lower():
+        if key in (spec.id.lower(), spec.label.lower(), spec.connector):
             return spec
 
-    # ID penuh yang tidak terdaftar -> pakai apa adanya.
-    if "/" in name:
-        return ModelSpec(id=name.strip(), label=name.strip())
-
+    # Dulu ID tak dikenal yang memuat "/" diterima apa adanya supaya pengguna
+    # bebas memakai model mana pun dari katalog NVIDIA. Kini tak ada katalog:
+    # menerima ID sembarangan hanya akan membuat giliran gagal saat dijalankan,
+    # jadi lebih baik ditolak di sini dengan daftar yang jelas.
     raise ValueError(
-        f"Model '{name}' tidak dikenal. Ketik /model untuk melihat daftar."
+        f"Model '{name}' tidak dikenal. Yang tersedia: "
+        + ", ".join(_ORDER)
+        + ". Ketik /model untuk memilih."
     )
 
 
 def spec_for_id(model_id: str) -> ModelSpec:
-    """Temukan ModelSpec berdasarkan ID (untuk model yang dipakai lewat .env)."""
+    """ModelSpec dari ID tersimpan (prefs/.env).
+
+    ID lama peninggalan era NVIDIA (mis. "z-ai/glm-5.2") tak lagi ada. Alih-alih
+    membuat ModelSpec palsu yang pasti gagal saat dipakai, kembalikan model
+    bawaan — pengguna lama otomatis mendarat di model yang benar-benar jalan.
+    """
     for spec in MODELS.values():
         if spec.id == model_id:
             return spec
-    return ModelSpec(id=model_id, label=model_id)
+    return MODELS[_ORDER[0]]
+
+
+def is_known_id(model_id: str) -> bool:
+    """True bila ID ini benar-benar ada di daftar (bukan hasil pemetaan ulang)."""
+    return any(spec.id == model_id for spec in MODELS.values())
 
 
 def random_fallback(exclude: set[str] | frozenset[str] = frozenset()) -> ModelSpec | None:
-    """Pilih model pengganti secara ACAK dari katalog (sengaja tanpa pola).
-
-    Dipakai setiap kali bagas-ai harus MENGALIHKAN model otomatis: naik-kelas
-    karena macet/ngeloop, atau migrasi dari model yang dihapus. Pilihan acak
-    mencegah kegagalan selalu jatuh ke model urutan berikutnya yang sama dan
-    menyebarkan beban antar model. Model khusus-vision (multimodal tanpa
-    reasoning) dilewati. None bila semua kandidat ada di `exclude`.
-    """
-    pool = [
-        spec
-        for spec in MODELS.values()
-        if spec.id not in exclude
-        and not spec.connector  # connector web (browser) jangan dipakai auto-fallback
-        and not (spec.multimodal and not spec.reasoning)
-    ]
+    """Model pengganti ACAK. None bila semua kandidat ada di `exclude`."""
+    pool = [spec for spec in MODELS.values() if spec.id not in exclude]
     return random.choice(pool) if pool else None
 
 
@@ -309,22 +126,11 @@ def catalog() -> list[tuple[int, str, ModelSpec]]:
 
 def list_text(current_id: str | None = None) -> str:
     """Daftar model siap tampil untuk perintah /model."""
-    lines = ["Model tersedia (semua di-host NVIDIA):"]
+    lines = ["Model tersedia (semua via browser — butuh login sekali):"]
     for i, key in enumerate(_ORDER, start=1):
         spec = MODELS[key]
-        tags = []
-        if spec.connector:
-            tags.append("🌐 web (butuh login browser)")
-        if spec.multimodal:
-            tags.append("multimodal")
-        if spec.reasoning:
-            tags.append("thinking")
-        if spec.note:
-            tags.append(spec.note)
-        tag = f"  [{', '.join(tags)}]" if tags else ""
+        tag = f"  [{spec.note}]" if spec.note else ""
         mark = "  <- aktif" if current_id and spec.id == current_id else ""
-        lines.append(f"  {i:>2}. {key:16s} {spec.label} ({spec.id}){tag}{mark}")
-    lines.append(
-        "Pilih: /model <nama|nomor|id>   contoh: /model glm  atau  /model 2"
-    )
+        lines.append(f"  {i:>2}. {key:12s} {spec.label}{tag}{mark}")
+    lines.append("Pilih: /model <nama|nomor>   contoh: /model kimi-web  atau  /model 1")
     return "\n".join(lines)

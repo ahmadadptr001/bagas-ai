@@ -4,7 +4,7 @@ Dipasang sebagai perintah `bagas-ai` (lihat pyproject.toml). Penggunaan:
 
     bagas-ai            # chat di terminal (default)
     bagas-ai chat       # sama dengan di atas
-    bagas-ai login      # wizard: masukkan API key NVIDIA (+ Telegram opsional)
+    bagas-ai login      # wizard: hubungkan bot Telegram (opsional)
     bagas-ai update     # cek & terapkan pembaruan dari GitHub
     bagas-ai telegram   # jalankan bot Telegram
     bagas-ai api        # jalankan server API (FastAPI)
@@ -38,12 +38,12 @@ except Exception:  # noqa: BLE001 - belum terpasang / metadata rusak
     __version__ = "0.0.0+dev"
 
 HELP = f"""\
-bagas-ai v{__version__} — AI agent serbaguna (NVIDIA free API)
+bagas-ai v{__version__} — AI agent serbaguna (model via browser)
 
 Penggunaan:
   bagas-ai              Buka sesi chat BARU di folder saat ini
   bagas-ai --resume     Lanjutkan percakapan terakhir di folder ini
-  bagas-ai login        Wizard: masukkan API key NVIDIA (+ Telegram opsional)
+  bagas-ai login        Wizard: hubungkan bot Telegram (opsional)
   bagas-ai add-dir <p>  Tambah folder konteks agar bagas-ai memahaminya
   bagas-ai update       Cek & terapkan pembaruan dari GitHub
   bagas-ai telegram     Jalankan bot Telegram
@@ -58,7 +58,7 @@ Project : {config.PROJECT_ROOT}   (folder terminal aktif = root project)
 
 
 def _cmd_login() -> None:
-    """Wizard login interaktif (validasi key ke NVIDIA + Telegram opsional)."""
+    """Wizard setup interaktif (bot Telegram opsional; tak ada API key)."""
     from .setup_wizard import run as run_wizard
 
     try:
@@ -193,13 +193,9 @@ def _enforce_update() -> None:
     print("  Lanjut pakai versi sekarang; coba `bagas-ai update` nanti.\n")
 
 
-def _need_key() -> bool:
-    if config.has_api_key():
-        return False
-    print("[!] NVIDIA_API_KEY belum diisi.")
-    print("   Jalankan: bagas-ai login   (wizard memandu memasukkan API key)")
-    print("   Ambil key gratis di https://build.nvidia.com\n")
-    return True
+# _need_key() DIHAPUS: bagas-ai tak lagi punya kredensial wajib. Model dipilih
+# lewat /model lalu login dilakukan SEKALI di jendela browser, jadi tak ada lagi
+# gerbang "isi API key dulu" sebelum chat/telegram/api boleh dijalankan.
 
 
 def _preload_with_bar() -> None:
@@ -266,16 +262,12 @@ def main() -> None:
         return
 
     if mode in ("chat", "cli"):
-        if _need_key():
-            sys.exit(1)
         _enforce_update()    # paksa update bila cek latar menemukan pembaruan
         _preload_with_bar()  # bar loading BERTAHAP selama impor pustaka (~1 dtk)
         from .interfaces.cli import main as run
         run(resume=resume)
         return
     if mode == "telegram":
-        if _need_key():
-            sys.exit(1)
         from . import osinfo
         osinfo.sync_to_memory()  # deteksi & simpan OS (senyap) untuk penyesuaian perintah
         osinfo.sync_hardware_to_memory()  # spek laptop: lokal, sekali saja
@@ -283,8 +275,6 @@ def main() -> None:
         run()
         return
     if mode == "api":
-        if _need_key():
-            sys.exit(1)
         from . import osinfo
         osinfo.sync_to_memory()
         osinfo.sync_hardware_to_memory()

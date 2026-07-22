@@ -26,22 +26,21 @@ console = Console()
 
 def main() -> None:
     console.clear()
-    ok = config.has_api_key()
+    # Tak ada lagi kredensial yang bisa "kosong": semua model lewat browser,
+    # jadi bagas-ai selalu siap dipakai begitu terpasang.
+    ok = True
 
     header = Text("bagasAI", style="bold magenta")
     header.append("  —  aktivasi", style="dim")
 
     status = Text()
-    if ok:
-        status.append("● AKTIF\n", style="bold green")
-    else:
-        status.append("● BELUM SIAP (API key kosong)\n", style="bold red")
+    status.append("● AKTIF\n", style="bold green")
 
     info = Text()
     info.append("Model default : ", style="bold")
     info.append(f"{models.spec_for_id(config.CHAT_MODEL).label}\n", style="cyan")
-    info.append("Endpoint      : ", style="bold")
-    info.append(f"{config.NVIDIA_BASE_URL}\n", style="dim")
+    info.append("Mode          : ", style="bold")
+    info.append("browser (login sekali via /model)\n", style="dim")
     info.append("Config        : ", style="bold")
     info.append(f"{config.CONFIG_HOME}\n", style="dim")
     info.append("Project root  : ", style="bold")
@@ -60,8 +59,10 @@ def main() -> None:
         tip.append(" untuk melanjutkan.", style="dim")
     else:
         tip.append("Jalankan ", style="dim")
-        tip.append("bagasai setup", style="bold cyan")
-        tip.append(" lalu isi NVIDIA_API_KEY.", style="dim")
+        tip.append("bagasai", style="bold cyan")
+        tip.append(" lalu pilih model lewat ", style="dim")
+        tip.append("/model", style="bold cyan")
+        tip.append(" — login browser sekali saja.", style="dim")
 
     console.print(
         Panel(

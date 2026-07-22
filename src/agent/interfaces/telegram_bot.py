@@ -29,7 +29,6 @@ from telegram.ext import (
 
 from .. import config, interaction, longmem, models, projectindex, telegram_perms
 from ..core import Agent
-from ..tools import vision
 
 # Ekstensi gambar yang otomatis DIKIRIM sebagai foto (bukan teks/data URI).
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
@@ -383,8 +382,16 @@ def build_application(on_event: OnEvent | None = None) -> Application:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "image.jpg"
             await tg_file.download_to_drive(str(path))
-            reply = await _run_with_typing(update, context, vision.analyze_image,
-                                           path, caption)
+            # Foto DILAMPIRKAN ke percakapan web milik sesi ini, bukan dikirim ke
+            # model vision terpisah seperti dulu. Bedanya nyata: gambar masuk ke
+            # percakapan yang SAMA, jadi AI web bisa mengaitkannya dengan tugas
+            # yang sedang berjalan dan bahkan menindaklanjuti dengan tool —
+            # sementara panggilan VLM sekali-pakai hanya bisa mendeskripsikan.
+            agent = _get_agent(update.effective_chat.id)
+            reply = await _run_with_typing(
+                update, context,
+                lambda teks: agent.run(teks, attachments=[str(path)]),
+                caption)
         emit("out", reply)
         await _reply_long(update, reply)
 
@@ -595,7 +602,6 @@ class TelegramService:
 
 def main() -> None:
     """Mode berdiri sendiri: `bagas-ai telegram` (polling di thread utama)."""
-    config.require_api_key()
     if not config.TELEGRAM_BOT_TOKEN:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN belum diisi di .env. Dapatkan dari @BotFather."

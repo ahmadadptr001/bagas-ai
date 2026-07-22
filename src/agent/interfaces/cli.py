@@ -223,7 +223,7 @@ def _fmt_elapsed(sec: float) -> str:
 
 def _web_phase(msg: str) -> str:
     """Ringkas status connector web jadi KATA FASE pendek untuk baris status,
-    supaya tampilannya seragam dengan giliran model NVIDIA."""
+    supaya tampilannya seragam antar layanan web."""
     m = (msg or "").lower()
     if "menjawab" in m:
         return "menjawab"
@@ -434,7 +434,7 @@ class Status:
             left = self.retry_until - now
             t = Text()
             t.append(f"  {frame} ", style="bold #f9e2af")
-            t.append("NVIDIA sibuk — menunggu lalu melanjutkan", style="#f9e2af")
+            t.append("layanan sibuk — menunggu lalu melanjutkan", style="#f9e2af")
             t.append(f"  {left:.0f}s", style="bold #fab387")
             if self.retry_msg:
                 t.append(f"  ·  {self.retry_msg}", style="dim #f9e2af")
@@ -723,7 +723,7 @@ class TurnView:
         if now < self.retry_until:
             left = self.retry_until - now
             return _oneline(Text.from_markup(
-                f"  [bold #f9e2af]{frame}[/] [#f9e2af]NVIDIA sibuk — menunggu lalu "
+                f"  [bold #f9e2af]{frame}[/] [#f9e2af]layanan sibuk — menunggu lalu "
                 f"melanjutkan[/] [bold #fab387]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]"))
         target = float(self.agent.tokens_live)
         self.disp += (target - self.disp) * 0.30
@@ -965,7 +965,6 @@ def _models_panel(current_id: str) -> Panel:
 # Loop utama
 # ---------------------------------------------------------------------------
 def main(resume: bool = False) -> None:
-    config.require_api_key()
     console.clear()
     show_logo()          # tampil segera setelah preload -> pengguna tahu app hidup
     console.print()
@@ -1018,9 +1017,9 @@ def main(resume: bool = False) -> None:
             pass
 
     threading.Thread(target=_bg_build_map, daemon=True).start()
-    # Panaskan openai di LATAR (impornya ~1.9 dtk) supaya respons PERTAMA tak
-    # tertunda oleh impor — selesai jauh sebelum pengguna selesai mengetik.
-    threading.Thread(target=llm._oa, daemon=True).start()
+    # Pemanasan impor `openai` DIHAPUS bersama klien API — pustaka itu tak lagi
+    # dipakai sama sekali. (Padanannya untuk jalur browser sudah ada di tempat
+    # lain: sesi Playwright dihidupkan sekali lalu dipertahankan antar giliran.)
     pout(_banner(agent, resumed), bottom=0)
     if resumed:
         console.print(Padding(Rule("[dim]percakapan sebelumnya[/dim]",
@@ -1414,9 +1413,11 @@ def main(resume: bool = False) -> None:
             console.print(f"  [dim]🌐 {n} percakapan di AI web ikut dihapus.[/dim]")
 
     def _revert_model(prev_model_id: str) -> None:
-        # Jangan "kembali" ke model web lain (sama-sama butuh koneksi) — pakai
-        # model NVIDIA default agar pengguna selalu punya model yang pasti jalan.
-        if models.spec_for_id(prev_model_id).is_web:
+        # Seluruh model kini berbasis browser, jadi tak ada lagi model "pasti
+        # jalan tanpa koneksi" untuk dijadikan pelabuhan. Yang masuk akal adalah
+        # kembali ke model SEBELUMNYA apa adanya; bila ID-nya sudah tak dikenal
+        # (mis. peninggalan katalog lama), spec_for_id memetakannya ke bawaan.
+        if not models.is_known_id(prev_model_id):
             prev_model_id = config.CHAT_MODEL
         try:
             console.print(
@@ -1432,7 +1433,7 @@ def main(resume: bool = False) -> None:
 
         Model CONNECTOR web (Claude/Qwen web) memakai jalur yang SAMA: ia kini
         bisa memanggil tool (edit file, jalankan perintah, dll) lewat protokol
-        teks, jadi langkah-langkahnya tampil persis seperti model NVIDIA."""
+        teks, jadi langkah-langkahnya tampil rapi di terminal."""
         steps.clear()
         step_ctr["n"] = 0
         cur_step.clear()
@@ -1686,9 +1687,10 @@ def main(resume: bool = False) -> None:
                 interrupted and not ans and err is None):
             # Benar-benar terputus (tak ada jawaban yang sempat jadi).
             console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
-        elif llm.is_rate_limit(err):
-            console.print("\n  [yellow]⏳ rate limit NVIDIA (~40 permintaan/menit) — "
-                          "tunggu ~1 menit lalu coba lagi[/yellow]\n")
+        # Cabang khusus rate-limit API DIHAPUS: batas pemakaian kini datang dari
+        # SITUS AI web, dan itu sudah ditangani lebih baik di core sebagai
+        # WebLimitError/WebBusyError — lengkap dengan kapan bisa dipakai lagi
+        # dan ulang-otomatis. Sisanya jatuh ke cabang error umum di bawah.
         elif err is not None:
             console.print(f"\n  [red]✖ error:[/red] {err}\n")
         else:
@@ -1754,7 +1756,9 @@ def main(resume: bool = False) -> None:
             console.print(Padding(_md(content.strip()), (0, 3, 1, 3)))
 
         def on_retry(attempt: int, wait: float, exc: Exception) -> None:
-            """NVIDIA rate-limit: bagas-ai menunggu lalu MELANJUTKAN, bukan gagal."""
+            """Dipertahankan demi kecocokan; jalur web tak memakai on_retry —
+            penantian saat server penuh ditangani di dalam core (WebBusyError
+            -> tunggu lalu ulangi) sehingga tak pernah sampai ke sini."""
             status_obj.note_retry(wait, f"percobaan ke-{attempt}")
 
         # Jalankan jawaban AI di THREAD LATAR BELAKANG supaya thread utama bebas
@@ -1811,9 +1815,10 @@ def main(resume: bool = False) -> None:
         if forced or interrupted or isinstance(err, (KeyboardInterrupt, llm.Cancelled)):
             # Memory sudah dirapikan & disimpan di dalam agent.run().
             console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
-        elif llm.is_rate_limit(err):
-            console.print("\n  [yellow]⏳ rate limit NVIDIA (~40 permintaan/menit) — "
-                          "tunggu ~1 menit lalu coba lagi[/yellow]\n")
+        # Cabang khusus rate-limit API DIHAPUS: batas pemakaian kini datang dari
+        # SITUS AI web, dan itu sudah ditangani lebih baik di core sebagai
+        # WebLimitError/WebBusyError — lengkap dengan kapan bisa dipakai lagi
+        # dan ulang-otomatis. Sisanya jatuh ke cabang error umum di bawah.
         elif err is not None:
             console.print(f"\n  [red]✖ error:[/red] {err}\n")
         else:

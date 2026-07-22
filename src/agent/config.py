@@ -61,25 +61,19 @@ def _get_bool(name: str, default: bool) -> bool:
     return val.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-# --- Kredensial & endpoint ---
-NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "").strip()
-NVIDIA_BASE_URL: str = os.getenv(
-    "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
-).strip()
-
-# --- Model (semua di-host NVIDIA) ---
-# Default chat: GLM-5.2. Bisa diganti via /model, dan model terakhir
-# yang dipakai tersimpan (lihat prefs.py).
-CHAT_MODEL: str = os.getenv("CHAT_MODEL", "z-ai/glm-5.2").strip()
-# Model DeepSeek DIHAPUS dari bagas-ai (sering gagal dipakai). Nilai lama yang
-# masih tersimpan di .env (mis. ditulis setup wizard versi lama) dialihkan
-# otomatis ke default agar pengguna tidak terjebak di model yang tak jalan.
-if "deepseek" in CHAT_MODEL.lower():
-    CHAT_MODEL = "z-ai/glm-5.2"
-# Model untuk analisis gambar (VLM NVIDIA resmi).
-VISION_MODEL: str = os.getenv(
-    "VISION_MODEL", "meta/llama-3.2-90b-vision-instruct"
-).strip()
+# --- Model ---
+# bagas-ai tidak lagi memakai model ber-API-key: SELURUH model kini berbasis
+# browser (lihat models.py & agent/connectors), memakai akun pengguna sendiri.
+# Karena itu tak ada NVIDIA_API_KEY / NVIDIA_BASE_URL / VISION_MODEL lagi, dan
+# tak ada kredensial apa pun yang perlu diisi saat instalasi.
+#
+# Nilai lama peninggalan era NVIDIA yang mungkin masih tersimpan di .env
+# (mis. "z-ai/glm-5.2") diabaikan: models.spec_for_id memetakannya ke model
+# bawaan, jadi pengguna lama otomatis mendarat di model yang benar-benar jalan
+# alih-alih terjebak di ID yang sudah tak ada.
+CHAT_MODEL: str = os.getenv("CHAT_MODEL", "web/kimi").strip()
+if not CHAT_MODEL.startswith("web/"):
+    CHAT_MODEL = "web/kimi"
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -114,37 +108,19 @@ REPO_BRANCH: str = os.getenv("BAGASAI_BRANCH", "master").strip()
 
 # --- Perilaku agent ---
 MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))
-# Jaring pengaman anti-loop-liar: batas TOTAL panggilan tool per giliran, dan
-# batas berapa kali panggilan tool yang PERSIS SAMA boleh terjadi sebelum agent
-# dipaksa berhenti memakai tool & menyimpulkan. Mencegah AI mengulang-ulang
-# pekerjaan atau ngelantur tanpa henti.
-MAX_TOOL_CALLS: int = int(os.getenv("MAX_TOOL_CALLS", "80"))
+# Jaring pengaman anti-loop-liar: berapa kali panggilan tool yang PERSIS SAMA
+# (atau kegagalan beruntun) boleh terjadi sebelum agent dipaksa berhenti memakai
+# tool & menyimpulkan. Mencegah AI mengulang-ulang pekerjaan tanpa henti.
 MAX_DUPLICATE_TOOL_CALLS: int = int(os.getenv("MAX_DUPLICATE_TOOL_CALLS", "3"))
-# AUTO-FALLBACK: bila AI mulai NGELOOP atau performanya menurun (mengulang tool
-# yang sama, menuliskan tool call sebagai teks, atau respons kosong berulang),
-# bagas-ai otomatis MENAIKKAN effort lalu MENGGANTI model — dengan KONTEKS
-# percakapan tetap dipertahankan (memory tak direset).
-AUTO_FALLBACK: bool = _get_bool("AUTO_FALLBACK", True)
-# Berapa kali boleh naik-kelas dalam satu giliran sebelum menyerah & menyimpulkan.
-MAX_ESCALATIONS: int = int(os.getenv("MAX_ESCALATIONS", "2"))
-TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.6"))
-# Timeout per request (detik). Model BESAR/REASONING (Nemotron-Ultra, Mistral-
-# Large) sering berpikir lama; 120s terlalu pendek -> request
-# di-timeout lalu DIULANG dari nol (malah makin lambat). Beri ruang lebih lega.
-REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "300"))
-# Total waktu (detik) bagas-ai bertahan mencoba ulang saat NVIDIA rate-limit /
-# throttle ("worker local total request limit reached", dll) SEBELUM menyerah.
-# Free tier ~40 RPM reset tiap menit, jadi default 5 menit cukup untuk pulih
-# lalu MELANJUTKAN progres tanpa membatalkan tugas.
-RETRY_MAX_SECONDS: float = float(os.getenv("RETRY_MAX_SECONDS", "300"))
-# WATCHDOG ANTI-MACET: bila stream TIDAK mengirim data apa pun (token, reasoning,
-# tool call) selama ini (detik), request dianggap MACET -> dibatalkan otomatis
-# lalu DIULANG. Berbeda dari REQUEST_TIMEOUT: ini mengukur JEDA antar-data, bukan
-# durasi total, jadi jawaban panjang tetap aman selama token terus mengalir.
-STREAM_STALL_TIMEOUT: float = float(os.getenv("STREAM_STALL_TIMEOUT", "90"))
-# Berapa kali macet boleh terjadi pada SATU langkah sebelum bagas-ai berhenti
-# mengulang di model yang sama dan NAIK KELAS (ganti effort/model) via core.
-MAX_STALLS_PER_CALL: int = int(os.getenv("MAX_STALLS_PER_CALL", "2"))
+
+# Setelan khusus endpoint API — TEMPERATURE, REQUEST_TIMEOUT, RETRY_MAX_SECONDS,
+# STREAM_STALL_TIMEOUT, MAX_STALLS_PER_CALL, MAX_TOOL_CALLS, AUTO_FALLBACK,
+# MAX_ESCALATIONS — DIHAPUS bersama model ber-API-key. Padanannya di jalur
+# browser hidup di tempat yang sesuai: batas waktu & polling ada di
+# WebConnector (start_timeout/answer_timeout), penantian saat server penuh
+# ditangani WebBusyError + tunggu-lalu-ulangi, dan penjaga anti-mengoceh ada di
+# _MAX_REPLY_CHARS. Nilai lama yang mungkin masih tertulis di .env diabaikan
+# begitu saja — tak perlu dibersihkan manual.
 
 # --- Keamanan ---
 ALLOW_CODE_EXEC: bool = _get_bool("ALLOW_CODE_EXEC", True)
@@ -185,16 +161,6 @@ CONNECTOR_KEEP_CHATS: int = int(os.getenv("CONNECTOR_KEEP_CHATS", "20"))
 
 ENV_FILE = CONFIG_HOME / ".env"
 
-
-def has_api_key() -> bool:
-    return bool(NVIDIA_API_KEY) and not NVIDIA_API_KEY.startswith("nvapi-xxxx")
-
-
-def require_api_key() -> None:
-    """Pastikan API key terisi; jika tidak, beri pesan yang jelas."""
-    if not has_api_key():
-        raise RuntimeError(
-            f"NVIDIA_API_KEY belum diisi.\n"
-            f"Jalankan '{APP_NAME} setup' lalu edit {ENV_FILE}\n"
-            f"Ambil key gratis di https://build.nvidia.com (Get API Key)."
-        )
+# has_api_key()/require_api_key() DIHAPUS bersama model ber-API-key. bagas-ai
+# tak lagi punya kredensial wajib: yang dibutuhkan cuma login browser (sekali,
+# lewat jendela Chrome) dan — bila ingin memakai Telegram — token botnya.

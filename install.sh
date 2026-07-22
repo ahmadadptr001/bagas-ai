@@ -7,12 +7,12 @@
 #   curl -fsSL <URL>/install.sh | bash   # dari mana saja (mengunduh repo)
 #
 # Skrip ini: cek Python, memasang bagas-ai sebagai perintah global, memastikan
-# PATH, lalu menjalankan wizard login untuk memasukkan API key NVIDIA.
+# PATH, lalu menjalankan wizard setup (bot Telegram opsional; tanpa API key).
 # ============================================================================
 set -euo pipefail
 
 BOLD=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; RED=$'\033[31m'
-CYN=$'\033[36m'; MAG=$'\033[35m'; RST=$'\033[0m'
+CYN=$'\033[36m'; MAG=$'\033[35m'; YLW=$'\033[33m'; RST=$'\033[0m'
 say()  { printf "%s\n" "$*"; }
 step() { printf "${MAG}${BOLD}» %s${RST}\n" "$*"; }
 ok()   { printf "  ${GRN}✓${RST} %s\n" "$*"; }
@@ -78,6 +78,17 @@ if [ -z "$INSTALLER" ]; then
 fi
 ok "Terpasang via $INSTALLER"
 
+# --- 3b. Browser Chromium untuk Playwright ---
+# WAJIB: seluruh model bagas-ai berjalan lewat browser. Paket pip `playwright`
+# hanya membawa pustakanya; binari browsernya harus diunduh terpisah. Tanpa
+# langkah ini, model pertama yang dipilih akan gagal dengan pesan teknis.
+step "Mengunduh browser Chromium (sekali saja, ~120 MB)"
+if "$PY" -m playwright install chromium; then
+  ok "Browser siap"
+else
+  warn "Gagal mengunduh Chromium — jalankan nanti: $PY -m playwright install chromium"
+fi
+
 # --- 4. Pastikan direktori bin/Scripts ada di PATH ---
 step "Memeriksa PATH"
 # Cari lokasi executable yang BENAR-BENAR terpasang (lebih andal daripada
@@ -142,8 +153,10 @@ else
   esac
 fi
 
-# --- 5. Wizard login (API key NVIDIA + Telegram opsional) ---
-printf "\n"; step "Login — masukkan API key"
+# --- 5. Wizard setup (bot Telegram opsional; TIDAK ada API key) ---
+# bagas-ai tak punya kredensial wajib: model dipilih lewat /model lalu login
+# dilakukan sekali di jendela browser.
+printf "\n"; step "Setup — bot Telegram (opsional)"
 if command -v bagas-ai >/dev/null 2>&1; then
   bagas-ai login || true
 else

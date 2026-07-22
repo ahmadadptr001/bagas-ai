@@ -6,7 +6,7 @@
 #   irm <URL>/install.ps1 | iex       # dari mana saja (mengunduh repo)
 #
 # Skrip ini: cek Python, memasang bagas-ai sebagai perintah global, memastikan
-# PATH, lalu menjalankan wizard login untuk memasukkan API key.
+# PATH, lalu menjalankan wizard setup (bot Telegram opsional; tanpa API key).
 # ============================================================================
 $ErrorActionPreference = "Stop"
 
@@ -74,6 +74,19 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { Err "pip install gagal."; exit 1 }
 }
 Ok "Terpasang"
+
+# --- 3b. Browser Chromium untuk Playwright ---
+# WAJIB: seluruh model bagas-ai berjalan lewat browser. Paket pip `playwright`
+# hanya membawa pustakanya; binari browsernya harus diunduh terpisah. Tanpa
+# langkah ini, model pertama yang dipilih akan gagal dengan pesan teknis.
+Step "Mengunduh browser Chromium (sekali saja, ~120 MB)"
+& $Py -m playwright install chromium
+if ($LASTEXITCODE -eq 0) {
+    Ok "Browser siap"
+} else {
+    Write-Host "  ! Gagal mengunduh Chromium - jalankan nanti:" -ForegroundColor Yellow
+    Write-Host "      $Py -m playwright install chromium" -ForegroundColor DarkGray
+}
 
 # --- 4. Pastikan folder Scripts ada di PATH (user) ---
 # Cari lokasi .exe yang BENAR-BENAR terpasang (penting untuk Python Store yang
@@ -158,9 +171,11 @@ if (-not $BinDir) {
     Write-Host "  Tutup lalu buka terminal BARU bila 'bagas-ai' belum dikenali." -ForegroundColor DarkGray
 }
 
-# --- 5. Wizard login (API key + Telegram opsional) ---
+# --- 5. Wizard setup (bot Telegram opsional; TIDAK ada API key) ---
+# bagas-ai tak punya kredensial wajib: model dipilih lewat /model lalu login
+# dilakukan sekali di jendela browser.
 Write-Host ""
-Step "Login - masukkan API key"
+Step "Setup - bot Telegram (opsional)"
 $bagas = Get-Command bagas-ai -ErrorAction SilentlyContinue
 if ($bagas) { & bagas-ai login } else { & $Py -m agent login }
 

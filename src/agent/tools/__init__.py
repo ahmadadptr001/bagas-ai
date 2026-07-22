@@ -14,7 +14,9 @@ from . import scripts_tool  # noqa: F401,E402
 from . import interact_tool  # noqa: F401,E402
 from . import screen  # noqa: F401,E402
 
-# vision.py sengaja TIDAK diimpor sebagai tool fungsi (dipakai langsung oleh
-# antarmuka), jadi tidak didaftarkan di sini.
+# vision.py DIHAPUS bersama model ber-API-key: ia mengirim gambar ke VLM NVIDIA
+# lewat endpoint terpisah. Gambar kini DILAMPIRKAN langsung ke percakapan web
+# (Agent.run(attachments=...) & take_screenshot), jadi situs AI web sendiri yang
+# melihatnya — dalam konteks percakapan yang sama, bukan panggilan sekali-pakai.
 
 __all__ = ["REGISTRY", "Tool", "execute", "get_schemas", "tool"]
