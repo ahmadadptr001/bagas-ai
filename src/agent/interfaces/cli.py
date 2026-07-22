@@ -874,7 +874,20 @@ def main(resume: bool = False) -> None:
     # mengetik. Pakai cache disk apa adanya (instan, mungkin sedikit basi), lalu
     # periksa kesegaran & bangun ulang DI THREAD LATAR; system prompt disegarkan
     # otomatis begitu peta terbaru siap.
-    _primed_map = projectindex.prime(config.PROJECT_ROOT)
+    #
+    # DIBUNGKUS dengan sengaja: instalasi PARSIAL/basi (update tak tuntas -> modul
+    # tak lagi cocok satu sama lain, mis. cli.py memanggil fungsi yang belum ada
+    # di projectindex.py versi lama) TAK boleh membuat bagas-ai gagal start dengan
+    # traceback mentah. Petanya toh dibangun ulang di latar; cukup lanjut & beri
+    # tahu sekali supaya penyebabnya (perlu reinstall bersih) jelas.
+    try:
+        _primed_map = projectindex.prime(config.PROJECT_ROOT)
+    except Exception as _prime_exc:  # noqa: BLE001
+        _primed_map = ""
+        console.print(
+            "  [yellow]⚠ peta proyek dilewati saat start[/] "
+            f"[dim](instalasi tampaknya belum tuntas: {type(_prime_exc).__name__}). "
+            "Tutup bagas-ai lalu reinstall/`bagasai update` bila ini berulang.)[/]")
 
     agent = Agent(session=session)   # instan: pakai peta cache / tanpa peta dulu
 
