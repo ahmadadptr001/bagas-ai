@@ -396,3 +396,71 @@ def analyze_image(path: str, question: str = "") -> str:
             f"berikutnya — kamu akan melihatnya sendiri.\n"
             f"Pertanyaan: {q}\n"
             f"{IMAGE_MARK} {target}")
+
+
+@tool
+def download_file(url: str, dest_path: str, max_mb: int = 50) -> str:
+    """UNDUH berkas dari internet ke proyek — gambar, sprite, suara, font, ikon, dataset, apa pun.
+
+    Inilah cara mengambil ASET. web_search hanya memberi cuplikan hasil
+    pencarian dan fetch_url hanya mengembalikan TEKS, jadi keduanya tak bisa
+    membawa berkas biner masuk ke proyek. Alur yang biasa: web_search untuk
+    menemukan sumbernya -> download_file untuk mengambilnya.
+
+    JANGAN cuma memberi tautan supaya pengguna mengunduh sendiri — unduh di
+    sini, lalu langsung pakai berkasnya di kode.
+
+    url: alamat berkasnya (http/https, tautan LANGSUNG ke berkas).
+    dest_path: tujuan simpan di proyek, mis. 'assets/img/mario.png'.
+    max_mb: batas ukuran (default 50 MB).
+    """
+    import requests
+
+    u = (url or "").strip()
+    if not u.lower().startswith(("http://", "https://")):
+        return "[error] url harus diawali http:// atau https://"
+    target = _safe_path(dest_path)
+    if target.is_dir():
+        return f"[error] {_display(target)} itu folder — sebutkan nama berkasnya."
+    batas = max(1, int(max_mb)) * 1024 * 1024
+    try:
+        r = requests.get(u, timeout=90, stream=True, allow_redirects=True,
+                         headers={"User-Agent": "Mozilla/5.0 (bagas-ai)"})
+    except requests.RequestException as e:
+        return f"[error] gagal mengunduh {u}: {e}"
+    if r.status_code >= 400:
+        return (f"[error] HTTP {r.status_code} dari {u} — tautannya mungkin "
+                "bukan tautan langsung ke berkas, atau butuh login.")
+
+    ctype = (r.headers.get("content-type") or "").split(";")[0]
+    # Banyak "tautan gambar" hasil pencarian sebenarnya halaman HTML. Menyimpannya
+    # sebagai .png menghasilkan berkas rusak yang baru ketahuan jauh kemudian.
+    if "html" in ctype and target.suffix.lower() not in (".html", ".htm", ""):
+        return (f"[error] {u} mengembalikan HALAMAN HTML, bukan berkas "
+                f"{target.suffix}. Itu tautan halaman, bukan tautan langsung ke "
+                "berkas. Buka halamannya dengan fetch_url untuk menemukan URL "
+                "berkas aslinya.")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    try:
+        with target.open("wb") as fh:
+            for bagian in r.iter_content(chunk_size=65536):
+                if not bagian:
+                    continue
+                total += len(bagian)
+                if total > batas:
+                    fh.close()
+                    target.unlink(missing_ok=True)
+                    return (f"[error] berkas melebihi {max_mb} MB — dibatalkan "
+                            "supaya proyek tak membengkak. Naikkan max_mb bila "
+                            "memang disengaja.")
+                fh.write(bagian)
+    except (OSError, requests.RequestException) as e:
+        target.unlink(missing_ok=True)
+        return f"[error] gagal menyimpan: {e}"
+    if total == 0:
+        target.unlink(missing_ok=True)
+        return f"[error] {u} mengembalikan berkas kosong."
+    return (f"Diunduh: {_display(target)} ({total} byte"
+            + (f", {ctype}" if ctype else "") + ").")

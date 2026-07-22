@@ -145,7 +145,12 @@ _TULIS_SH = re.compile(
     r"|\btee\b"
     r"|\bsed\b[^|]*-i\b"
     r"|\bpatch\b\s|\bapplypatch\b"
-    r"|\b(?:cp|mv)\s+[^\s|&]+\s+[^\s|&]+",
+    r"|\b(?:cp|mv)\s+[^\s|&]+\s+[^\s|&]+"
+    # Mengunduh aset lewat shell juga berakhir sebagai berkas yang tak terlihat
+    # pengguna, dan bergantung curl/wget kebetulan ada di PATH. download_file
+    # melakukannya lintas-platform sekaligus memeriksa ukuran & tipe isinya.
+    r"|\bcurl\b[^|]*\s-[oO]\b|\bwget\b[^|]*\s-O\b|\bwget\s+http"
+    r"|\bInvoke-WebRequest\b[^|]*-OutFile\b|\bStart-BitsTransfer\b",
     re.IGNORECASE,
 )
 # Tulisan ke lokasi SEMENTARA memang wajar (pemrosesan data, berkas kerja) dan
@@ -165,7 +170,9 @@ _PESAN_TOLAK = (
     '{{"path": ..., "content": "...isi lengkap..."}}\n'
     "  - menambah di akhir file             -> append_file\n"
     "  - pindah / salin / hapus             -> move_file / copy_file / "
-    "delete_file\n\n"
+    "delete_file\n"
+    "  - mengunduh aset dari internet       -> download_file "
+    '{{"url": ..., "dest_path": "assets/img/x.png"}}\n\n'
     "Alasannya: hanya tool file yang menampilkan diff berwarna (hijau = baris "
     "ditambah, merah = dihapus) di terminal pengguna SEBELUM file disentuh. "
     "Perubahan lewat skrip tak terlihat sama sekali, jadi pengguna kehilangan "
