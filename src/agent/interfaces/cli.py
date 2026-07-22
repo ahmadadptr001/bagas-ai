@@ -971,8 +971,10 @@ class TurnView:
 # ---------------------------------------------------------------------------
 def _banner(agent: Agent, resumed: bool) -> Panel:
     spec = agent.model_spec
-    kind = ("🧠 reasoning" if spec.reasoning
-            else "🖼 multimodal" if spec.multimodal else "🤖 chat")
+    # Seluruh model berbasis browser, jadi penanda jenis lama (reasoning /
+    # multimodal / chat) tak lagi membedakan apa pun. Yang berguna sekarang:
+    # menegaskan bahwa model ini berjalan lewat browser.
+    kind = "🌐 via browser"
     # Kolom label rata kanan (abu) + nilai berwarna -> sejajar & profesional.
     grid = Table.grid(padding=(0, 2))
     grid.add_column(justify="right", style="#7f849c", min_width=7)
@@ -1007,13 +1009,8 @@ def _models_panel(current_id: str) -> Panel:
     tbl.add_column("kemampuan", style="dim")
     tbl.add_column("aktif", justify="center")
     for i, key, spec in models.catalog():
-        tags = []
-        if spec.multimodal:
-            tags.append("multimodal")
-        if spec.reasoning:
-            tags.append("thinking")
         mark = "[bold green]●[/bold green]" if spec.id == current_id else ""
-        tbl.add_row(str(i), key, spec.label, ", ".join(tags) or "-", mark)
+        tbl.add_row(str(i), key, spec.label, spec.note or "-", mark)
     return Panel(tbl, title="[bold]🔀 Model tersedia[/bold]", border_style="cyan",
                  box=box.ROUNDED)
 
@@ -1915,14 +1912,9 @@ def main(resume: bool = False) -> None:
         connector web (pemanggil lalu menjalankan _connect_web), selain itu None."""
         def _describe(spec) -> str:
             # Satu baris: nama (rata) + badge kemampuan + SARAN "cocok untuk apa".
-            badge = ""
-            if spec.is_web:
-                badge += "🌐"
-            if spec.reasoning:
-                badge += "🧠"
-            if spec.multimodal:
-                badge += "🖼"
-            badge = f" {badge}" if badge else "  "
+            # Semua model kini web, jadi lencana reasoning/multimodal tak lagi
+            # membedakan apa pun — cukup satu penanda bahwa ini lewat browser.
+            badge = " 🌐" if spec.is_web else "  "
             note = f"  —  {spec.note}" if spec.note else ""
             return f"{spec.label:<28}{badge}{note}"
 
@@ -1946,32 +1938,13 @@ def main(resume: bool = False) -> None:
         return None
 
     def pick_effort() -> None:
-        # Model web (Claude/Qwen web): /effort MENGKLIK tombol di UI situsnya
-        # (ganti varian model & mode berpikir web), bukan parameter API.
-        if agent.model_spec.is_web:
-            pick_web_option()
-            return
-        if not agent.model_spec.supports_effort():
-            console.print(
-                f"  [dim]Model [bold]{agent.model_spec.label}[/bold] menjawab langsung "
-                "— tidak punya mode berpikir yang bisa diatur.[/dim]"
-            )
-            return
-        choices = [
-            Choice(key, f"{icon}  {title:<9} —  {desc}")
-            for key, title, desc, icon in agent.model_spec.effort_info()
-        ]
-        try:
-            sel = inquirer.select(
-                message="Mode berpikir — seberapa dalam bagas-ai menalar?",
-                choices=choices, default=agent.effort, pointer="❯",
-                long_instruction="Makin dalam = makin cermat tapi lebih lambat & boros token.",
-            ).execute()
-            agent.set_effort(sel)
-            title = dict((k, t) for k, t, _, _ in agent.model_spec.effort_info()).get(sel, sel)
-            console.print(f"  [green]✓ Mode berpikir: [bold]{title}[/bold][/green]")
-        except (KeyboardInterrupt, EOFError):
-            pass
+        """/effort — untuk model web berarti MENGKLIK tombol mode berpikir di UI
+        situsnya, bukan mengirim parameter API.
+
+        Cabang model ber-API-key (menu effort dari reasoning_style, set_effort)
+        DIHAPUS bersama katalog NVIDIA: seluruh model kini web, jadi satu-satunya
+        jalur yang tersisa adalah pick_web_option."""
+        pick_web_option()
 
     def pick_web_option() -> None:
         """/effort untuk model web: pilih tombol di UI situs (varian model /
@@ -2694,9 +2667,9 @@ def main(resume: bool = False) -> None:
         s = agent.tokens_session
         total = grand["base"] + s.total
         spec = agent.model_spec
-        kind = ("🌐" if spec.is_web else
-                "🧠" if spec.reasoning else ("🖼" if spec.multimodal else "🤖"))
-        eff = f" <eff>◇ {agent.effort}</eff>" if agent.effort else ""
+        # Seluruh model berbasis browser -> penanda selalu sama.
+        kind = "🌐" if spec.is_web else "🤖"
+        eff = ""
         sep = " <sep>│</sep> "
         return HTML(
             " <brand>⬢ bagas-ai</brand>"

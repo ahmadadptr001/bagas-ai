@@ -419,25 +419,21 @@ def build_application(on_event: OnEvent | None = None) -> Application:
         if not await _guard(update):
             return
         agent = _get_agent(update.effective_chat.id)
-        if not agent.model_spec.supports_effort():
-            await update.message.reply_text(
-                f"Model {agent.model_spec.label} menjawab langsung — tak punya "
-                f"mode berpikir yang bisa diatur.")
-            return
-        rows = [[InlineKeyboardButton(
-            f"{'● ' if k == agent.effort else ''}{icon} {title}"[:60],
-            callback_data=f"effort:{k}")]
-            for k, title, _desc, icon in agent.model_spec.effort_info()]
-        await update.message.reply_text("🎚 Mode berpikir:",
-                                        reply_markup=InlineKeyboardMarkup(rows))
+        # Mode berpikir kini diatur dengan MENGKLIK tombol di UI situs AI web
+        # (lihat WebConnector.web_actions) — butuh jendela browser di laptop,
+        # jadi tak bisa dijalankan dari Telegram. Menu effort ala API yang dulu
+        # ada di sini ikut hilang bersama model ber-API-key.
+        await update.message.reply_text(
+            f"🎚 Mode berpikir {agent.model_spec.label} diatur lewat tombol di "
+            "situsnya, jadi harus dari terminal: ketik /effort di sesi bagas-ai "
+            "pada laptop.")
 
     async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
             return
         agent = _get_agent(update.effective_chat.id)
-        eff = f"\n🎚 Effort: {agent.effort}" if agent.effort else ""
         await update.message.reply_text(
-            f"⬢ bagas-ai\n🤖 Model: {agent.model_spec.label}{eff}\n"
+            f"⬢ bagas-ai\n🌐 Model: {agent.model_spec.label} (via browser)\n"
             f"📁 Folder: {config.PROJECT_ROOT}\n"
             f"⚡ Token sesi: {agent.tokens_session.total:,}".replace(",", "."))
 
@@ -494,13 +490,8 @@ def build_application(on_event: OnEvent | None = None) -> Application:
                 emit("info", f"model diganti lewat Telegram -> {label}")
             except Exception as e:  # noqa: BLE001
                 await cq.edit_message_text(f"✖ gagal: {e}")
-        elif data.startswith("effort:"):
-            try:
-                val = agent.set_effort(data.split(":", 1)[1])
-                await cq.edit_message_text(f"✓ Mode berpikir: {val}")
-                emit("info", f"effort diganti lewat Telegram -> {val}")
-            except Exception as e:  # noqa: BLE001
-                await cq.edit_message_text(f"✖ gagal: {e}")
+        # Cabang "effort:" DIHAPUS bersama menunya — tombolnya tak pernah lagi
+        # dikirim, dan set_effort sudah tak ada di Agent.
 
     # concurrent_updates(True): WAJIB agar balasan pengguna atas pertanyaan agent
     # bisa diproses SELAGI handler pemicu masih menunggu (kalau tidak -> deadlock).
