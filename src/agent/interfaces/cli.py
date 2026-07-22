@@ -320,6 +320,43 @@ def _row(lineno: str, sign: str, text: str, style: str) -> None:
     console.print(line)
 
 
+# Tool yang MENGUBAH ISI file -> perubahannya ditampilkan sebagai diff berwarna
+# SEBELUM file disentuh. Dulu hanya write_file, sehingga perubahan lewat
+# edit_file/append_file lolos tanpa bisa ditinjau — padahal justru edit_file yang
+# dianjurkan untuk file besar, jadi tanpa ini kebanyakan perubahan jadi tak terlihat.
+_TOOL_DIFF = ("write_file", "edit_file", "append_file")
+
+
+def _isi_sebelum_sesudah(name: str, path: str, args: dict):
+    """(isi_lama, isi_baru, file_sudah_ada) untuk merender diff sebuah langkah.
+
+    Isi barunya DIHITUNG dari argumen — untuk edit_file/append_file hasil akhir
+    tak ada di args, jadi harus disimulasikan persis seperti yang akan dilakukan
+    tool-nya (lihat tools/files.py)."""
+    full = config.PROJECT_ROOT / path
+    exists = full.exists()
+    old = full.read_text(encoding="utf-8", errors="replace") if exists else ""
+    a = args if isinstance(args, dict) else {}
+    if name == "write_file":
+        return old, a.get("content", "") or "", exists
+    if name == "append_file":
+        return old, old + (a.get("content", "") or ""), exists
+    if name == "edit_file":
+        lama = a.get("old_text", "") or ""
+        baru = a.get("new_text", "") or ""
+        if not lama or lama not in old:
+            # Tool-nya akan menolak; jangan tampilkan diff yang menyesatkan.
+            return old, old, exists
+        jml = a.get("count", 1)
+        try:
+            jml = int(jml)
+        except (TypeError, ValueError):
+            jml = 1
+        n = old.count(lama) if jml == -1 else jml
+        return old, old.replace(lama, baru, n), exists
+    return old, old, exists
+
+
 def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200) -> None:
     """Tampilan editor: header status + line-numbered diff (bg hijau/merah)."""
     icon, label = ("✨", "dibuat") if is_new else ("📝", "diubah")
@@ -1314,11 +1351,8 @@ def main(resume: bool = False) -> None:
         cur_step.update(n=step_ctr["n"], name=name, args=args, start=time.time())
         p = args.get("path") if isinstance(args, dict) else None
         # Diff/preview substantif ditampilkan SEBELUM aksi (konten inti perubahan).
-        if name == "write_file" and p:
-            full = config.PROJECT_ROOT / p
-            exists = full.exists()
-            old = full.read_text(encoding="utf-8", errors="replace") if exists else ""
-            new = args.get("content", "") if isinstance(args, dict) else ""
+        if name in _TOOL_DIFF and p:
+            old, new, exists = _isi_sebelum_sesudah(name, p, args)
             _print_diff(p, old, new, is_new=not exists)
         elif name == "delete_file" and p:
             full = config.PROJECT_ROOT / p
@@ -1628,7 +1662,7 @@ def main(resume: bool = False) -> None:
             # Diff tulis/hapus dicetak (otomatis di ATAS region live) sbg konteks
             # perubahan, lalu menjadi bagian riwayat terminal.
             p = args.get("path") if isinstance(args, dict) else None
-            if name == "write_file" and p:
+            if name in _TOOL_DIFF and p:
                 full = config.PROJECT_ROOT / p
                 exists = full.exists()
                 old = full.read_text(encoding="utf-8", errors="replace") if exists else ""

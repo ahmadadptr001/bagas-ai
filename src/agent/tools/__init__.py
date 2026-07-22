@@ -13,6 +13,8 @@ from . import media  # noqa: F401,E402
 from . import scripts_tool  # noqa: F401,E402
 from . import interact_tool  # noqa: F401,E402
 from . import screen  # noqa: F401,E402
+from . import search  # noqa: F401,E402
+from . import extras  # noqa: F401,E402
 
 # vision.py DIHAPUS bersama model ber-API-key: ia mengirim gambar ke VLM NVIDIA
 # lewat endpoint terpisah. Gambar kini DILAMPIRKAN langsung ke percakapan web

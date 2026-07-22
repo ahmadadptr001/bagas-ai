@@ -158,15 +158,21 @@ _SEMENTARA = re.compile(
 
 _PESAN_TOLAK = (
     "[DITOLAK] Perubahan file TIDAK boleh lewat {tool}.\n\n"
-    "Gunakan write_file — satu blok per file, berisi isi LENGKAP file itu:\n"
-    '  {{"tool": "write_file", "args": {{"path": "src/contoh.js", '
-    '"content": "...isi lengkap..."}}}}\n\n'
-    "Alasannya: hanya write_file yang menampilkan diff berwarna (hijau = baris "
+    "Gunakan tool file yang tepat:\n"
+    "  - ubah SEBAGIAN file (paling sering) -> edit_file "
+    '{{"path": ..., "old_text": "potongan lama", "new_text": "penggantinya"}}\n'
+    "  - file baru / ditulis ulang total    -> write_file "
+    '{{"path": ..., "content": "...isi lengkap..."}}\n'
+    "  - menambah di akhir file             -> append_file\n"
+    "  - pindah / salin / hapus             -> move_file / copy_file / "
+    "delete_file\n\n"
+    "Alasannya: hanya tool file yang menampilkan diff berwarna (hijau = baris "
     "ditambah, merah = dihapus) di terminal pengguna SEBELUM file disentuh. "
     "Perubahan lewat skrip tak terlihat sama sekali, jadi pengguna kehilangan "
     "satu-satunya kesempatan meninjaunya.\n"
-    "Isi file panjang tidak masalah — kalau sangat besar, kerjakan satu file "
-    "per giliran. JANGAN kembali memakai skrip.\n\n"
+    "Isi file panjang tidak masalah. Kalau menulis ulang seluruh file terasa "
+    "berat, itu justru tanda kamu harus memakai edit_file — bukan tanda harus "
+    "kembali ke skrip.\n\n"
     "{tool} tetap boleh untuk yang memang bukan mengedit file: menjalankan tes, "
     "memasang dependensi, menjalankan program, memeriksa hasil."
 )

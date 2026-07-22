@@ -153,3 +153,113 @@ def list_dir(path: str = ".") -> str:
         size = p.stat().st_size if p.is_file() else "-"
         entries.append(f"[{kind}] {p.name} ({size})")
     return "\n".join(entries) if entries else "(kosong)"
+
+
+@tool
+def edit_file(path: str, old_text: str, new_text: str, count: int = 1) -> str:
+    """Ubah SEBAGIAN isi file: ganti potongan teks lama dengan yang baru (bedah presisi, tanpa menulis ulang seluruh file).
+
+    Pakai ini untuk perubahan kecil pada file besar — jauh lebih hemat daripada
+    write_file yang menuntut seluruh isi file. Perubahannya tetap tampil sebagai
+    diff berwarna di terminal pengguna.
+
+    path: relatif terhadap root project, atau path ABSOLUT untuk folder konteks.
+    old_text: potongan PERSIS yang mau diganti (termasuk spasi/indentasi).
+    new_text: penggantinya. Kosongkan untuk MENGHAPUS potongan itu.
+    count: berapa kemunculan diganti (default 1; -1 = semua).
+    """
+    target = _safe_path(path)
+    if not target.is_file():
+        return f"[error] file tidak ditemukan: {_display(target)}"
+    if not old_text:
+        return "[error] old_text kosong — sebutkan potongan yang mau diganti."
+    isi = target.read_text(encoding="utf-8", errors="replace")
+    n = isi.count(old_text)
+    if n == 0:
+        return (f"[error] potongan itu TIDAK ADA di {_display(target)}. "
+                "Baca dulu filenya (read_file) lalu salin potongannya persis "
+                "— termasuk spasi & indentasi.")
+    # Ambigu itu berbahaya: mengganti kemunculan yang salah merusak file diam-diam.
+    if n > 1 and count == 1:
+        return (f"[error] potongan itu muncul {n} kali di {_display(target)}. "
+                "Perpanjang old_text agar unik, atau set count=-1 bila memang "
+                "semua kemunculan harus diganti.")
+    baru = isi.replace(old_text, new_text, n if count == -1 else count)
+    if baru == isi:
+        return "[error] tidak ada yang berubah."
+    target.write_text(baru, encoding="utf-8")
+    diganti = n if count == -1 else min(count, n)
+    msg = (f"Diubah: {_display(target)} ({diganti} kemunculan, "
+           f"{len(isi)} -> {len(baru)} karakter).")
+    chk = _syntax_check(target)
+    if chk:
+        msg += f"\n[cek sintaks] {chk}"
+        if chk.startswith("GAGAL"):
+            msg += "  -> PERBAIKI dulu sebelum lanjut; jangan anggap selesai."
+    return msg
+
+
+@tool
+def append_file(path: str, content: str) -> str:
+    """Tambahkan teks di AKHIR file (dibuat bila belum ada) tanpa menimpa isi lama.
+
+    path: relatif terhadap root project, atau path ABSOLUT untuk folder konteks.
+    content: teks yang ditambahkan.
+    """
+    target = _safe_path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lama = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+    with target.open("a", encoding="utf-8") as fh:
+        fh.write(content)
+    msg = (f"Ditambahkan ke {_display(target)} "
+           f"({len(content)} karakter; total {len(lama) + len(content)}).")
+    chk = _syntax_check(target)
+    if chk:
+        msg += f"\n[cek sintaks] {chk}"
+    return msg
+
+
+@tool
+def move_file(source: str, dest: str) -> str:
+    """Pindahkan atau ganti nama file/folder di dalam area yang diizinkan.
+
+    source: file/folder asal. dest: tujuan (path baru, termasuk nama barunya).
+    """
+    a, b = _safe_path(source), _safe_path(dest)
+    if not a.exists():
+        return f"[error] tidak ditemukan: {_display(a)}"
+    if b.exists():
+        return f"[error] tujuan sudah ada: {_display(b)} — hapus dulu bila memang mau ditimpa."
+    b.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(a), str(b))
+    return f"Dipindahkan: {_display(a)} -> {_display(b)}"
+
+
+@tool
+def copy_file(source: str, dest: str) -> str:
+    """Salin file (atau seluruh folder) di dalam area yang diizinkan.
+
+    source: file/folder asal. dest: tujuan salinan.
+    """
+    a, b = _safe_path(source), _safe_path(dest)
+    if not a.exists():
+        return f"[error] tidak ditemukan: {_display(a)}"
+    if b.exists():
+        return f"[error] tujuan sudah ada: {_display(b)}"
+    b.parent.mkdir(parents=True, exist_ok=True)
+    if a.is_dir():
+        shutil.copytree(str(a), str(b))
+    else:
+        shutil.copy2(str(a), str(b))
+    return f"Disalin: {_display(a)} -> {_display(b)}"
+
+
+@tool
+def make_dir(path: str) -> str:
+    """Buat folder (beserta folder induknya bila belum ada)."""
+    target = _safe_path(path)
+    if target.is_file():
+        return f"[error] sudah ada FILE dengan nama itu: {_display(target)}"
+    sudah = target.is_dir()
+    target.mkdir(parents=True, exist_ok=True)
+    return (f"Folder {'sudah ada' if sudah else 'dibuat'}: {_display(target)}")
