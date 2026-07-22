@@ -3,6 +3,7 @@ dari type hints + docstring, plus registry global."""
 from __future__ import annotations
 
 import inspect
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, get_args, get_origin, get_type_hints
 
@@ -110,11 +111,92 @@ def get_schemas(names: list[str] | None = None) -> list[dict[str, Any]]:
     return [t.schema for t in tools]
 
 
+# --- Penegakan: perubahan file WAJIB lewat write_file ---------------------
+#
+# Kenapa ditegakkan di sini, bukan cukup diminta lewat prompt:
+#   - Diff berwarna (hijau/merah) HANYA dirender untuk write_file. Perubahan
+#     yang dilakukan skrip tampil sebagai "menjalankan python" belaka, sehingga
+#     pengguna kehilangan satu-satunya kesempatan meninjau sebelum file berubah.
+#   - Instruksi protokol cuma dikirim SEKALI di awal percakapan web, jadi chat
+#     lama tak pernah menerimanya, dan model mana pun bisa saja mengabaikannya.
+#     Aturan yang cuma "diminta baik-baik" akan dilanggar cepat atau lambat.
+#
+# Yang dicegat HANYA penulisan file yang ditulis EKSPLISIT di potongan kode yang
+# diusulkan model. Perintah yang kebetulan menghasilkan file sebagai efek samping
+# (npm run build, pytest, kompilasi) TIDAK tersentuh karena polanya tak muncul di
+# teks perintah.
+_TULIS_PY = re.compile(
+    # Mode TULIS pada open(): w/a/x, atau r+ . Sengaja TIDAK menuntut mode
+    # berada tepat sebelum ')' — bentuk paling lazim justru
+    # open(path, 'w', encoding='utf-8'), yang dulu lolos karena tuntutan itu.
+    # Mode BACA ('r', 'rb') tak dicegat: membaca file memang wajar.
+    r"""open\s*\([^)]*?['"](?:[wax][bt+]*|r\+[bt]*)['"]"""
+    r"""|open\s*\([^)]*mode\s*=\s*['"][wax]"""           # open(..., mode="w")
+    r"|\.write_text\s*\(|\.write_bytes\s*\("
+    r"|\.writelines\s*\("
+    r"|shutil\.(?:copy|copy2|copyfile|move)\s*\("
+    r"|os\.(?:replace|rename|remove|unlink)\s*\("
+    r"|json\.dump\s*\(|yaml\.(?:dump|safe_dump)\s*\(",
+    re.IGNORECASE,
+)
+_TULIS_SH = re.compile(
+    r">\s*[^\s|&>]+"                       # redirect > file  (juga menangkap >>)
+    r"|\bSet-Content\b|\bOut-File\b|\bAdd-Content\b"
+    r"|\btee\b"
+    r"|\bsed\b[^|]*-i\b"
+    r"|\bpatch\b\s|\bapplypatch\b"
+    r"|\b(?:cp|mv)\s+[^\s|&]+\s+[^\s|&]+",
+    re.IGNORECASE,
+)
+# Tulisan ke lokasi SEMENTARA memang wajar (pemrosesan data, berkas kerja) dan
+# tak ada gunanya ditinjau — jangan dihalangi.
+_SEMENTARA = re.compile(
+    r"tempfile|mkstemp|mkdtemp|TemporaryDirectory|NamedTemporary"
+    r"|/tmp/|\\temp\\|%TEMP%|\$TMPDIR|gettempdir",
+    re.IGNORECASE,
+)
+
+_PESAN_TOLAK = (
+    "[DITOLAK] Perubahan file TIDAK boleh lewat {tool}.\n\n"
+    "Gunakan write_file — satu blok per file, berisi isi LENGKAP file itu:\n"
+    '  {{"tool": "write_file", "args": {{"path": "src/contoh.js", '
+    '"content": "...isi lengkap..."}}}}\n\n'
+    "Alasannya: hanya write_file yang menampilkan diff berwarna (hijau = baris "
+    "ditambah, merah = dihapus) di terminal pengguna SEBELUM file disentuh. "
+    "Perubahan lewat skrip tak terlihat sama sekali, jadi pengguna kehilangan "
+    "satu-satunya kesempatan meninjaunya.\n"
+    "Isi file panjang tidak masalah — kalau sangat besar, kerjakan satu file "
+    "per giliran. JANGAN kembali memakai skrip.\n\n"
+    "{tool} tetap boleh untuk yang memang bukan mengedit file: menjalankan tes, "
+    "memasang dependensi, menjalankan program, memeriksa hasil."
+)
+
+
+def _tolak_tulis_file(name: str, arguments: dict[str, Any]) -> str | None:
+    """Pesan penolakan bila tool ini dipakai untuk MENULIS file, else None."""
+    if name == "run_python":
+        kode = str(arguments.get("code") or "")
+        pola = _TULIS_PY
+    elif name in ("run_command", "run_command_bg"):
+        kode = str(arguments.get("command") or "")
+        pola = _TULIS_SH
+    else:
+        return None
+    if not kode or _SEMENTARA.search(kode):
+        return None
+    if not pola.search(kode):
+        return None
+    return _PESAN_TOLAK.format(tool=name)
+
+
 def execute(name: str, arguments: dict[str, Any]) -> str:
     """Jalankan tool berdasarkan nama; selalu kembalikan string untuk LLM."""
     tool_obj = REGISTRY.get(name)
     if tool_obj is None:
         return f"[error] tool '{name}' tidak ditemukan."
+    tolak = _tolak_tulis_file(name, arguments)
+    if tolak:
+        return tolak
     try:
         result = tool_obj.run(**arguments)
         return result if isinstance(result, str) else str(result)
