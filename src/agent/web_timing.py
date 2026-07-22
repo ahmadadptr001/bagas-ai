@@ -12,21 +12,34 @@ properti pertanyaan. Maka ETA dihitung hidup-hidup:
 
     ETA = (perkiraan panjang akhir - karakter yang sudah mengalir) / throughput
 
-Perkiraan panjang akhir memakai harapan BERSYARAT E[L | L > c]: dari riwayat
-panjang jawaban, ambil rata-rata yang LEBIH PANJANG dari yang sudah terlihat
-sekarang. Ini penting — makin banyak teks yang sudah mengalir, makin sempit
-kemungkinan panjang akhirnya, jadi perkiraan otomatis menajam seiring waktu
-alih-alih terpaku pada satu tebakan awal.
+Perkiraan panjang akhir memakai KUANTIL BERSYARAT (lihat kuantil_panjang): dari
+riwayat panjang jawaban, buang yang lebih pendek dari teks yang sudah terlihat
+(mustahil jadi jawaban ini), lalu ambil kuantil-q dari sisanya. Makin banyak
+teks yang mengalir, makin sempit kemungkinan panjang akhirnya, jadi perkiraan
+menajam sendiri alih-alih terpaku pada satu tebakan awal.
+
+Yang dijanjikan adalah BATAS ATAS, bukan tebakan titik
+------------------------------------------------------
+Panjang jawaban belum ada saat ETA ditanya, jadi hitung-mundur satu angka tak
+bisa dibuat tepat 80-90% (terukur pada 4000 giliran simulasi: penaksir titik
+terbaik ~40%, metode median-durasi lama 6%). Yang BISA dikalibrasi ke sana
+adalah janji satu sisi "selesai dalam <=X" — itulah yang ditampilkan UI.
 
 Klaim akurasi tidak diasumsikan, tapi DIUKUR
 --------------------------------------------
-Tiap giliran menyimpan pasangan (perkiraan pertama, durasi sebenarnya).
-`akurasi()` mengembalikan proporsi giliran yang perkiraannya meleset <=25%.
-Angka itu ditampilkan apa adanya di UI, supaya "akurat 80-90%" jadi sesuatu
-yang bisa diperiksa pengguna, bukan janji kosong. Kalau kenyataannya 60%, yang
-tertulis 60%.
+Tiap giliran menyimpan pasangan (janji pertama, durasi sebenarnya).
+`akurasi()` mengembalikan proporsi janji yang DITEPATI (durasi <= janji, dengan
+kelonggaran setengah detik). Angka itu ditampilkan apa adanya di UI, supaya
+"tepat 80-90%" jadi sesuatu yang bisa diperiksa pengguna, bukan janji kosong.
+Kalau kenyataannya 60%, yang tertulis 60% — dan kuantilnya naik sendiri.
 
-Bentuk baris data (v2): [start_latency, answer_dur, total_chars, predicted_dur]
+SATUAN: `total_chars` WAJIB sesatuan dengan teks yang dialirkan ke on_token
+(teks polos hasil _read_last_message), bukan panjang markdown. Mencampur
+keduanya membuat throughput dan perkiraan panjang berbeda satuan sehingga ETA
+bias sistematis — bias yang tak bisa diperbaiki swa-kalibrasi, karena kuantil
+hanya menggeser cakupan, bukan satuan.
+
+Bentuk baris data (v2): [start_latency, answer_dur, total_chars, promised_dur]
 Baris v1 lama ([start_latency, answer_dur]) tetap dibaca; kolom yang tak ada
 dianggap 0 dan cuma dilewati oleh statistik yang membutuhkannya.
 """
@@ -41,11 +54,14 @@ from . import config
 
 _MAX = 40   # sampel per service yang disimpan (buang yang paling lama)
 _MIN = 4    # di bawah ini: belum cukup -> jangan tampilkan ETA
-_MIN_RATE = 3   # sampel ber-karakter minimum sebelum throughput dipercaya
-# Ambang "perkiraan dianggap tepat" untuk mengukur akurasi. 25% dipilih karena
-# itu batas di mana perkiraan masih terasa membantu bagi manusia: ditulis 20s,
-# nyatanya 15-25s. Lebih ketat dari ini akan menghukum variasi yang wajar.
-_TOLERANSI = 0.25
+# Sampel ber-karakter minimum sebelum throughput MAUPUN sebaran panjang
+# dipercaya. Keduanya memakai ambang yang sama karena bersumber dari baris yang
+# sama: memercayai salah satunya saja pernah membuat janji "terkalibrasi"
+# dihitung dari SATU titik data.
+_MIN_RATE = 3
+# Kelonggaran menilai janji: selisih di bawah setengah detik tak terasa manusia,
+# jadi tetap dihitung ditepati.
+_SLACK = 0.5
 _lock = threading.Lock()
 
 
@@ -61,9 +77,13 @@ def _load() -> dict:
         return {}
 
 
-def _rows(service: str) -> list[list[float]]:
-    """Baris yang sah untuk `service`, dinormalkan ke panjang 4 (v1 -> v2)."""
-    raw = _load().get(service)
+def _rows(service: str, data: dict | None = None) -> list[list[float]]:
+    """Baris yang sah untuk `service`, dinormalkan ke panjang 4 (v1 -> v2).
+
+    `data` boleh dioper agar satu pembacaan file dipakai bersama beberapa
+    statistik — medians() dulu membaca & mem-parse berkas yang sama tiga kali
+    per giliran, tepat di jalur sebelum pengguna melihat respons pertama."""
+    raw = (_load() if data is None else data).get(service)
     if not isinstance(raw, list):
         return []
     out: list[list[float]] = []
@@ -131,7 +151,7 @@ def note_promise(service: str, promised_dur: float) -> None:
         data[service] = rows
 
         # Geser kuantil menuju sasaran cakupan (lihat catatan _TARGET).
-        ditepati = 1.0 if akhir[1] <= akhir[3] + 0.5 else 0.0
+        ditepati = 1.0 if akhir[1] <= akhir[3] + _SLACK else 0.0
         simpan = data.get(_q_key())
         if not isinstance(simpan, dict):
             simpan = {}
@@ -147,22 +167,33 @@ def note_promise(service: str, promised_dur: float) -> None:
 
 
 def medians(service: str) -> dict[str, Any] | None:
-    """{'start', 'answer', 'n', 'rate', 'lengths', 'akurasi'} atau None bila
-    sampel belum cukup untuk memberi perkiraan yang bertanggung jawab.
+    """{'start', 'answer', 'n', 'rate', 'lengths', 'akurasi', 'kuantil'} atau
+    None bila sampel belum cukup untuk memberi perkiraan yang bertanggung jawab.
 
     'rate'     : throughput median (karakter/detik), None bila belum terukur.
-    'lengths'  : panjang jawaban yang pernah tercatat -> dasar E[L | L > c].
-    'akurasi'  : proporsi perkiraan yang meleset <=25%, None bila belum terukur.
+    'lengths'  : sebaran panjang jawaban -> dasar kuantil bersyarat. KOSONG bila
+                 sampelnya belum mencapai _MIN_RATE.
+    'akurasi'  : proporsi janji yang DITEPATI, None bila belum terukur.
+    'kuantil'  : kuantil hasil swa-kalibrasi yang sedang berlaku.
     """
     if not service:
         return None
-    pairs = _rows(service)
+    # SATU pembacaan berkas dipakai bersama semua statistik di bawah.
+    data = _load()
+    pairs = _rows(service, data)
     if len(pairs) < _MIN:
         return None
 
     berkarakter = [p for p in pairs if p[2] > 0 and p[1] > 0]
     rate = None
+    lengths: list[float] = []
+    # Throughput DAN sebaran panjang sama-sama menunggu ambang yang sama. Dulu
+    # hanya `rate` dijaga, sehingga dengan 1-2 sampel UI tetap menampilkan
+    # "≤Xs lagi" — format janji terkalibrasi — padahal kuantilnya diambil dari
+    # satu titik data. Lebih baik diam (UI jatuh ke perkiraan kasar) daripada
+    # tampil meyakinkan tanpa dasar.
     if len(berkarakter) >= _MIN_RATE:
+        lengths = [p[2] for p in berkarakter]
         rate = median(p[2] / p[1] for p in berkarakter)
         if rate <= 0:
             rate = None
@@ -172,9 +203,9 @@ def medians(service: str) -> dict[str, Any] | None:
         "answer": median(p[1] for p in pairs),
         "n": len(pairs),
         "rate": rate,
-        "lengths": [p[2] for p in berkarakter],
-        "akurasi": akurasi(service),
-        "kuantil": kuantil(service),
+        "lengths": lengths,
+        "akurasi": akurasi(service, data),
+        "kuantil": kuantil(service, data),
     }
 
 
@@ -220,9 +251,9 @@ def _q_key() -> str:
     return "#kuantil"
 
 
-def kuantil(service: str) -> float:
+def kuantil(service: str, data: dict | None = None) -> float:
     """Kuantil yang sedang dipakai untuk service ini (hasil swa-kalibrasi)."""
-    simpan = _load().get(_q_key())
+    simpan = (_load() if data is None else data).get(_q_key())
     if isinstance(simpan, dict):
         nilai = simpan.get(service)
         if isinstance(nilai, (int, float)) and _Q_MIN <= nilai <= _Q_MAX:
@@ -230,13 +261,11 @@ def kuantil(service: str) -> float:
     return _Q_AWAL
 
 
-def akurasi(service: str) -> float | None:
-    """Proporsi janji "selesai dalam <=X" yang DITEPATI. None bila belum ada
-    cukup giliran yang sempat diberi janji."""
-    dinilai = [p for p in _rows(service) if p[3] > 0 and p[1] > 0]
+def akurasi(service: str, data: dict | None = None) -> float | None:
+    """Proporsi janji "selesai dalam <=X" yang DITEPATI (durasi <= janji, dengan
+    kelonggaran _SLACK). None bila belum cukup giliran yang sempat diberi janji."""
+    dinilai = [p for p in _rows(service, data) if p[3] > 0 and p[1] > 0]
     if len(dinilai) < _MIN_RATE:
         return None
-    # Toleransi kecil: janji dianggap ditepati bila selesai sebelum batas, atau
-    # meleset di bawah setengah detik (perbedaan sekecil itu tak terasa manusia).
-    ditepati = sum(1 for p in dinilai if p[1] <= p[3] + 0.5)
+    ditepati = sum(1 for p in dinilai if p[1] <= p[3] + _SLACK)
     return ditepati / len(dinilai)

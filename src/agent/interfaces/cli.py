@@ -859,8 +859,13 @@ class TurnView:
         Median durasi ditinggalkan karena sebarannya sangat lebar (terukur
         5.75s-28.12s pada layanan yang sama) — sebabnya panjang jawaban yang
         berbeda-beda, bukan layanannya yang tak menentu. Throughput jauh lebih
-        stabil, dan panjang akhir diperkirakan lewat E[L | L > c] yang menajam
-        sendiri seiring makin banyak teks yang terlihat.
+        stabil, dan panjang akhir diperkirakan lewat KUANTIL BERSYARAT
+        (web_timing.kuantil_panjang) yang menajam sendiri seiring makin banyak
+        teks yang terlihat — kuantil, bukan rata-rata, supaya hasilnya jadi
+        BATAS ATAS yang bisa dikalibrasi.
+
+        `chars` bersatuan teks POLOS (dari on_token), sesatuan dengan panjang
+        yang dicatat web_timing — jangan campur dengan panjang markdown.
 
         Kembali (frac, None) bila belum layak menampilkan apa pun."""
         med = self._web_med or {}

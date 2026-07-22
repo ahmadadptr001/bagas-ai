@@ -1005,6 +1005,19 @@ class WebConnector:
         if not final:
             final = last
 
+        # Catat ID percakapan yang sedang dipakai (untuk fitur bersih-bersih) dan
+        # isi MENTAH blok kode balasan (pemanggil memakainya untuk membaca usulan
+        # tool tanpa risiko rusak oleh perenderan markdown).
+        #
+        # DISETEL SEBELUM pemeriksaan sibuk di bawah — yang bisa melempar. Kalau
+        # ditaruh sesudahnya, giliran sibuk meninggalkan kedua atribut berisi
+        # nilai giliran SEBELUMNYA, dan pemanggil yang menangani WebBusyError lalu
+        # membaca last_code_blocks akan memproses blok kode jawaban lama sebagai
+        # usulan tool giliran ini. last_chat_id khususnya wajib: tanpanya, ulang-
+        # otomatis di core tak tahu chat mana yang sudah terlanjur dibuat.
+        self.last_chat_id = self.current_chat_id(page)
+        self.last_code_blocks = self._read_code_blocks(page)
+
         # Pemberitahuan "server sedang sibuk" muncul DI TEMPAT balasan, jadi tanpa
         # pemeriksaan ini ia diteruskan sebagai jawaban model.
         #
@@ -1023,18 +1036,19 @@ class WebConnector:
         # start_latency = durasi fase berpikir, answer_dur = durasi fase menjawab.
         try:
             from .. import web_timing
-            # Panjang jawaban ikut dicatat: ia yang menjelaskan kenapa durasi
-            # berbeda-beda, dan jadi dasar perhitungan throughput di web_timing.
+            # Panjang yang dicatat WAJIB `last` (teks polos), bukan `final`
+            # (markdown): on_token mengalirkan potongan `cur` dari
+            # _read_last_message, jadi penghitung kemajuan di UI bersatuan teks
+            # polos. Mencatat panjang markdown — yang lebih gemuk karena **, #,
+            # pagar kode, pipa tabel, dan spasi hard-break — membuat throughput
+            # dan sebaran panjang beda satuan dengan kemajuan yang diukur, lalu
+            # ETA bias sistematis (sisa ditaksir terlalu besar, bar terlalu
+            # kosong). Swa-kalibrasi TAK bisa memperbaikinya: kuantil menggeser
+            # cakupan, bukan satuan.
             web_timing.record(self.service, _t_started - t0,
-                              time.time() - _t_started, len(final))
+                              time.time() - _t_started, len(last))
         except Exception:  # noqa: BLE001 - statistik tak boleh ganggu jawaban
             pass
-
-        # Catat ID percakapan yang sedang dipakai (untuk fitur bersih-bersih).
-        self.last_chat_id = self.current_chat_id(page)
-        # Simpan isi MENTAH blok kode balasan ini — pemanggil memakainya untuk
-        # membaca usulan tool tanpa risiko rusak oleh perenderan markdown.
-        self.last_code_blocks = self._read_code_blocks(page)
 
         if not final:
             raise BrowserError(

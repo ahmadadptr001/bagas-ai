@@ -220,11 +220,15 @@ def _purge_build(repo: Path) -> None:
     isinya basi, dan --force-reinstall pun cuma memasang ulang wheel basi yang
     sama. Membuang build/ membuat setiap pembaruan dibangun dari sumber apa adanya.
     """
-    for nama in ("build", "dist"):
-        try:
-            shutil.rmtree(repo / nama)
-        except (OSError, FileNotFoundError):
-            pass
+    # HANYA build/. `dist/` sengaja TIDAK disentuh: ia bukan cache — isinya
+    # wheel/sdist hasil rilis yang mungkin sengaja disimpan pengguna, dan untuk
+    # instalasi editable `repo` adalah checkout kerja pengguna sendiri. Menghapus
+    # dist/ berarti membuang artefak rilis tanpa peringatan & tanpa jalan pulih,
+    # padahal yang meracuni pembaruan cuma build/lib.
+    try:
+        shutil.rmtree(repo / "build")
+    except (OSError, FileNotFoundError):
+        pass
     try:
         for egg in (repo / "src").glob("*.egg-info"):
             shutil.rmtree(egg, ignore_errors=True)

@@ -778,6 +778,19 @@ class Agent:
             selama giliran berjalan, bukan melompat di akhir."""
             self.tokens_live = (prompt_chars + reply_chars) // 4
 
+        def _status(msg: str) -> None:
+            """Lapor status HANYA bila pemanggil menyediakan salurannya.
+
+            on_status boleh None — dan memang None pada pemanggil non-CLI:
+            telegram_bot memanggil agent.run() tanpa on_status, begitu pula
+            interfaces/api.py. Memanggilnya langsung membuat jalur ulang-otomatis
+            mati dengan TypeError yang lalu ditelan `except Exception` di bawah,
+            sehingga pengguna Telegram/API menerima '[Connector …] gagal:
+            NoneType object is not callable' dan ulang-otomatis tak pernah
+            jalan — persis kebalikan dari tujuan fiturnya."""
+            if on_status is not None:
+                on_status(msg)
+
         def _send(msg: str, new_chat: bool = False,
                   open_chat_id: str | None = None,
                   attachments: list[str] | None = None) -> str:
@@ -793,8 +806,6 @@ class Agent:
             # relaunch kapan pun selalu kembali ke percakapan yang benar.
             if open_chat_id is None:
                 open_chat_id = self._web_chat_id
-            prompt_chars += len(msg)
-            _sync_tokens()
             # "Server sedang sibuk" itu SEMENTARA (kuota kita aman) dan biasanya
             # pulih dalam hitungan detik, jadi ditangani di sini: tunggu lalu
             # kirim ULANG pesan yang sama. Menyerahkannya ke pengguna berarti
@@ -802,6 +813,12 @@ class Agent:
             # Jeda menaik supaya tak menambah beban server yang sedang penuh.
             jeda = (15, 40, 75)
             for percobaan in range(len(jeda) + 1):
+                # Dihitung PER PERCOBAAN: pesannya benar-benar diketik & dikirim
+                # ulang tiap kali, jadi menghitungnya sekali di luar loop membuat
+                # estimasi token meremehkan lalu lintas justru pada giliran yang
+                # paling banyak menghabiskan kuota situs.
+                prompt_chars += len(msg)
+                _sync_tokens()
                 try:
                     out = conn.send(
                         msg, on_status=on_status, on_token=on_token,
@@ -814,10 +831,21 @@ class Agent:
                 except connectors.WebBusyError:
                     if percobaan >= len(jeda):
                         raise           # sudah cukup sabar -> laporkan jujur
+                    # Percobaan berikutnya harus MASUK KE CHAT YANG SAMA. Tanpa
+                    # ini, kirim pertama sebuah sesi (new_chat=True) mengulang
+                    # dengan new_chat=True juga, sehingga tiap percobaan membuat
+                    # chat BARU: sampai empat chat terlantar berisi pesan yang
+                    # sama, dan sesi akhirnya tertaut ke chat terakhir saja —
+                    # persis pola kehilangan konteks yang sudah pernah diperbaiki.
+                    dibuat = getattr(conn, "last_chat_id", "") or ""
+                    if dibuat:
+                        new_chat = False
+                        open_chat_id = dibuat
+                        self._link_web_chat(dibuat)
                     tunggu = jeda[percobaan]
-                    on_status(f"{self.model_spec.label} sibuk — menunggu "
-                              f"{tunggu}s lalu mencoba lagi "
-                              f"({percobaan + 1}/{len(jeda)})")
+                    _status(f"{self.model_spec.label} sibuk — menunggu "
+                            f"{tunggu}s lalu mencoba lagi "
+                            f"({percobaan + 1}/{len(jeda)})")
                     # Tidur dipecah supaya Esc/batal tetap responsif; cancel_event
                     # yang menyala mengakhiri penungguan seketika.
                     habis = time.time() + tunggu
