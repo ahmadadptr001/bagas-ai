@@ -459,7 +459,46 @@ class BrowserHub:
     def _loop(self) -> None:
         from playwright.sync_api import sync_playwright
 
-        self._pw = sync_playwright().start()
+        # Driver Playwright kadang GAGAL start pada percobaan pertama: pipe ke
+        # proses node driver tertutup sebelum handshake selesai, memunculkan
+        # "'PlaywrightContextManager' object has no attribute '_playwright'"
+        # (sering menyusul "Connection closed while reading from the driver").
+        # Dulu galat itu menembus keluar _loop dan MEMBUNUH thread hub diam-diam:
+        # tak ada lagi yang mengambil job dari antrean, sehingga SETIAP kirim
+        # berikutnya menggantung tanpa penjelasan (persis gejala "cuma berpikir").
+        # Sekarang: coba beberapa kali dengan jeda; bila tetap gagal, JANGAN
+        # biarkan thread mati — layani tiap job dengan galat yang jelas dan tandai
+        # hub POISONED agar hub() menggantinya dengan hub baru di pemakaian
+        # berikutnya (peluncuran driver yang segar sering berhasil).
+        pw = None
+        galat: BaseException | None = None
+        for percobaan in range(3):
+            try:
+                pw = sync_playwright().start()
+                break
+            except BaseException as exc:  # noqa: BLE001
+                galat = exc
+                time.sleep(0.8 * (percobaan + 1))
+
+        if pw is None:
+            self.poisoned = True
+            pesan = BrowserError(
+                "gagal memulai mesin browser — driver Playwright tak mau start "
+                f"({type(galat).__name__ if galat else '?'}). Coba kirim lagi; "
+                "bila terus terjadi jalankan 'playwright install'."
+            )
+            while True:
+                job = self._q.get()
+                if job is None:
+                    break
+                # Gagal-cepat: tak ada job yang boleh menggantung menunggu driver
+                # yang takkan pernah siap.
+                job.started.set()
+                job.error = pesan
+                job.done.set()
+            return
+
+        self._pw = pw
         while True:
             job = self._q.get()
             if job is None:

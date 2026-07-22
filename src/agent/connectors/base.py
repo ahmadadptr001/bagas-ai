@@ -252,6 +252,15 @@ JS_TO_MARKDOWN = r"""
   const el = pilihTerakhirBerisi(selectors);
   if (!el) return "";
 
+  // Sentinel PATAH-BARIS-KERAS. Newline TUNGGAL di Markdown DILEBUR jadi spasi
+  // oleh perender (Rich) — itulah sebab pohon direktori & baris-baris yang
+  // dipisah <br> dulu tampil gepeng jadi satu paragraf. Sentinel ini ditaruh di
+  // titik yang HARUS tetap patah, lalu di akhir diubah jadi "  \n" (dua spasi +
+  // newline: satu-satunya patah keras yang dihormati Rich). Dipakai sentinel,
+  // bukan langsung "  \n", supaya perapian di bawah tak keburu memangkas spasi
+  // ekornya.
+  const HB = String.fromCharCode(0xE000);
+
   // BLOK BERPIKIR (mode reasoning/"ahli") DILEWATI SAAT SERIALISASI — bukan
   // dibuang dari sebuah klon. Klon yang tak terpasang di dokumen membuat
   // innerText merosot jadi textContent, sehingga isi ber-`display:none` justru
@@ -332,7 +341,9 @@ JS_TO_MARKDOWN = r"""
       } else if (tag === "p") {
         out += ser(ch).trim() + "\n\n";
       } else if (tag === "br") {
-        out += "\n";
+        // <br> = patah baris yang DISENGAJA penulis. Sebagai newline tunggal ia
+        // dilebur Rich jadi spasi; pakai patah keras agar benar-benar patah.
+        out += HB;
       } else if (tag === "strong" || tag === "b") {
         out += "**" + ser(ch).trim() + "**";
       } else if (tag === "em" || tag === "i") {
@@ -389,12 +400,37 @@ JS_TO_MARKDOWN = r"""
         const tabel = bungkusPendek(
           "table", "p,ul,ol,h1,h2,h3,h4,h5,h6,pre,blockquote");
         if (tabel) { out += "\n" + table(tabel); continue; }
-        out += ser(ch);
+        const dalam = ser(ch);
+        out += dalam;
+        // Elemen BLOK generik (div/section, mis. tiap baris pohon direktori yang
+        // dirender sebagai <div> tersendiri) dulu digabung TANPA pemisah apa pun
+        // -> semuanya berdempet di satu baris. Beri patah keras bila isinya teks
+        // sebaris yang belum menutup bloknya sendiri. Elemen inline (span) tak
+        // disentuh, dan wadah yang isinya sudah berakhir newline (mis. berisi
+        // <p>) juga dilewati agar tak menambah baris kosong.
+        let disp = "";
+        try { disp = getComputedStyle(ch).display || ""; } catch (e) {}
+        const blok = disp && !disp.startsWith("inline") &&
+                     disp !== "contents" && disp !== "none";
+        if (blok && dalam.trim() && !/\n\s*$/.test(dalam) &&
+            dalam[dalam.length - 1] !== HB) {
+          out += HB;
+        }
       }
     }
     return out;
   }
-  const rapikan = (s) => s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const rapikan = (s) => {
+    // Perapian jalan LEBIH DULU selagi patah keras masih berupa sentinel (bukan
+    // spasi/newline), jadi pemangkasan spasi-ekor di bawah tak menyentuhnya.
+    s = s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
+    // Sentinel -> patah keras Markdown (dua spasi + newline). Spasi di sekitarnya
+    // diserap supaya tak jadi indentasi liar di baris berikutnya.
+    s = s.replace(new RegExp("[ \\t]*" + HB + "[ \\t]*", "g"), "  \n");
+    s = s.replace(/(?:  \n){2,}/g, "  \n");   // patah beruntun -> satu
+    s = s.replace(/  \n(\n)/g, "$1");          // patah tepat sebelum paragraf: buang
+    return s.replace(/[ \t]+$/g, "").trim();
+  };
   let hasil = rapikan(ser(el));
   // PENGAMAN: selektor berpikir yang salah menangkap SELURUH jawaban akan
   // menyisakan hasil kosong -> ulangi tanpa penyaringan, lebih baik ada blok
@@ -556,6 +592,12 @@ class WebConnector:
     # Berapa kali cek berturut-turut teks tak berubah -> dianggap selesai.
     _stable_needed: int = 5
     _poll_ms: int = 400
+    # Batas anti-"mengoceh": panjang balasan yang, bila dilewati, generasi
+    # dihentikan paksa. Model kadang terjebak mengulang potongan yang sama tanpa
+    # henti (terukur di Kimi: ~108 rb token / 6 menit menulis baris identik).
+    # ~150 rb karakter ≈ 37 rb token — sangat sedikit balasan sah melampauinya,
+    # sedangkan kasus mengoceh membengkak jauh di atasnya.
+    _MAX_REPLY_CHARS: int = 150_000
     # Tenggat menunggu halaman siap SESUDAH bernavigasi. Sengaja jauh lebih
     # longgar daripada jalur cepat (1,5 detik untuk halaman yang sudah terbuka):
     # SPA butuh waktu boot. TERUKUR di kimi.com pada sesi yang SUDAH LOGIN —
@@ -916,6 +958,13 @@ class WebConnector:
             if on_token and len(cur) > emitted:
                 on_token(cur[emitted:])
                 emitted = len(cur)
+            # Penjaga anti-mengoceh: balasan membengkak tak wajar ATAU ekornya
+            # cuma pola pendek yang diulang berkali-kali (model terjebak repetisi).
+            # Tekan STOP situs lalu hentikan pembacaan — balasan terpotong jauh
+            # lebih baik daripada terminal tersandera sampai batas waktu 5 menit.
+            if len(cur) >= self._MAX_REPLY_CHARS or self._mengoceh(cur):
+                self._stop_generating(page)
+                break
             if cur == last:
                 stable += 1
                 # Selesai bila: teks berhenti berubah, situs tak lagi menandai
@@ -1190,6 +1239,36 @@ class WebConnector:
         except Exception:  # noqa: BLE001
             pass
         return False
+
+    @staticmethod
+    def _mengoceh(text: str) -> bool:
+        """True bila EKOR balasan cuma pola pendek yang diulang berkali-kali —
+        ciri model terjebak repetisi (mis. menulis baris kode identik ribuan
+        kali). Hanya diperiksa saat teks sudah cukup panjang supaya balasan sah
+        yang kebetulan memuat sedikit pengulangan tak salah dipotong."""
+        if len(text) < 12000:
+            return False
+        ekor = text[-2400:]
+        # Unit ekor beberapa ukuran: pola berulang bisa 1 baris pendek atau
+        # beberapa baris. Bila satu unit menyusun sebagian besar ekor (non-tumpang
+        # tindih ≥30x), itu repetisi yang jelas, bukan prosa/kode wajar.
+        for n in (16, 32, 64):
+            unit = ekor[-n:].strip()
+            if len(unit) >= 3 and ekor.count(unit) >= 30:
+                return True
+        return False
+
+    def _stop_generating(self, page: Any) -> None:
+        """Best-effort: tekan tombol STOP situs agar generasi berhenti. Diam bila
+        tombolnya tak ada/berubah — pemanggil tetap keluar dari loop."""
+        for sel in self.stop_selectors:
+            try:
+                loc = page.locator(sel)
+                if loc.count() and loc.first.is_visible():
+                    self._click_element(loc.first)
+                    return
+            except Exception:  # noqa: BLE001
+                pass
 
     def _answer_started(self, page: Any, counts_before: dict[str, int],
                         text_before: str = "") -> bool:

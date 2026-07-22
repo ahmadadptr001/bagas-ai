@@ -32,15 +32,14 @@ class KimiConnector(WebConnector):
     chat_url_template = "https://www.kimi.com/chat/{id}"
     chat_id_pattern = r"/chat/([A-Za-z0-9_-]{8,})"
 
-    # Jendela Kimi sengaja TIDAK disembunyikan ke latar seperti connector lain.
-    # Alasannya khas situs ini: Kimi memperlihatkan seluruh proses kerjanya —
-    # blok berpikir, langkah pencarian web, lalu jawaban diketik bertahap — dan
-    # semua itu tak terlihat sama sekali bila jendelanya disembunyikan; yang
-    # sampai ke terminal hanya hasil akhirnya yang sudah disaring.
+    # Jendela Kimi berjalan DI LATAR (tersembunyi) seperti connector lain: yang
+    # dipakai pengguna cuma hasil akhir yang sudah disaring, bukan proses kerjanya
+    # (blok berpikir, langkah pencarian, ketikan bertahap). Dulu sempat dibuat
+    # terlihat agar prosesnya bisa diamati; itu tak lagi diperlukan.
     #
-    # Matikan lewat .env bila ingin perilaku lama: CONNECTOR_SHOW tak perlu
-    # disentuh, cukup ubah baris ini jadi False.
-    show_window = True
+    # Ingin melihat prosesnya lagi? Set CONNECTOR_SHOW=true di .env (memaksa semua
+    # connector terlihat), atau ubah baris ini jadi True.
+    show_window = False
 
     # --- input ---
     # DIVERIFIKASI: kotak inputnya <div class="chat-input-editor"> berukuran

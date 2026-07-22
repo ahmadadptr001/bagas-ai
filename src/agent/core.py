@@ -777,9 +777,21 @@ class Agent:
             selama giliran berjalan, bukan melompat di akhir."""
             self.tokens_live = (prompt_chars + reply_chars) // 4
 
-        def _send(msg: str, new_chat: bool = False, open_chat_id: str = "",
+        def _send(msg: str, new_chat: bool = False,
+                  open_chat_id: str | None = None,
                   attachments: list[str] | None = None) -> str:
             nonlocal prompt_chars, reply_chars
+            # Default: LANJUTKAN percakapan browser sesi ini. Ini KUNCI kontinuitas
+            # di tengah tugas. Dulu hanya kirim PERTAMA yang menargetkan chat ini;
+            # pesan susulan (hasil tool, teguran, perbaikan) dikirim dengan
+            # open_chat_id kosong. Akibatnya bila browser mati & diluncurkan ulang
+            # di tengah agentic-loop (mis. sesudah eksekusi lama yang bikin sesi
+            # browser time-out), halaman baru mendarat di chat KOSONG dan susulan
+            # diketik ke sana — AI web kehilangan seluruh konteks "progress tadi"
+            # lalu kebingungan. Dengan menargetkan chat yang SAMA di tiap kirim,
+            # relaunch kapan pun selalu kembali ke percakapan yang benar.
+            if open_chat_id is None:
+                open_chat_id = self._web_chat_id
             prompt_chars += len(msg)
             _sync_tokens()
             out = conn.send(
@@ -791,6 +803,12 @@ class Agent:
             )
             reply_chars += len(out or "")
             _sync_tokens()
+            # Tangkap kaitan chat begitu URL /chat/<id> tersedia (kadang baru
+            # muncul sesudah balasan pertama). Sekali tertangkap, semua kirim &
+            # relaunch berikutnya otomatis menargetkan percakapan yang sama.
+            got = getattr(conn, "last_chat_id", "")
+            if got and got != self._web_chat_id:
+                self._link_web_chat(got)
             return out
 
         try:
@@ -827,6 +845,13 @@ class Agent:
             # — boros kuota & tak menghasilkan apa pun.
             seen_tools: dict[str, str] = {}
             dup_hits = 0
+            # Langkah yang GAGAL/timeout BERTURUT-TURUT. Beda dari dup_hits: di sini
+            # argumennya boleh berubah-ubah (mis. AI web menjalankan kode yang
+            # sedikit divariasikan tapi tetap infinite-loop lalu timeout berulang),
+            # sehingga cache anti-ulang tak menangkapnya dan tugas bisa memutar
+            # sampai _WEB_MAX_STEPS (~12 menit timeout beruntun). Dihentikan lebih
+            # awal supaya AI web menyimpulkan jujur alih-alih terus mencoba.
+            fail_streak = 0
             force_final = False
             nudges = 0    # teguran "kode ditampilkan tapi tak ditulis ke file"
             while True:
@@ -923,6 +948,13 @@ class Agent:
                     else:
                         result = tools.execute(name, args)
                         seen_tools[kunci] = result
+                        # Deret gagal beruntun (lihat fail_streak di atas). Penanda
+                        # gagal seragam dari tools: "[GAGAL...]" (shell) & "GAGAL:"
+                        # (files). Sukses apa pun menyetel ulang deretnya.
+                        if "[GAGAL" in result or result.lstrip().startswith("GAGAL"):
+                            fail_streak += 1
+                        else:
+                            fail_streak = 0
                         if on_tool_result:
                             on_tool_result(name, result)
                     steps += 1
@@ -957,6 +989,20 @@ class Agent:
                     )
                     if on_notice:
                         on_notice("langkah yang sama berulang — beralih ke "
+                                  "kesimpulan")
+                elif fail_streak >= config.MAX_DUPLICATE_TOOL_CALLS:
+                    # Gagal/timeout beruntun (mis. kode yang dijalankan tak pernah
+                    # berhenti): berhenti mencoba, minta kesimpulan jujur.
+                    force_final = True
+                    follow += (
+                        "\n\n[SISTEM] Beberapa langkah tool GAGAL/timeout "
+                        "berturut-turut. STOP menjalankan ulang kode itu. Berikan "
+                        "jawaban akhir dalam teks biasa: jelaskan JUJUR apa yang "
+                        "berhasil, apa yang gagal DAN kenapa (mis. kode yang "
+                        "dijalankan tak berhenti / timeout), lalu langkah tersisa."
+                    )
+                    if on_notice:
+                        on_notice("langkah gagal/timeout beruntun — beralih ke "
                                   "kesimpulan")
                 reply = _send(follow, attachments=images)
         except llm.Cancelled:
