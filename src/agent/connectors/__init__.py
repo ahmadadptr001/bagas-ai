@@ -8,7 +8,9 @@ sesi browser tetap hidup lintas giliran (tak login/buka ulang tiap pesan).
 from __future__ import annotations
 
 from .base import WebConnector
-from .browser import BrowserError, WebLimitError, playwright_available
+from .browser import (
+    BrowserError, WebBusyError, WebLimitError, playwright_available,
+)
 from .claude import ClaudeConnector
 from .kimi import KimiConnector
 from .qwen import QwenConnector

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Callable
 
 from . import config, llm, models, prefs, prompts
@@ -794,13 +795,36 @@ class Agent:
                 open_chat_id = self._web_chat_id
             prompt_chars += len(msg)
             _sync_tokens()
-            out = conn.send(
-                msg, on_status=on_status, on_token=on_token,
-                cancel_event=cancel_event, new_chat=new_chat,
-                open_chat_id=open_chat_id,
-                complete_when=_web_reply_complete,
-                attachments=attachments,
-            )
+            # "Server sedang sibuk" itu SEMENTARA (kuota kita aman) dan biasanya
+            # pulih dalam hitungan detik, jadi ditangani di sini: tunggu lalu
+            # kirim ULANG pesan yang sama. Menyerahkannya ke pengguna berarti
+            # tugas yang sedang berjalan putus di tengah tanpa alasan nyata.
+            # Jeda menaik supaya tak menambah beban server yang sedang penuh.
+            jeda = (15, 40, 75)
+            for percobaan in range(len(jeda) + 1):
+                try:
+                    out = conn.send(
+                        msg, on_status=on_status, on_token=on_token,
+                        cancel_event=cancel_event, new_chat=new_chat,
+                        open_chat_id=open_chat_id,
+                        complete_when=_web_reply_complete,
+                        attachments=attachments,
+                    )
+                    break
+                except connectors.WebBusyError:
+                    if percobaan >= len(jeda):
+                        raise           # sudah cukup sabar -> laporkan jujur
+                    tunggu = jeda[percobaan]
+                    on_status(f"{self.model_spec.label} sibuk — menunggu "
+                              f"{tunggu}s lalu mencoba lagi "
+                              f"({percobaan + 1}/{len(jeda)})")
+                    # Tidur dipecah supaya Esc/batal tetap responsif; cancel_event
+                    # yang menyala mengakhiri penungguan seketika.
+                    habis = time.time() + tunggu
+                    while time.time() < habis:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise llm.Cancelled()
+                        time.sleep(0.2)
             reply_chars += len(out or "")
             _sync_tokens()
             # Tangkap kaitan chat begitu URL /chat/<id> tersedia (kadang baru
@@ -1009,6 +1033,16 @@ class Agent:
             self.memory.repair_dangling_tools()
             self._persist()
             raise
+        except connectors.WebBusyError as exc:
+            # Sudah diulang beberapa kali dan servernya MASIH penuh. Katakan apa
+            # adanya — jangan tampilkan pemberitahuan situs seolah jawaban model.
+            answer = (
+                f"🕒 **Server {self.model_spec.label} sedang penuh.**\n\n"
+                f"> {exc}\n\n"
+                "Sudah kucoba ulang beberapa kali dengan jeda, tapi masih penuh. "
+                "Kirim ulang sebentar lagi, atau ketik `/model` untuk pindah ke "
+                "model NVIDIA (gratis & tanpa browser) supaya bisa lanjut sekarang."
+            )
         except connectors.WebLimitError as exc:
             # Kuota situs habis — sampaikan apa adanya (termasuk kapan pulih)
             # dan tawarkan jalan keluar, jangan sekadar "gagal".

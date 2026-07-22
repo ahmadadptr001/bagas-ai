@@ -196,6 +196,19 @@ class KimiConnector(WebConnector):
     # cocok dengan jawaban AI yang kebetulan membahas rate limit).
     limit_patterns = ()
 
+    # Pemberitahuan SIBUK Kimi — bentuk aslinya terlihat langsung di terminal:
+    #   "System is currently busy. Please try again later."
+    #   "Capacity is busy. Please wait or upgrade"
+    # Muncul DI TEMPAT balasan, jadi sebelum ini ia tampil sebagai "jawaban".
+    # Sengaja dijangkar pada kata "busy" bersama subjeknya (system/capacity/
+    # server) supaya kalimat biasa yang memuat "busy" tak ikut tertangkap;
+    # penjaga panjang di base (busy_max_chars) menutup sisanya.
+    busy_patterns = (
+        r"\b(system|capacity|server|service)\s+is\s+(currently\s+)?busy\b",
+        r"\bsistem\s+sedang\s+sibuk\b",
+        r"\bplease\s+wait\s+or\s+upgrade\b",
+    )
+
     # --- /effort: pemilih model + usaha berpikir ---
     # DIPETAKAN LANGSUNG pada sesi login. Berbeda dari Qwen yang kontrolnya
     # tersebar di dua tempat, Kimi menaruh SEMUANYA di balik satu pembuka

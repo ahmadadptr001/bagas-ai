@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from .. import config
 from .browser import (
-    BrowserError, WebLimitError, hub, profile_dir, set_windows_visible,
+    BrowserError, WebBusyError, WebLimitError, hub, profile_dir, set_windows_visible,
 )
 
 # Cari teks pendek di halaman yang cocok salah satu pola (dipakai mendeteksi
@@ -523,6 +523,17 @@ class WebConnector:
     # Jarak minimal antar-pemeriksaan limit (detik). Pemeriksaan memindai DOM,
     # jadi jangan dijalankan tiap putaran polling (300 ms).
     limit_poll_seconds: float = 2.0
+    # Pola teks "server sedang KEWALAHAN" — beda dari limit_patterns: kuota kita
+    # aman, servernya yang penuh, dan biasanya pulih dalam hitungan detik.
+    # Pemberitahuannya menggantikan isi balasan, jadi tanpa deteksi ini ia tampil
+    # sebagai "jawaban" model.
+    busy_patterns: tuple[str, ...] = ()
+    # Pemberitahuan sibuk selalu PENDEK. Ambang ini penjaga salah-tangkap yang
+    # penting: jawaban model yang KEBETULAN membahas server sibuk hampir pasti
+    # jauh lebih panjang, jadi teks panjang tak pernah dianggap pemberitahuan.
+    # (Pelajaran dari claude.py: pola longgar pernah membatalkan giliran yang
+    # sebenarnya normal.)
+    busy_max_chars: int = 400
     # Input file untuk MELAMPIRKAN gambar (mis. screenshot) ke pesan. Kosong =
     # situs ini tak mendukung lampiran.
     file_input_selector: str = ""
@@ -984,6 +995,12 @@ class WebConnector:
                 stable = 0
                 last = cur
             page.wait_for_timeout(self._poll_ms)
+
+        # Pemberitahuan "server sedang sibuk" muncul DI TEMPAT balasan, jadi tanpa
+        # pemeriksaan ini ia diteruskan sebagai jawaban model. Diperiksa SEBELUM
+        # web_timing.record supaya giliran gagal tak mencemari median ETA (durasinya
+        # sangat pendek dan akan membuat perkiraan terlalu optimistis).
+        self._raise_if_busy(last)
 
         # Rekam waktu NYATA turn ini -> dasar ETA yang jujur (lihat web_timing):
         # start_latency = durasi fase berpikir, answer_dur = durasi fase menjawab.
@@ -1492,6 +1509,23 @@ class WebConnector:
         msg = self.detect_limit(page)
         if msg:
             raise WebLimitError(msg)
+
+    def _raise_if_busy(self, text: str) -> None:
+        """Balasan ternyata cuma pemberitahuan "server sibuk"? -> WebBusyError,
+        supaya pemanggil menunggu lalu mengulang, BUKAN menampilkannya sebagai
+        jawaban model.
+
+        Dua penjaga agar jawaban asli tak pernah salah tangkap: teks harus
+        PENDEK (lihat busy_max_chars) dan harus cocok pola yang khas milik
+        pemberitahuan situs."""
+        if not self.busy_patterns or not text:
+            return
+        bersih = text.strip()
+        if len(bersih) > self.busy_max_chars:
+            return
+        for pola in self.busy_patterns:
+            if re.search(pola, bersih, re.I):
+                raise WebBusyError(bersih.replace("\n", " ")[:160])
 
     def _read_code_blocks(self, page: Any) -> list[str]:
         """Isi MENTAH semua blok kode pada balasan terakhir (apa adanya)."""

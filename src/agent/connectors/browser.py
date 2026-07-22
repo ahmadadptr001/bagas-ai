@@ -345,6 +345,18 @@ class WebLimitError(BrowserError):
     yang memang tak akan datang."""
 
 
+class WebBusyError(BrowserError):
+    """Layanan sedang KEWALAHAN sesaat ("System is currently busy…").
+
+    BEDA TEGAS dari WebLimitError: kuota kita baik-baik saja, servernya yang
+    penuh — biasanya pulih dalam hitungan detik. Karena itu jawabannya bukan
+    "ganti model" melainkan TUNGGU LALU ULANGI otomatis.
+
+    Dulu pemberitahuan begini terbaca sebagai isi balasan biasa, sehingga
+    tampil sebagai "jawaban" model — giliran dianggap sukses padahal model tak
+    pernah menjawab, dan alur agentic lanjut di atas teks yang bukan jawaban."""
+
+
 def playwright_available() -> bool:
     """True bila Playwright + modul sync-nya bisa diimpor."""
     try:
