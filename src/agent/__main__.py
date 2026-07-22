@@ -119,11 +119,32 @@ def _cmd_update() -> None:
         return
 
     out = updater.apply()
-    if out.get("status") == "updated":
-        tail = "" if out.get("reinstalled") else f" (catatan pip: {out.get('pip_detail','')})"
-        print("✓ bagas-ai diperbarui! Jalankan ulang perintah bagas-ai." + tail)
-    else:
+    if out.get("status") != "updated":
         print(f"✖ gagal ({out.get('status')}): {out.get('detail','')}")
+        return
+
+    if out.get("reinstalled"):
+        print("✓ bagas-ai diperbarui! Jalankan ulang perintah bagas-ai.")
+        return
+
+    # BELUM terpasang. Dua keadaan yang SANGAT berbeda, dan dulu keduanya
+    # ditampilkan sama: sepotong OSError pip yang terpotong di tengah kalimat.
+    # Padahal saat .exe terkunci (karena update dijalankan DARI bagas-ai),
+    # pemasangannya sudah dijadwalkan otomatis — pengguna cuma perlu menutup
+    # bagas-ai, bukan panik melihat error yang sebenarnya sudah ditangani.
+    if out.get("scheduled"):
+        print("✓ Kode terbaru sudah ditarik.")
+        print("  ⏳ " + (out.get("note")
+                        or "Pemasangan berjalan otomatis begitu bagas-ai "
+                           "ditutup — cukup TUTUP lalu buka lagi."))
+        return
+
+    print("⚠ Kode terbaru sudah ditarik, tapi pemasangannya belum jalan.")
+    if out.get("note"):
+        print("  " + out["note"])
+    detail = (out.get("pip_detail") or "").strip()
+    if detail:
+        print(f"  catatan pip: {detail}")
 
 
 def _cmd_add_dir(args: list[str]) -> None:
