@@ -1,0 +1,3 @@
+# Hook shell WAJIB LF: dengan CRLF, sh gagal ("bad interpreter: /bin/sh^M")
+# di clone yang autocrlf-nya aktif.
+.githooks/pre-commit text eol=lf

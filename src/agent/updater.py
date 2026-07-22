@@ -215,7 +215,18 @@ def _reinstall(repo: Path) -> dict:
     flags: list[str] = []
     if not editable and _is_user_install():
         flags.append("--user")
-    target = ["-e", str(repo)] if editable else [str(repo)]
+    if editable:
+        target = ["-e", str(repo)]
+    else:
+        # KUNCI (penyebab "update tak ngefek"): instalasi non-editable DILEWATI
+        # pip bila versi paket sama ("Requirement already satisfied"). Nomor versi
+        # di pyproject nyaris tak pernah dinaikkan per commit, jadi git pull
+        # menarik kode baru ke repo TAPI site-packages tetap basi — update terasa
+        # kosong padahal git sudah terbaru. --force-reinstall memaksa menimpa apa
+        # pun versinya; --no-deps menjaga cepat & aman (dependensi yang sudah
+        # terpasang tak diutak-atik). Sumber kebenaran versi di sini adalah COMMIT
+        # git, bukan string versi.
+        target = ["--force-reinstall", "--no-deps", str(repo)]
 
     inst = _run(base + flags + target, repo, timeout=600)
     blob = (inst.stderr + inst.stdout).lower()

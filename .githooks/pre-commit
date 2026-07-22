@@ -1,0 +1,15 @@
+#!/bin/sh
+# Auto-bump versi patch tiap commit. Logikanya di .githooks/bump_version.py.
+# Diaktifkan dengan: git config core.hooksPath .githooks
+# (installer & README menyetel ini otomatis; jalankan sekali per clone).
+#
+# JANGAN pernah menghambat commit gara-gara hook -> semua jalur diakhiri "|| true".
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+if command -v python >/dev/null 2>&1; then
+  python "$root/.githooks/bump_version.py" || true
+elif command -v py >/dev/null 2>&1; then
+  py "$root/.githooks/bump_version.py" || true
+elif command -v python3 >/dev/null 2>&1; then
+  python3 "$root/.githooks/bump_version.py" || true
+fi
+exit 0
