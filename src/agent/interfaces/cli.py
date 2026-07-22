@@ -772,6 +772,13 @@ class TurnView:
         ph_el = now - self.phase_since
         if self.phase == "berpikir":
             s = med["start"]
+            # Sebagian situs (mis. kimi.com) membuat wadah balasan SEKETIKA
+            # setelah kirim, jadi fase 'berpikir' terukur ~0 detik dan seluruh
+            # penantian nyata jatuh ke fase 'menjawab'. Menampilkan "biasanya
+            # mulai menjawab ~0s" cuma kebisingan yang meremehkan lama tunggu —
+            # lebih baik diam dan biarkan bar fase berikutnya yang bicara.
+            if s < 1.0:
+                return None
             if ph_el <= max(s * 1.5, s + 3):
                 txt = f"biasanya mulai menjawab ~{s:.0f}s"
             else:
