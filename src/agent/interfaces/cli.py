@@ -243,6 +243,33 @@ def _web_phase(msg: str) -> str:
     return (msg or "").strip().rstrip("…") or "bekerja"
 
 
+# Escape ANSI (CSI/OSC/dua-karakter) + karakter kendali lain. Keluaran tool nyata
+# penuh dengannya — pip, npm, git, dan hampir semua CLI modern mewarnai
+# keluarannya, dan model web pun kadang menyalin log berwarna ke jawabannya.
+# Rich memperlakukan isi Text sebagai teks BIASA: byte ESC diteruskan apa adanya
+# ke terminal, lalu terminal mengeksekusinya. Akibatnya warna region live berubah
+# sendiri, kursor melompat, bahkan layar terhapus — persis "tampilan kacau" yang
+# sulit ditelusuri karena sumbernya keluaran perintah, bukan kode UI.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"          # CSI (warna, gerak kursor, hapus layar)
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC (judul jendela, hyperlink)
+    r"|\x1b[@-Z\\-_]"                      # escape dua karakter
+)
+_KENDALI_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _bersih_kendali(s: str) -> str:
+    """Buang escape ANSI & karakter kendali; TAB jadi spasi.
+
+    TAB ikut diganti karena lebar tampilannya ditentukan terminal (biasanya 8),
+    sehingga perhitungan lebar Rich meleset dan kolom jadi tak sejajar."""
+    if not s:
+        return s
+    s = _ANSI_RE.sub("", s)
+    s = s.replace("\t", "    ")
+    return _KENDALI_RE.sub("", s)
+
+
 def _oneline(t: Text) -> Text:
     """Baris untuk region live: JANGAN pernah wrap — wrap membuat tinggi region
     berubah antar-frame sehingga rich.Live menggambar ulang kacau (kedip/baris
@@ -582,7 +609,11 @@ class TurnView:
         # Pra-hitung baris hasil SEKALI di sini — _render_step dipanggil ~12x/dtk
         # per frame; tanpa cache ini regex+splitlines diulang terus tiap frame.
         text = re.sub(r"^exit_code=\S+\n?", "", (result or "").strip())
-        rec["_lines"] = text.splitlines()
+        # Dibersihkan DI SINI, di jalur pra-hitung yang sebenarnya dipakai.
+        # Membersihkan hanya di _render_step tidak ada gunanya: cabang itu cuma
+        # jalan bila `_lines` belum ada, sedangkan tiap langkah yang selesai
+        # selalu melewati baris ini lebih dulu.
+        rec["_lines"] = _bersih_kendali(text).splitlines()
         rec["_nlines"] = sum(1 for ln in rec["_lines"] if ln.strip())
         self.tool = None
         self.phase = "berpikir"
@@ -625,7 +656,10 @@ class TurnView:
         if not delta:
             return
         self._web_chars += len(delta)
-        buf = self._stream + delta
+        # Dibersihkan SEBELUM masuk buffer: jawaban model bisa memuat log
+        # berwarna yang disalin apa adanya, dan byte ESC di region live akan
+        # dieksekusi terminal (warna berubah sendiri, kursor melompat).
+        buf = self._stream + _bersih_kendali(delta)
         # Dipotong dari depan: yang ditonton pengguna selalu bagian terbaru.
         self._stream = buf[-self._PREVIEW_KEEP:]
 
@@ -699,7 +733,10 @@ class TurnView:
         lines = rec.get("_lines")
         if lines is None:
             text = re.sub(r"^exit_code=\S+\n?", "", (rec["result"] or "").strip())
-            lines = text.splitlines()
+            # Keluaran perintah nyaris selalu berwarna (pip/npm/git) -> escape-nya
+            # WAJIB dibuang sebelum masuk region live, kalau tidak terminal ikut
+            # mengeksekusinya dan tampilan berantakan.
+            lines = _bersih_kendali(text).splitlines()
         nlines = rec.get("_nlines")
         if nlines is None:
             nlines = sum(1 for ln in lines if ln.strip())
@@ -766,6 +803,43 @@ class TurnView:
         # basi, dan ringkasan dicetak SETELAH jawaban (urutan benar).
         if not self.done:
             blocks.append((("other", None), self._footer()))
+        return self._muat_layar(blocks)
+
+    def _tinggi(self, rends: list) -> int:
+        """Tinggi NYATA (baris) bila daftar renderable ini digambar.
+
+        Diukur, bukan ditaksir: satu blok TIDAK sama dengan satu baris — hasil
+        langkah yang terbuka adalah SATU Text berisi banyak baris. Menaksir
+        dengan menghitung blok itulah sebabnya penjaga tinggi yang lama meleset."""
+        try:
+            return len(console.render_lines(Group(*rends), console.options,
+                                            pad=False))
+        except Exception:  # noqa: BLE001 - konsol tiruan/uji -> taksiran kasar
+            return len(rends)
+
+    def _muat_layar(self, blocks: list) -> list:
+        """Pastikan region live MUAT di layar, buang langkah tertua bila perlu.
+
+        Region live yang lebih tinggi dari layar membuat rich.Live tak bisa
+        menghapus baris yang sudah lewat atas layar -> baris hantu, teks dobel,
+        scroll rusak. Penjaga lama (live_cap) menaksir jatah baris lewat rumus
+        dan punya lantai `max(3, ...)` yang tetap dilanggar saat layar sempit:
+        TERUKUR 26 baris di terminal 24 baris pada 5 langkah ter-expand.
+
+        Di sini tingginya diukur langsung lalu blok TERTUA dibuang sampai muat.
+        Yang tertua memang paling layak dikorbankan: langkah terbaru yang sedang
+        berjalan itulah yang ditonton, dan riwayat penuhnya tetap ada di
+        scrollback serta /expand."""
+        if not blocks:
+            return blocks
+        try:
+            layar = console.size.height
+        except Exception:  # noqa: BLE001
+            return blocks
+        maks = max(4, layar - 2)   # sisakan ruang untuk prompt & baris perintah
+        # Footer (blok terakhir) tak boleh dibuang: di situlah status & spinner.
+        while len(blocks) > 1 and self._tinggi([r for _, r in blocks]) > maks:
+            blocks.pop(0)
         return blocks
 
     def __rich__(self):
