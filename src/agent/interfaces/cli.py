@@ -534,6 +534,8 @@ class TurnView:
         # Perkiraan PERTAMA yang ditampilkan (detik, total durasi menjawab) —
         # dipakai menilai akurasi sesudah giliran selesai.
         self._web_pred_first = 0.0
+        # Ekor jawaban yang sedang ditulis, untuk pratinjau bergulir di region live.
+        self._stream = ""
 
     # --- mutasi (dipanggil dari worker) ---
     def add_narasi(self, text: str) -> None:
@@ -601,13 +603,63 @@ class TurnView:
             if text == "menjawab":
                 self._web_chars = 0
                 self._web_pred_first = 0.0
+                self._stream = ""
             self.phase = text
             self.phase_since = time.time()   # patok waktu fase baru (untuk ETA)
 
-    def note_stream(self, n: int) -> None:
-        """Sekian karakter jawaban baru saja mengalir (dari on_token)."""
-        if n > 0:
-            self._web_chars += n
+    # Berapa baris jawaban yang sedang ditulis ditampilkan di region live.
+    # Kecil DENGAN SENGAJA: region live harus jauh lebih pendek dari layar, kalau
+    # tidak rich.Live tak bisa menghapus baris yang sudah lewat atas layar dan
+    # muncul baris hantu/dobel.
+    PREVIEW_LINES = 6
+    # Ekor teks yang disimpan untuk pratinjau. Tak perlu menyimpan seluruh
+    # jawaban (bisa ratusan ribu karakter) — yang ditampilkan hanya ekornya.
+    _PREVIEW_KEEP = 4000
+
+    def note_stream(self, delta: str) -> None:
+        """Potongan jawaban baru saja mengalir dari situs (dari on_token).
+
+        Dua gunanya: menghitung kemajuan untuk ETA, dan menyimpan EKOR teks
+        supaya pengguna bisa melihat jawaban terbentuk saat itu juga alih-alih
+        menatap spinner sampai jawaban selesai sepenuhnya."""
+        if not delta:
+            return
+        self._web_chars += len(delta)
+        buf = self._stream + delta
+        # Dipotong dari depan: yang ditonton pengguna selalu bagian terbaru.
+        self._stream = buf[-self._PREVIEW_KEEP:]
+
+    def _preview_rows(self, dipakai: int = 0) -> list:
+        """Beberapa baris TERAKHIR jawaban yang sedang ditulis, untuk region live.
+
+        Jawaban lengkap TIDAK dirender di sini melainkan dicetak ke riwayat
+        sesudah giliran selesai — inilah yang membuat jawaban sepanjang apa pun
+        tak merusak scroll. Yang tampil saat berjalan cuma jendela bergulir
+        setinggi PREVIEW_LINES, jadi tinggi region live tetap tetap."""
+        teks = self._stream
+        if not teks.strip():
+            return []
+        # Jatah baris dibatasi tinggi terminal: region live yang lebih tinggi
+        # dari layar membuat rich.Live gagal menghapus baris lama -> baris hantu.
+        # `dipakai` = baris yang sudah terpakai langkah, +4 cadangan untuk footer
+        # (status, ETA, tips) dan prompt.
+        try:
+            tinggi = console.size.height
+        except Exception:  # noqa: BLE001
+            tinggi = 30
+        jatah = min(self.PREVIEW_LINES, tinggi - dipakai - 6)
+        if jatah < 2:
+            return []
+        baris = [b for b in teks.replace("\r", "").split("\n")]
+        # Baris kosong di ekor bikin pratinjau tampak "melompat" tanpa isi.
+        while baris and not baris[-1].strip():
+            baris.pop()
+        if not baris:
+            return []
+        rows = []
+        for b in baris[-jatah:]:
+            rows.append(_oneline(Text("  │ " + b.rstrip(), style="#7f849c")))
+        return rows
 
     def toggle(self) -> None:
         """Ctrl+R (cadangan): buka/tutup SEMUA hasil sekaligus."""
@@ -702,6 +754,13 @@ class TurnView:
             if kind == "step":
                 for r in self._render_step(val, live_cap=live_cap):
                     blocks.append((("step", val["n"]), r))
+        # Jawaban yang SEDANG ditulis: tampilkan ekornya supaya pengguna tak
+        # menatap spinner tanpa isi sampai jawaban rampung. Dilewati saat ada
+        # langkah ter-expand — keduanya berebut tinggi layar, dan isi langkah
+        # yang sengaja dibuka pengguna lebih berhak.
+        if not self.done and not n_exp:
+            blocks.extend((("other", None), r)
+                          for r in self._preview_rows(dipakai=len(blocks)))
         # Footer (spinner/status) HANYA selama berjalan. Saat done, region yang
         # membeku ke riwayat cukup berisi langkah — tanpa "membatalkan…"/spinner
         # basi, dan ringkasan dicetak SETELAH jawaban (urutan benar).
@@ -1526,8 +1585,9 @@ def main(resume: bool = False) -> None:
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status,
-                    # Aliran teks jawaban = sinyal kemajuan NYATA untuk ETA.
-                    on_token=lambda s: view.note_stream(len(s)),
+                    # Aliran teks jawaban: dipakai untuk ETA sekaligus pratinjau
+                    # bergulir, supaya jawaban terlihat terbentuk saat itu juga.
+                    on_token=view.note_stream,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
