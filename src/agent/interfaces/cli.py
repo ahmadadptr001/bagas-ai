@@ -527,6 +527,13 @@ class TurnView:
                 self._web_med = web_timing.medians(self._web_service)
             except Exception:  # noqa: BLE001
                 self._web_med = None
+        # Jumlah karakter jawaban yang SUDAH mengalir di giliran ini. Inilah
+        # sinyal yang membuat ETA benar-benar hidup: bukan menebak durasi dari
+        # median, tapi mengukur kemajuan nyata terhadap perkiraan panjang akhir.
+        self._web_chars = 0
+        # Perkiraan PERTAMA yang ditampilkan (detik, total durasi menjawab) —
+        # dipakai menilai akurasi sesudah giliran selesai.
+        self._web_pred_first = 0.0
 
     # --- mutasi (dipanggil dari worker) ---
     def add_narasi(self, text: str) -> None:
@@ -587,8 +594,20 @@ class TurnView:
         """Set fase status langsung (dipakai connector web: 'menjawab', dsb).
         Diabaikan saat ada tool berjalan supaya fase tool tak tertimpa."""
         if self.tool is None and text and text != self.phase:
+            # Giliran connector bisa berisi BEBERAPA fase 'menjawab' (jawaban
+            # awal, lalu balasan atas hasil tool). Tiap kali fase menjawab
+            # dimulai lagi, hitungan karakter & perkiraan pertama disetel ulang
+            # supaya ETA menghitung jawaban yang SEKARANG, bukan akumulasi.
+            if text == "menjawab":
+                self._web_chars = 0
+                self._web_pred_first = 0.0
             self.phase = text
             self.phase_since = time.time()   # patok waktu fase baru (untuk ETA)
+
+    def note_stream(self, n: int) -> None:
+        """Sekian karakter jawaban baru saja mengalir (dari on_token)."""
+        if n > 0:
+            self._web_chars += n
 
     def toggle(self) -> None:
         """Ctrl+R (cadangan): buka/tutup SEMUA hasil sekaligus."""
@@ -749,11 +768,34 @@ class TurnView:
         return rows[0] if len(rows) == 1 else Group(*rows)
 
     @staticmethod
-    def _bar(frac: float, width: int = 12) -> str:
+    def _bar(frac: float, width: int = 14) -> str:
+        """Pill TIPIS: dibangun dari glyph garis (U+2501/U+2500), bukan blok
+        penuh (U+2588/U+2591).
+
+        Blok penuh setinggi satu baris sel penuh sehingga terlihat seperti
+        batang tebal; glyph garis hanya menggambar satu goresan di tengah sel,
+        jadi bar-nya terbaca tipis & rendah seperti pill. Ujungnya diberi
+        setengah-garis (U+257A/U+2578 tebal, U+2576/U+2574 tipis) supaya kedua
+        sisi tampak membulat alih-alih terpotong siku.
+
+        Sengaja memakai box-drawing yang ADA di hampir semua font terminal —
+        glyph pill Powerline (U+E0B4/E0B6) bergantung Nerd Font dan akan jadi
+        kotak-tofu di font bawaan."""
         frac = max(0.0, min(frac, 1.0))
-        fill = int(round(frac * width))
-        return (f"[#a6e3a1]{'█' * fill}[/]"
-                f"[#45475a]{'░' * (width - fill)}[/]")
+        isi = int(round(frac * width))
+        # Dirakit per-sel supaya lebarnya SELALU `width`. Versi sebelumnya
+        # menyusun ujung + tengah secara terpisah dan meleset satu karakter di
+        # 0%/100%, sehingga bar berkedut saat mendekati ujung.
+        def sel(i: int, terisi: bool) -> str:
+            if i == 0:
+                return "╺" if terisi else "╶"
+            if i == width - 1:
+                return "╸" if terisi else "╴"
+            return "━" if terisi else "─"
+
+        kiri = "".join(sel(i, True) for i in range(isi))
+        kanan = "".join(sel(i, False) for i in range(isi, width))
+        return f"[#a6e3a1]{kiri}[/][#45475a]{kanan}[/]"
 
     def _web_eta_line(self, now: float):
         """Baris ETA SADAR-FASE untuk connector web — dijaga JUJUR:
@@ -785,17 +827,79 @@ class TurnView:
                 txt = f"biasanya ~{s:.0f}s — kali ini agak lama, ditunggu ya"
             return _oneline(Text.from_markup(f"     [dim #6c7086]{txt}[/]"))
         if self.phase == "menjawab":
-            a = med["answer"]
-            eta = a - ph_el
+            frac, eta = self._web_progress(ph_el)
+            if eta is None:
+                return None
+            bar = self._bar(min(frac, 0.95))
             if eta >= 1:
-                bar = self._bar(min(ph_el / a, 0.95) if a > 0 else 0.0)
-                tail = f"≈{eta:.0f}s lagi (perkiraan)"
+                # "≤" bukan "≈": angkanya JANJI batas atas yang dikalibrasi,
+                # bukan tebakan titik. Hitung-mundur satu angka tak bisa dibuat
+                # akurat 80-90% (panjang jawaban belum ada saat ditanya);
+                # janji satu sisi bisa — lihat web_timing._TARGET.
+                tail = f"≤{eta:.0f}s lagi"
             else:
-                bar = self._bar(0.95)
-                tail = "lebih lama dari biasanya…"
+                tail = "hampir selesai…"
+            akur = med.get("akurasi")
+            # Angka DIUKUR dari giliran-giliran sebelumnya, bukan klaim: berapa
+            # persen janji yang benar-benar ditepati. Kalau kenyataannya 60%,
+            # yang tertulis 60% — dan kuantilnya menyetel diri naik.
+            jejak = f" · janji tepat {akur * 100:.0f}%" if akur is not None else ""
             return _oneline(Text.from_markup(
-                f"     {bar}  [dim #6c7086]{tail}[/]"))
+                f"     {bar}  [dim #6c7086]{tail}{jejak}[/]"))
         return None
+
+    def _web_progress(self, ph_el: float) -> tuple[float, float | None]:
+        """(kemajuan 0-1, detik tersisa) untuk fase 'menjawab'.
+
+        Perkiraan dihitung dari KEMAJUAN NYATA, bukan median durasi:
+
+            sisa = (perkiraan panjang akhir - karakter yang sudah mengalir)
+                   / throughput
+
+        Median durasi ditinggalkan karena sebarannya sangat lebar (terukur
+        5.75s-28.12s pada layanan yang sama) — sebabnya panjang jawaban yang
+        berbeda-beda, bukan layanannya yang tak menentu. Throughput jauh lebih
+        stabil, dan panjang akhir diperkirakan lewat E[L | L > c] yang menajam
+        sendiri seiring makin banyak teks yang terlihat.
+
+        Kembali (frac, None) bila belum layak menampilkan apa pun."""
+        med = self._web_med or {}
+        chars = self._web_chars
+        rate = med.get("rate")
+        lengths = med.get("lengths") or []
+
+        # Throughput dari riwayat belum ada? Pakai laju giliran INI, tapi tunggu
+        # beberapa detik dulu — laju di detik pertama masih sangat berisik.
+        if not rate:
+            if ph_el < 3 or chars <= 0:
+                return 0.0, None
+            rate = chars / ph_el
+
+        if chars <= 0 or not lengths:
+            # Belum ada teks / belum ada riwayat panjang: jatuh kembali ke median
+            # durasi supaya tetap ada gambaran kasar, dan katakan apa adanya.
+            a = med.get("answer") or 0.0
+            if a <= 0:
+                return 0.0, None
+            return min(ph_el / a, 0.95), max(a - ph_el, 0.0)
+
+        try:
+            from .. import web_timing
+            # Kuantil (bukan rata-rata) supaya angkanya jadi BATAS ATAS yang
+            # bisa dikalibrasi; nilainya menyetel diri tiap giliran.
+            total = web_timing.kuantil_panjang(
+                lengths, chars, med.get("kuantil", 0.80))
+        except Exception:  # noqa: BLE001
+            return 0.0, None
+
+        sisa_chars = max(total - chars, 0.0)
+        eta = sisa_chars / rate if rate > 0 else 0.0
+        frac = chars / total if total > 0 else 0.0
+
+        # Simpan janji PERTAMA (sebagai total durasi) untuk dinilai nanti.
+        if not self._web_pred_first and eta >= 1:
+            self._web_pred_first = ph_el + eta
+        return frac, eta
 
 
 # ---------------------------------------------------------------------------
@@ -1416,6 +1520,8 @@ def main(resume: bool = False) -> None:
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status,
+                    # Aliran teks jawaban = sinyal kemajuan NYATA untuk ETA.
+                    on_token=lambda s: view.note_stream(len(s)),
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
@@ -1543,6 +1649,16 @@ def main(resume: bool = False) -> None:
                 # Jawaban TIDAK ditaruh di region live (bisa sangat panjang ->
                 # bikin kedip & scroll rusak); dicetak ke riwayat setelah Live tutup.
                 view.done = True
+                # Nilai perkiraan ETA terhadap kenyataan. Ditempel ke giliran
+                # yang barusan tercatat connector, supaya angka "tepat N%" di
+                # layar adalah hasil UKUR, bukan klaim.
+                if view._web_service and view._web_pred_first:
+                    try:
+                        from .. import web_timing
+                        web_timing.note_promise(view._web_service,
+                                                view._web_pred_first)
+                    except Exception:  # noqa: BLE001 - statistik tak boleh ganggu
+                        pass
                 live.refresh()
         except KeyboardInterrupt:
             interrupted = True

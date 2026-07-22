@@ -1006,8 +1006,10 @@ class WebConnector:
         # start_latency = durasi fase berpikir, answer_dur = durasi fase menjawab.
         try:
             from .. import web_timing
+            # Panjang jawaban ikut dicatat: ia yang menjelaskan kenapa durasi
+            # berbeda-beda, dan jadi dasar perhitungan throughput di web_timing.
             web_timing.record(self.service, _t_started - t0,
-                              time.time() - _t_started)
+                              time.time() - _t_started, len(last))
         except Exception:  # noqa: BLE001 - statistik tak boleh ganggu jawaban
             pass
 

@@ -322,7 +322,11 @@ def _reinstall(repo: Path) -> dict:
 
     _purge_build(repo)
     # Geser exe yang mungkin sedang berjalan SEBELUM pip menyentuhnya (Windows).
-    digeser = _liberate_scripts() if not editable else []
+    # BERLAKU JUGA untuk editable: pip tetap menulis ulang skrip konsol, jadi
+    # exe yang terkunci tetap menggagalkan perintahnya (TERAMATI: `pip install
+    # -e .` mati dengan WinError 32 pada bagas-ai.exe saat bagas-ai berjalan).
+    # Bedanya cuma keparahannya — pada editable kode sudah aktif dari repo.
+    digeser = _liberate_scripts()
 
     inst = _run(base + flags + target, repo, timeout=600)
     blob = (inst.stderr + inst.stdout).lower()
