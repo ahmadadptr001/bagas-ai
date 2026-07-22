@@ -996,11 +996,28 @@ class WebConnector:
                 last = cur
             page.wait_for_timeout(self._poll_ms)
 
+        # Jawaban final ditentukan DULU: rekonstruksi Markdown dari HTML
+        # (list/tabel/heading/kode utuh) bila diaktifkan; kalau gagal, pakai teks
+        # polos yang sudah stabil.
+        final = ""
+        if self.read_as_markdown:
+            final = self._read_last_markdown(page) or ""
+        if not final:
+            final = last
+
         # Pemberitahuan "server sedang sibuk" muncul DI TEMPAT balasan, jadi tanpa
-        # pemeriksaan ini ia diteruskan sebagai jawaban model. Diperiksa SEBELUM
-        # web_timing.record supaya giliran gagal tak mencemari median ETA (durasinya
-        # sangat pendek dan akan membuat perkiraan terlalu optimistis).
+        # pemeriksaan ini ia diteruskan sebagai jawaban model.
+        #
+        # KEDUA jalur baca diperiksa, dan itu bukan kehati-hatian berlebihan:
+        # TERAMATI di kimi.com, pemberitahuannya lolos ke pengguna lewat hasil
+        # markdown padahal teks polosnya tak memuatnya — memeriksa `last` saja
+        # tidak cukup, keduanya harus dijaga.
+        #
+        # Diperiksa SEBELUM web_timing.record supaya giliran gagal tak mencemari
+        # statistik ETA: durasinya sangat pendek dan akan membuat janji terlalu
+        # optimistis, plus panjangnya mengacaukan perhitungan throughput.
         self._raise_if_busy(last)
+        self._raise_if_busy(final)
 
         # Rekam waktu NYATA turn ini -> dasar ETA yang jujur (lihat web_timing):
         # start_latency = durasi fase berpikir, answer_dur = durasi fase menjawab.
@@ -1009,7 +1026,7 @@ class WebConnector:
             # Panjang jawaban ikut dicatat: ia yang menjelaskan kenapa durasi
             # berbeda-beda, dan jadi dasar perhitungan throughput di web_timing.
             web_timing.record(self.service, _t_started - t0,
-                              time.time() - _t_started, len(last))
+                              time.time() - _t_started, len(final))
         except Exception:  # noqa: BLE001 - statistik tak boleh ganggu jawaban
             pass
 
@@ -1019,18 +1036,12 @@ class WebConnector:
         # membaca usulan tool tanpa risiko rusak oleh perenderan markdown.
         self.last_code_blocks = self._read_code_blocks(page)
 
-        if not last:
+        if not final:
             raise BrowserError(
                 f"tidak ada jawaban terbaca dari {self.label}. Coba periksa "
                 "selektor pesan, atau kirim ulang."
             )
-        # Jawaban final: rekonstruksi Markdown dari HTML (list/tabel/heading/kode
-        # utuh) bila diaktifkan; kalau gagal, pakai teks polos yang sudah stabil.
-        if self.read_as_markdown:
-            md = self._read_last_markdown(page)
-            if md:
-                return md
-        return last
+        return final
 
     def _set_action_on_hub(self, h: Any, label: str, path: tuple[str, ...],
                            opener: str = "") -> str:
