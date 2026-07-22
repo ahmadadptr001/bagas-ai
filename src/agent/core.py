@@ -52,7 +52,10 @@ _IMAGE_MARK_RE = re.compile(r"^\[GAMBAR\][ \t]+(.+?)[ \t]*$", re.MULTILINE)
 _WEB_REMINDER = (
     "[Pengingat: kalau permintaan ini perlu MENGUBAH file atau menjalankan "
     "sesuatu, keluarkan blok [[TOOL]] — jangan menampilkan kode untuk kusalin "
-    "sendiri. Aku yang mengeksekusi dan mengirim balik hasilnya.]"
+    "sendiri. Aku yang mengeksekusi dan mengirim balik hasilnya. "
+    "Setiap perubahan file WAJIB lewat write_file (isi lengkap) — jangan "
+    "menulis file lewat run_python/run_command, karena hanya write_file yang "
+    "menampilkan diff berwarna untuk kutinjau sebelum file disentuh.]"
 )
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
 _WEB_MAX_STEPS = 24
@@ -117,6 +120,24 @@ def _web_tool_protocol() -> str:
         "5. Untuk membuat/mengubah file, usulkan write_file (bukan menampilkan "
         "kode untuk saya salin manual), karena tujuan saya memang agar bagas-ai "
         "yang menuliskannya langsung ke proyek.\n"
+        "5b. WAJIB: JANGAN menulis/menambal file lewat run_python atau "
+        "run_command — bukan lewat open(...).write(), pathlib.write_text, "
+        "re.sub lalu tulis ulang, heredoc, echo >, Set-Content, sed -i, patch, "
+        "maupun skrip generator. SEMUA perubahan file harus lewat write_file, "
+        "satu blok per file, berisi isi LENGKAP file itu.\n"
+        "    Alasannya bukan gaya, tapi supaya perubahanmu BISA DIPERIKSA: "
+        "untuk write_file, bagas-ai menampilkan diff berwarna (hijau = baris "
+        "ditambah, merah = dihapus) di terminal SEBELUM file disentuh, sehingga "
+        "saya melihat persis apa yang berubah. Perubahan lewat skrip tak "
+        "terlihat sama sekali — yang tampil cuma 'menjalankan python', dan saya "
+        "kehilangan satu-satunya kesempatan meninjau. File juga bisa rusak "
+        "diam-diam tanpa saya sadari.\n"
+        "    Isi file panjang memang membuat JSON-nya besar; itu tak apa. "
+        "Kalau file sangat besar, pecah pekerjaannya per file (satu write_file "
+        "per giliran) — JANGAN beralih ke skrip.\n"
+        "    run_python & run_command tetap dipakai untuk hal yang memang bukan "
+        "pengeditan file: menjalankan tes, memasang dependensi, menjalankan "
+        "program, memeriksa hasil.\n"
         "6. Path file relatif terhadap folder proyek yang disebut di konteks, "
         "dan pakai garis miring biasa (src/app/main.py) — JANGAN backslash, "
         "supaya tidak rusak saat dikirim.\n"
@@ -614,9 +635,9 @@ class Agent:
         dipakai UI untuk menampilkan hasil (mis. output perintah) secara ringkas.
         `on_notice(teks)` dipanggil saat bagas-ai mengambil tindakan anti-macet
         otomatis (mis. memaksa menyimpulkan sesudah tool gagal beruntun).
-        `on_retry` dipertahankan demi kecocokan pemanggil lama; jalur web tak
-        memakainya karena penantian rate-limit/sibuk ditangani di dalam
-        _run_connector (WebBusyError -> tunggu lalu ulangi).
+        `on_retry(percobaan, tunggu, exc)` dipanggil saat situs sedang PENUH
+        dan bagas-ai menunggu lalu mengirim ulang — UI memakainya untuk
+        hitung-mundur sisa waktu di footer.
         Bila `cancel_event` diset di tengah jalan, melempar llm.Cancelled.
         """
         return self._run_connector(
@@ -624,7 +645,7 @@ class Agent:
             on_status=on_status, on_token=on_token,
             on_tool=on_tool, on_message=on_message,
             on_tool_result=on_tool_result, on_notice=on_notice,
-            attachments=attachments,
+            on_retry=on_retry, attachments=attachments,
         )
 
     def _run_connector(
@@ -638,6 +659,7 @@ class Agent:
         on_message: Callable[[str], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
         on_notice: Callable[[str], None] | None = None,
+        on_retry: Callable[[int, float, Exception], None] | None = None,
         attachments: list[str] | None = None,
     ) -> str:
         """Jalankan giliran lewat AI web (browser) sebagai AGENT penuh.
@@ -784,6 +806,17 @@ class Agent:
                     _status(f"{self.model_spec.label} sibuk — menunggu "
                             f"{tunggu}s lalu mencoba lagi "
                             f"({percobaan + 1}/{len(jeda)})")
+                    # UI sudah punya hitung-mundur khusus penantian seperti ini
+                    # (footer "layanan sibuk — menunggu lalu melanjutkan Ns").
+                    # Dulu menganggur karena on_retry tak pernah dipanggil lagi
+                    # sesudah jalur API dihapus, sehingga penantian 75 detik
+                    # hanya ditandai sebaris teks fase tanpa sisa waktu.
+                    if on_retry is not None:
+                        try:
+                            on_retry(percobaan + 1, float(tunggu),
+                                     connectors.WebBusyError("server penuh"))
+                        except Exception:  # noqa: BLE001 - UI tak boleh menggagalkan
+                            pass
                     # Tidur dipecah supaya Esc/batal tetap responsif; cancel_event
                     # yang menyala mengakhiri penungguan seketika.
                     habis = time.time() + tunggu

@@ -90,8 +90,16 @@ except Exception:  # pragma: no cover
 
 def _md(text: str) -> Markdown:
     """Markdown bertema catppuccin (inline code pakai style `markdown.code`,
-    blok kode ```lang``` disorot tema `dracula`)."""
-    return Markdown(text, code_theme=_CODE_THEME)
+    blok kode ```lang``` disorot tema `dracula`).
+
+    Escape ANSI dibuang DI SINI karena inilah satu-satunya pintu yang dilewati
+    SEMUA teks model menuju layar: narasi antar-langkah dan jawaban akhir. Dulu
+    penyaringnya hanya dipasang di region live, padahal jalur ini justru lebih
+    berbahaya — region live ditimpa tiap frame, sedangkan riwayat terminal
+    PERMANEN: satu \x1b[2J dari log yang disalin model menghapus scrollback
+    giliran sebelumnya, dan \x1b[31m tanpa reset mewarnai semua teks sesudahnya
+    sampai terminal di-reset manual."""
+    return Markdown(_bersih_kendali(text), code_theme=_CODE_THEME)
 
 # Padding tepi supaya konten tidak mepet ke pinggir terminal (kiri/kanan/bawah).
 _LPAD = 2
@@ -259,13 +267,21 @@ _KENDALI_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _bersih_kendali(s: str) -> str:
-    """Buang escape ANSI & karakter kendali; TAB jadi spasi.
+    """Buang escape ANSI & karakter kendali; CR jadi baris baru, TAB jadi spasi.
+
+    CR ditangani TERSENDIRI, bukan lewat _KENDALI_RE: \\x0d jatuh persis di celah
+    antara \\x0c dan \\x0e sehingga dulu lolos diam-diam. Ia karakter kendali
+    sungguhan — memindahkan kursor ke kolom 0 — dan seluruh progress bar
+    pip/npm/docker dibangun darinya, jadi ini bukan kasus langka. Diubah jadi
+    baris baru (bukan dibuang) supaya tiap pembaruan progres tetap terbaca
+    sebagai barisnya sendiri alih-alih menyambung jadi satu baris panjang.
 
     TAB ikut diganti karena lebar tampilannya ditentukan terminal (biasanya 8),
     sehingga perhitungan lebar Rich meleset dan kolom jadi tak sejajar."""
     if not s:
         return s
     s = _ANSI_RE.sub("", s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = s.replace("\t", "    ")
     return _KENDALI_RE.sub("", s)
 
@@ -663,7 +679,7 @@ class TurnView:
         # Dipotong dari depan: yang ditonton pengguna selalu bagian terbaru.
         self._stream = buf[-self._PREVIEW_KEEP:]
 
-    def _preview_rows(self, dipakai: int = 0) -> list:
+    def _preview_rows(self) -> list:
         """Beberapa baris TERAKHIR jawaban yang sedang ditulis, untuk region live.
 
         Jawaban lengkap TIDAK dirender di sini melainkan dicetak ke riwayat
@@ -673,18 +689,13 @@ class TurnView:
         teks = self._stream
         if not teks.strip():
             return []
-        # Jatah baris dibatasi tinggi terminal: region live yang lebih tinggi
-        # dari layar membuat rich.Live gagal menghapus baris lama -> baris hantu.
-        # `dipakai` = baris yang sudah terpakai langkah, +4 cadangan untuk footer
-        # (status, ETA, tips) dan prompt.
-        try:
-            tinggi = console.size.height
-        except Exception:  # noqa: BLE001
-            tinggi = 30
-        jatah = min(self.PREVIEW_LINES, tinggi - dipakai - 6)
-        if jatah < 2:
-            return []
-        baris = [b for b in teks.replace("\r", "").split("\n")]
+        # Perhitungan jatah baris sendiri DIHAPUS dari sini: ia memakai jumlah
+        # BLOK sebagai pengganti jumlah BARIS — kekeliruan yang sama persis
+        # dengan yang diperbaiki _muat_layar — dan menjadikan dua sumber
+        # kebenaran untuk satu invarian, sehingga menyetel PREVIEW_LINES terasa
+        # tak berpengaruh. Kini cukup satu penjaga: _muat_layar yang MENGUKUR.
+        jatah = self.PREVIEW_LINES
+        baris = teks.split("\n")
         # Baris kosong di ekor bikin pratinjau tampak "melompat" tanpa isi.
         while baris and not baris[-1].strip():
             baris.pop()
@@ -786,7 +797,13 @@ class TurnView:
                 avail = console.size.height
             except Exception:  # noqa: BLE001
                 avail = 30
-            live_cap = max(3, (avail - 4 - 2 * len(items)) // n_exp)
+            # Lantai `max(3, ...)` DIBUANG: itulah yang membuat jatah tetap
+            # dilanggar di layar sempit (terukur 26 baris di terminal 24).
+            # Dengan lantai 1, kelebihan tinggi ditebus dengan MEMANGKAS isi tiap
+            # langkah — bukan dengan _muat_layar membuang langkah utuh, yang bagi
+            # pengguna terlihat seperti langkah menghilang begitu saja setelah
+            # sengaja dibuka lewat Ctrl+R.
+            live_cap = max(1, (avail - 4 - 2 * len(items)) // n_exp)
         for kind, val in items:
             if kind == "step":
                 for r in self._render_step(val, live_cap=live_cap):
@@ -796,8 +813,7 @@ class TurnView:
         # langkah ter-expand — keduanya berebut tinggi layar, dan isi langkah
         # yang sengaja dibuka pengguna lebih berhak.
         if not self.done and not n_exp:
-            blocks.extend((("other", None), r)
-                          for r in self._preview_rows(dipakai=len(blocks)))
+            blocks.extend((("other", None), r) for r in self._preview_rows())
         # Footer (spinner/status) HANYA selama berjalan. Saat done, region yang
         # membeku ke riwayat cukup berisi langkah — tanpa "membatalkan…"/spinner
         # basi, dan ringkasan dicetak SETELAH jawaban (urutan benar).
@@ -805,31 +821,41 @@ class TurnView:
             blocks.append((("other", None), self._footer()))
         return self._muat_layar(blocks)
 
-    def _tinggi(self, rends: list) -> int:
-        """Tinggi NYATA (baris) bila daftar renderable ini digambar.
+    # Taksiran tinggi per blok bila pengukuran GAGAL. Sengaja terlalu besar:
+    # menaksir kekecilan berarti penjaga tinggi mati diam-diam dan baris hantu
+    # kembali tanpa satu pun tanda, sedangkan menaksir kebesaran cuma memangkas
+    # lebih banyak dari perlu — arah kesalahan yang aman.
+    _TAKSIR_BLOK = 4
+
+    def _tinggi_blok(self, rend) -> int:
+        """Tinggi NYATA (baris) satu renderable.
 
         Diukur, bukan ditaksir: satu blok TIDAK sama dengan satu baris — hasil
-        langkah yang terbuka adalah SATU Text berisi banyak baris. Menaksir
-        dengan menghitung blok itulah sebabnya penjaga tinggi yang lama meleset."""
+        langkah yang terbuka adalah SATU Text berisi banyak baris (terukur: 16
+        blok = 26 baris). Menghitung blok itulah sebabnya penjaga tinggi yang
+        lama meleset."""
         try:
-            return len(console.render_lines(Group(*rends), console.options,
-                                            pad=False))
-        except Exception:  # noqa: BLE001 - konsol tiruan/uji -> taksiran kasar
-            return len(rends)
+            return len(console.render_lines(rend, console.options, pad=False))
+        except Exception:  # noqa: BLE001 - konsol tiruan/uji
+            return self._TAKSIR_BLOK
 
     def _muat_layar(self, blocks: list) -> list:
         """Pastikan region live MUAT di layar, buang langkah tertua bila perlu.
 
         Region live yang lebih tinggi dari layar membuat rich.Live tak bisa
         menghapus baris yang sudah lewat atas layar -> baris hantu, teks dobel,
-        scroll rusak. Penjaga lama (live_cap) menaksir jatah baris lewat rumus
-        dan punya lantai `max(3, ...)` yang tetap dilanggar saat layar sempit:
-        TERUKUR 26 baris di terminal 24 baris pada 5 langkah ter-expand.
+        scroll rusak.
 
-        Di sini tingginya diukur langsung lalu blok TERTUA dibuang sampai muat.
-        Yang tertua memang paling layak dikorbankan: langkah terbaru yang sedang
-        berjalan itulah yang ditonton, dan riwayat penuhnya tetap ada di
-        scrollback serta /expand."""
+        Tinggi tiap blok diukur SEKALI lalu dijumlahkan; pembuangan cuma
+        mengurangi jumlah itu. Versi sebelumnya merender ULANG seluruh region
+        tiap putaran pembuangan — terukur 3 panggilan render_lines untuk satu
+        _blocks(), padahal _blocks() dipanggil ~12x/detik oleh __rich__ DAN
+        sekali lagi oleh pemetaan klik.
+
+        Yang dibuang adalah blok TERTUA: langkah terbaru yang sedang berjalan
+        itulah yang ditonton, dan riwayat penuhnya tetap ada di scrollback serta
+        /expand. Footer (blok terakhir) tak pernah dibuang — di situlah status &
+        spinner."""
         if not blocks:
             return blocks
         try:
@@ -837,10 +863,13 @@ class TurnView:
         except Exception:  # noqa: BLE001
             return blocks
         maks = max(4, layar - 2)   # sisakan ruang untuk prompt & baris perintah
-        # Footer (blok terakhir) tak boleh dibuang: di situlah status & spinner.
-        while len(blocks) > 1 and self._tinggi([r for _, r in blocks]) > maks:
-            blocks.pop(0)
-        return blocks
+        tinggi = [self._tinggi_blok(r) for _, r in blocks]
+        total = sum(tinggi)
+        i = 0
+        while i < len(blocks) - 1 and total > maks:
+            total -= tinggi[i]
+            i += 1
+        return blocks[i:]
 
     def __rich__(self):
         return Group(*[r for _, r in self._blocks()])

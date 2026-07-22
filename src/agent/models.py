@@ -20,7 +20,6 @@ Konsekuensi yang disengaja:
 """
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 
@@ -113,10 +112,12 @@ def is_known_id(model_id: str) -> bool:
     return any(spec.id == model_id for spec in MODELS.values())
 
 
-def random_fallback(exclude: set[str] | frozenset[str] = frozenset()) -> ModelSpec | None:
-    """Model pengganti ACAK. None bila semua kandidat ada di `exclude`."""
-    pool = [spec for spec in MODELS.values() if spec.id not in exclude]
-    return random.choice(pool) if pool else None
+# random_fallback() DIHAPUS: pemakainya dulu _escalate (naik-kelas otomatis) dan
+# migrasi preferensi DeepSeek, keduanya ikut hilang bersama katalog ber-API-key.
+# Membiarkannya berbahaya, bukan sekadar sampah: ia memilih model ACAK, jadi bila
+# kelak dipanggil lagi karena disangka masih dipakai, ia akan memindahkan
+# pengguna ke layanan web lain DI TENGAH tugas — memicu jendela login mendadak
+# dan memutus konteks percakapan, persis alasan naik-kelas otomatis dihapus.
 
 
 def catalog() -> list[tuple[int, str, ModelSpec]]:
