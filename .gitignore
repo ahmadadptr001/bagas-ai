@@ -16,3 +16,8 @@ env/
 .DS_Store
 .vscode/
 .idea/
+
+# Artefak build setuptools — JANGAN di-commit: build/lib jadi cache basi,
+# pip ikut membungkusnya dan update tak pernah benar-benar terpasang.
+build/
+dist/
