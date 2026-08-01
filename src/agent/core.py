@@ -62,8 +62,38 @@ _WEB_REMINDER = (
 )
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
 _WEB_MAX_STEPS = 24
+
+# Tool yang benar-benar MENGUBAH berkas kode. Dipakai untuk memutuskan apakah
+# perlu validasi otomatis sebelum jawaban akhir (kalau tak ada kode yang berubah,
+# tak ada yang perlu divalidasi). Ekstensi berkas kode difilter terpisah agar
+# perubahan pada aset/teks (mis. gambar hasil download) tak memicu validasi.
+_TOOL_MUTASI = {
+    "write_file", "edit_file", "append_file", "replace_in_files", "move_file",
+}
+_EKS_KODE = {
+    ".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue",
+    ".svelte", ".go", ".rs", ".php", ".rb", ".java", ".kt", ".c", ".h",
+    ".cpp", ".cc", ".cs", ".swift", ".dart", ".json", ".css", ".scss",
+}
 # Batas panjang hasil tool yang dikirim balik ke AI web (hemat & fokus).
 _WEB_RESULT_CAP = 6000
+
+
+def _menyentuh_kode(name: str, args: dict) -> bool:
+    """True bila argumen tool menyasar berkas ber-EKSTENSI KODE.
+
+    Perubahan pada aset/teks biasa (gambar, .md, .txt) tak perlu memicu validasi
+    kompilasi/lint. replace_in_files tak menyebut satu path pasti, jadi selalu
+    dianggap menyentuh kode (aman: paling banter validasi berjalan sia-sia)."""
+    if name == "replace_in_files":
+        return True
+    for kunci in ("path", "dest"):
+        nilai = args.get(kunci)
+        if isinstance(nilai, str) and nilai:
+            import os as _os
+            if _os.path.splitext(nilai)[1].lower() in _EKS_KODE:
+                return True
+    return False
 
 
 def _web_tool_protocol() -> str:
@@ -120,6 +150,14 @@ def _web_tool_protocol() -> str:
         "lanjutkan berdasarkan hasil itu.\n"
         "4. Kalau tugas sudah selesai, balas biasa TANPA blok [[TOOL]] — itu "
         "kuanggap jawaban akhir.\n"
+        "4b. SEBELUM jawaban akhir, bila kamu MENGUBAH kode: WAJIB validasi dulu "
+        "dengan validate_project (ia memilih sendiri cara yang tepat: npm run "
+        "lint/typecheck, ruff/py_compile, cargo check, go vet, php -l, dll.). "
+        "Kalau proyeknya memang dijalankan (punya entry point / server dev), "
+        "jalankan juga programnya — run_command untuk skrip singkat, atau "
+        "run_command_bg lalu bg_output untuk server — dan pastikan start tanpa "
+        "error. Kalau validasi GAGAL, perbaiki lalu ulangi; JANGAN menyatakan "
+        "selesai selagi masih ada yang gagal.\n"
         "5. Untuk membuat/mengubah file, usulkan write_file (bukan menampilkan "
         "kode untuk saya salin manual), karena tujuan saya memang agar bagas-ai "
         "yang menuliskannya langsung ke proyek.\n"
@@ -219,6 +257,10 @@ def _web_tool_protocol() -> str:
         "- Menjalankan: run_command / run_python untuk menjalankan tes, "
         "memasang dependensi, menjalankan program. INGAT: keduanya DITOLAK bila "
         "dipakai menulis berkas.\n"
+        "- MEMVALIDASI hasil: validate_project — ia MENDETEKSI SENDIRI cara "
+        "memeriksa proyek (npm run lint/typecheck, ruff/py_compile, cargo check, "
+        "go vet, php -l, make lint, dll.) lalu menjalankannya. Pakai ini untuk "
+        "membuktikan kode masih waras sesudah mengubahnya.\n"
         "- Lama berjalan: run_command_bg + bg_output/bg_stop/bg_list, supaya "
         "giliran tidak tersandera menunggu.\n"
         "- Ke pengguna: ask_user bila benar-benar perlu keputusannya, notify "
@@ -951,6 +993,12 @@ class Agent:
             fail_streak = 0
             force_final = False
             nudges = 0    # teguran "kode ditampilkan tapi tak ditulis ke file"
+            # Validasi otomatis sebelum jawaban akhir: `mutasi_kode` menyala bila
+            # ada tool yang benar-benar MENGUBAH berkas kode; `validasi_jalan`
+            # mencegah paksaan validasi berulang tanpa henti bila hasilnya tetap
+            # gagal (setelah sekali dipaksa, keputusan diserahkan ke AI).
+            mutasi_kode = False
+            validasi_jalan = False
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise llm.Cancelled()
@@ -986,6 +1034,35 @@ class Agent:
                         "isi lengkap. Kalau memang hanya penjelasan, ulangi "
                         "jawaban akhirmu tanpa blok tool.")
                     continue
+
+                # VALIDASI OTOMATIS sebelum menutup: kalau kode berubah tapi AI
+                # belum sekali pun memanggil validate_project, jalankan sendiri
+                # dan paksa AI menyelesaikan temuannya. Ini penegakan, bukan
+                # sekadar imbauan protokol — "selesai" tanpa bukti kode masih
+                # waras persis yang ingin dihindari pengguna. Dipaksa MAKS sekali
+                # per giliran (validasi_jalan) agar tak memutar tanpa henti.
+                if (not calls and not force_final and mutasi_kode
+                        and not validasi_jalan):
+                    validasi_jalan = True
+                    if on_notice:
+                        on_notice("memvalidasi kode sebelum menutup…")
+                    hasil_val = tools.execute("validate_project", {})
+                    if on_tool:
+                        on_tool("validate_project", {})
+                    if on_tool_result:
+                        on_tool_result("validate_project", hasil_val)
+                    gagal_val = ("✗" in hasil_val or "GAGAL" in hasil_val
+                                 or "TIMEOUT" in hasil_val)
+                    if gagal_val:
+                        reply = _send(
+                            "[SISTEM] Sebelum menutup, aku menjalankan "
+                            "validate_project atas kode yang barusan berubah dan "
+                            "ADA yang GAGAL. Perbaiki dulu, lalu validasi lagi — "
+                            "jangan nyatakan selesai selagi masih gagal.\n\n"
+                            f"[[HASIL validate_project]]\n{hasil_val}\n"
+                            "[[/HASIL]]")
+                        continue
+                    # Lulus: lanjut ke penutupan normal di bawah.
 
                 if not calls or steps >= _WEB_MAX_STEPS:
                     # Tak ada tool -> ini jawaban AKHIR. Bersihkan sisa penanda
@@ -1056,6 +1133,15 @@ class Agent:
                             fail_streak = 0
                         if on_tool_result:
                             on_tool_result(name, result)
+                        # Tandai bila kode BERUBAH (untuk validasi otomatis di
+                        # akhir), dan catat bila validasi memang sudah dijalankan.
+                        if name == "validate_project":
+                            validasi_jalan = True
+                        elif (name in _TOOL_MUTASI
+                              and not result.lstrip().startswith("GAGAL")
+                              and not result.lstrip().startswith("[DITOLAK")
+                              and _menyentuh_kode(name, args)):
+                            mutasi_kode = True
                     steps += 1
                     # Tool yang menghasilkan GAMBAR (mis. screenshot): file-nya
                     # dilampirkan ke pesan berikutnya supaya AI web melihatnya
