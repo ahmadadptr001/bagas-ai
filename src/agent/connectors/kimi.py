@@ -182,6 +182,13 @@ class KimiConnector(WebConnector):
     # set_input_files di awal tak akan menemukan apa pun (karena itu _upload
     # di-override di bawah).
     file_input_selector = "input.hidden-input, input[type='file']"
+    # Input file YANG SEBENARNYA milik komposer Kimi (di dalam popover toolkit).
+    # Dipisah dari file_input_selector yang longgar: keputusan "perlu buka
+    # popover?" HARUS berdasar input spesifik ini. Kalau memakai selektor longgar,
+    # sebuah <input type=file> basi/tersembunyi milik komponen lain membuat
+    # hitungannya > 0, popover tak pernah dibuka, lalu set_input_files mengenai
+    # input yang salah dan gambar DIAM-DIAM tak terlampir.
+    _INPUT_ASLI = "input.hidden-input"
     # Kartu pratinjau yang SUDAH SELESAI diunggah — `:not(.loading)` penting:
     # kartunya muncul seketika dengan kelas `loading`, dan mengirim saat itu
     # berarti pesan berangkat sebelum gambarnya benar-benar terunggah.
@@ -255,20 +262,34 @@ class KimiConnector(WebConnector):
 
         Keberhasilannya tidak dinilai di sini melainkan oleh _attach_files, yang
         menunggu kartu `.image-thumbnail` selesai (tanpa kelas `loading`)."""
-        # Popover mungkin sudah terbuka dari percobaan sebelumnya; klik hanya
-        # bila input-nya memang belum ada.
-        if page.locator(self.file_input_selector).count() == 0:
+        # Popover mungkin sudah terbuka dari percobaan sebelumnya; buka hanya
+        # bila input ASLI komposer memang belum ada. Sengaja memakai _INPUT_ASLI,
+        # BUKAN file_input_selector yang longgar — lihat komentar di atas.
+        if page.locator(self._INPUT_ASLI).count() == 0:
             try:
                 self._click_element(page.locator(self._BTN_TOOLKIT).first)
                 page.wait_for_timeout(600)
             except Exception:  # noqa: BLE001 - dinilai lewat percobaan di bawah
                 pass
 
-        try:
-            page.set_input_files(self.file_input_selector, paths, timeout=8000)
-            return
-        except Exception:  # noqa: BLE001 - cadangan: dialog pemilih file
-            pass
+        # Isi input asli bila sudah muncul; kalau belum, baru jatuh ke selektor
+        # longgar sebagai cadangan.
+        for sel in (self._INPUT_ASLI, self.file_input_selector):
+            try:
+                if page.locator(sel).count() == 0:
+                    continue
+                page.set_input_files(sel, paths, timeout=8000)
+                # VERIFIKASI: set_input_files pada input yang salah/terlepas bisa
+                # "berhasil" tanpa benar-benar memuat file. Pastikan file memang
+                # masuk sebelum menganggap beres — kalau tidak, biarkan
+                # _attach_files (penantian thumbnail) yang menilai / coba cadangan.
+                loaded = page.evaluate(
+                    "(s) => { const el = document.querySelector(s); "
+                    "return el && el.files ? el.files.length : 0; }", sel)
+                if loaded:
+                    return
+            except Exception:  # noqa: BLE001 - cadangan: dialog pemilih file
+                pass
 
         try:
             with page.expect_file_chooser(timeout=15000) as chooser:
