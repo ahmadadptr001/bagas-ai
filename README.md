@@ -137,6 +137,39 @@ Disimpan di `~/.bagasai/.env`.
 
 ---
 
+## 🗑️ Mencopot
+
+```bash
+bagas-ai uninstall
+```
+
+Menghapus **paket** dan **seluruh data** di `~/.bagasai` sekaligus: sesi
+percakapan, memory jangka panjang, script memory, profil login browser, dan
+`.env`. Berkas proyekmu sendiri tidak disentuh. Ada konfirmasi (ketik `HAPUS`);
+lewati dengan `--yes`.
+
+| Opsi | Efek |
+|---|---|
+| `--yes` / `-y` | Jangan tanya konfirmasi |
+| `--data-only` | Hapus data saja, paket tetap terpasang |
+| `--keep-data` | Copot paket saja, data tetap disimpan |
+
+> **`pip uninstall bagasai` tidak menghapus datamu.** Bukan kelalaian: pip
+> memang **tidak punya hook uninstall** — saat mencopot, ia hanya menghapus
+> berkas yang tercatat di RECORD paket dan tak menjalankan kode apa pun dari
+> paket itu (wheel melarangnya). Karena `~/.bagasai` berada di luar RECORD,
+> folder itu selalu tertinggal. `bagas-ai uninstall` ada justru untuk
+> menutup celah tersebut. Kalau paket sudah terlanjur dicopot lewat pip,
+> hapus manual: `rm -rf ~/.bagasai` (Windows: `Remove-Item -Recurse -Force
+> $HOME\.bagasai`).
+
+Pencopotan paket berjalan **beberapa detik setelah perintah selesai** lewat
+proses pendamping — pip tak bisa menghapus `bagasai.exe` selagi ia dipakai
+menjalankan perintah ini. Hasilnya ditulis ke `bagasai_uninstall.log` di
+folder TEMP.
+
+---
+
 ## 🔒 Keamanan
 
 - Tool file & shell **dibatasi ke folder kerja** (mitigasi path traversal).

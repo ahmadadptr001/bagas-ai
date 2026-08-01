@@ -15,8 +15,8 @@ from .kimi import KimiConnector
 from .qwen import QwenConnector
 
 # service -> kelas connector.
-# Connector "claude" DIHAPUS (2026-08-01): claude.ai menolak protokol
-# [[TOOL]] sebagai injeksi meski prompt sudah dijujurkan — tak tertolong.
+# Connector "claude" DIHAPUS (2026-08-01): claude.ai menolak protokol [[TOOL]]
+# sebagai upaya injeksi, jadi giliran berakhir jadi penolakan alih-alih kerja.
 _REGISTRY: dict[str, type[WebConnector]] = {
     "kimi": KimiConnector,
     "qwen": QwenConnector,

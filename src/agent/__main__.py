@@ -49,8 +49,14 @@ Penggunaan:
   bagas-ai telegram     Jalankan bot Telegram
   bagas-ai api          Jalankan server API di http://localhost:8000
   bagas-ai setup        Sama dengan 'login'
+  bagas-ai uninstall    Copot bagas-ai + HAPUS semua datanya (~/.bagasai)
   bagas-ai version      Tampilkan versi
   bagas-ai help         Tampilkan bantuan ini
+
+Catatan: `pip uninstall bagasai` HANYA menghapus paketnya — data di
+{config.CONFIG_HOME} tetap tertinggal (pip tak punya hook uninstall).
+Pakai `bagas-ai uninstall` bila ingin keduanya hilang sekaligus.
+  Opsi: --yes (tanpa konfirmasi)  --data-only (data saja)  --keep-data (paket saja)
 
 Config  : {config.CONFIG_HOME}
 Project : {config.PROJECT_ROOT}   (folder terminal aktif = root project)
@@ -145,6 +151,82 @@ def _cmd_update() -> None:
     detail = (out.get("pip_detail") or "").strip()
     if detail:
         print(f"  catatan pip: {detail}")
+
+
+def _cmd_uninstall(flags: set[str]) -> None:
+    """Copot bagas-ai + SELURUH datanya (~/.bagasai).
+
+    Ada sebagai perintah karena `pip uninstall` TIDAK bisa dikaitkan ke kode
+    apa pun (lihat penjelasan panjang di agent/uninstall.py): pip cuma
+    menghapus berkas paket, jadi data di ~/.bagasai akan tertinggal selamanya
+    kalau tak ada perintah seperti ini."""
+    from . import uninstall as unin
+
+    hanya_data = "--data-only" in flags
+    simpan_data = "--keep-data" in flags
+    if hanya_data and simpan_data:
+        print("✖ --data-only dan --keep-data saling bertentangan; pilih salah satu.")
+        sys.exit(1)
+
+    info = unin.ringkasan()
+    print("\n⚠  MENCOPOT bagas-ai — yang akan DIHAPUS PERMANEN:\n")
+    if not simpan_data:
+        if info["data_ada"]:
+            print(f"  • Data & konfigurasi : {info['data_dir']}")
+            print(f"      {info['berkas']} berkas, {info['ukuran']} — berisi sesi "
+                  "percakapan, memory jangka panjang,")
+            print("      script memory, profil login browser (harus login ulang), "
+                  "dan .env")
+        else:
+            print(f"  • Data & konfigurasi : {info['data_dir']} (sudah tidak ada)")
+    if not hanya_data:
+        versi = info["versi"]
+        if versi:
+            print(f"  • Paket Python       : bagasai {versi} "
+                  "(perintah bagas-ai / bagasai / bagas)")
+        else:
+            print("  • Paket Python       : tidak terpasang lewat pip "
+                  "(dijalankan dari salinan repo?) — pencopotan pip dilewati")
+    print("\n  Berkas PROYEKMU sendiri tidak disentuh sama sekali.\n")
+
+    if "--yes" not in flags and "-y" not in flags:
+        try:
+            jawab = input("Ketik HAPUS (huruf besar) untuk melanjutkan: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            jawab = ""
+        if jawab != "HAPUS":
+            print("Dibatalkan — tidak ada yang dihapus.")
+            return
+
+    if not simpan_data:
+        ok, catatan = unin.hapus_data()
+        if ok:
+            print(f"✓ Data dihapus: {info['data_dir']}"
+                  + (f" ({catatan})" if catatan else ""))
+        else:
+            print(f"⚠ Sebagian data belum terhapus — {catatan}")
+
+    if hanya_data:
+        print("\nSelesai. Paket bagas-ai masih terpasang "
+              "(`bagas-ai uninstall` tanpa --data-only untuk mencopotnya juga).")
+        return
+
+    if not info["versi"]:
+        print("\nSelesai. Tak ada paket pip yang perlu dicopot.")
+        return
+
+    # Pencopotan HARUS menunggu proses ini keluar: kita sedang berjalan dari
+    # bagasai.exe, dan pip tak bisa menghapus berkas yang masih dipakai.
+    ok, jejak = unin.jadwalkan_pencopotan(hapus_juga_data=not simpan_data)
+    if ok:
+        print("\n⏳ Pencopotan paket berjalan OTOMATIS beberapa detik setelah "
+              "perintah ini selesai.")
+        print("   Jangan buka bagas-ai lagi sampai itu tuntas.")
+        print(f"   Log hasilnya: {jejak}")
+        print("\nTerima kasih sudah memakai bagas-ai 👋")
+        return
+    print(f"\n⚠ Tak bisa menjadwalkan pencopotan otomatis ({jejak}).")
+    print("   Copot manual dengan: pip uninstall -y bagasai")
 
 
 def _cmd_add_dir(args: list[str]) -> None:
@@ -280,6 +362,9 @@ def main() -> None:
         return
     if mode in ("add-dir", "adddir"):
         _cmd_add_dir(positional)
+        return
+    if mode in ("uninstall", "copot"):
+        _cmd_uninstall(flags)
         return
 
     if mode in ("chat", "cli"):

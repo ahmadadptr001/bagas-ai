@@ -319,10 +319,7 @@ def build_transcript_digest(
             continue
         text = content.strip()
         # Lewati instruksi internal & preamble yang bukan ucapan pengguna.
-        # "[SISTEM]" = label lama (sesi tersimpan sebelum diganti), "[pesan
-        # otomatis bagas-ai]" = label sekarang (lihat _TAG_AUTO di core.py).
-        if not text or text.startswith(
-                ("[SISTEM]", "[pesan otomatis bagas-ai]", "[[HASIL")):
+        if not text or text.startswith("[SISTEM]") or text.startswith("[[HASIL"):
             continue
         if "PERMINTAAN SAYA:" in text:          # pesan pertama sesi web
             text = text.split("PERMINTAAN SAYA:", 1)[1].strip()
