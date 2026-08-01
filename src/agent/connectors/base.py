@@ -1522,12 +1522,32 @@ class WebConnector:
             if not self._input_text(inp):
                 return              # kotak kosong -> pesan sudah berangkat
             page.wait_for_timeout(500)
-        try:
-            btn = page.locator(self.send_button_selector).first
-            if btn.count():
-                self._click_element(btn)
-        except Exception:  # noqa: BLE001 - biarkan penantian jawaban yang menilai
-            pass
+        # Enter tak mempan. Coba tombol kirim — dan VERIFIKASI hasilnya, jangan
+        # menyerah diam-diam: teks yang gagal berangkat NANGKRING di komposer
+        # browser (terlihat pengguna sebagai prompt [SISTEM] yang tak pernah
+        # terkirim) sementara penantian jawaban menggantung sia-sia sampai
+        # timeout. Situs sesekali mengunci komposer sejenak (mis. sesudah
+        # memotong output panjangnya — "Output stopped"), jadi diberi beberapa
+        # putaran sebelum dinyatakan gagal dengan pesan yang jelas.
+        for putaran in range(3):
+            try:
+                btn = page.locator(self.send_button_selector).first
+                if btn.count():
+                    self._click_element(btn)
+            except Exception:  # noqa: BLE001 - dinilai lewat isi kotak di bawah
+                pass
+            for _ in range(6):      # ~3 detik per putaran
+                if not self._input_text(inp):
+                    return
+                page.wait_for_timeout(500)
+            page.keyboard.press(self.submit_key)   # coba Enter sekali lagi
+            page.wait_for_timeout(400)
+            if not self._input_text(inp):
+                return
+        raise BrowserError(
+            f"pesan tak mau terkirim di {self.label} — komposer menolak Enter "
+            "maupun tombol kirim (mungkin sedang terkunci situs). Teks masih "
+            "tertinggal di kotak input; coba kirim ulang.")
 
     @staticmethod
     def _input_text(inp: Any) -> str:

@@ -63,6 +63,15 @@ _WEB_REMINDER = (
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
 _WEB_MAX_STEPS = 24
 
+# Label UI yang DISISIPKAN situs saat memotong jawaban yang terlalu panjang
+# (terlihat di kimi.com sebagai "Output stopped" di bawah kode). Dijangkar ke
+# EKOR teks supaya kalimat biasa yang kebetulan memuat frasa ini tak tertangkap.
+_OUTPUT_STOP_RE = re.compile(
+    r"\n?[ \t]*(?:Output stopped|Generation stopped|输出已停止)\.?[ \t]*$",
+    re.IGNORECASE)
+# Berapa kali maksimal meminta lanjutan output yang terpotong dalam SATU kirim.
+_MAX_LANJUT = 3
+
 # Tool yang benar-benar MENGUBAH berkas kode. Dipakai untuk memutuskan apakah
 # perlu validasi otomatis sebelum jawaban akhir (kalau tak ada kode yang berubah,
 # tak ada yang perlu divalidasi). Ekstensi berkas kode difilter terpisah agar
@@ -860,9 +869,9 @@ class Agent:
             if on_status is not None:
                 on_status(msg)
 
-        def _send(msg: str, new_chat: bool = False,
-                  open_chat_id: str | None = None,
-                  attachments: list[str] | None = None) -> str:
+        def _send_raw(msg: str, new_chat: bool = False,
+                      open_chat_id: str | None = None,
+                      attachments: list[str] | None = None) -> str:
             nonlocal prompt_chars, reply_chars
             # Default: LANJUTKAN percakapan browser sesi ini. Ini KUNCI kontinuitas
             # di tengah tugas. Dulu hanya kirim PERTAMA yang menargetkan chat ini;
@@ -942,6 +951,36 @@ class Agent:
             if got and got != self._web_chat_id:
                 self._link_web_chat(got)
             return out
+
+        def _send(msg: str, new_chat: bool = False,
+                  open_chat_id: str | None = None,
+                  attachments: list[str] | None = None) -> str:
+            """_send_raw + auto-lanjut bila situs MEMOTONG output panjang.
+
+            Kimi menghentikan jawaban yang melewati batas panjangnya dan
+            menampilkan label "Output stopped" di bawahnya; label itu ikut
+            terbaca sebagai ekor jawaban. Tanpa penanganan, jawaban terpotong
+            dianggap selesai: kode putus di tengah, dan blok [[TOOL]] yang belum
+            tertutup tak pernah dieksekusi. Di sini potongannya diminta
+            DILANJUTKAN (maks _MAX_LANJUT kali) lalu digabung."""
+            out = _send_raw(msg, new_chat, open_chat_id, attachments)
+            lanjut = 0
+            while _OUTPUT_STOP_RE.search(out or "") and lanjut < _MAX_LANJUT:
+                lanjut += 1
+                out = _OUTPUT_STOP_RE.sub("", out).rstrip()
+                _status("output terpotong situs — meminta lanjutannya "
+                        f"({lanjut}/{_MAX_LANJUT})…")
+                tambahan = _send_raw(
+                    "[SISTEM] Output-mu barusan TERPOTONG oleh batas panjang "
+                    "situs ('Output stopped'). LANJUTKAN persis dari titik "
+                    "terputus — jangan mengulang dari awal dan jangan minta "
+                    "maaf. KECUALI bila yang terpotong adalah blok [[TOOL]]: "
+                    "blok JSON yang putus tak bisa kubaca, jadi kirim ULANG "
+                    "blok [[TOOL]] itu secara UTUH dari pembukanya. Ingat: "
+                    "kalau isi write_file terlalu panjang sampai terpotong, "
+                    "itu tanda kuat harus memakai edit_file per bagian.")
+                out = out + "\n" + (tambahan or "")
+            return _OUTPUT_STOP_RE.sub("", out or "")
 
         try:
             # SATU sesi terminal = SATU percakapan browser:
