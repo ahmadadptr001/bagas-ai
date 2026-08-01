@@ -57,7 +57,11 @@ _WEB_REMINDER = (
     "edit_file berisi HANYA potongan yang berubah (old_text/new_text) — jangan "
     "write_file seluruh file, dan jangan menulis file lewat run_python/"
     "run_command. write_file cuma untuk file BARU atau tulis-ulang-total dengan "
-    "isi lengkap. Hanya tool file yang menampilkan diff berwarna untuk "
+    "isi lengkap. File BARU yang PANJANG (> ±100 baris) WAJIB ditulis BERTAHAP "
+    "tanpa diminta: write_file bagian awal, lalu append_file lanjutannya pesan "
+    "demi pesan — pesan yang kepanjangan DIPOTONG situs dan blok terpotong tak "
+    "bisa kueksekusi. Jangan pernah menyuruh pengguna melakukan langkah manual "
+    "apa pun. Hanya tool file yang menampilkan diff berwarna untuk "
     "kutinjau sebelum file disentuh.]"
 )
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
@@ -158,10 +162,15 @@ def _web_tool_protocol() -> str:
         "3. Setelah kukirim balik hasilnya (ditandai [[HASIL <nama_tool>]]), "
         "lanjutkan berdasarkan hasil itu.\n"
         "4. Kalau tugas sudah selesai, balas biasa TANPA blok [[TOOL]] — itu "
-        "kuanggap jawaban akhir.\n"
+        "kuanggap jawaban akhir. Jawaban akhir TIDAK BOLEH menyuruh saya "
+        "mengerjakan langkah yang bisa kamu lakukan sendiri lewat tool "
+        "(menyalin kode, menulis sisa file, menjalankan perintah, memvalidasi) "
+        "— selesaikan semuanya dulu, baru menutup.\n"
         "4b. SEBELUM jawaban akhir, bila kamu MENGUBAH kode: WAJIB validasi dulu "
-        "dengan validate_project (ia memilih sendiri cara yang tepat: npm run "
-        "lint/typecheck, ruff/py_compile, cargo check, go vet, php -l, dll.). "
+        "dengan validate_project (ia memilih sendiri cara yang tepat per "
+        "ekosistem: Next.js = npm run lint + npm run build, Python = ruff/"
+        "py_compile + smoke-run skrip yang diubah, cargo check, go vet, php -l, "
+        "dll. — beri argumen paths berisi berkas yang kamu ubah). "
         "Kalau proyeknya memang dijalankan (punya entry point / server dev), "
         "jalankan juga programnya — run_command untuk skrip singkat, atau "
         "run_command_bg lalu bg_output untuk server — dan pastikan start tanpa "
@@ -182,12 +191,25 @@ def _web_tool_protocol() -> str:
         "terlihat sama sekali — yang tampil cuma 'menjalankan python', dan saya "
         "kehilangan satu-satunya kesempatan meninjau. File juga bisa rusak "
         "diam-diam tanpa saya sadari.\n"
-        "    Isi file panjang memang membuat JSON-nya besar; itu tak apa. "
-        "Kalau file sangat besar, pecah pekerjaannya per file (satu write_file "
-        "per giliran) — JANGAN beralih ke skrip.\n"
         "    run_python & run_command tetap dipakai untuk hal yang memang bukan "
         "pengeditan file: menjalankan tes, memasang dependensi, menjalankan "
         "program, memeriksa hasil.\n"
+        "5c. FILE PANJANG — WAJIB DITULIS BERTAHAP, TANPA DIMINTA: situs chat "
+        "ini MEMOTONG pesan yang terlalu panjang ('Output stopped'), dan blok "
+        "yang terpotong TAK BISA kueksekusi sama sekali — kerjaanmu hangus. "
+        "Maka batasi SETIAP pesanmu: maksimal SATU blok write_file/append_file "
+        "besar per pesan, isinya JANGAN melebihi ±100 baris (≈4.000 karakter). "
+        "File baru yang lebih panjang dari itu kamu pecah SENDIRI:\n"
+        "    - pesan pertama: write_file berisi bagian AWAL file;\n"
+        "    - pesan berikutnya (setelah kukirim [[HASIL]]): append_file "
+        "lanjutannya, bagian demi bagian, berurutan sampai lengkap;\n"
+        "    - jangan menulis ulang bagian yang sudah tertulis, jangan berhenti "
+        "di tengah, dan JANGAN PERNAH menyuruh saya menyalin/menulis sisanya "
+        "manual — lanjutkan sendiri sampai file utuh.\n"
+        "    Untuk file yang SUDAH ada, pecahan alami-nya adalah edit_file per "
+        "bagian (blok kecil old_text/new_text) — itu otomatis aman dari "
+        "pemotongan. Prinsip yang sama berlaku untuk teks jawaban: jangan "
+        "menumpuk kode panjang di luar blok tool.\n"
         "6. Path file relatif terhadap folder proyek yang disebut di konteks, "
         "dan pakai garis miring biasa (src/app/main.py) — JANGAN backslash, "
         "supaya tidak rusak saat dikirim.\n"
@@ -267,9 +289,11 @@ def _web_tool_protocol() -> str:
         "memasang dependensi, menjalankan program. INGAT: keduanya DITOLAK bila "
         "dipakai menulis berkas.\n"
         "- MEMVALIDASI hasil: validate_project — ia MENDETEKSI SENDIRI cara "
-        "memeriksa proyek (npm run lint/typecheck, ruff/py_compile, cargo check, "
-        "go vet, php -l, make lint, dll.) lalu menjalankannya. Pakai ini untuk "
-        "membuktikan kode masih waras sesudah mengubahnya.\n"
+        "memeriksa proyek per ekosistem (Next.js: npm run lint + build; Python: "
+        "ruff/py_compile + smoke-run skrip yang diubah; cargo check, go vet, "
+        "php -l, make lint, dll.) lalu menjalankannya. Isi paths dengan berkas "
+        "yang kamu ubah. Pakai ini untuk membuktikan kode masih waras sesudah "
+        "mengubahnya.\n"
         "- Lama berjalan: run_command_bg + bg_output/bg_stop/bg_list, supaya "
         "giliran tidak tersandera menunggu.\n"
         "- Ke pengguna: ask_user bila benar-benar perlu keputusannya, notify "
@@ -972,13 +996,20 @@ class Agent:
                         f"({lanjut}/{_MAX_LANJUT})…")
                 tambahan = _send_raw(
                     "[SISTEM] Output-mu barusan TERPOTONG oleh batas panjang "
-                    "situs ('Output stopped'). LANJUTKAN persis dari titik "
-                    "terputus — jangan mengulang dari awal dan jangan minta "
-                    "maaf. KECUALI bila yang terpotong adalah blok [[TOOL]]: "
-                    "blok JSON yang putus tak bisa kubaca, jadi kirim ULANG "
-                    "blok [[TOOL]] itu secara UTUH dari pembukanya. Ingat: "
-                    "kalau isi write_file terlalu panjang sampai terpotong, "
-                    "itu tanda kuat harus memakai edit_file per bagian.")
+                    "situs ('Output stopped'). Mulai sekarang JAGA tiap pesan "
+                    "tetap pendek (satu blok tool besar per pesan, ±100 baris "
+                    "isi). Lanjutkan begini:\n"
+                    "- Yang terpotong TEKS biasa: lanjutkan persis dari titik "
+                    "terputus — jangan mengulang dari awal, jangan minta maaf.\n"
+                    "- Yang terpotong blok [[TOOL]]: JSON yang putus tak bisa "
+                    "kubaca sama sekali. Bila bloknya KECIL, kirim ulang utuh. "
+                    "Bila isinya PANJANG (write_file/append_file besar), JANGAN "
+                    "kirim ulang utuh — pasti terpotong lagi. PECAH: kirim "
+                    "write_file berisi bagian AWAL saja (±100 baris), lalu "
+                    "setelah kukirim [[HASIL]], lanjutkan append_file bagian "
+                    "berikutnya sampai file lengkap. Untuk file yang sudah ada, "
+                    "pakai edit_file per bagian. Kerjakan sendiri sampai "
+                    "tuntas — jangan menyuruhku menulis sisanya manual.")
                 out = out + "\n" + (tambahan or "")
             return _OUTPUT_STOP_RE.sub("", out or "")
 
@@ -1038,6 +1069,10 @@ class Agent:
             # gagal (setelah sekali dipaksa, keputusan diserahkan ke AI).
             mutasi_kode = False
             validasi_jalan = False
+            # Berkas kode yang diubah giliran ini — dioper ke validate_project
+            # agar pemeriksaan per-berkas (py_compile/smoke-run/php -l) tepat
+            # menyasar yang barusan disentuh, bukan menebak-nebak.
+            berkas_mutasi: set[str] = set()
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise llm.Cancelled()
@@ -1054,7 +1089,11 @@ class Agent:
                         "rusak saat dirender). Kirim ULANG langkah itu SAJA "
                         "dengan format persis:\n[[TOOL]]\n```json\n"
                         '{"tool": "...", "args": {...}}\n```\n[[/TOOL]]\n'
-                        "Pakai garis miring biasa pada path, tanpa teks lain.")
+                        "Pakai garis miring biasa pada path, tanpa teks lain. "
+                        "Kalau isinya PANJANG (kemungkinan tadi terpotong "
+                        "situs), jangan ulangi utuh — pecah: write_file bagian "
+                        "awal (±100 baris) lalu append_file lanjutannya di "
+                        "pesan-pesan berikutnya.")
                     continue
 
                 # AI web menampilkan KODE tapi tak menuliskannya ke file: itu
@@ -1085,9 +1124,10 @@ class Agent:
                     validasi_jalan = True
                     if on_notice:
                         on_notice("memvalidasi kode sebelum menutup…")
-                    hasil_val = tools.execute("validate_project", {})
+                    args_val = {"paths": " ".join(sorted(berkas_mutasi))}
+                    hasil_val = tools.execute("validate_project", args_val)
                     if on_tool:
-                        on_tool("validate_project", {})
+                        on_tool("validate_project", args_val)
                     if on_tool_result:
                         on_tool_result("validate_project", hasil_val)
                     gagal_val = ("✗" in hasil_val or "GAGAL" in hasil_val
@@ -1181,6 +1221,10 @@ class Agent:
                               and not result.lstrip().startswith("[DITOLAK")
                               and _menyentuh_kode(name, args)):
                             mutasi_kode = True
+                            for kunci_path in ("path", "dest"):
+                                nilai = args.get(kunci_path)
+                                if isinstance(nilai, str) and nilai:
+                                    berkas_mutasi.add(nilai)
                     steps += 1
                     # Tool yang menghasilkan GAMBAR (mis. screenshot): file-nya
                     # dilampirkan ke pesan berikutnya supaya AI web melihatnya

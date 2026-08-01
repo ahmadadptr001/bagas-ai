@@ -7,14 +7,16 @@ tiap ekosistem — npm run lint di proyek Node, `ruff`/kompilasi di Python,
 
 validate_project MENDETEKSI ekosistemnya dari berkas penanda (package.json,
 pyproject.toml, Cargo.toml, go.mod, composer.json, Makefile) lalu memilih
-perintah pemeriksa yang paling tepat DAN CEPAT (statik: lint / type-check /
-kompilasi — bukan menjalankan seluruh test suite yang bisa lama), menjalankan
-semuanya, lalu merangkum LULUS/GAGAL. Bila tak ada pemeriksa yang cocok, ia
-jujur mengatakannya alih-alih diam seolah lulus.
+pemeriksa yang paling tepat: statik dulu (lint / type-check / kompilasi — bukan
+seluruh test suite yang bisa lama), DITAMBAH build penuh untuk framework yang
+galatnya baru muncul saat build (Next.js dkk. — lint lulus bukan jaminan), dan
+smoke-run singkat untuk skrip Python yang diubah ("jalankan dan lihat
+hasilnya"). Semuanya dijalankan lalu dirangkum LULUS/GAGAL. Bila tak ada
+pemeriksa yang cocok, ia jujur mengatakannya alih-alih diam seolah lulus.
 
-Menjalankan APLIKASI-nya (server dev, skrip) diserahkan ke AI lewat run_command/
-run_command_bg — itu butuh penilaian (port, argumen, kapan berhenti), sedangkan
-di sini fokusnya pemeriksaan statik yang aman & deterministik.
+Menjalankan APLIKASI menetap (server dev) tetap diserahkan ke AI lewat
+run_command_bg — itu butuh penilaian (port, argumen, kapan berhenti); smoke-run
+di sini sengaja bertimeout pendek dan menganggap "masih berjalan" = start sehat.
 """
 from __future__ import annotations
 
@@ -32,6 +34,12 @@ ROOT: Path = config.PROJECT_ROOT
 # type-check bisa memindai banyak berkas) tapi tetap dibatasi agar tak
 # menggantung bila sebuah perkakas menunggu sesuatu.
 _VAL_TIMEOUT = 180
+# Build penuh (mis. `next build`) memang lambat — beri napas lebih panjang,
+# karena inilah satu-satunya pemeriksa yang menangkap galat tipe/route Next.js.
+_BUILD_TIMEOUT = 600
+# Smoke-run skrip Python: cukup untuk crash-saat-import/start terlihat; program
+# yang MASIH berjalan melewati batas ini justru pertanda start-nya sehat.
+_SMOKE_TIMEOUT = 20
 
 
 def _pm() -> str:
@@ -45,17 +53,33 @@ def _pm() -> str:
     return "npm" if shutil.which("npm") else ""
 
 
-def _pkg_scripts() -> dict:
-    """Isi bagian "scripts" package.json (kosong bila tak ada / tak terbaca)."""
+def _pkg_json() -> dict:
+    """Isi package.json (kosong bila tak ada / tak terbaca)."""
     pkg = ROOT / "package.json"
     if not pkg.is_file():
         return {}
     try:
         data = json.loads(pkg.read_text(encoding="utf-8", errors="replace"))
-        s = data.get("scripts")
-        return s if isinstance(s, dict) else {}
-    except Exception:  # noqa: BLE001 - package.json rusak: perlakukan tak ada skrip
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 - package.json rusak: perlakukan tak ada
         return {}
+
+
+def _pkg_scripts() -> dict:
+    """Isi bagian "scripts" package.json (kosong bila tak ada / tak terbaca)."""
+    s = _pkg_json().get("scripts")
+    return s if isinstance(s, dict) else {}
+
+
+def _pkg_deps() -> set[str]:
+    """Nama semua dependency package.json (deps + devDeps), untuk deteksi framework."""
+    data = _pkg_json()
+    out: set[str] = set()
+    for bagian in ("dependencies", "devDependencies"):
+        d = data.get(bagian)
+        if isinstance(d, dict):
+            out.update(d.keys())
+    return out
 
 
 def _split_paths(paths: str) -> list[Path]:
@@ -71,14 +95,19 @@ def _split_paths(paths: str) -> list[Path]:
     return out
 
 
-def _detect_checks(paths: str) -> list[tuple[str, str | list[str], bool]]:
-    """Susun daftar pemeriksaan (label, perintah, shell) sesuai isi proyek.
+# Framework yang galat tipe/route-nya BARU ketahuan saat build penuh — untuk
+# proyek begini, lint saja belum membuktikan apa pun; build ikut diwajibkan.
+_BUILD_FRAMEWORKS = {"next", "nuxt", "astro", "@remix-run/dev"}
+
+
+def _detect_checks(paths: str) -> list[tuple[str, str | list[str], bool, int]]:
+    """Susun daftar pemeriksaan (label, perintah, shell, timeout) sesuai isi proyek.
 
     Urutannya sengaja: yang paling menandakan "kode valid" (type-check, lint,
     kompilasi) didahulukan. Hanya menambahkan pemeriksa yang perkakasnya BENAR
     ada di sistem — biar tak menghasilkan "command not found" yang menyesatkan.
     """
-    checks: list[tuple[str, str | list[str], bool]] = []
+    checks: list[tuple[str, str | list[str], bool, int]] = []
     touched = _split_paths(paths)
 
     # --- Node / TypeScript / JavaScript --------------------------------------
@@ -87,60 +116,69 @@ def _detect_checks(paths: str) -> list[tuple[str, str | list[str], bool]]:
         pm = _pm()
         # Skrip proyek sendiri paling dipercaya: penulisnya sudah menyetel
         # aturan lint/type-check yang mereka mau. Ambil yang lazim, tanpa
-        # menjalankan "test" (bisa lama / butuh layanan) atau "build" penuh
-        # kecuali tak ada pemeriksa lain.
+        # menjalankan "test" (bisa lama / butuh layanan).
         urutan = ["typecheck", "type-check", "tsc", "lint", "check", "lint:fix"]
         dipakai = [n for n in urutan if n in scripts]
         if pm:
             for n in dipakai:
-                checks.append((f"{pm} run {n}", f"{pm} run {n}", True))
+                checks.append((f"{pm} run {n}", f"{pm} run {n}", True,
+                               _VAL_TIMEOUT))
         # Tak ada skrip type-check tapi ada tsconfig -> tsc --noEmit langsung.
         if (not any(n in scripts for n in ("typecheck", "type-check", "tsc"))
                 and (ROOT / "tsconfig.json").is_file()
                 and (shutil.which("npx") or shutil.which("tsc"))):
-            checks.append(("tsc --noEmit", "npx --no-install tsc --noEmit", True))
-        # Kalau sama sekali tak ada pemeriksa statik, jatuh ke build sebagai
-        # bukti minimal bahwa proyek masih ter-compile.
-        if not dipakai and "build" in scripts and pm:
-            checks.append((f"{pm} run build", f"{pm} run build", True))
+            checks.append(("tsc --noEmit", "npx --no-install tsc --noEmit", True,
+                           _VAL_TIMEOUT))
+        # Next.js dkk.: banyak galat (tipe, route, import server/client) BARU
+        # muncul saat `run build` — lint lulus bukan jaminan. Maka untuk
+        # framework di daftar itu build SELALU ikut; proyek Node lain tetap
+        # memakai build hanya sebagai pemeriksa terakhir bila tak ada yang lain.
+        if "build" in scripts and pm and (not dipakai
+                                          or _pkg_deps() & _BUILD_FRAMEWORKS):
+            checks.append((f"{pm} run build", f"{pm} run build", True,
+                           _BUILD_TIMEOUT))
 
     # --- Python --------------------------------------------------------------
     ada_py = (ROOT / "pyproject.toml").is_file() or (ROOT / "setup.py").is_file() \
         or any(ROOT.glob("*.py")) or any(ROOT.rglob("*.py"))
     if ada_py:
         if shutil.which("ruff"):
-            checks.append(("ruff check", ["ruff", "check", "."], False))
+            checks.append(("ruff check", ["ruff", "check", "."], False,
+                           _VAL_TIMEOUT))
         elif shutil.which("flake8"):
-            checks.append(("flake8", ["flake8"], False))
+            checks.append(("flake8", ["flake8"], False, _VAL_TIMEOUT))
         # mypy hanya bila proyek memang mengonfigurasinya (kalau tidak, ribuan
         # galat tipe pihak-ketiga cuma bikin bising).
         if shutil.which("mypy") and _mypy_dikonfigurasi():
-            checks.append(("mypy", ["mypy", "."], False))
+            checks.append(("mypy", ["mypy", "."], False, _VAL_TIMEOUT))
         # Kompilasi (parse) berkas .py yang DISENTUH — cepat, tak menjalankan.
         py_touched = [str(t) for t in touched if t.suffix.lower() in (".py", ".pyw")]
         if py_touched:
             checks.append(("py_compile (berkas yang diubah)",
-                           ["python", "-m", "py_compile", *py_touched], False))
+                           ["python", "-m", "py_compile", *py_touched], False,
+                           _VAL_TIMEOUT))
         elif not shutil.which("ruff") and not shutil.which("flake8"):
             # Tak ada linter & tak ada daftar berkas: kompilasi seluruh paket
             # secara diam (bounded oleh timeout) sebagai jaring minimal.
             checks.append(("compileall", ["python", "-m", "compileall", "-q", "."],
-                           False))
+                           False, _VAL_TIMEOUT))
 
     # --- Rust ----------------------------------------------------------------
     if (ROOT / "Cargo.toml").is_file() and shutil.which("cargo"):
-        checks.append(("cargo check", ["cargo", "check", "--quiet"], False))
+        checks.append(("cargo check", ["cargo", "check", "--quiet"], False,
+                       _VAL_TIMEOUT))
 
     # --- Go ------------------------------------------------------------------
     if (ROOT / "go.mod").is_file() and shutil.which("go"):
-        checks.append(("go vet", ["go", "vet", "./..."], False))
-        checks.append(("go build", ["go", "build", "./..."], False))
+        checks.append(("go vet", ["go", "vet", "./..."], False, _VAL_TIMEOUT))
+        checks.append(("go build", ["go", "build", "./..."], False, _VAL_TIMEOUT))
 
     # --- PHP -----------------------------------------------------------------
     if shutil.which("php"):
         php_touched = [str(t) for t in touched if t.suffix.lower() == ".php"]
         for f in php_touched:
-            checks.append((f"php -l {Path(f).name}", ["php", "-l", f], False))
+            checks.append((f"php -l {Path(f).name}", ["php", "-l", f], False,
+                           _VAL_TIMEOUT))
 
     # --- Makefile lint (proyek yang menaruh perintahnya di Make) -------------
     mk = ROOT / "Makefile"
@@ -151,10 +189,54 @@ def _detect_checks(paths: str) -> list[tuple[str, str | list[str], bool]]:
             teks = ""
         for target in ("lint", "check", "typecheck"):
             if f"\n{target}:" in teks or teks.startswith(f"{target}:"):
-                checks.append((f"make {target}", ["make", target], False))
+                checks.append((f"make {target}", ["make", target], False,
+                               _VAL_TIMEOUT))
                 break
 
     return checks
+
+
+def _smoke_python(touched: list[Path]) -> list[tuple[str, str, bool]]:
+    """Jalankan sebentar skrip Python yang DIUBAH — "tinggal jalanin dan lihat
+    hasilnya": crash saat import/start (ImportError, dependency hilang,
+    NameError di level modul) ketahuan di sini padahal lolos lint.
+
+    Hanya berkas yang punya guard __main__ (memang dirancang dijalankan) yang
+    dicoba; modul murni cukup diperiksa statik + py_compile. Hasil per berkas:
+    (label, keterangan, gagal?). Semantik khusus:
+      - timeout  = program MASIH berjalan setelah _SMOKE_TIMEOUT -> start sehat,
+        dihentikan, LULUS (server/loop memang tak akan pernah "selesai").
+      - EOFError = skrip menunggu input interaktif (stdin sengaja ditutup) ->
+        bukan kegagalan kode, dilewati dengan catatan.
+    """
+    kandidat: list[Path] = []
+    for t in touched:
+        if t.suffix.lower() not in (".py", ".pyw"):
+            continue
+        try:
+            teks = t.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - tak terbaca: biar pemeriksa lain yang lapor
+            continue
+        if "__main__" in teks:
+            kandidat.append(t)
+    hasil: list[tuple[str, str, bool]] = []
+    for f in kandidat[:3]:  # dibatasi: smoke-run itu pelengkap, bukan test suite
+        label = f"python {f.name} (smoke-run)"
+        rc, out, timed_out = _execute(["python", str(f)], shell=False,
+                                      timeout=_SMOKE_TIMEOUT)
+        if timed_out:
+            hasil.append((label,
+                          f"masih BERJALAN setelah {_SMOKE_TIMEOUT}s tanpa "
+                          "crash (dihentikan) — start dianggap sehat", False))
+        elif rc == 0:
+            hasil.append((label, "selesai tanpa error (exit=0)", False))
+        elif "EOFError" in out:
+            hasil.append((label,
+                          "menunggu input interaktif (stdin ditutup saat "
+                          "validasi) — dilewati, bukan kegagalan kode", False))
+        else:
+            hasil.append((label, f"CRASH (exit={rc})\n{_clip(out, 3000)}", True))
+    return hasil
 
 
 def _mypy_dikonfigurasi() -> bool:
@@ -175,20 +257,24 @@ def _mypy_dikonfigurasi() -> bool:
 
 @tool
 def validate_project(paths: str = "") -> str:
-    """Validasi ulang kode proyek: DETEKSI SENDIRI cara memeriksanya (npm run lint/typecheck, ruff/py_compile, cargo check, go vet, php -l, make lint, dll.) lalu jalankan & laporkan LULUS/GAGAL. Panggil ini SEBELUM menyatakan tugas selesai.
+    """Validasi ulang kode proyek SESUAI EKOSISTEMNYA: DETEKSI SENDIRI cara memeriksanya (Next.js: npm run lint + npm run build; Python: ruff/py_compile + menjalankan skrip yang diubah; Rust: cargo check; Go: go vet+build; PHP: php -l; dll.) lalu jalankan & laporkan LULUS/GAGAL. Panggil ini SEBELUM menyatakan tugas selesai.
 
-    Memilih pemeriksa statik yang cepat (lint / type-check / kompilasi) sesuai
-    ekosistem proyek — bukan menjalankan seluruh test. Bila ada yang GAGAL,
-    perbaiki dulu; jangan anggap tugas selesai.
+    Memilih pemeriksa sesuai ekosistem proyek: statik dulu (lint / type-check /
+    kompilasi), lalu build penuh untuk framework yang galatnya baru muncul saat
+    build (Next.js dkk.), plus smoke-run singkat untuk skrip Python yang diubah
+    ("jalankan dan lihat hasilnya"). Bila ada yang GAGAL, perbaiki dulu; jangan
+    anggap tugas selesai.
 
     paths: opsional, daftar berkas yang baru kamu ubah (dipisah spasi/koma) agar
-        pemeriksaan per-berkas (mis. py_compile, php -l) menyasar tepat ke sana.
+        pemeriksaan per-berkas (py_compile, smoke-run, php -l) menyasar tepat
+        ke sana.
     """
     blocked = _guard()
     if blocked:
         return blocked
     checks = _detect_checks(paths)
-    if not checks:
+    smoke = _smoke_python(_split_paths(paths))
+    if not checks and not smoke:
         return (
             "[validasi] Tak ada cara validasi otomatis yang terdeteksi untuk "
             "proyek ini (tak ada package.json/pyproject/Cargo.toml/go.mod/… yang "
@@ -199,12 +285,12 @@ def validate_project(paths: str = "") -> str:
 
     bagian: list[str] = []
     gagal = 0
-    for label, cmd, shell in checks:
-        rc, out, timed_out = _execute(cmd, shell=shell, timeout=_VAL_TIMEOUT)
+    for label, cmd, shell, batas in checks:
+        rc, out, timed_out = _execute(cmd, shell=shell, timeout=batas)
         if timed_out:
             gagal += 1
             bagian.append(
-                f"⏱ {label}: TIMEOUT (> {_VAL_TIMEOUT}s, dihentikan) — anggap "
+                f"⏱ {label}: TIMEOUT (> {batas}s, dihentikan) — anggap "
                 f"BELUM lulus.\n{_clip(out, 1500)}")
         elif rc == 0:
             bagian.append(f"✓ {label}: LULUS")
@@ -213,10 +299,18 @@ def validate_project(paths: str = "") -> str:
             bagian.append(
                 f"✗ {label}: GAGAL (exit={rc})\n{_clip(out, 3000)}")
 
+    for label, ket, buruk in smoke:
+        if buruk:
+            gagal += 1
+            bagian.append(f"✗ {label}: {ket}")
+        else:
+            bagian.append(f"✓ {label}: {ket}")
+
+    total = len(checks) + len(smoke)
     kepala = (
-        f"[validasi] {len(checks) - gagal}/{len(checks)} pemeriksaan lulus."
+        f"[validasi] {total - gagal}/{total} pemeriksaan lulus."
         if gagal else
-        f"[validasi] SEMUA {len(checks)} pemeriksaan LULUS.")
+        f"[validasi] SEMUA {total} pemeriksaan LULUS.")
     if gagal:
         kepala += (" Ada yang GAGAL — baca detailnya, PERBAIKI kodenya, lalu "
                    "validasi lagi. JANGAN nyatakan tugas selesai.")
