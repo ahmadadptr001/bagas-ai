@@ -8,7 +8,6 @@ Ctrl+Backspace bisa hapus per-kata. Tanpa antrean — satu tugas satu waktu.
 from __future__ import annotations
 
 import difflib
-import os
 import re
 import sys
 import threading
@@ -1699,16 +1698,14 @@ def main(resume: bool = False) -> None:
                         f"  [#f9e2af]⏳ diantrekan:[/] [#cdd6f4]{_esc(teks)}[/]"
                         "  [dim](dikerjakan setelah giliran ini)[/]"))])
                 return True
-            if ch == "\x08":                       # Backspace (msvcrt = \x08)
+            if ch in ("\x08", "\x7f"):             # Backspace / Ctrl+Backspace
+                # KEDUANYA hapus 1 HURUF. Arah byte-nya tak bisa dipercaya:
+                # msvcrt klasik bilang polos='\x08' & Ctrl='\x7f', tapi ConPTY
+                # (Windows Terminal) TERBUKTI mengirim '\x7f' untuk Backspace
+                # POLOS (regresi v1.0.42 di jalur prompt_toolkit). Salah tebak
+                # di sini berarti Backspace polos menghapus sekata — merusak.
+                # Hapus-kata selama giliran cukup lewat menahan Backspace.
                 typing_state["buf"] = typing_state["buf"][:-1]
-                view.typing = typing_state["buf"]
-                return True
-            if ch == "\x7f":                       # Ctrl+Backspace (msvcrt = \x7f)
-                # Kode msvcrt TERBALIK dari terminal VT: Backspace polos = \x08,
-                # Ctrl+Backspace = \x7f. Hapus satu KATA di ekor buffer.
-                b = typing_state["buf"].rstrip(" ")
-                i = b.rfind(" ")
-                typing_state["buf"] = b[:i + 1] if i >= 0 else ""
                 view.typing = typing_state["buf"]
                 return True
             if ch in ("\x00", "\xe0"):             # prefix tombol khusus msvcrt
@@ -2672,17 +2669,23 @@ def main(resume: bool = False) -> None:
         return do_action(action)
 
     # --- input (prompt_toolkit hanya saat idle) ---
-    # ATURAN: Backspace polos = hapus 1 HURUF; Ctrl+Backspace = hapus 1 KATA.
+    # ATURAN MUTLAK: Backspace polos = hapus 1 HURUF, apa pun terminalnya.
+    # Ctrl+Backspace = hapus 1 KATA bila bisa dibedakan; bila tidak, ia ikut
+    # hapus 1 huruf (arah gagal yang AMAN — kebalikannya merusak ketikan).
     #
     # Di prompt_toolkit, `backspace` dan `c-h` adalah KEY YANG SAMA (alias:
-    # Keys.Backspace = Keys.ControlH) — mengikat salah satunya ke hapus-kata
-    # berarti KEDUANYA menghapus kata. Pembedanya bukan key, melainkan DATA
-    # byte mentah pada event, dan arahnya BERBEDA per jalur input:
-    #   - Win32 console (Windows, termasuk Windows Terminal): Backspace polos
-    #     -> data '\x08'; Ctrl+Backspace -> data '\x7f'  (win32.py: keycodes)
-    #   - Terminal VT (Linux/mac): persis TERBALIK ('\x7f' polos, '\x08' Ctrl).
-    # Maka satu handler c-h bercabang pada data, dengan penanda kata sesuai
-    # platform. Hapus kata juga tersedia lewat Ctrl+W & Alt+Backspace.
+    # Keys.Backspace = Keys.ControlH) — pembedanya hanya DATA byte mentah
+    # event. TERBUKTI EMPIRIS di terminal pengguna (Windows Terminal/ConPTY,
+    # regresi v1.0.42): Backspace polos tiba dengan data '\x7f' — BUKAN
+    # '\x08' seperti klaim tabel keycodes Win32 legacy. Ctrl+Backspace tiba
+    # sebagai '\x08' (sama seperti terminal VT Linux/mac).
+    #
+    # Maka penanda hapus-kata = '\x08' di SEMUA platform: '\x7f' (Backspace
+    # polos WT/VT) selalu 1 huruf. Konsekuensi di console legacy murni yang
+    # mengirim '\x08' untuk Backspace polos: di sana Backspace polos akan
+    # menghapus kata — bila itu terjadi, JANGAN memutar arah penanda lagi
+    # (itu merusak terminal utama pengguna); pakai deteksi jenis input.
+    # Hapus kata juga selalu tersedia lewat Ctrl+W & Alt+Backspace.
     kb = KeyBindings()
 
     def _del_word(event):
@@ -2693,12 +2696,12 @@ def main(resume: bool = False) -> None:
     kb.add("c-w")(_del_word)                   # Ctrl+W
     kb.add("escape", "backspace")(_del_word)   # Alt+Backspace
 
-    _DATA_KATA = "\x7f" if os.name == "nt" else "\x08"
+    _DATA_KATA = "\x08"   # Ctrl+Backspace (WT/ConPTY & VT); '\x7f' = polos
 
     @kb.add("c-h")
     def _backspace_pintar(event):
         """Backspace polos = 1 huruf; Ctrl+Backspace = 1 kata (lihat blok
-        komentar di atas soal alias key & data byte per platform)."""
+        komentar di atas soal alias key & data byte)."""
         data = event.key_sequence[0].data if event.key_sequence else ""
         if data == _DATA_KATA:
             _del_word(event)
