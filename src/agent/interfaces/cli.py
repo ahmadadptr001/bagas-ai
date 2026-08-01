@@ -662,6 +662,12 @@ class TurnView:
         self._web_pred_first = 0.0
         # Ekor jawaban yang sedang ditulis, untuk pratinjau bergulir di region live.
         self._stream = ""
+        # Ketikan pengguna SELAMA giliran berjalan (fitur antrean prompt):
+        # `typing` = buffer yang sedang diketik (tampil di footer), `queue_n` =
+        # berapa prompt yang sudah antre. Enter TIDAK membatalkan apa pun —
+        # prompt masuk antrean dan dikerjakan setelah giliran ini selesai.
+        self.typing = ""
+        self.queue_n = 0
 
     # --- mutasi (dipanggil dari worker) ---
     def add_narasi(self, text: str) -> None:
@@ -1026,6 +1032,20 @@ class TurnView:
             f"[dim]token[/]{effseg}{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
         rows = [status]
+        # Ketikan yang sedang berlangsung + antrean prompt — supaya pengguna
+        # MELIHAT ketikannya mendarat (terminal biasa tak menggemakan apa pun
+        # selama giliran berjalan) dan yakin Enter = antre, bukan batal.
+        if self.typing:
+            ket = Text("  ❯ ", style="bold #cba6f7")
+            ket.append(self.typing, style="#cdd6f4")
+            ket.append("▌", style="#cba6f7")
+            ket.append("   Enter = antre (tidak membatalkan)",
+                       style="dim italic")
+            rows.append(_oneline(ket))
+        if self.queue_n:
+            rows.append(_oneline(Text(
+                f"  ⏳ {self.queue_n} prompt di antrean — dikerjakan setelah "
+                "giliran ini selesai", style="dim #f9e2af")))
         # Baris ETA sadar-fase (hanya connector web dgn riwayat cukup).
         eta = self._web_eta_line(now) if self._web_service else None
         if eta is not None:
@@ -1340,6 +1360,13 @@ def main(resume: bool = False) -> None:
     steps: dict[int, dict] = {}
     step_ctr = {"n": 0}
     cur_step: dict = {}
+    # --- Antrean prompt: mengetik SELAGI giliran berjalan --------------------
+    # Enter saat giliran masih jalan TIDAK membatalkan apa pun — teksnya masuk
+    # antrean dan dikerjakan berurutan setelah giliran selesai. `typing_state`
+    # menyimpan ketikan yang belum di-Enter; sisa ketikan saat giliran selesai
+    # dibawa ke prompt berikutnya sebagai isi awal (tak ada ketikan yang hilang).
+    prompt_queue: list[str] = []
+    typing_state = {"buf": ""}
     # Mode tampilan giliran: True = TUI interaktif (langkah bisa diklik SELAGI
     # berjalan); False = tampilan rich biasa (mengalir, tanpa layar-penuh).
     tui_mode = {"on": True}
@@ -1736,6 +1763,8 @@ def main(resume: bool = False) -> None:
                 console.print(r)
 
         view = TurnView(agent, commit=_commit)
+        # Giliran ini mungkin datang DARI antrean — sisa antrean tetap tampil.
+        view.queue_n = len(prompt_queue)
         ctr = {"n": 0}
 
         def _on_tool(name: str, args: dict) -> None:
@@ -1857,6 +1886,42 @@ def main(resume: bool = False) -> None:
 
         worker_thread = threading.Thread(target=worker, daemon=True)
         interrupted = False
+
+        def _ketik(ch: str) -> bool:
+            """Tangani SATU karakter ketikan selama giliran berjalan.
+
+            Enter = masukkan buffer ke ANTREAN (BUKAN membatalkan — Ctrl+C tetap
+            satu-satunya jalan membatalkan). Return True bila karakter sudah
+            ditangani di sini (pemanggil tak perlu memprosesnya lagi)."""
+            if ch in ("\r", "\n"):
+                teks = typing_state["buf"].strip()
+                typing_state["buf"] = ""
+                view.typing = ""
+                if teks:
+                    prompt_queue.append(teks)
+                    view.queue_n = len(prompt_queue)
+                    # Jejak permanen di riwayat supaya yang antre terlihat jelas.
+                    _commit([_oneline(Text.from_markup(
+                        f"  [#f9e2af]⏳ diantrekan:[/] [#cdd6f4]{_esc(teks)}[/]"
+                        "  [dim](dikerjakan setelah giliran ini)[/]"))])
+                return True
+            if ch == "\x08":                       # Backspace
+                typing_state["buf"] = typing_state["buf"][:-1]
+                view.typing = typing_state["buf"]
+                return True
+            if ch in ("\x00", "\xe0"):             # prefix tombol khusus msvcrt
+                if _msvcrt is not None:
+                    try:
+                        _msvcrt.getwch()           # buang scancode pasangannya
+                    except Exception:  # noqa: BLE001
+                        pass
+                return True
+            if ch >= " ":                          # karakter tercetak
+                typing_state["buf"] += ch
+                view.typing = typing_state["buf"]
+                return True
+            return False                            # kontrol lain (^R/^C dsb.)
+
         # Capture mouse MENELAN event scroll wheel -> terminal tak bisa digulung.
         # Saat pengguna terdeteksi men-scroll, capture DILEPAS sementara (wheel
         # kembali dilayani terminal secara native) lalu dipasang lagi otomatis.
@@ -1896,6 +1961,8 @@ def main(resume: bool = False) -> None:
                                         view.toggle()
                                     elif ch == "\x03":
                                         raise KeyboardInterrupt
+                                    else:
+                                        _ketik(ch)
                                 else:
                                     time.sleep(0.03)
                                 continue
@@ -1919,6 +1986,8 @@ def main(resume: bool = False) -> None:
                                         view.toggle()
                                     elif ev[1] == "\x03":     # Ctrl+C
                                         raise KeyboardInterrupt
+                                    else:
+                                        _ketik(ev[1])
                             if not got:
                                 time.sleep(0.02)
                         elif _msvcrt is not None:
@@ -1928,6 +1997,8 @@ def main(resume: bool = False) -> None:
                                     view.toggle()
                                 elif ch == "\x03":
                                     raise KeyboardInterrupt
+                                else:
+                                    _ketik(ch)
                             else:
                                 time.sleep(0.03)
                         else:
@@ -2928,17 +2999,30 @@ def main(resume: bool = False) -> None:
         )
 
     while True:
-        try:
-            # patch_stdout: aktivitas bot Telegram (dari thread latar) tercetak
-            # RAPI di atas prompt, tak merusak baris input.
-            with patch_stdout(raw=True):
-                raw = session_pt.prompt(
-                    HTML('<style fg="#cba6f7"><b>❯</b></style> '),
-                    bottom_toolbar=bottom_toolbar)
-        except KeyboardInterrupt:
-            continue
-        except EOFError:
-            break
+        # ANTREAN DULU: prompt yang diketik+Enter selama giliran sebelumnya
+        # dikerjakan berurutan — digemakan dulu agar riwayat terlihat persis
+        # seperti diketik di prompt biasa. Perintah slash pun ikut jalur ini.
+        if prompt_queue:
+            raw = prompt_queue.pop(0)
+            console.print(f"[bold #cba6f7]❯[/] [#cba6f7]{_esc(raw)}[/]  "
+                          f"[dim](dari antrean)[/]")
+        else:
+            try:
+                # patch_stdout: aktivitas bot Telegram (dari thread latar)
+                # tercetak RAPI di atas prompt, tak merusak baris input.
+                # `default` = sisa ketikan yang belum di-Enter saat giliran
+                # tadi selesai — tak ada ketikan yang hilang, tinggal lanjut.
+                prefill = typing_state["buf"]
+                typing_state["buf"] = ""
+                with patch_stdout(raw=True):
+                    raw = session_pt.prompt(
+                        HTML('<style fg="#cba6f7"><b>❯</b></style> '),
+                        bottom_toolbar=bottom_toolbar,
+                        default=prefill)
+            except KeyboardInterrupt:
+                continue
+            except EOFError:
+                break
         text = raw.strip()
         if not text:
             continue
