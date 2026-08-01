@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-try:  # keyboard non-blocking (Windows) untuk toggle expand inline (Ctrl+R)
+try:  # keyboard non-blocking (Windows): ketikan-selama-giliran & Ctrl+C
     import msvcrt as _msvcrt
 except ImportError:  # pragma: no cover - non-Windows
     _msvcrt = None
@@ -122,11 +122,10 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("permissions-bot", "atur izin siapa yang boleh kontrol via Telegram"),
     ("review", "cari bug & kesalahan sistem di seluruh proyek"),
     ("scan", "pindai ulang & segarkan peta proyek"),
-    ("live", "hidup/matikan tampilan interaktif (Ctrl+R buka/tutup live)"),
+    ("live", "hidup/matikan tampilan mengalir dengan footer status"),
     ("expand", "cetak ulang hasil penuh · /expand N untuk satu langkah"),
     ("memory", "memory jangka panjang"),
     ("scripts", "script memory"),
-    ("models", "daftar semua model"),
     ("update", "cek pembaruan"),
     ("help", "bantuan"),
     ("exit", "keluar"),
@@ -304,8 +303,13 @@ _GUT_A = "#5bd66f on #0d2a14"
 _GUT_D = "#e06b6b on #2a0d0d"
 
 
-def _row(lineno: str, sign: str, text: str, style: str) -> None:
-    """Cetak satu baris gaya editor '123 + kode' dengan bg + margin tepi."""
+def _row(lineno: str, sign: str, text: str, style: str) -> Text:
+    """Satu baris gaya editor '123 + kode' dengan bg + margin tepi.
+
+    MENGEMBALIKAN Text, tidak mencetak sendiri: seluruh diff dirakit dulu lalu
+    dicetak SEKALI (atomik). Dulu tiap baris dicetak terpisah — selagi region
+    live me-refresh ~12x/detik, footer animasi bisa menyela DI ANTARA dua baris
+    diff dan tampilan diff tampak tertimpa/terpotong kotak animasi."""
     inner = max(20, min(console.width - 2 * _LPAD, 108))
     line = Text(" " * _LPAD)  # margin kiri tanpa background
     line.append(f" {lineno:>4} {sign} ", style=style)
@@ -318,7 +322,7 @@ def _row(lineno: str, sign: str, text: str, style: str) -> None:
     if pad > 0:
         line.append(" " * pad, style=style)
     line.no_wrap = True
-    console.print(line)
+    return line
 
 
 # Tool yang MENGUBAH ISI file -> perubahannya ditampilkan sebagai diff berwarna
@@ -383,9 +387,13 @@ def _isi_sebelum_sesudah(name: str, path: str, args: dict):
 
 
 def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200) -> None:
-    """Tampilan editor: header status + line-numbered diff (bg hijau/merah)."""
+    """Tampilan editor: header status + line-numbered diff (bg hijau/merah).
+
+    Seluruh diff dicetak SEKALI sebagai satu Group (statis, atomik) — mengalir
+    ke scrollback seperti output biasa, tak pernah disela/ditimpa footer live."""
     icon, label = ("✨", "dibuat") if is_new else ("📝", "diubah")
-    console.print(f"\n  [bold]{icon} [cyan]{path}[/cyan][/bold] [dim]({label})[/dim]")
+    rows: list = [Text.from_markup(
+        f"\n  [bold]{icon} [cyan]{_esc(path)}[/cyan][/bold] [dim]({label})[/dim]")]
     diff = list(difflib.unified_diff(old.splitlines(), new.splitlines(),
                                      lineterm="", n=2))
     body = diff[2:] if len(diff) >= 2 and diff[0].startswith("---") else diff
@@ -393,36 +401,39 @@ def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200) -
     shown = 0
     for line in body:
         if shown >= limit:
-            console.print("  [dim]... (diff dipotong)[/dim]")
+            rows.append(Text("  ... (diff dipotong)", style="dim"))
             break
         if line.startswith("@@"):
             m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)", line)
             if m:
                 old_ln, new_ln = int(m.group(1)), int(m.group(2))
             if shown:
-                console.print("  [dim]⋮[/dim]")
+                rows.append(Text("  ⋮", style="dim"))
             continue
         tag, content = line[:1], line[1:]
         if tag == "+":
-            _row(str(new_ln), "+", content, _ADD)
+            rows.append(_row(str(new_ln), "+", content, _ADD))
             new_ln += 1
         elif tag == "-":
-            _row(str(old_ln), "-", content, _DEL)
+            rows.append(_row(str(old_ln), "-", content, _DEL))
             old_ln += 1
         else:
-            _row(str(new_ln), " ", content, _CTX)
+            rows.append(_row(str(new_ln), " ", content, _CTX))
             old_ln += 1
             new_ln += 1
         shown += 1
+    console.print(Group(*rows))
 
 
 def _print_delete(path: str, content: str, limit: int = 80) -> None:
-    console.print(f"\n  [bold]🗑 [cyan]{path}[/cyan][/bold] [dim](dihapus)[/dim]")
+    rows: list = [Text.from_markup(
+        f"\n  [bold]🗑 [cyan]{_esc(path)}[/cyan][/bold] [dim](dihapus)[/dim]")]
     for i, line in enumerate(content.splitlines(), start=1):
         if i > limit:
-            console.print("  [dim]... (dipotong)[/dim]")
+            rows.append(Text("  ... (dipotong)", style="dim"))
             break
-        _row(str(i), "-", line, _DEL)
+        rows.append(_row(str(i), "-", line, _DEL))
+    console.print(Group(*rows))
 
 
 def show_logo() -> None:
@@ -608,37 +619,35 @@ _TIPS = (
 
 
 class TurnView:
-    """Tampilan SATU GILIRAN yang hidup INLINE (rich.Live, TANPA layar-penuh),
-    persis alur terminal biasa. Seluruh giliran (narasi, langkah, jawaban)
-    dirender di region yang terus diperbarui; hasil tiap langkah bisa DIBUKA/
-    ditutup secara realtime dengan Ctrl+R (seperti Claude). Saat giliran selesai,
-    region ini 'membeku' jadi bagian riwayat terminal (transient=False)."""
+    """Tampilan SATU GILIRAN yang MENGALIR seperti terminal biasa.
+
+    SEMUA konten (narasi, langkah, diff, pratinjau jawaban) dicetak STATIS ke
+    scrollback begitu tersedia — tidak ada yang dirender di region tetap yang
+    menimpa/menutupi apa pun. Satu-satunya bagian yang hidup (rich.Live) adalah
+    FOOTER kecil di baris paling bawah: spinner status + ketikan yang sedang
+    berlangsung + antrean. Tingginya kecil & nyaris konstan (tiap baris
+    _oneline anti-wrap), jadi ia tak pernah lebih tinggi dari layar dan tak
+    pernah menutupi ketikan pengguna maupun diff — akar bug "kotak animasi
+    menimpa input" pada desain lama yang menaruh langkah + pratinjau di region
+    live."""
 
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
-    # Region live SENGAJA dijaga PENDEK: kalau seluruh giliran (narasi + banyak
-    # langkah + jawaban panjang) ditaruh di region live, tingginya melebihi layar
-    # -> rich.Live menggambar ulang semuanya tiap frame => KEDIP & scroll rusak
-    # (terasa saat sesi/jawaban besar). Item lama "dibekukan" ke riwayat terminal.
-    MAX_LIVE_STEPS = 5
 
     def __init__(self, agent: Agent, commit=None) -> None:
         self.agent = agent
         self.commit = commit          # commit(renderables) -> cetak ke riwayat
         self.start = time.time()
         self._lock = threading.Lock()
-        self.items: list[tuple[str, object]] = []  # ("step",rec) yang masih live
         self.all_steps: list[dict] = []            # SEMUA langkah (untuk ringkasan)
         self._said = False                         # header "🤖" sekali per giliran
         self.answer: str | None = None
-        self.expanded = False          # Ctrl+R toggle: buka/tutup hasil semua langkah
-        self._clickable = False        # True bila mouse aktif -> tampilkan petunjuk klik
         self.done = False
         self.cancelling = False
         self.retry_until = 0.0
         self.retry_msg = ""
         self.phase = "berpikir"
         self.tool: str | None = None
+        self.tool_label = ""           # label langkah berjalan (tampil di footer)
         self.disp = 0.0
         self.phase_since = self.start   # kapan fase SEKARANG mulai (untuk ETA)
         # ETA connector web belajar dari riwayat waktu turn pengguna sendiri —
@@ -659,7 +668,9 @@ class TurnView:
         # Perkiraan PERTAMA yang ditampilkan (detik, total durasi menjawab) —
         # dipakai menilai akurasi sesudah giliran selesai.
         self._web_pred_first = 0.0
-        # Ekor jawaban yang sedang ditulis, untuk pratinjau bergulir di region live.
+        # Baris TERAKHIR (parsial) jawaban yang sedang ditulis. Baris yang sudah
+        # LENGKAP langsung dicetak ke scrollback oleh note_stream — yang
+        # disimpan di sini hanya ekor yang belum ketemu newline-nya.
         self._stream = ""
         # Ketikan pengguna SELAMA giliran berjalan (fitur antrean prompt):
         # `typing` = buffer yang sedang diketik (tampil di footer), `queue_n` =
@@ -683,43 +694,34 @@ class TurnView:
             out.append(Padding(_md(text.strip()), (0, 3, 1, 3)))
             self.commit(out)
 
-    def _overflow(self) -> list:
-        """Langkah lama yang keluar dari jatah region live (untuk dibekukan)."""
-        out = []
-        with self._lock:
-            while len(self.items) > self.MAX_LIVE_STEPS:
-                out.append(self.items.pop(0))
-        return out
-
     def start_step(self, n: int, name: str, label: str) -> dict:
         rec = {"n": n, "name": name, "label": label, "result": "",
-               "failed": False, "running": True, "expanded": False}
+               "failed": False, "running": True}
         with self._lock:
-            self.items.append(("step", rec))
             self.all_steps.append(rec)
         self.tool = name
+        self.tool_label = label or ""
         self.phase = _PHASE.get(name, "bekerja")
         self.phase_since = time.time()
-        # Bekukan langkah lama ke riwayat agar region live tak tumbuh tanpa batas.
-        for kind, val in self._overflow():
-            if kind == "step" and self.commit:
-                self.commit(self._render_step(val))
         return rec
 
     def end_step(self, rec: dict, result: str, failed: bool) -> None:
         rec["result"] = result or ""
         rec["failed"] = failed
         rec["running"] = False
-        # Pra-hitung baris hasil SEKALI di sini — _render_step dipanggil ~12x/dtk
-        # per frame; tanpa cache ini regex+splitlines diulang terus tiap frame.
         text = re.sub(r"^exit_code=\S+\n?", "", (result or "").strip())
-        # Dibersihkan DI SINI, di jalur pra-hitung yang sebenarnya dipakai.
-        # Membersihkan hanya di _render_step tidak ada gunanya: cabang itu cuma
-        # jalan bila `_lines` belum ada, sedangkan tiap langkah yang selesai
-        # selalu melewati baris ini lebih dulu.
+        # Keluaran perintah nyaris selalu berwarna (pip/npm/git) -> escape-nya
+        # WAJIB dibuang sebelum dicetak, kalau tidak terminal mengeksekusinya
+        # dan tampilan berantakan.
         rec["_lines"] = _bersih_kendali(text).splitlines()
         rec["_nlines"] = sum(1 for ln in rec["_lines"] if ln.strip())
+        # Langkah selesai LANGSUNG dicetak statis ke scrollback — bukan ditahan
+        # di region live. Inilah inti desain mengalir: riwayat langkah menjadi
+        # scrollback biasa yang bisa digulung dan tak pernah ditimpa animasi.
+        if self.commit:
+            self.commit(self._render_step(rec))
         self.tool = None
+        self.tool_label = ""
         self.phase = "berpikir"
         self.phase_since = time.time()
 
@@ -742,250 +744,91 @@ class TurnView:
             self.phase = text
             self.phase_since = time.time()   # patok waktu fase baru (untuk ETA)
 
-    # Tinggi jendela EKOR pratinjau di region live. Baris LENGKAP yang keluar
-    # dari jendela ini DIBEKUKAN ke riwayat terminal (lihat note_stream) —
-    # beginilah teks MENGALIR ke bawah seperti Claude CLI: baris lama menjadi
-    # scrollback sungguhan yang bisa digulung, region live hanya memegang ekor
-    # terbaru + footer. Jendela sengaja kecil karena bukan lagi satu-satunya
-    # tempat menonton: arus utamanya ada di scrollback.
-    PREVIEW_LINES = 8
-    # Ekor teks yang disimpan untuk pratinjau. Tak perlu menyimpan seluruh
-    # jawaban (bisa ratusan ribu karakter) — yang ditampilkan hanya ekornya.
+    # Panjang maksimum ekor parsial yang disimpan (baris tunggal super panjang
+    # dari log/minified tak perlu disimpan utuh — tampilnya pun dipotong).
     _PREVIEW_KEEP = 4000
 
     def note_stream(self, delta: str) -> None:
         """Potongan jawaban baru saja mengalir dari situs (dari on_token).
 
-        Dua gunanya: menghitung kemajuan untuk ETA, dan menyimpan EKOR teks
-        supaya pengguna bisa melihat jawaban terbentuk saat itu juga alih-alih
-        menatap spinner sampai jawaban selesai sepenuhnya."""
+        Dua gunanya: menghitung kemajuan untuk ETA, dan MENGALIRKAN teks ke
+        scrollback saat itu juga. Setiap baris yang sudah LENGKAP langsung
+        dicetak permanen (statis, bisa digulung, tak pernah ditimpa animasi);
+        hanya baris terakhir yang masih setengah diketik yang ditahan — ia
+        tampil sebagai satu baris ekor di footer. Aman di-commit permanen
+        karena aliran on_token append-only monotonik (base hanya mengirim
+        `cur[emitted:]` saat teks BERTAMBAH)."""
         if not delta:
             return
         self._web_chars += len(delta)
         # Dibersihkan SEBELUM masuk buffer: jawaban model bisa memuat log
-        # berwarna yang disalin apa adanya, dan byte ESC di region live akan
-        # dieksekusi terminal (warna berubah sendiri, kursor melompat).
+        # berwarna yang disalin apa adanya, dan byte ESC akan dieksekusi
+        # terminal (warna berubah sendiri, kursor melompat).
         buf = self._stream + _bersih_kendali(delta)
-        # Baris LENGKAP yang melewati jendela pratinjau DIBEKUKAN ke riwayat:
-        # dari sinilah efek "mengalir ke bawah" — baris lama tercetak permanen
-        # ke scrollback (bisa digulung), bukan tertimpa di jendela tetap yang
-        # memotong kode. Aman di-commit permanen karena aliran on_token
-        # append-only monotonik (base hanya mengirim `cur[emitted:]` saat teks
-        # BERTAMBAH). Baris terakhir tak pernah dibekukan — ia mungkin masih
-        # setengah diketik.
-        if self.commit and "\n" in buf:
+        if "\n" in buf:
             lines = buf.split("\n")
-            ekor_parsial = lines.pop()
-            luber = len(lines) - self.PREVIEW_LINES
-            if luber > 0:
-                beku, lines = lines[:luber], lines[luber:]
+            buf = lines.pop()          # ekor parsial: belum boleh dicetak
+            if self.commit:
                 self.commit([
                     _oneline(Text("  │ " + b.rstrip(), style="#7f849c"))
-                    for b in beku
+                    for b in lines
                 ])
-            buf = "\n".join(lines + [ekor_parsial])
-        # Dipotong dari depan: yang ditonton pengguna selalu bagian terbaru.
+        # Dipotong dari depan: yang ditampilkan cuma ekor terbaru.
         self._stream = buf[-self._PREVIEW_KEEP:]
 
-    def _preview_rows(self) -> list:
-        """Beberapa baris TERAKHIR jawaban yang sedang ditulis, untuk region live.
+    def _preview_row(self):
+        """Satu baris ekor jawaban yang masih setengah diketik (untuk footer).
+        None bila tak ada. SELALU maksimal satu baris (_oneline anti-wrap) —
+        tinggi footer tak berubah-ubah karenanya."""
+        teks = self._stream.strip()
+        if not teks:
+            return None
+        return _oneline(Text("  │ " + teks, style="#7f849c"))
 
-        Jawaban lengkap TIDAK dirender di sini melainkan dicetak ke riwayat
-        sesudah giliran selesai — inilah yang membuat jawaban sepanjang apa pun
-        tak merusak scroll. Yang tampil saat berjalan cuma jendela bergulir
-        setinggi PREVIEW_LINES, jadi tinggi region live tetap tetap."""
-        teks = self._stream
-        if not teks.strip():
-            return []
-        # Ada saluran riwayat (commit)? Baris yang luber sudah MENGALIR ke
-        # scrollback lewat note_stream, jadi di sini cukup jendela ekor kecil.
-        # Tanpa saluran riwayat, tak ada tempat membekukan baris — jendelanya
-        # saja yang diperbesar mengikuti layar (batas atas dijaga _muat_layar).
-        jatah = self.PREVIEW_LINES
-        if not self.commit:
-            try:
-                tinggi_layar = console.size.height
-            except Exception:  # noqa: BLE001
-                tinggi_layar = 24
-            jatah = max(jatah, tinggi_layar - 8)
-        baris = teks.split("\n")
-        # Baris kosong di ekor bikin pratinjau tampak "melompat" tanpa isi.
-        while baris and not baris[-1].strip():
-            baris.pop()
-        if not baris:
-            return []
-        rows = []
-        for b in baris[-jatah:]:
-            rows.append(_oneline(Text("  │ " + b.rstrip(), style="#7f849c")))
-        return rows
-
-    def toggle(self) -> None:
-        """Ctrl+R (cadangan): buka/tutup SEMUA hasil sekaligus."""
-        self.expanded = not self.expanded
-
-    def toggle_step(self, n: int) -> bool:
-        """Klik: buka/tutup hasil langkah #n saja. True bila langkah ada."""
-        with self._lock:
-            for kind, val in self.items:
-                if kind == "step" and val["n"] == n and not val["running"]:
-                    val["expanded"] = not val["expanded"]
-                    return True
-        return False
-
-    # --- render satu langkah ---
-    def _render_step(self, rec: dict, live_cap: int = 0) -> list:
-        """`live_cap` > 0 = sedang dirender di region LIVE: batasi jumlah baris
-        hasil ter-expand agar total region < tinggi layar (lihat _blocks)."""
+    # --- render satu langkah (dipanggil SEKALI saat langkah selesai) ---
+    def _render_step(self, rec: dict) -> list:
+        """Blok statis sebuah langkah yang SELESAI, untuk dicetak ke riwayat:
+        kepala (✓/✗ + label + #n) lalu ringkasan 'N baris'. Hasil penuhnya
+        dibuka lewat /expand N — bukan ditampilkan semua di sini."""
         n = rec["n"]
         label = rec["label"] or ""
         if len(label) > 64:
             label = label[:61] + "…"
-        running = rec["running"]
         failed = rec["failed"]
-        if running:
-            frame = self.FRAMES[int((time.time() - self.start) * 10) % len(self.FRAMES)]
-            icon = f"[#f9e2af]{frame}[/]"
-        else:
-            icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
+        icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
         phase = _PHASE.get(rec["name"], "langkah")
         head = _oneline(Text.from_markup(
             f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
             f"   [dim #94e2d5]#{n}[/]"
         ))
         out = [head]
-        # Pakai baris pra-hitung dari end_step (fallback hitung bila belum ada).
-        lines = rec.get("_lines")
-        if lines is None:
-            text = re.sub(r"^exit_code=\S+\n?", "", (rec["result"] or "").strip())
-            # Keluaran perintah nyaris selalu berwarna (pip/npm/git) -> escape-nya
-            # WAJIB dibuang sebelum masuk region live, kalau tidak terminal ikut
-            # mengeksekusinya dan tampilan berantakan.
-            lines = _bersih_kendali(text).splitlines()
-        nlines = rec.get("_nlines")
-        if nlines is None:
-            nlines = sum(1 for ln in lines if ln.strip())
-        if running:
-            out.append(Text("     menjalankan…", style="italic #6c7086"))
-        elif not lines:
-            pass
-        elif rec["expanded"] or self.expanded:
-            cap = live_cap if live_cap > 0 else 40
-            shown = lines[:cap]
-            body = Text("\n".join("     " + ln for ln in shown),
-                        style="#f5c9c9" if failed else "#a6adc8")
-            # Tiap baris hasil juga anti-wrap: baris super panjang (log/minified)
-            # yang wrap membuat tinggi region berubah -> kedip/baris hantu.
-            out.append(_oneline(body))
-            if len(lines) > cap:
-                out.append(_oneline(Text(
-                    f"     … {len(lines) - cap} baris lagi (/expand {n})",
-                    style="dim")))
-        else:
+        lines = rec.get("_lines") or []
+        nlines = rec.get("_nlines", 0)
+        if lines:
             unit = "hasil" if rec["name"] == "web_search" else "baris"
             tag = "[#f38ba8]gagal[/] · " if failed else ""
             out.append(_oneline(Text.from_markup(
-                f"     [dim]{tag}{nlines} {unit}[/]")))
+                f"     [dim]{tag}{nlines} {unit} · /expand {n}[/]")))
         return out
 
-    def _blocks(self) -> list:
-        """Urutan (tag, renderable) untuk render & pemetaan-klik. tag =
-        ('step', n) bila baris itu milik langkah #n, else ('other', None).
-
-        HANYA berisi langkah yang masih 'live' (maks. MAX_LIVE_STEPS) + footer,
-        supaya region live PENDEK -> tak berkedip & terminal tetap bisa di-scroll.
-        Narasi & jawaban dibekukan ke riwayat, bukan dirender di sini."""
-        blocks: list = []
-        with self._lock:
-            items = list(self.items)
-        # Region live WAJIB lebih pendek dari layar: bila lebih tinggi, rich.Live
-        # tak bisa menghapus baris yang sudah lewat atas layar -> baris hantu/
-        # dobel. Saat ada langkah ter-expand, jatah barisnya dihitung dari tinggi
-        # terminal dan dibagi rata antar langkah yang terbuka.
-        n_exp = sum(1 for kind, val in items
-                    if kind == "step" and not val["running"]
-                    and (val["expanded"] or self.expanded))
-        live_cap = 0
-        if n_exp:
-            try:
-                avail = console.size.height
-            except Exception:  # noqa: BLE001
-                avail = 30
-            # Lantai `max(3, ...)` DIBUANG: itulah yang membuat jatah tetap
-            # dilanggar di layar sempit (terukur 26 baris di terminal 24).
-            # Dengan lantai 1, kelebihan tinggi ditebus dengan MEMANGKAS isi tiap
-            # langkah — bukan dengan _muat_layar membuang langkah utuh, yang bagi
-            # pengguna terlihat seperti langkah menghilang begitu saja setelah
-            # sengaja dibuka lewat Ctrl+R.
-            live_cap = max(1, (avail - 4 - 2 * len(items)) // n_exp)
-        for kind, val in items:
-            if kind == "step":
-                for r in self._render_step(val, live_cap=live_cap):
-                    blocks.append((("step", val["n"]), r))
-        # Jawaban yang SEDANG ditulis: tampilkan ekornya supaya pengguna tak
-        # menatap spinner tanpa isi sampai jawaban rampung. Dilewati saat ada
-        # langkah ter-expand — keduanya berebut tinggi layar, dan isi langkah
-        # yang sengaja dibuka pengguna lebih berhak.
-        if not self.done and not n_exp:
-            blocks.extend((("other", None), r) for r in self._preview_rows())
-        # Footer (spinner/status) HANYA selama berjalan. Saat done, region yang
-        # membeku ke riwayat cukup berisi langkah — tanpa "membatalkan…"/spinner
-        # basi, dan ringkasan dicetak SETELAH jawaban (urutan benar).
-        if not self.done:
-            blocks.append((("other", None), self._footer()))
-        return self._muat_layar(blocks)
-
-    # Taksiran tinggi per blok bila pengukuran GAGAL. Sengaja terlalu besar:
-    # menaksir kekecilan berarti penjaga tinggi mati diam-diam dan baris hantu
-    # kembali tanpa satu pun tanda, sedangkan menaksir kebesaran cuma memangkas
-    # lebih banyak dari perlu — arah kesalahan yang aman.
-    _TAKSIR_BLOK = 4
-
-    def _tinggi_blok(self, rend) -> int:
-        """Tinggi NYATA (baris) satu renderable.
-
-        Diukur, bukan ditaksir: satu blok TIDAK sama dengan satu baris — hasil
-        langkah yang terbuka adalah SATU Text berisi banyak baris (terukur: 16
-        blok = 26 baris). Menghitung blok itulah sebabnya penjaga tinggi yang
-        lama meleset."""
-        try:
-            return len(console.render_lines(rend, console.options, pad=False))
-        except Exception:  # noqa: BLE001 - konsol tiruan/uji
-            return self._TAKSIR_BLOK
-
-    def _muat_layar(self, blocks: list) -> list:
-        """Pastikan region live MUAT di layar, buang langkah tertua bila perlu.
-
-        Region live yang lebih tinggi dari layar membuat rich.Live tak bisa
-        menghapus baris yang sudah lewat atas layar -> baris hantu, teks dobel,
-        scroll rusak.
-
-        Tinggi tiap blok diukur SEKALI lalu dijumlahkan; pembuangan cuma
-        mengurangi jumlah itu. Versi sebelumnya merender ULANG seluruh region
-        tiap putaran pembuangan — terukur 3 panggilan render_lines untuk satu
-        _blocks(), padahal _blocks() dipanggil ~12x/detik oleh __rich__ DAN
-        sekali lagi oleh pemetaan klik.
-
-        Yang dibuang adalah blok TERTUA: langkah terbaru yang sedang berjalan
-        itulah yang ditonton, dan riwayat penuhnya tetap ada di scrollback serta
-        /expand. Footer (blok terakhir) tak pernah dibuang — di situlah status &
-        spinner."""
-        if not blocks:
-            return blocks
-        try:
-            layar = console.size.height
-        except Exception:  # noqa: BLE001
-            return blocks
-        maks = max(4, layar - 2)   # sisakan ruang untuk prompt & baris perintah
-        tinggi = [self._tinggi_blok(r) for _, r in blocks]
-        total = sum(tinggi)
-        i = 0
-        while i < len(blocks) - 1 and total > maks:
-            total -= tinggi[i]
-            i += 1
-        return blocks[i:]
-
     def __rich__(self):
-        return Group(*[r for _, r in self._blocks()])
+        """Region live = FOOTER SAJA (status + ketikan + antrean + ETA/tips).
+
+        Semua baris _oneline anti-wrap -> tinggi kecil & stabil, selalu muat di
+        layar, tak pernah menimpa konten yang sudah tercetak. Saat done, region
+        dikosongkan: semuanya sudah berada di scrollback."""
+        if self.done:
+            return Text("")
+        rows = []
+        ekor = self._preview_row()
+        if ekor is not None:
+            rows.append(ekor)
+        footer = self._footer()
+        if isinstance(footer, Group):
+            rows.extend(footer.renderables)
+        else:
+            rows.append(footer)
+        return Group(*rows)
 
     def _footer(self):
         el = time.time() - self.start
@@ -1005,24 +848,13 @@ class TurnView:
         if abs(target - self.disp) < 1:
             self.disp = target
         tok = _fmt(int(self.disp))
-        if self.done:
-            with self._lock:
-                stps = list(self.all_steps)
-            n_step = len(stps)
-            if not n_step:
-                return Text("")  # chat murni: tanpa footer
-            n_file = sum(1 for s in stps if s["name"] in _TOOL_UBAH_FILE)
-            n_fail = sum(1 for s in stps if s["failed"])
-            seg = [f"{n_step} langkah"]
-            if n_file:
-                seg.append(f"{n_file} file")
-            if n_fail:
-                seg.append(f"[#f38ba8]{n_fail} gagal[/]")
-            seg += [_fmt_elapsed(el), f"⚡ {tok} token"]
-            return _oneline(Text.from_markup(
-                "  [dim]" + " · ".join(seg) + "[/]   [dim]·[/]   "
-                "[#94e2d5]/expand N[/][dim] lihat penuh[/]"))
-        extra = f"   [dim]·[/]   [#f5c2e7]🔧 {self.tool}[/]" if self.tool else ""
+        extra = ""
+        if self.tool:
+            lbl = self.tool_label
+            if len(lbl) > 40:
+                lbl = lbl[:37] + "…"
+            lbl = f" [dim]{_esc(lbl)}[/]" if lbl else ""
+            extra = f"   [dim]·[/]   [#f5c2e7]🔧 {self.tool}[/]{lbl}"
         eff = getattr(self.agent, "effort", None)
         effseg = f"   [dim]·[/]   [#f5c2e7]◇ effort {eff}[/]" if eff else ""
         status = _oneline(Text.from_markup(
@@ -1231,22 +1063,6 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
                  title="[bold #cba6f7]⬢ bagas-ai[/]", title_align="left")
 
 
-def _models_panel(current_id: str) -> Panel:
-    tbl = Table(box=box.SIMPLE_HEAD, show_edge=False, expand=False)
-    tbl.add_column("#", style="dim", justify="right")
-    tbl.add_column("alias", style="bold cyan")
-    tbl.add_column("model", style="white")
-    tbl.add_column("kemampuan", style="dim")
-    tbl.add_column("aktif", justify="center")
-    for i, key, spec in models.catalog():
-        mark = "[bold green]●[/bold green]" if spec.id == current_id else ""
-        tbl.add_row(str(i), key, spec.label, spec.note or "-", mark)
-    return Panel(tbl, title="[bold]🔀 Model tersedia[/bold]", border_style="cyan",
-                 box=box.ROUNDED)
-
-
-
-
 # ---------------------------------------------------------------------------
 # Loop utama
 # ---------------------------------------------------------------------------
@@ -1366,8 +1182,8 @@ def main(resume: bool = False) -> None:
     # dibawa ke prompt berikutnya sebagai isi awal (tak ada ketikan yang hilang).
     prompt_queue: list[str] = []
     typing_state = {"buf": ""}
-    # Mode tampilan giliran: True = TUI interaktif (langkah bisa diklik SELAGI
-    # berjalan); False = tampilan rich biasa (mengalir, tanpa layar-penuh).
+    # Mode tampilan giliran: True = tampilan mengalir dengan footer status hidup
+    # (langkah/diff/jawaban statis di scrollback); False = tampilan klasik.
     tui_mode = {"on": True}
 
     def _step_label(name: str, args: dict) -> str:
@@ -1402,9 +1218,9 @@ def main(resume: bool = False) -> None:
                 return v
         return name
 
-    # Saat prompt pilihan (ask_user) aktif, POLLER input di loop giliran (msvcrt/
-    # mouse) HARUS berhenti membaca — kalau tidak, ketikan user DICURI poller dan
-    # dropdown inquirer rusak (keduanya membaca console yang sama).
+    # Saat prompt pilihan (ask_user) aktif, POLLER keyboard di loop giliran
+    # (msvcrt) HARUS berhenti membaca — kalau tidak, ketikan user DICURI poller
+    # dan dropdown inquirer rusak (keduanya membaca console yang sama).
     input_paused = {"on": False}
     # Event Telegram yang datang saat console "dipinjam" menu — dicetak nanti.
     _tg_pending: list[tuple[str, str]] = []
@@ -1547,8 +1363,7 @@ def main(resume: bool = False) -> None:
         console.print(Padding(panel, (0, 3, 1, 3)))
 
     def open_step_viewer() -> None:
-        """Cetak ulang hasil PENUH semua langkah giliran terakhir (inline, teks).
-        Saat giliran berjalan, buka/tutup realtime cukup pakai Ctrl+R."""
+        """Cetak ulang hasil PENUH semua langkah giliran terakhir (inline, teks)."""
         if not steps:
             console.print("  [dim]belum ada langkah untuk dibuka.[/dim]\n")
             return
@@ -1735,9 +1550,10 @@ def main(resume: bool = False) -> None:
 
     def process(text: str) -> None:
         """Jalankan satu giliran INLINE (tanpa layar-penuh, tetap di alur terminal
-        biasa). Seluruh giliran dirender di satu region rich.Live yang hidup &
-        membeku jadi riwayat saat selesai. Hasil langkah bisa dibuka/tutup realtime
-        dengan Ctrl+R. Ctrl+C membatalkan. Bila gagal, jatuh ke process_classic.
+        biasa). Semua konten (langkah, diff, jawaban) MENGALIR statis ke
+        scrollback; yang hidup hanya footer status kecil di baris paling bawah.
+        Hasil penuh langkah dibuka lewat /expand N. Ctrl+C membatalkan. Bila
+        gagal, jatuh ke process_classic.
 
         Model CONNECTOR web (Claude/Qwen web) memakai jalur yang SAMA: ia kini
         bisa memanggil tool (edit file, jalankan perintah, dll) lewat protokol
@@ -1755,11 +1571,14 @@ def main(resume: bool = False) -> None:
         cbs_alive = {"on": True}
 
         def _commit(renderables) -> None:
-            """Bekukan konten ke riwayat terminal (tercetak DI ATAS region live)."""
+            """Bekukan konten ke riwayat terminal (tercetak DI ATAS region live).
+
+            SEKALI print untuk seluruh batch (atomik): dicetak satu-satu memberi
+            celah bagi refresh live menyela di antara dua baris."""
             if not cbs_alive["on"]:
                 return
-            for r in renderables:
-                console.print(r)
+            if renderables:
+                console.print(Group(*renderables))
 
         view = TurnView(agent, commit=_commit)
         # Giliran ini mungkin datang DARI antrean — sisa antrean tetap tampil.
@@ -1848,41 +1667,11 @@ def main(resume: bool = False) -> None:
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
 
-        # Coba aktifkan MOUSE inline (klik hasil untuk buka/tutup) tanpa layar-penuh.
-        mouse = None
-        try:
-            from . import winmouse
-            if winmouse.available():
-                m = winmouse.MouseReader()
-                if m.enable():
-                    mouse = m
-                    view._clickable = True
-        except Exception:  # noqa: BLE001
-            mouse = None
-
-        def _hit_step(click_y: int) -> int | None:
-            """Petakan baris klik (koordinat buffer) ke #langkah, atau None."""
-            bottom = mouse.cursor_row() if mouse else None
-            if bottom is None:
-                return None
-            blocks = view._blocks()
-            opts = console.options
-            heights = []
-            for _, r in blocks:
-                try:
-                    heights.append(len(console.render_lines(r, opts, pad=False)))
-                except Exception:  # noqa: BLE001
-                    heights.append(1)
-            total = sum(heights)
-            top = bottom - total + 1
-            offset = click_y - top
-            acc = 0
-            for (tag, _), h in zip(blocks, heights):
-                if acc <= offset < acc + h:
-                    return tag[1] if tag[0] == "step" else None
-                acc += h
-            return None
-
+        # Mouse capture SENGAJA tak dipakai lagi: dulu ia ada untuk klik-buka
+        # langkah di region live, tapi ia MENELAN event scroll wheel (terminal
+        # tak bisa digulung) — dan kini langkah dicetak statis ke scrollback,
+        # jadi tak ada lagi yang perlu diklik. Scroll & seleksi teks kembali
+        # 100% native. Hasil penuh langkah tetap bisa dibuka lewat /expand N.
         worker_thread = threading.Thread(target=worker, daemon=True)
         interrupted = False
 
@@ -1921,10 +1710,6 @@ def main(resume: bool = False) -> None:
                 return True
             return False                            # kontrol lain (^R/^C dsb.)
 
-        # Capture mouse MENELAN event scroll wheel -> terminal tak bisa digulung.
-        # Saat pengguna terdeteksi men-scroll, capture DILEPAS sementara (wheel
-        # kembali dilayani terminal secara native) lalu dipasang lagi otomatis.
-        mouse_pause = {"until": 0.0}
         try:
             with Live(view, console=console, refresh_per_second=12,
                       transient=False, vertical_overflow="visible") as live:
@@ -1933,68 +1718,13 @@ def main(resume: bool = False) -> None:
                 while worker_thread.is_alive():
                     try:
                         if input_paused["on"]:
-                            # ask_user sedang tampil -> JANGAN baca console; biarkan
-                            # inquirer yang menerima seluruh ketikan/klik. Lepaskan
-                            # juga capture mouse agar prompt & scroll normal.
-                            if mouse is not None and mouse.active:
-                                try:
-                                    mouse.disable()
-                                except Exception:  # noqa: BLE001
-                                    pass
-                                mouse_pause["until"] = 0.0
+                            # ask_user sedang tampil -> JANGAN baca console;
+                            # biarkan inquirer yang menerima seluruh ketikan.
                             worker_thread.join(timeout=0.1)
-                        elif mouse is not None:
-                            # Jeda-scroll usai? pasang lagi capture klik.
-                            if (not mouse.active
-                                    and time.time() >= mouse_pause["until"]):
-                                try:
-                                    mouse.enable()
-                                except Exception:  # noqa: BLE001
-                                    pass
-                            if not mouse.active:
-                                # Capture DILEPAS (pengguna sedang men-scroll):
-                                # wheel dilayani terminal; keyboard via msvcrt.
-                                if _msvcrt is not None and _msvcrt.kbhit():
-                                    ch = _msvcrt.getwch()
-                                    if ch == "\x12":
-                                        view.toggle()
-                                    elif ch == "\x03":
-                                        raise KeyboardInterrupt
-                                    else:
-                                        _ketik(ch)
-                                else:
-                                    time.sleep(0.03)
-                                continue
-                            got = False
-                            for ev in mouse.poll():
-                                got = True
-                                if ev[0] == "wheel":
-                                    # Pengguna men-scroll: lepaskan capture agar
-                                    # wheel menggulung terminal seperti biasa.
-                                    try:
-                                        mouse.disable()
-                                    except Exception:  # noqa: BLE001
-                                        pass
-                                    mouse_pause["until"] = time.time() + 4.0
-                                elif ev[0] == "click":
-                                    n = _hit_step(ev[2])
-                                    if n is not None:
-                                        view.toggle_step(n)
-                                elif ev[0] == "key":
-                                    if ev[1] == "\x12":       # Ctrl+R (buka semua)
-                                        view.toggle()
-                                    elif ev[1] == "\x03":     # Ctrl+C
-                                        raise KeyboardInterrupt
-                                    else:
-                                        _ketik(ev[1])
-                            if not got:
-                                time.sleep(0.02)
                         elif _msvcrt is not None:
                             if _msvcrt.kbhit():
                                 ch = _msvcrt.getwch()
-                                if ch == "\x12":
-                                    view.toggle()
-                                elif ch == "\x03":
+                                if ch == "\x03":              # Ctrl+C
                                     raise KeyboardInterrupt
                                 else:
                                     _ketik(ch)
@@ -2030,11 +1760,6 @@ def main(resume: bool = False) -> None:
         finally:
             cbs_alive["on"] = False   # worker yatim tak boleh mencetak lagi
             live_holder["live"] = None
-            if mouse is not None:
-                try:
-                    mouse.disable()
-                except Exception:  # noqa: BLE001
-                    pass
         # Giliran web yang dibatalkan: pastikan sesi browser tak tertinggal macet.
         if interrupted and agent.model_spec.is_web:
             _reset_web_hub_if_stuck(worker_thread)
@@ -2532,9 +2257,8 @@ def main(resume: bool = False) -> None:
             f"[{c}]/reset[/]    kosongkan riwayat      [{c}]/clear[/]    bersihkan layar\n"
             f"[{c}]/review[/]   cari bug seluruh proyek [{c}]/scan[/]     segarkan peta proyek\n"
             f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
-            f"[{c}]/live[/]     interaktif on/off      [{c}]/expand[/]   buka hasil (klik/tutup)\n"
-            f"[{c}]/models[/]   daftar semua model     [{c}]/update[/]   cek pembaruan\n"
-            f"[#f38ba8]/exit[/]     keluar",
+            f"[{c}]/live[/]     tampilan mengalir      [{c}]/expand[/]   buka hasil penuh\n"
+            f"[{c}]/update[/]   cek pembaruan          [#f38ba8]/exit[/]     keluar",
             title="[bold #cba6f7]❔ Bantuan[/]", title_align="left",
             border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2)))
 
@@ -2738,8 +2462,6 @@ def main(resume: bool = False) -> None:
             show_help()
         elif action == "update":
             _with_console(do_update)
-        elif action == "models":
-            pout(_models_panel(agent.model))
         elif action == "scan":
             do_scan()
         elif action == "bot":
@@ -3070,9 +2792,10 @@ def main(resume: bool = False) -> None:
             elif cmd == "live":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:
-                    console.print("  [#a6e3a1]✓ tampilan interaktif AKTIF[/] "
-                                  "[dim]— hasil langkah bisa dibuka/tutup realtime "
-                                  "dengan Ctrl+R selagi AI berjalan (tetap inline).[/]\n")
+                    console.print("  [#a6e3a1]✓ tampilan mengalir AKTIF[/] "
+                                  "[dim]— langkah/diff/jawaban mengalir ke "
+                                  "scrollback + footer status hidup di bawah; "
+                                  "buka hasil penuh lewat /expand N.[/]\n")
                 else:
                     console.print("  [#f9e2af]○ tampilan interaktif MATI[/] "
                                   "[dim]— pakai tampilan mengalir biasa; buka hasil "
