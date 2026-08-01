@@ -162,8 +162,10 @@ def replace_in_files(find: str, replace: str, pattern: str = "*",
         return (f"[SIMULASI] {total} kecocokan di {len(kena)} berkas — "
                 f"BELUM ada yang diubah:\n{daftar}\n\n"
                 "Ulangi dengan dry_run=false bila sudah benar.")
+    from .checkpoint import snapshot as _snapshot
     for p, _ in kena:
         isi = p.read_text(encoding="utf-8", errors="strict")
+        _snapshot(p)   # pre-image untuk undo_changes
         p.write_text(isi.replace(find, replace), encoding="utf-8")
     return f"Diganti {total} kecocokan di {len(kena)} berkas:\n{daftar}"
 

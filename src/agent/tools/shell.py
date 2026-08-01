@@ -32,11 +32,15 @@ def _guard() -> str | None:
     return None
 
 
-def _popen(args, *, shell: bool) -> subprocess.Popen:
-    """Jalankan proses NON-INTERAKTIF di grup/sesi sendiri agar bisa dibunuh tuntas."""
+def _popen(args, *, shell: bool, stdin_pipe: bool = False) -> subprocess.Popen:
+    """Jalankan proses di grup/sesi sendiri agar bisa dibunuh tuntas.
+
+    stdin default DITUTUP (perintah interaktif dapat EOF, tak menggantung).
+    stdin_pipe=True (dipakai run_command_bg) membuka saluran input sehingga
+    proses latar bisa dikirimi ketikan lewat bg_send."""
     kwargs = dict(
         cwd=WORKSPACE,
-        stdin=subprocess.DEVNULL,   # kunci: perintah interaktif dapat EOF, tak menggantung
+        stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,   # gabung stderr ke stdout
         text=True,
@@ -183,14 +187,14 @@ atexit.register(_cleanup_bg)
 
 @tool
 def run_command_bg(command: str) -> str:
-    """Jalankan perintah yang MENETAP / berjalan lama (server dev, watcher, bot) di LATAR belakang, lalu SEGERA kembali tanpa menunggu selesai — sehingga kamu bisa lanjut merespons & memakai tool lain (multitasking). PAKAI ini untuk 'npm run dev', 'npm start', 'vite', 'uvicorn', 'flask run', 'watch', dsb. JANGAN pakai run_command untuk perintah menetap (akan menggantung). Cek keluaran dengan bg_output, hentikan dengan bg_stop.
+    """Jalankan perintah yang MENETAP / berjalan lama (server dev, watcher, bot) di LATAR belakang, lalu SEGERA kembali tanpa menunggu selesai — sehingga kamu bisa lanjut merespons & memakai tool lain (multitasking). PAKAI ini untuk 'npm run dev', 'npm start', 'vite', 'uvicorn', 'flask run', 'watch', dsb. JANGAN pakai run_command untuk perintah menetap (akan menggantung). Cek keluaran dengan bg_output, kirim input/jawaban prompt dengan bg_send, hentikan dengan bg_stop.
 
     command: perintah menetap yang akan dijalankan di latar (mis. 'npm run dev').
     """
     blocked = _guard()
     if blocked:
         return blocked
-    proc = _popen(command, shell=True)
+    proc = _popen(command, shell=True, stdin_pipe=True)
     bid = f"bg{next(_bg_seq)}"
     entry = {
         "id": bid, "command": command, "proc": proc,
@@ -230,6 +234,40 @@ def bg_output(bg_id: str, lines: int = 40) -> str:
     status = "BERJALAN" if e["running"] else f"BERHENTI (exit_code={e['rc']})"
     body = "\n".join(tail) or "(belum ada output)"
     return f"[bg {bg_id}] {status} · {e['command']}\n{body}"
+
+
+@tool
+def bg_send(bg_id: str, text: str, press_enter: bool = True) -> str:
+    """Kirim INPUT (ketikan) ke sebuah perintah latar yang sedang berjalan — untuk menjawab prompt interaktif ('Ok to proceed? y'), mengetik ke REPL, atau perintah CLI yang menunggu jawaban. Setelahnya cek reaksi prosesnya via output yang dikembalikan / bg_output.
+
+    bg_id: id perintah latar (mis. 'bg1', dari run_command_bg).
+    text: teks yang dikirim ke stdin proses itu.
+    press_enter: true (default) = akhiri dengan Enter (newline).
+    """
+    e = _BG.get(bg_id)
+    if not e:
+        aktif = ", ".join(_BG.keys()) or "(tidak ada)"
+        return f"[bg] id '{bg_id}' tak ditemukan. Perintah latar yang ada: {aktif}"
+    if not e["running"]:
+        return (f"[error] {bg_id} sudah BERHENTI (exit_code={e['rc']}) — "
+                "tak ada proses yang bisa menerima input.")
+    proc = e["proc"]
+    if proc.stdin is None:
+        return f"[error] {bg_id} tidak membuka saluran input (stdin tertutup)."
+    data = text if (text.endswith("\n") or not press_enter) else text + "\n"
+    try:
+        proc.stdin.write(data)
+        proc.stdin.flush()
+    except (OSError, ValueError, BrokenPipeError) as exc:
+        return (f"[GAGAL] tak bisa mengirim input ke {bg_id}: {exc}. "
+                "Prosesnya kemungkinan tidak sedang membaca stdin "
+                "(atau baru saja berhenti — cek bg_output).")
+    # Beri proses waktu sejenak bereaksi supaya output balasannya ikut terbawa.
+    time.sleep(0.8)
+    tail = "\n".join(list(e["lines"])[-15:])
+    status = "BERJALAN" if e["running"] else f"BERHENTI (exit_code={e['rc']})"
+    return (f"[bg {bg_id}] input terkirim: {text!r}. Status: {status}.\n"
+            f"Output terbaru:\n{tail or '(belum ada output baru)'}")
 
 
 @tool

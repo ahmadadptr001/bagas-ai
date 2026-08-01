@@ -338,6 +338,7 @@ _TOOL_DIFF = ("write_file", "edit_file", "append_file")
 _TOOL_UBAH_FILE = {
     "write_file", "edit_file", "append_file", "delete_file", "move_file",
     "copy_file", "replace_in_files", "download_file", "zip_extract",
+    "undo_changes",
 }
 
 
@@ -501,6 +502,10 @@ _PHASE = {
     "analyze_image": "menganalisis",
     "attach_file": "mengunggah",
     "validate_project": "memvalidasi",
+    "run_tests": "menguji",
+    "web_preview": "meninjau",
+    "undo_changes": "memulihkan",
+    "bg_send": "mengetik",
     "run_command": "menjalankan",
     "run_python": "menjalankan",
     "run_command_bg": "menjalankan",

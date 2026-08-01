@@ -40,6 +40,8 @@ _BUILD_TIMEOUT = 600
 # Smoke-run skrip Python: cukup untuk crash-saat-import/start terlihat; program
 # yang MASIH berjalan melewati batas ini justru pertanda start-nya sehat.
 _SMOKE_TIMEOUT = 20
+# Test suite penuh bisa lama, tapi tetap wajib berbatas.
+_TEST_TIMEOUT = 600
 
 
 def _pm() -> str:
@@ -253,6 +255,95 @@ def _mypy_dikonfigurasi() -> bool:
             except Exception:  # noqa: BLE001
                 pass
     return False
+
+
+def _ada_py_test() -> bool:
+    """Deteksi keberadaan berkas test Python TANPA memindai seluruh pohon
+    (rglob dari root bisa menyapu node_modules/.git yang raksasa)."""
+    for d in ("tests", "test"):
+        p = ROOT / d
+        if p.is_dir() and (any(p.rglob("test_*.py")) or any(p.rglob("*_test.py"))):
+            return True
+    for pat in ("test_*.py", "*_test.py"):
+        if any(ROOT.glob(pat)):
+            return True
+        src = ROOT / "src"
+        if src.is_dir() and any(src.rglob(pat)):
+            return True
+    return False
+
+
+def _deteksi_tests() -> list[tuple[str, str | list[str], bool]]:
+    """(label, perintah, shell) test runner per ekosistem yang BENAR terdeteksi."""
+    runs: list[tuple[str, str | list[str], bool]] = []
+
+    scripts = _pkg_scripts()
+    t = scripts.get("test", "")
+    pm = _pm()
+    # Placeholder bawaan `npm init` bukan test sungguhan — jangan dijalankan.
+    if pm and isinstance(t, str) and t.strip() and "no test specified" not in t:
+        runs.append((f"{pm} test", f"{pm} test", True))
+
+    if _ada_py_test():
+        # pytest bila tersedia di interpreter yang sama; kalau tidak, unittest.
+        rc, _, timed = _execute(["python", "-m", "pytest", "--version"],
+                                shell=False, timeout=30)
+        if rc == 0 and not timed:
+            runs.append(("pytest", ["python", "-m", "pytest", "-q",
+                                    "--maxfail=10"], False))
+        else:
+            runs.append(("unittest", ["python", "-m", "unittest", "discover"],
+                         False))
+
+    if (ROOT / "go.mod").is_file() and shutil.which("go"):
+        runs.append(("go test", ["go", "test", "./..."], False))
+    if (ROOT / "Cargo.toml").is_file() and shutil.which("cargo"):
+        runs.append(("cargo test", ["cargo", "test", "--quiet"], False))
+    return runs
+
+
+@tool
+def run_tests() -> str:
+    """Jalankan TEST SUITE proyek — deteksi sendiri runnernya (npm/pnpm/yarn test, pytest/unittest, go test, cargo test) lalu laporkan LULUS/GAGAL + output pentingnya. Pelengkap validate_project (yang hanya cek statik): pakai ini sesudah perubahan besar atau saat proyek memang punya test.
+
+    Tanpa argumen — seluruh suite. Untuk menjalankan subset/test tertentu
+    (mis. `pytest tests/test_x.py -k nama`), pakai run_command langsung.
+    """
+    blocked = _guard()
+    if blocked:
+        return blocked
+    runs = _deteksi_tests()
+    if not runs:
+        return (
+            "[tes] Tak ada test suite yang terdeteksi (tidak ada skrip "
+            "package.json 'test' yang sungguhan, berkas test_*.py, go.mod, "
+            "maupun Cargo.toml — atau runnernya belum terpasang). Kalau kamu "
+            "yakin proyek ini punya test, jalankan langsung dengan run_command."
+        )
+    bagian: list[str] = []
+    gagal = 0
+    for label, cmd, sh in runs:
+        rc, out, timed_out = _execute(cmd, shell=sh, timeout=_TEST_TIMEOUT)
+        if timed_out:
+            gagal += 1
+            bagian.append(
+                f"⏱ {label}: TIMEOUT (> {_TEST_TIMEOUT}s, dihentikan) — anggap "
+                f"BELUM lulus. Output terakhir:\n{_clip(out, 2000)}")
+        elif rc == 0:
+            # Ekor output disertakan: "LULUS" tanpa bukti (mis. 'Ran 0 tests')
+            # menyesatkan — biarkan modelnya menilai jumlah test yang jalan.
+            ekor = "\n".join(out.strip().splitlines()[-5:])
+            bagian.append(f"✓ {label}: LULUS\n{_clip(ekor, 500)}")
+        else:
+            gagal += 1
+            bagian.append(f"✗ {label}: GAGAL (exit={rc})\n{_clip(out, 4000)}")
+    kepala = (
+        f"[tes] {len(runs) - gagal}/{len(runs)} runner lulus."
+        if gagal else f"[tes] SEMUA {len(runs)} runner LULUS.")
+    if gagal:
+        kepala += (" Ada test yang GAGAL — baca detailnya, perbaiki, lalu "
+                   "jalankan lagi. JANGAN nyatakan tugas selesai.")
+    return kepala + "\n\n" + "\n\n".join(bagian)
 
 
 @tool

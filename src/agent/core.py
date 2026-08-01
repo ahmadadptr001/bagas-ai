@@ -61,7 +61,9 @@ _WEB_REMINDER = (
     "tanpa diminta: write_file bagian awal, lalu append_file lanjutannya pesan "
     "demi pesan — pesan yang kepanjangan DIPOTONG situs dan blok terpotong tak "
     "bisa kueksekusi. Jangan pernah menyuruh pengguna melakukan langkah manual "
-    "apa pun. Hanya tool file yang menampilkan diff berwarna untuk "
+    "apa pun. LANGSUNG KE INTI: tanpa pembuka basa-basi, tanpa mengulang "
+    "permintaan, langkah seminimal mungkin — begitu cukup info, langsung "
+    "kerjakan/jawab. Hanya tool file yang menampilkan diff berwarna untuk "
     "kutinjau sebelum file disentuh.]"
 )
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
@@ -91,7 +93,7 @@ _TOOL_MUTASI = {
 _TOOL_STATE = _TOOL_MUTASI | {
     "delete_file", "copy_file", "make_dir", "download_file", "zip_extract",
     "zip_create", "run_command", "run_python", "run_script", "run_command_bg",
-    "bg_stop",
+    "bg_stop", "bg_send", "undo_changes",
 }
 _EKS_KODE = {
     ".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue",
@@ -229,7 +231,21 @@ def _web_tool_protocol() -> str:
         "minta maaf atau menjelaskan panjang lebar.\n"
         "8. Untuk membaca file, pakai read_file (bukan perintah shell seperti "
         "Get-Content/cat) supaya hasilnya rapi & utuh.\n\n"
+        "LANGSUNG KE INTI — gaya kerja yang WAJIB:\n"
+        "- TANPA basa-basi: jangan membuka dengan 'Baik, saya akan…', jangan "
+        "mengulang permintaan dengan kata-katamu sendiri, jangan minta izin "
+        "untuk langkah yang jelas perlu — LANGSUNG kerjakan. Bila informasinya "
+        "sudah cukup, balasan PERTAMA-mu sudah memuat blok [[TOOL]] pertama, "
+        "bukan rencana panjang.\n"
+        "- Narasi antar-langkah maksimal 1-2 kalimat, hanya bila menambah "
+        "pemahaman. Tanpa rangkuman ulang di tiap langkah.\n"
+        "- Jawaban akhir: HASIL dulu di kalimat pertama, detail seperlunya — "
+        "bukan esai. Jangan mengulang daftar semua yang kamu lakukan bila "
+        "langkah-langkahnya sudah terlihat.\n\n"
         "HEMAT LANGKAH — ini penting, jangan buang giliran:\n"
+        "- Kerjakan HANYA yang diminta — jangan memperluas cakupan (refactor "
+        "tak diminta, perbaikan gaya di file yang tak disebut) dan jangan "
+        "menambah langkah yang tak mengubah hasil.\n"
         "- JANGAN membaca ulang file yang isinya SUDAH ada di percakapan ini.\n"
         "- Pakai peta proyek di bawah untuk tahu file mana yang relevan; jangan "
         "menjelajah folder satu per satu untuk hal yang sudah terlihat di peta.\n"
@@ -306,9 +322,23 @@ def _web_tool_protocol() -> str:
         "ruff/py_compile + smoke-run skrip yang diubah; cargo check, go vet, "
         "php -l, make lint, dll.) lalu menjalankannya. Isi paths dengan berkas "
         "yang kamu ubah. Pakai ini untuk membuktikan kode masih waras sesudah "
-        "mengubahnya.\n"
-        "- Lama berjalan: run_command_bg + bg_output/bg_stop/bg_list, supaya "
-        "giliran tidak tersandera menunggu.\n"
+        "mengubahnya. run_tests menjalankan TEST SUITE proyek (npm test / "
+        "pytest / go test / cargo test) — pakai sesudah perubahan besar bila "
+        "proyeknya punya test.\n"
+        "- MELIHAT HASIL UI WEB: web_preview(url) membuka halaman (mis. "
+        "http://localhost:3000) di browser headless lalu mengembalikan status, "
+        "error console/JS, dan SCREENSHOT yang terlampir ke pesan berikutnya — "
+        "kamu benar-benar melihat tampilannya. Sesudah mengubah kode UI: "
+        "nyalakan dev server (run_command_bg), tunggu siap (bg_output), lalu "
+        "web_preview — jangan menyatakan tampilan benar tanpa melihatnya.\n"
+        "- SALAH ARAH / merusak? undo_changes membatalkan SEMUA perubahan file "
+        "giliran terakhir (cadangan otomatis per giliran) — lebih cepat "
+        "daripada menambal kerusakan satu-satu. Panggil berulang untuk mundur "
+        "lebih jauh.\n"
+        "- Lama berjalan: run_command_bg + bg_output/bg_send/bg_stop/bg_list, "
+        "supaya giliran tidak tersandera menunggu. Prompt interaktif ('Ok to "
+        "proceed?', pertanyaan CLI) dijawab lewat bg_send — jangan biarkan "
+        "proses menggantung menunggu ketikan.\n"
         "- Ke pengguna: ask_user bila benar-benar perlu keputusannya, notify "
         "untuk memberi tahu tugas panjang sudah selesai, open_path untuk "
         "MENUNJUKKAN hasil (mis. buka index.html di browser), clipboard_write "
@@ -795,6 +825,10 @@ class Agent:
         hitung-mundur sisa waktu di footer.
         Bila `cancel_event` diset di tengah jalan, melempar llm.Cancelled.
         """
+        # Kelompok checkpoint baru per giliran: undo_changes memulihkan tepat
+        # satu giliran, bukan campuran beberapa giliran.
+        from .tools import checkpoint as _checkpoint
+        _checkpoint.begin_turn()
         return self._run_connector(
             user_input, cancel_event=cancel_event,
             on_status=on_status, on_token=on_token,

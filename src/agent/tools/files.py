@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .. import config, workspace
 from .base import tool
+from .checkpoint import snapshot as _snapshot
 
 ROOT = config.PROJECT_ROOT
 
@@ -188,19 +189,57 @@ def _display(target: Path) -> str:
     return str(target)
 
 
+_READ_CAP = 20000   # batas karakter per pembacaan (hemat konteks percakapan)
+
+
 @tool
-def read_file(path: str) -> str:
-    """Baca isi sebuah file teks di dalam root project atau folder konteks (add-dir).
+def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
+    """Baca isi sebuah file teks di dalam root project atau folder konteks (add-dir). Untuk file BESAR, baca per bagian dengan start_line/end_line — jangan menebak isi bagian yang belum terbaca.
 
     path: relatif terhadap root project, atau path ABSOLUT untuk file di folder
     konteks tambahan.
+    start_line: baris pertama yang dibaca (1-based; 0/kosong = dari awal).
+    end_line: baris terakhir yang dibaca (1-based; 0/kosong = sampai akhir).
     """
     target = _safe_path(path)
     if not target.is_file():
         return f"File tidak ditemukan: {path}"
     text = target.read_text(encoding="utf-8", errors="replace")
-    if len(text) > 20000:
-        text = text[:20000] + "\n... [dipotong]"
+    try:
+        s, e = int(start_line or 0), int(end_line or 0)
+    except (TypeError, ValueError):
+        s = e = 0
+
+    if s or e:
+        lines = text.splitlines(keepends=True)
+        n = len(lines)
+        s = max(1, s or 1)
+        e = n if e <= 0 else min(e, n)
+        if s > n:
+            return (f"[error] start_line={s} melebihi jumlah baris file "
+                    f"({n} baris).")
+        if e < s:
+            return f"[error] end_line ({e}) lebih kecil dari start_line ({s})."
+        cuplikan = "".join(lines[s - 1:e])
+        if len(cuplikan) > _READ_CAP:
+            cuplikan = cuplikan[:_READ_CAP] + \
+                "\n... [dipotong — persempit rentang barisnya]"
+        # Header di baris tersendiri: isi di bawahnya tetap byte apa adanya,
+        # aman disalin persis sebagai old_text untuk edit_file.
+        return f"[{_display(target)} baris {s}-{e} dari {n}]\n" + cuplikan
+
+    if len(text) > _READ_CAP:
+        # Potong DI BATAS BARIS + beri petunjuk lanjut yang bisa langsung
+        # dieksekusi — dulu cuma "[dipotong]" buntu, model jadi menebak sisanya
+        # dan old_text edit_file-nya meleset.
+        potong = text[:_READ_CAP]
+        batas = potong.rfind("\n")
+        if batas > 0:
+            potong = potong[:batas + 1]
+        n_tampil = potong.count("\n")
+        total = len(text.splitlines())
+        return (potong + f"... [dipotong: baru baris 1-{n_tampil} dari {total}. "
+                f"Lanjutkan dengan read_file(path, start_line={n_tampil + 1})]")
     return text
 
 
@@ -225,6 +264,7 @@ def write_file(path: str, content: str, allow_shrink: bool = False) -> str:
         tolak = _tolak_penimpaan_merusak(target, content)
         if tolak:
             return tolak
+    _snapshot(target)   # pre-image untuk undo_changes (file baru: undo = hapus)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     verb = "Ditimpa" if existed else "Dibuat"
@@ -248,8 +288,9 @@ def delete_file(path: str) -> str:
     target = _safe_path(path)
     if not target.is_file():
         return f"File tidak ditemukan: {path}"
+    _snapshot(target)   # pre-image untuk undo_changes (bisa dikembalikan)
     target.unlink()
-    return f"Dihapus: {_display(target)}"
+    return f"Dihapus: {_display(target)} — bisa dikembalikan dengan undo_changes."
 
 
 @tool
@@ -302,6 +343,7 @@ def edit_file(path: str, old_text: str, new_text: str, count: int = 1) -> str:
     baru = isi.replace(old_text, new_text, n if count == -1 else count)
     if baru == isi:
         return "[error] tidak ada yang berubah."
+    _snapshot(target)   # pre-image untuk undo_changes
     target.write_text(baru, encoding="utf-8")
     diganti = n if count == -1 else min(count, n)
     msg = (f"Diubah: {_display(target)} ({diganti} kemunculan, "
@@ -324,6 +366,7 @@ def append_file(path: str, content: str) -> str:
     target = _safe_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     lama = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+    _snapshot(target)   # pre-image untuk undo_changes
     with target.open("a", encoding="utf-8") as fh:
         fh.write(content)
     msg = (f"Ditambahkan ke {_display(target)} "
@@ -345,6 +388,11 @@ def move_file(source: str, dest: str) -> str:
         return f"[error] tidak ditemukan: {_display(a)}"
     if b.exists():
         return f"[error] tujuan sudah ada: {_display(b)} — hapus dulu bila memang mau ditimpa."
+    if a.is_file():
+        # pre-image untuk undo_changes: sumber dikembalikan, tujuan dihapus.
+        # Pemindahan FOLDER tidak dicadangkan (undo tak mencakupnya).
+        _snapshot(a)
+        _snapshot(b)
     b.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(a), str(b))
     return f"Dipindahkan: {_display(a)} -> {_display(b)}"
@@ -361,6 +409,7 @@ def copy_file(source: str, dest: str) -> str:
         return f"[error] tidak ditemukan: {_display(a)}"
     if b.exists():
         return f"[error] tujuan sudah ada: {_display(b)}"
+    _snapshot(b)   # tujuan belum ada -> undo_changes menghapus salinannya
     b.parent.mkdir(parents=True, exist_ok=True)
     if a.is_dir():
         shutil.copytree(str(a), str(b))
