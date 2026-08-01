@@ -708,12 +708,13 @@ class TurnView:
             self.phase = text
             self.phase_since = time.time()   # patok waktu fase baru (untuk ETA)
 
-    # Batas BAWAH jumlah baris pratinjau jawaban yang sedang ditulis. Ini cuma
-    # lantai — tinggi sebenarnya MENGIKUTI layar (lihat _preview_rows) supaya
-    # pratinjau TUMBUH ke bawah seiring jawaban ditulis, bukan terjebak di jendela
-    # kecil yang terasa "fixed". Batas ATASnya dijaga _muat_layar yang mengukur
-    # tinggi nyata region agar tetap lebih pendek dari layar (anti baris-hantu).
-    PREVIEW_LINES = 6
+    # Tinggi jendela EKOR pratinjau di region live. Baris LENGKAP yang keluar
+    # dari jendela ini DIBEKUKAN ke riwayat terminal (lihat note_stream) —
+    # beginilah teks MENGALIR ke bawah seperti Claude CLI: baris lama menjadi
+    # scrollback sungguhan yang bisa digulung, region live hanya memegang ekor
+    # terbaru + footer. Jendela sengaja kecil karena bukan lagi satu-satunya
+    # tempat menonton: arus utamanya ada di scrollback.
+    PREVIEW_LINES = 8
     # Ekor teks yang disimpan untuk pratinjau. Tak perlu menyimpan seluruh
     # jawaban (bisa ratusan ribu karakter) — yang ditampilkan hanya ekornya.
     _PREVIEW_KEEP = 4000
@@ -731,6 +732,24 @@ class TurnView:
         # berwarna yang disalin apa adanya, dan byte ESC di region live akan
         # dieksekusi terminal (warna berubah sendiri, kursor melompat).
         buf = self._stream + _bersih_kendali(delta)
+        # Baris LENGKAP yang melewati jendela pratinjau DIBEKUKAN ke riwayat:
+        # dari sinilah efek "mengalir ke bawah" — baris lama tercetak permanen
+        # ke scrollback (bisa digulung), bukan tertimpa di jendela tetap yang
+        # memotong kode. Aman di-commit permanen karena aliran on_token
+        # append-only monotonik (base hanya mengirim `cur[emitted:]` saat teks
+        # BERTAMBAH). Baris terakhir tak pernah dibekukan — ia mungkin masih
+        # setengah diketik.
+        if self.commit and "\n" in buf:
+            lines = buf.split("\n")
+            ekor_parsial = lines.pop()
+            luber = len(lines) - self.PREVIEW_LINES
+            if luber > 0:
+                beku, lines = lines[:luber], lines[luber:]
+                self.commit([
+                    _oneline(Text("  │ " + b.rstrip(), style="#7f849c"))
+                    for b in beku
+                ])
+            buf = "\n".join(lines + [ekor_parsial])
         # Dipotong dari depan: yang ditonton pengguna selalu bagian terbaru.
         self._stream = buf[-self._PREVIEW_KEEP:]
 
@@ -744,18 +763,17 @@ class TurnView:
         teks = self._stream
         if not teks.strip():
             return []
-        # Jatah baris MENGIKUTI tinggi layar supaya pratinjau tumbuh panjang ke
-        # bawah saat jawaban makin banyak — bukan jendela 6 baris yang terasa
-        # dipatok. Batas ATAS tetap dijaga _muat_layar (mengukur tinggi NYATA
-        # region lalu memangkas dari atas bila melebihi layar), jadi menambah
-        # jatah di sini aman: paling banter _muat_layar yang memangkas balik,
-        # tak akan menimbulkan baris hantu. Sisakan ruang untuk footer & sebagian
-        # langkah yang masih hidup di atas pratinjau.
-        try:
-            tinggi_layar = console.size.height
-        except Exception:  # noqa: BLE001
-            tinggi_layar = 24
-        jatah = max(self.PREVIEW_LINES, tinggi_layar - 8)
+        # Ada saluran riwayat (commit)? Baris yang luber sudah MENGALIR ke
+        # scrollback lewat note_stream, jadi di sini cukup jendela ekor kecil.
+        # Tanpa saluran riwayat, tak ada tempat membekukan baris — jendelanya
+        # saja yang diperbesar mengikuti layar (batas atas dijaga _muat_layar).
+        jatah = self.PREVIEW_LINES
+        if not self.commit:
+            try:
+                tinggi_layar = console.size.height
+            except Exception:  # noqa: BLE001
+                tinggi_layar = 24
+            jatah = max(jatah, tinggi_layar - 8)
         baris = teks.split("\n")
         # Baris kosong di ekor bikin pratinjau tampak "melompat" tanpa isi.
         while baris and not baris[-1].strip():
