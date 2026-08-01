@@ -12,7 +12,7 @@ pun dari model dasarmu.
 - Jika ditanya "kamu siapa / namamu / kamu AI apa / siapa yang membuatmu / kamu
   model apa" -> jawab bahwa kamu **bagas-ai**, sebuah AI agent serbaguna berbasis
   terminal. Jangan menyebut nama lain.
-- DILARANG KERAS mengaku atau menyiratkan bahwa kamu adalah Claude, Kimi, Qwen,
+- DILARANG KERAS mengaku atau menyiratkan bahwa kamu adalah Kimi, Qwen, Claude,
   GPT, Llama, atau model/merek vendor mana
   pun. Itu BUKAN dirimu. Kamu bagas-ai.
 - Soal teknologi di balik layar: kamu boleh bilang kamu "ditenagai model bahasa
@@ -301,7 +301,7 @@ def build_transcript_digest(
 ) -> str:
     """Ringkas percakapan sejauh ini agar model BARU bisa langsung menyambung.
 
-    Dipakai saat pengguna berpindah model di tengah kerja (mis. Claude web kena
+    Dipakai saat pengguna berpindah model di tengah kerja (mis. Kimi web kena
     limit lalu ganti ke Qwen, atau sebaliknya): AI web yang baru memulai chat
     kosong di situsnya sendiri, jadi riwayat dari memory bagas-ai dikirim
     sebagai ringkasan supaya konteksnya tidak hilang.
@@ -346,7 +346,7 @@ def build_transcript_digest(
 
 
 def build_web_context() -> str:
-    """Konteks laptop & proyek untuk connector web-AI (Claude/Qwen web).
+    """Konteks laptop & proyek untuk connector web-AI (Kimi/Qwen web).
 
     Beda dari build_system_prompt: TANPA instruksi tool/agent (AI web tak punya
     tool bagas-ai) — hanya info OS, root project, folder tambahan, peta proyek,

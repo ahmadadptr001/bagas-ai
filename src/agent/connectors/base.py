@@ -1,6 +1,6 @@
 """Kerangka connector web-AI: buka halaman chat, ketik prompt, tunggu jawaban.
 
-Satu WebConnector = satu situs (Claude, Qwen, dst). Tiap subclass cukup mengisi
+Satu WebConnector = satu situs (Kimi, Qwen, dst). Tiap subclass cukup mengisi
 SELECTOR & URL situsnya; algoritma kirim + tunggu-jawaban ada di sini dan dibuat
 TAHAN-BANTING:
   - Deteksi login KETAT: URL bukan halaman login/auth DAN kotak input terlihat
@@ -75,7 +75,8 @@ JS_FIND_TEXT = r"""
 #      pratinjau DI LUAR pohon kotak input.
 #   2. `card` kosong -> cara lama: hitung <img> beberapa tingkat di atas kotak
 #      input. Dipertahankan sebagai cadangan untuk connector yang belum
-#      memetakan kartunya (mis. claude.ai, tempat cara ini terbukti bekerja).
+#      memetakan kartunya (terbukti bekerja di situs yang menaruh pratinjau
+#      di dalam pohon kotak input).
 #
 # Kenapa cara 1 perlu ada: di chat.qwen.ai cara 2 TERUKUR selalu 0 — pratinjaunya
 # bukan keturunan kotak input (ditelusuri 11 tingkat ke atas pun nihil), sehingga
@@ -447,8 +448,8 @@ JS_TO_MARKDOWN = r"""
 class WebConnector:
     """Basis connector. Subclass mengisi atribut kelas di bawah."""
 
-    service: str = ""          # kunci internal & nama folder profil (mis. "claude")
-    label: str = ""            # nama tampilan (mis. "Claude (web)")
+    service: str = ""          # kunci internal & nama folder profil (mis. "kimi")
+    label: str = ""            # nama tampilan (mis. "Kimi (web)")
     chat_url: str = ""         # halaman chat / sesi baru
     # Tombol "chat baru" milik situs. Bila diisi, memulai percakapan baru cukup
     # MENGEKLIKNYA alih-alih memuat ulang seluruh SPA — jauh lebih cepat dan tak
@@ -531,8 +532,8 @@ class WebConnector:
     # Pemberitahuan sibuk selalu PENDEK. Ambang ini penjaga salah-tangkap yang
     # penting: jawaban model yang KEBETULAN membahas server sibuk hampir pasti
     # jauh lebih panjang, jadi teks panjang tak pernah dianggap pemberitahuan.
-    # (Pelajaran dari claude.py: pola longgar pernah membatalkan giliran yang
-    # sebenarnya normal.)
+    # (Pelajaran dari connector claude.ai yang kini dihapus: pola longgar pernah
+    # membatalkan giliran yang sebenarnya normal.)
     busy_max_chars: int = 400
     # Input file untuk MELAMPIRKAN gambar (mis. screenshot) ke pesan. Kosong =
     # situs ini tak mendukung lampiran.
@@ -619,7 +620,7 @@ class WebConnector:
     # dan hanya benar-benar terpakai saat halaman memang belum siap.
     _NAV_READY_MS: int = 15000
 
-    # Pola menangkap ID percakapan dari URL (mis. claude.ai/chat/<uuid>).
+    # Pola menangkap ID percakapan dari URL (mis. kimi.com/chat/<id>).
     chat_id_pattern: str = r"/chat/([0-9a-fA-F-]{16,})"
     # Template URL untuk MEMBUKA percakapan lama (lanjut chat yang sudah ada).
     chat_url_template: str = ""
@@ -1685,7 +1686,7 @@ class WebConnector:
 
         Konsep connector: browser MUNCUL sekali untuk LOGIN, lalu MINGGIR
         (di-minimize) — seluruh proses & jawaban tampil di TERMINAL, pengguna tak
-        menyentuh browser lagi. Kenapa bukan headless: situs seperti claude.ai
+        menyentuh browser lagi. Kenapa bukan headless: situs chat AI umumnya
         pakai Cloudflare, dan clearance-nya terikat fingerprint browser TAMPIL —
         di headless ditolak. Jadi jendela tetap ada tapi disembunyikan (minimize).
 
@@ -1820,7 +1821,7 @@ class WebConnector:
         )
 
     def _on_login_page(self, page: Any) -> bool:
-        """True bila page sedang di halaman login/auth (claude.ai/login, Google
+        """True bila page sedang di halaman login/auth (mis. /login situs, Google
         sign-in, dsb) — dipastikan lewat URL, bukan tebakan elemen."""
         try:
             url = (page.url or "").lower()

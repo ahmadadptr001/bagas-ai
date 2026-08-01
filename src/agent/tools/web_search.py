@@ -6,7 +6,7 @@ from .base import tool
 
 @tool
 def web_search(query: str, max_results: int = 5) -> str:
-    """Cari informasi terkini di internet menggunakan DuckDuckGo. Gunakan untuk berita, fakta terbaru, harga, atau apa pun yang mungkin berubah.
+    """Cari di internet (DuckDuckGo). Query: 2-4 kata kunci konkret bhs Inggris (boleh operator site:), BUKAN kalimat panjang; kalau nihil ubah SATU kata, jangan susun query acak baru.
 
     query: kata kunci pencarian.
     max_results: jumlah hasil (default 5).

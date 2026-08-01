@@ -21,7 +21,7 @@ from .memory import Memory
 from .session import Session
 from .tools import base as tools
 
-# --- Protokol tool untuk CONNECTOR web (Claude/Qwen web) ---
+# --- Protokol tool untuk CONNECTOR web (Kimi/Qwen web) ---
 # AI web tak punya function-calling API, jadi kita ajari ia "memanggil" tool
 # dengan menuliskan blok teks bertanda kurung siku ganda yang mudah di-parse,
 # lalu bagas-ai mengeksekusi tool itu SUNGGUHAN di laptop (mesin tool yang sama
@@ -284,9 +284,29 @@ def _web_tool_protocol() -> str:
         "KAPAN PAKAI YANG MANA — daftar di bawah panjang, jadi ini pintasnya. "
         "Salah pilih tool bukan cuma boros giliran, tapi sering membuat "
         "pekerjaan terlihat 'selesai' padahal tidak:\n"
-        "- Mencari sesuatu: search_text (cari ISI, mis. di mana fungsi X) dan "
-        "glob_files (cari NAMA berkas). Keduanya jauh lebih cepat daripada "
-        "list_dir + read_file berulang kali.\n"
+        "- MENCARI BERKAS DI PROYEK — pakai cara yang terarah, jangan menebak "
+        "berulang kali: search_text (cari ISI, mis. di mana fungsi X "
+        "didefinisikan) dan glob_files (cari NAMA berkas). Keduanya jauh lebih "
+        "cepat daripada list_dir + read_file bergiliran. Urutannya:\n"
+        "  1) LIHAT PETA PROYEK di bawah lebih dulu — nama berkas & simbol "
+        "kuncinya sudah tercantum di sana. Kalau yang kamu cari SUDAH terlihat "
+        "di peta, langsung read_file; JANGAN mencari lagi.\n"
+        "  2) Belum terlihat -> cari dengan POTONGAN KODE HARFIAH yang pasti "
+        "ada di berkasnya, bukan deskripsi konsep. Benar: 'def "
+        "detect_heart_gesture', 'class CameraThread', 'localStorage.getItem', "
+        "'/api/login'. SALAH: 'fungsi deteksi tangan', 'logika utama kamera', "
+        "'bagian yang mengatur musik' — kata konsep begitu jarang muncul "
+        "harfiah di kode, jadi hasilnya nihil lalu kamu menebak lagi.\n"
+        "  3) Tak tahu nama pastinya? Cari POTONGAN yang paling khas & pendek "
+        "(mis. 'heart' saja, atau 'gesture'), bukan kalimat panjang. Satu kata "
+        "khas mengalahkan lima kata tebakan.\n"
+        "  4) MAKSIMAL 2–3 pencarian untuk satu hal. Nihil dua kali berarti "
+        "asumsimu soal penamaan yang salah — ganti STRATEGI, bukan menambah "
+        "sinonim acak: pakai glob_files untuk melihat nama-nama berkas di "
+        "folder yang relevan, atau list_dir sekali pada foldernya, lalu "
+        "read_file kandidat yang paling masuk akal.\n"
+        "  5) Begitu berkasnya ketemu, BERHENTI mencari dan langsung kerjakan. "
+        "Jangan mencari ulang hal yang sudah kamu temukan di giliran ini.\n"
         "- BAHAYA yang paling sering terjadi: write_file MENGGANTI SELURUH isi "
         "berkas. Kalau kamu hanya mengirim bagian yang kamu ubah — apalagi "
         "dengan penanda seperti '// ... sisanya tetap ...' — seluruh sisa "
@@ -336,15 +356,41 @@ def _web_tool_protocol() -> str:
         "kamu baca sendiri.\n"
         "- Internet: web_search (cari), fetch_url (baca isi satu halaman), "
         "http_request (memanggil API: POST/PUT/header).\n"
-        "- MENCARI & MENGAMBIL ASET (gambar, sprite, suara, font, ikon, "
-        "dataset) — ini sering salah, jadi baca baik-baik: JANGAN memakai "
-        "pencarian bawaanmu sendiri, dan JANGAN cuma memberi daftar tautan "
-        "supaya saya mengunduh sendiri. Alurnya: web_search untuk menemukan "
-        "sumbernya -> (bila perlu) fetch_url untuk membuka halamannya dan "
-        "menemukan URL berkas yang ASLI -> download_file untuk benar-benar "
-        "mengambilnya ke dalam proyek -> baru pakai berkasnya di kode. "
-        "Aset yang tidak diunduh sama saja dengan tidak ada: kodenya akan "
-        "menunjuk berkas yang tak pernah wujud.\n"
+        "- MENCARI & MENGAMBIL ASET/FILE dari internet (gambar, sprite, "
+        "suara, musik, font, ikon, dataset) — di sinilah paling sering "
+        "terbuang banyak giliran karena kata kunci acak & jalan memutar. "
+        "Ikuti strategi ini PERSIS:\n"
+        "  1) TETAPKAN SPESIFIKASI dulu, sebelum mencari apa pun: isi apa, "
+        "format apa (mp3? png transparan? ttf? zip?), harus gratis/bebas "
+        "lisensi. Satu kalimat: 'butuh <isi> format <ekstensi> gratis'.\n"
+        "  2) LANGSUNG KE SUMBER yang memang membagikan file jenis itu — "
+        "jangan pencarian umum: musik & sound effect -> pixabay.com / "
+        "freesound.org; sprite & aset game -> kenney.nl / opengameart.org / "
+        "itch.io (yang gratis); foto/gambar -> pixabay.com / unsplash.com; "
+        "font -> Google Fonts (file .ttf-nya ada di github.com/google/fonts); "
+        "dataset -> repositori resminya. Pakai operator `site:` di "
+        "web_search untuk mengunci sumbernya.\n"
+        "  3) KATA KUNCI: bahasa Inggris, 2–4 kata benda konkret = isi + "
+        "jenis + (bila perlu) format. Benar: 'site:pixabay.com galaxy "
+        "ambient music', 'goblin sprite sheet png site:opengameart.org'. "
+        "SALAH: kalimat panjang, kata sifat berbunga-bunga, atau menyalin "
+        "deskripsi tugas mentah-mentah ke query.\n"
+        "  4) MAKSIMAL 2x web_search per file. Kalau hasil pertama nihil, "
+        "ubah SATU kata paling menentukan (sinonim, atau buat lebih umum: "
+        "'galaxy ambient' -> 'space music') — JANGAN menyusun kombinasi "
+        "acak baru tiap percobaan.\n"
+        "  5) fetch_url halaman hasil HANYA untuk menemukan URL file ASLI "
+        "(tautan berujung .mp3/.png/.zip/.ttf atau tombol unduh). Halaman "
+        "minta login / berbayar / tak ada tautan langsung? TINGGALKAN, "
+        "pindah ke sumber berikutnya — jangan berputar-putar di situ.\n"
+        "  6) Begitu URL file ketemu -> download_file ke folder proyek yang "
+        "tepat, cek hasilnya sukses (ukuran > 0; audio/video boleh "
+        "media_info), lalu BERHENTI mencari — file pertama yang layak "
+        "sudah cukup, tak usah berburu yang 'lebih sempurna'.\n"
+        "  JANGAN memberi daftar tautan supaya saya mengunduh sendiri, dan "
+        "jangan memakai pencarian bawaanmu — aset yang tidak diunduh lewat "
+        "download_file sama saja tidak ada: kode akan menunjuk berkas yang "
+        "tak pernah wujud.\n"
         "- Menjalankan: run_command / run_python untuk menjalankan tes, "
         "memasang dependensi, menjalankan program. INGAT: keduanya DITOLAK bila "
         "dipakai menulis berkas.\n"
@@ -741,7 +787,7 @@ class Agent:
         before = self.model_spec.connector
         self.model_spec = models.resolve(name)
         if self.model_spec.connector != before:
-            # Pindah layanan (mis. Claude web -> Qwen web): state percakapan web
+            # Pindah layanan (mis. Kimi web -> Qwen web): state percakapan web
             # TIDAK boleh terbawa. Tanpa ini, layanan baru dikira sudah menerima
             # konteks (padahal chat-nya kosong) dan ID chat milik layanan lama
             # ikut terbawa.
@@ -888,7 +934,7 @@ class Agent:
         protokol teks (_web_tool_protocol): ia menuliskan blok [[TOOL]]{...}[[/TOOL]],
         bagas-ai MENGEKSEKUSI tool itu sungguhan di laptop (mesin tool yang sama
         di laptop), lalu mengirim balik hasilnya — berulang sampai AI web
-        menjawab tanpa blok tool (jawaban akhir). Dengan begitu Claude/Qwen web bisa
+        menjawab tanpa blok tool (jawaban akhir). Dengan begitu Kimi/Qwen web bisa
         mengedit file, menjalankan perintah, mencari web, dll.
 
         Web-AI menyimpan konteks percakapannya SENDIRI di sesi browser; memory
@@ -1376,7 +1422,7 @@ class Agent:
                 f"> {exc}\n\n"
                 "Sudah kucoba ulang beberapa kali dengan jeda, tapi masih penuh. "
                 "Kirim ulang sebentar lagi, atau ketik `/model` untuk pindah ke "
-                "layanan web lain (Claude/Qwen/Kimi) supaya bisa lanjut sekarang."
+                "layanan web lain (Kimi/Qwen) supaya bisa lanjut sekarang."
             )
         except connectors.WebLimitError as exc:
             # Kuota situs habis — sampaikan apa adanya (termasuk kapan pulih)
@@ -1385,7 +1431,7 @@ class Agent:
                 f"⛔ **{self.model_spec.label} sedang kena batas pemakaian.**\n\n"
                 f"> {exc}\n\n"
                 "Tunggu sampai waktu itu, atau ketik `/model` untuk pindah ke "
-                "layanan web lain (Claude/Qwen/Kimi) supaya bisa lanjut kerja "
+                "layanan web lain (Kimi/Qwen) supaya bisa lanjut kerja "
                 "sekarang."
             )
         except connectors.BrowserError as exc:

@@ -134,10 +134,10 @@ COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "300"))
 # memverifikasi hasil ngoding-nya. Matikan dengan AUTO_SYNTAX_CHECK=false.
 AUTO_SYNTAX_CHECK: bool = _get_bool("AUTO_SYNTAX_CHECK", True)
 
-# --- Connector web-AI (fitur /model claude-web, qwen-web, kimi-web via browser) ---
+# --- Connector web-AI (fitur /model kimi-web, qwen-web via browser) ---
 # Default (false): jendela Chrome MUNCUL sekali untuk login lalu DI-MINIMIZE —
 # semua proses & jawaban tampil di TERMINAL, pengguna tak menyentuh browser.
-# Jendela tetap ada (bukan headless) karena Cloudflare (mis. claude.ai) menolak
+# Jendela tetap ada (bukan headless) karena Cloudflare di situs chat AI menolak
 # sesi headless. Set CONNECTOR_HEADLESS=true untuk memaksa headless sejati (tanpa
 # jendela sama sekali) — hanya cocok untuk situs yang lolos tanpa Cloudflare.
 CONNECTOR_HEADLESS: bool = _get_bool("CONNECTOR_HEADLESS", False)
@@ -148,7 +148,7 @@ CONNECTOR_HEADLESS: bool = _get_bool("CONNECTOR_HEADLESS", False)
 # atribut `show_window` (Kimi memakainya secara bawaan).
 CONNECTOR_SHOW: bool = _get_bool("CONNECTOR_SHOW", False)
 # Pakai Google CHROME asli (channel="chrome") alih-alih Chromium bawaan Playwright
-# — lebih jarang terdeteksi/di-blok (mis. Cloudflare claude.ai) & lebih familiar.
+# — lebih jarang terdeteksi/di-blok oleh Cloudflare & lebih familiar.
 # Bila Chrome tak terpasang, otomatis fallback ke Chromium bawaan. Kosongkan
 # ("") untuk memaksa Chromium bawaan.
 CONNECTOR_BROWSER_CHANNEL: str = os.getenv("CONNECTOR_BROWSER_CHANNEL", "chrome").strip()

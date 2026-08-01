@@ -1560,7 +1560,7 @@ def main(resume: bool = False) -> None:
         Hasil penuh langkah dibuka lewat /expand N. Ctrl+C membatalkan. Bila
         gagal, jatuh ke process_classic.
 
-        Model CONNECTOR web (Claude/Qwen web) memakai jalur yang SAMA: ia kini
+        Model CONNECTOR web (Kimi/Qwen web) memakai jalur yang SAMA: ia kini
         bisa memanggil tool (edit file, jalankan perintah, dll) lewat protokol
         teks, jadi langkah-langkahnya tampil rapi di terminal."""
         steps.clear()

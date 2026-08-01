@@ -199,8 +199,9 @@ class KimiConnector(WebConnector):
 
     # Teks pemberitahuan limit Kimi belum pernah terlihat; sengaja DIKOSONGKAN
     # agar tak ada pola longgar yang salah menangkap jawaban biasa sebagai
-    # "kuota habis" (pelajaran dari claude.py: pola seperti "usage limit" ikut
-    # cocok dengan jawaban AI yang kebetulan membahas rate limit).
+    # "kuota habis" (pelajaran dari connector claude.ai yang kini dihapus: pola
+    # seperti "usage limit" ikut cocok dengan jawaban AI yang kebetulan membahas
+    # rate limit).
     limit_patterns = ()
 
     # Pemberitahuan SIBUK Kimi — bentuk aslinya terlihat langsung di terminal:
@@ -224,7 +225,7 @@ class KimiConnector(WebConnector):
     #   .effort-item  -> "Thinking effort" -> submenu .effort-option:
     #                    "Standard" | "High"
     # Tak ada toggle "berpikir" tersendiri — usaha berpikir adalah submenu di
-    # dalam pemilih model, jadi bentuknya path-klik dua tingkat seperti Claude.
+    # dalam pemilih model, jadi bentuknya path-klik dua tingkat.
     #
     # PENTING: item menu Kimi TIDAK memakai role ARIA — TERUKUR
     # [role=menuitem]=0, [role=menuitemradio]=0, [role=option]=0. Karena itu
