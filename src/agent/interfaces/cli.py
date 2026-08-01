@@ -8,6 +8,7 @@ Ctrl+Backspace bisa hapus per-kata. Tanpa antrean — satu tugas satu waktu.
 from __future__ import annotations
 
 import difflib
+import os
 import re
 import sys
 import threading
@@ -1698,8 +1699,16 @@ def main(resume: bool = False) -> None:
                         f"  [#f9e2af]⏳ diantrekan:[/] [#cdd6f4]{_esc(teks)}[/]"
                         "  [dim](dikerjakan setelah giliran ini)[/]"))])
                 return True
-            if ch == "\x08":                       # Backspace
+            if ch == "\x08":                       # Backspace (msvcrt = \x08)
                 typing_state["buf"] = typing_state["buf"][:-1]
+                view.typing = typing_state["buf"]
+                return True
+            if ch == "\x7f":                       # Ctrl+Backspace (msvcrt = \x7f)
+                # Kode msvcrt TERBALIK dari terminal VT: Backspace polos = \x08,
+                # Ctrl+Backspace = \x7f. Hapus satu KATA di ekor buffer.
+                b = typing_state["buf"].rstrip(" ")
+                i = b.rfind(" ")
+                typing_state["buf"] = b[:i + 1] if i >= 0 else ""
                 view.typing = typing_state["buf"]
                 return True
             if ch in ("\x00", "\xe0"):             # prefix tombol khusus msvcrt
@@ -2396,12 +2405,33 @@ def main(resume: bool = False) -> None:
         else:
             console.print(f"  [yellow]ℹ Folder itu tidak ada di daftar konteks.[/yellow]\n")
 
+    def ask_add_dir() -> None:
+        """Box input path untuk /add-dir TANPA argumen — dengan autolengkap
+        path (Tab) dan khusus folder, jadi tak perlu hafal/ketik path lengkap
+        di belakang perintah."""
+        try:
+            path = inquirer.filepath(
+                message="Path folder yang mau ditambahkan:",
+                only_directories=True,
+                long_instruction=("Tab = autolengkap path · Enter = tambah · "
+                                  "Ctrl+C = batal"),
+            ).execute()
+        except (KeyboardInterrupt, EOFError):
+            console.print("  [dim]dibatalkan.[/dim]\n")
+            return
+        path = (path or "").strip().strip('"').strip("'")
+        if not path:
+            console.print("  [dim]dibatalkan (kosong).[/dim]\n")
+            return
+        do_add_dir(path)
+
     def show_dirs() -> None:
         dirs = workspace.list_dirs()
         if not dirs:
             console.print(
                 "  [dim]Belum ada folder konteks tambahan.[/dim]  "
-                "Pakai [#94e2d5]/add-dir <path>[/] untuk menambah.\n"
+                "Ketik [#94e2d5]/add-dir[/] untuk menambah (muncul box input "
+                "path), atau langsung [#94e2d5]/add-dir <path>[/].\n"
             )
             return
         body = Text()
@@ -2642,17 +2672,17 @@ def main(resume: bool = False) -> None:
         return do_action(action)
 
     # --- input (prompt_toolkit hanya saat idle) ---
-    # ATURAN UTAMA: Backspace polos = hapus 1 HURUF, SELALU, di terminal mana pun.
+    # ATURAN: Backspace polos = hapus 1 HURUF; Ctrl+Backspace = hapus 1 KATA.
     #
-    # Kenyataannya tombol Backspace bisa terkirim sebagai `backspace` (\x7f) ATAU
-    # `c-h` (\x08) tergantung terminal/OS — dan tak bisa dibedakan dari Ctrl+
-    # Backspace secara andal. Maka kita SENGAJA membiarkan KEDUA kode itu memakai
-    # perilaku default prompt_toolkit (hapus 1 huruf) dan TIDAK PERNAH mengikatnya
-    # ke hapus-kata. Ini menjamin Backspace polos tak akan pernah menghapus sekata.
-    #
-    # Hapus 1 KATA hanya lewat kombinasi yang MUSTAHIL sama dengan Backspace polos:
-    #   - Ctrl+W        (c-w)
-    #   - Alt+Backspace (escape, backspace)
+    # Di prompt_toolkit, `backspace` dan `c-h` adalah KEY YANG SAMA (alias:
+    # Keys.Backspace = Keys.ControlH) — mengikat salah satunya ke hapus-kata
+    # berarti KEDUANYA menghapus kata. Pembedanya bukan key, melainkan DATA
+    # byte mentah pada event, dan arahnya BERBEDA per jalur input:
+    #   - Win32 console (Windows, termasuk Windows Terminal): Backspace polos
+    #     -> data '\x08'; Ctrl+Backspace -> data '\x7f'  (win32.py: keycodes)
+    #   - Terminal VT (Linux/mac): persis TERBALIK ('\x7f' polos, '\x08' Ctrl).
+    # Maka satu handler c-h bercabang pada data, dengan penanda kata sesuai
+    # platform. Hapus kata juga tersedia lewat Ctrl+W & Alt+Backspace.
     kb = KeyBindings()
 
     def _del_word(event):
@@ -2662,6 +2692,18 @@ def main(resume: bool = False) -> None:
 
     kb.add("c-w")(_del_word)                   # Ctrl+W
     kb.add("escape", "backspace")(_del_word)   # Alt+Backspace
+
+    _DATA_KATA = "\x7f" if os.name == "nt" else "\x08"
+
+    @kb.add("c-h")
+    def _backspace_pintar(event):
+        """Backspace polos = 1 huruf; Ctrl+Backspace = 1 kata (lihat blok
+        komentar di atas soal alias key & data byte per platform)."""
+        data = event.key_sequence[0].data if event.key_sequence else ""
+        if data == _DATA_KATA:
+            _del_word(event)
+        else:
+            event.current_buffer.delete_before_cursor(1)
 
     # Enter saat menu sugesti "/..." terbuka: terapkan opsi yang tersorot (atau
     # opsi PERTAMA bila belum ada yang disorot) LALU LANGSUNG JALANKAN — satu
@@ -2787,7 +2829,8 @@ def main(resume: bool = False) -> None:
                 if len(parts) == 2:
                     do_add_dir(parts[1].strip().strip('"').strip("'"))
                 else:
-                    console.print("  [yellow]Pakai: /add-dir <path folder>[/yellow]\n")
+                    # Tanpa argumen -> box input path (autolengkap folder).
+                    _with_console(ask_add_dir)
             elif cmd == "rm-dir" or cmd.startswith("rm-dir "):
                 parts = text.split(maxsplit=1)
                 if len(parts) == 2:

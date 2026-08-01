@@ -193,13 +193,17 @@ _READ_CAP = 20000   # batas karakter per pembacaan (hemat konteks percakapan)
 
 
 @tool
-def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
-    """Baca isi sebuah file teks di dalam root project atau folder konteks (add-dir). Untuk file BESAR, baca per bagian dengan start_line/end_line — jangan menebak isi bagian yang belum terbaca.
+def read_file(path: str, start_line: int = 0, end_line: int = 0,
+              line_numbers: bool = False) -> str:
+    """Baca isi sebuah file teks di dalam root project atau folder konteks (add-dir). Untuk file BESAR, baca per bagian dengan start_line/end_line. NOMOR BARIS SELALU 1-BASED (baris pertama = baris 1) — saat pengguna menyebut "baris ke-N", verifikasi dengan start_line/end_line atau line_numbers=true, JANGAN menghitung sendiri dari 0.
 
     path: relatif terhadap root project, atau path ABSOLUT untuk file di folder
     konteks tambahan.
     start_line: baris pertama yang dibaca (1-based; 0/kosong = dari awal).
     end_line: baris terakhir yang dibaca (1-based; 0/kosong = sampai akhir).
+    line_numbers: true = tiap baris diberi awalan "N| " (1-based) supaya kamu
+        tahu pasti nomor tiap baris. Awalan itu BUKAN isi file — saat menyalin
+        old_text untuk edit_file, buang awalannya.
     """
     target = _safe_path(path)
     if not target.is_file():
@@ -209,6 +213,13 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
         s, e = int(start_line or 0), int(end_line or 0)
     except (TypeError, ValueError):
         s = e = 0
+
+    def _bernomor(potongan: str, mulai: int) -> str:
+        """Awalan 'N| ' per baris, N dari `mulai` (1-based)."""
+        out = []
+        for ofs, ln in enumerate(potongan.splitlines()):
+            out.append(f"{mulai + ofs}| {ln}")
+        return "\n".join(out) + ("\n" if potongan.endswith("\n") else "")
 
     if s or e:
         lines = text.splitlines(keepends=True)
@@ -221,12 +232,28 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
         if e < s:
             return f"[error] end_line ({e}) lebih kecil dari start_line ({s})."
         cuplikan = "".join(lines[s - 1:e])
+        if line_numbers:
+            cuplikan = _bernomor(cuplikan, s)
         if len(cuplikan) > _READ_CAP:
             cuplikan = cuplikan[:_READ_CAP] + \
                 "\n... [dipotong — persempit rentang barisnya]"
-        # Header di baris tersendiri: isi di bawahnya tetap byte apa adanya,
-        # aman disalin persis sebagai old_text untuk edit_file.
+        # Header di baris tersendiri: tanpa line_numbers, isi di bawahnya tetap
+        # byte apa adanya — aman disalin persis sebagai old_text edit_file.
         return f"[{_display(target)} baris {s}-{e} dari {n}]\n" + cuplikan
+
+    if line_numbers:
+        bernomor = _bernomor(text, 1)
+        if len(bernomor) > _READ_CAP:
+            potong = bernomor[:_READ_CAP]
+            batas = potong.rfind("\n")
+            if batas > 0:
+                potong = potong[:batas + 1]
+            n_tampil = potong.count("\n")
+            total = len(text.splitlines())
+            return (potong + f"... [dipotong: baris 1-{n_tampil} dari {total}. "
+                    f"Lanjutkan dengan read_file(path, start_line="
+                    f"{n_tampil + 1}, line_numbers=true)]")
+        return bernomor
 
     if len(text) > _READ_CAP:
         # Potong DI BATAS BARIS + beri petunjuk lanjut yang bisa langsung
