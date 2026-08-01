@@ -340,7 +340,22 @@ def _isi_sebelum_sesudah(name: str, path: str, args: dict):
     old = full.read_text(encoding="utf-8", errors="replace") if exists else ""
     a = args if isinstance(args, dict) else {}
     if name == "write_file":
-        return old, a.get("content", "") or "", exists
+        baru = a.get("content", "") or ""
+        # Prediksi dengan GUARD YANG SAMA seperti tool-nya: write_file berisi
+        # potongan (penanda "...sisanya tetap..." / menyusut drastis) akan
+        # DITOLAK oleh _tolak_penimpaan_merusak — jadi diff "seluruh file merah,
+        # potongan hijau" itu pratinjau penulisan yang TAK PERNAH terjadi.
+        # Mencetaknya justru membuat pengguna yakin kodenya dihapus & ditulis
+        # ulang. Bila akan ditolak: tanpa diff; pesan [DITOLAK] dari tool-lah
+        # yang tampil sebagai hasil langkah.
+        if exists and not a.get("allow_shrink"):
+            try:
+                from ..tools.files import _tolak_penimpaan_merusak
+                if _tolak_penimpaan_merusak(full, baru):
+                    return old, old, exists
+            except Exception:  # noqa: BLE001 - prediksi gagal: tampilkan apa adanya
+                pass
+        return old, baru, exists
     if name == "append_file":
         return old, old + (a.get("content", "") or ""), exists
     if name == "edit_file":
@@ -1362,7 +1377,11 @@ def main(resume: bool = False) -> None:
         # Diff/preview substantif ditampilkan SEBELUM aksi (konten inti perubahan).
         if name in _TOOL_DIFF and p:
             old, new, exists = _isi_sebelum_sesudah(name, p, args)
-            _print_diff(p, old, new, is_new=not exists)
+            # old == new pada file yang sudah ada = tulisan itu akan DITOLAK
+            # tool-nya (potongan/penyusutan drastis) atau memang tanpa efek —
+            # jangan cetak header diff yang menyesatkan.
+            if not (exists and old == new):
+                _print_diff(p, old, new, is_new=not exists)
         elif name == "delete_file" and p:
             full = config.PROJECT_ROOT / p
             content = full.read_text(encoding="utf-8", errors="replace") if full.exists() else ""
@@ -1678,7 +1697,10 @@ def main(resume: bool = False) -> None:
                 # edit_file, sehingga diff menampilkan SELURUH file sebagai
                 # terhapus — seakan kode dihapus lalu ditulis ulang.
                 old, new, exists = _isi_sebelum_sesudah(name, p, args)
-                _print_diff(p, old, new, is_new=not exists)
+                # old == new pada file yang sudah ada = akan DITOLAK / tanpa
+                # efek — jangan cetak header diff yang menyesatkan.
+                if not (exists and old == new):
+                    _print_diff(p, old, new, is_new=not exists)
             elif name == "delete_file" and p:
                 full = config.PROJECT_ROOT / p
                 content = full.read_text(encoding="utf-8", errors="replace") if full.exists() else ""
