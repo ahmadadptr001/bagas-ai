@@ -3,6 +3,7 @@ saat `bagasai` dipanggil) DAN folder konteks tambahan (fitur add-dir).
 Dibatasi agar tidak keluar dari folder-folder yang diizinkan."""
 from __future__ import annotations
 
+import difflib
 import json as _json
 import re
 import shutil
@@ -133,6 +134,28 @@ def _tolak_penimpaan_merusak(target: Path, baru: str) -> str | None:
             "lengkapnya dengan read_file, lalu ulangi write_file dengan "
             "allow_shrink=true."
         )
+
+    # Tulis-ulang NYARIS SAMA: sebagian besar baris isi baru identik dengan
+    # yang lama -> ini "perubahan kecil ditulis ulang seluruh file", padahal
+    # seharusnya edit_file. Ditolak bukan demi gaya: menulis ulang file panjang
+    # dari ingatan model rawan menghilangkan detail secara senyap, plus output
+    # sepanjang itu rawan TERPOTONG situs sebelum sampai (JSON putus). Batas
+    # 4000 baris menjaga SequenceMatcher tetap murah; file lebih besar dari itu
+    # sudah pasti tak layak ditulis ulang utuh, tapi biarkan penjaga lain yang
+    # bicara daripada menghitung rasio mahal di sini.
+    if 60 <= n_lama <= 4000 and n_baru >= n_lama * 0.5:
+        sm = difflib.SequenceMatcher(None, lama.splitlines(), baru.splitlines())
+        if sm.quick_ratio() >= 0.8 and sm.ratio() >= 0.8:
+            return (
+                f"[DITOLAK] Isi baru ~{int(sm.ratio() * 100)}% identik dengan isi "
+                f"sekarang ({n_lama} baris) — ini perubahan SEBAGIAN yang ditulis "
+                "ulang sebagai seluruh file.\n\n"
+                "Pakai edit_file per bagian yang berubah (old_text/new_text, "
+                "boleh beberapa blok sekaligus) — lebih aman, bisa ditinjau, dan "
+                "tak mungkin terpotong di tengah.\n\n"
+                "Kalau memang SENGAJA menulis ulang total dan isinya sudah "
+                "lengkap, ulangi write_file dengan allow_shrink=true."
+            )
     return None
 
 
@@ -189,8 +212,10 @@ def write_file(path: str, content: str, allow_shrink: bool = False) -> str:
     bagian yang kamu ubah, seluruh sisanya HILANG.
 
     path: relatif terhadap root project, atau path ABSOLUT untuk folder konteks.
-    allow_shrink: set true HANYA bila kamu memang sengaja memangkas file secara
-        besar-besaran dan sudah membaca isi lengkapnya lebih dulu.
+    allow_shrink: set true HANYA bila kamu memang SENGAJA memangkas besar-
+        besaran / menulis ulang total file yang sudah ada, DAN sudah membaca
+        isi lengkapnya lebih dulu. Tanpa ini, isi yang tampak potongan atau
+        nyaris sama dengan isi lama DITOLAK (harusnya edit_file).
     content: isi file.
     """
     target = _safe_path(path)

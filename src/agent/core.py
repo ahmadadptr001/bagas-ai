@@ -83,6 +83,16 @@ _MAX_LANJUT = 3
 _TOOL_MUTASI = {
     "write_file", "edit_file", "append_file", "replace_in_files", "move_file",
 }
+# Tool yang MENGUBAH KEADAAN (file/sistem/proses). Sesudah salah satunya SUKSES,
+# cache anti-ulang dibersihkan: hasil read_file/list_dir/run_command yang
+# tersimpan sudah BASI — mengembalikannya lagi (plus teguran "kamu sudah
+# menjalankan langkah ini") membuat AI web bekerja dari isi file lama dan
+# menuduhnya mengulang padahal ia memverifikasi perubahan yang sah.
+_TOOL_STATE = _TOOL_MUTASI | {
+    "delete_file", "copy_file", "make_dir", "download_file", "zip_extract",
+    "zip_create", "run_command", "run_python", "run_script", "run_command_bg",
+    "bg_stop",
+}
 _EKS_KODE = {
     ".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue",
     ".svelte", ".go", ".rs", ".php", ".rb", ".java", ".kt", ".c", ".h",
@@ -243,7 +253,10 @@ def _web_tool_protocol() -> str:
         "dengan penanda seperti '// ... sisanya tetap ...' — seluruh sisa "
         "berkas HILANG. Kalau yang mau diubah cuma beberapa baris, pakai "
         "edit_file. write_file hanya untuk berkas BARU atau saat kamu benar-"
-        "benar mengirim isi lengkapnya.\n"
+        "benar mengirim isi lengkapnya. PENEGAKAN OTOMATIS: write_file pada "
+        "berkas yang sudah ada akan DITOLAK sistem bila isinya tampak potongan "
+        "ATAU nyaris sama dengan isi lama (perubahan kecil wajib edit_file) — "
+        "jangan buang giliran menabraknya.\n"
         "- Mengubah berkas: edit_file untuk perubahan sebagian (PILIHAN UTAMA "
         "pada berkas besar), write_file untuk berkas baru / tulis ulang total, "
         "append_file untuk menambah di akhir, replace_in_files untuk mengganti "
@@ -1206,10 +1219,19 @@ class Agent:
                         # Deret gagal beruntun (lihat fail_streak di atas). Penanda
                         # gagal seragam dari tools: "[GAGAL...]" (shell) & "GAGAL:"
                         # (files). Sukses apa pun menyetel ulang deretnya.
-                        if "[GAGAL" in result or result.lstrip().startswith("GAGAL"):
-                            fail_streak += 1
-                        else:
+                        sukses = not ("[GAGAL" in result
+                                      or result.lstrip().startswith(
+                                          ("GAGAL", "[DITOLAK", "[error]")))
+                        if sukses:
                             fail_streak = 0
+                        else:
+                            fail_streak += 1
+                        # Keadaan berubah -> hasil tool lama basi. Kosongkan
+                        # cache anti-ulang, tapi simpan kembali langkah BARUSAN:
+                        # mengulang persis mutasi yang sama tetap terdeteksi.
+                        if sukses and name in _TOOL_STATE:
+                            seen_tools.clear()
+                            seen_tools[kunci] = result
                         if on_tool_result:
                             on_tool_result(name, result)
                         # Tandai bila kode BERUBAH (untuk validasi otomatis di
