@@ -691,10 +691,11 @@ class TurnView:
             self.phase = text
             self.phase_since = time.time()   # patok waktu fase baru (untuk ETA)
 
-    # Berapa baris jawaban yang sedang ditulis ditampilkan di region live.
-    # Kecil DENGAN SENGAJA: region live harus jauh lebih pendek dari layar, kalau
-    # tidak rich.Live tak bisa menghapus baris yang sudah lewat atas layar dan
-    # muncul baris hantu/dobel.
+    # Batas BAWAH jumlah baris pratinjau jawaban yang sedang ditulis. Ini cuma
+    # lantai — tinggi sebenarnya MENGIKUTI layar (lihat _preview_rows) supaya
+    # pratinjau TUMBUH ke bawah seiring jawaban ditulis, bukan terjebak di jendela
+    # kecil yang terasa "fixed". Batas ATASnya dijaga _muat_layar yang mengukur
+    # tinggi nyata region agar tetap lebih pendek dari layar (anti baris-hantu).
     PREVIEW_LINES = 6
     # Ekor teks yang disimpan untuk pratinjau. Tak perlu menyimpan seluruh
     # jawaban (bisa ratusan ribu karakter) — yang ditampilkan hanya ekornya.
@@ -726,12 +727,18 @@ class TurnView:
         teks = self._stream
         if not teks.strip():
             return []
-        # Perhitungan jatah baris sendiri DIHAPUS dari sini: ia memakai jumlah
-        # BLOK sebagai pengganti jumlah BARIS — kekeliruan yang sama persis
-        # dengan yang diperbaiki _muat_layar — dan menjadikan dua sumber
-        # kebenaran untuk satu invarian, sehingga menyetel PREVIEW_LINES terasa
-        # tak berpengaruh. Kini cukup satu penjaga: _muat_layar yang MENGUKUR.
-        jatah = self.PREVIEW_LINES
+        # Jatah baris MENGIKUTI tinggi layar supaya pratinjau tumbuh panjang ke
+        # bawah saat jawaban makin banyak — bukan jendela 6 baris yang terasa
+        # dipatok. Batas ATAS tetap dijaga _muat_layar (mengukur tinggi NYATA
+        # region lalu memangkas dari atas bila melebihi layar), jadi menambah
+        # jatah di sini aman: paling banter _muat_layar yang memangkas balik,
+        # tak akan menimbulkan baris hantu. Sisakan ruang untuk footer & sebagian
+        # langkah yang masih hidup di atas pratinjau.
+        try:
+            tinggi_layar = console.size.height
+        except Exception:  # noqa: BLE001
+            tinggi_layar = 24
+        jatah = max(self.PREVIEW_LINES, tinggi_layar - 8)
         baris = teks.split("\n")
         # Baris kosong di ekor bikin pratinjau tampak "melompat" tanpa isi.
         while baris and not baris[-1].strip():
@@ -1663,10 +1670,12 @@ def main(resume: bool = False) -> None:
             # perubahan, lalu menjadi bagian riwayat terminal.
             p = args.get("path") if isinstance(args, dict) else None
             if name in _TOOL_DIFF and p:
-                full = config.PROJECT_ROOT / p
-                exists = full.exists()
-                old = full.read_text(encoding="utf-8", errors="replace") if exists else ""
-                new = args.get("content", "") if isinstance(args, dict) else ""
+                # WAJIB lewat _isi_sebelum_sesudah: untuk edit_file/append_file
+                # isi barunya BUKAN args["content"] (edit_file pakai old_text/
+                # new_text). Menyalin content mentah membuat `new` kosong pada
+                # edit_file, sehingga diff menampilkan SELURUH file sebagai
+                # terhapus — seakan kode dihapus lalu ditulis ulang.
+                old, new, exists = _isi_sebelum_sesudah(name, p, args)
                 _print_diff(p, old, new, is_new=not exists)
             elif name == "delete_file" and p:
                 full = config.PROJECT_ROOT / p
