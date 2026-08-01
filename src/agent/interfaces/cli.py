@@ -328,6 +328,15 @@ def _row(lineno: str, sign: str, text: str, style: str) -> None:
 # dianjurkan untuk file besar, jadi tanpa ini kebanyakan perubahan jadi tak terlihat.
 _TOOL_DIFF = ("write_file", "edit_file", "append_file")
 
+# SEMUA tool yang mengubah isi disk. Dipakai ringkasan giliran ("N file") dan
+# pemicu penyegaran peta proyek. Dulu hanya write_file/delete_file — giliran
+# penuh edit_file diringkas "0 file", dan peta proyek DIAM-DIAM basi sesudah
+# edit sehingga giliran berikutnya bekerja dari peta lama.
+_TOOL_UBAH_FILE = {
+    "write_file", "edit_file", "append_file", "delete_file", "move_file",
+    "copy_file", "replace_in_files", "download_file", "zip_extract",
+}
+
 
 def _isi_sebelum_sesudah(name: str, path: str, args: dict):
     """(isi_lama, isi_baru, file_sudah_ada) untuk merender diff sebuah langkah.
@@ -460,12 +469,32 @@ def show_logo() -> None:
 # dikerjakan (bukan cuma "berpikir"). Tanpa tool aktif -> "berpikir".
 _PHASE = {
     "write_file": "menulis",
+    "edit_file": "mengedit",
+    "append_file": "menambah",
     "delete_file": "menghapus",
+    "move_file": "memindah",
+    "copy_file": "menyalin",
+    "make_dir": "membuat folder",
     "read_file": "membaca",
     "list_dir": "menelusuri",
+    "glob_files": "mencari",
+    "search_text": "mencari",
     "web_search": "mencari",
+    "fetch_url": "membuka",
+    "http_request": "memanggil API",
+    "download_file": "mengunduh",
+    "replace_in_files": "mengganti",
+    "diff_files": "membandingkan",
+    "zip_create": "mengarsip",
+    "zip_extract": "membongkar",
+    "take_screenshot": "memotret",
+    "analyze_image": "menganalisis",
+    "attach_file": "mengunggah",
+    "validate_project": "memvalidasi",
     "run_command": "menjalankan",
     "run_python": "menjalankan",
+    "run_command_bg": "menjalankan",
+    "bg_output": "memantau",
     "run_script": "menjalankan",
     "save_script": "menyimpan",
     "remember": "mengingat",
@@ -977,7 +1006,7 @@ class TurnView:
             n_step = len(stps)
             if not n_step:
                 return Text("")  # chat murni: tanpa footer
-            n_file = sum(1 for s in stps if s["name"] in ("write_file", "delete_file"))
+            n_file = sum(1 for s in stps if s["name"] in _TOOL_UBAH_FILE)
             n_fail = sum(1 for s in stps if s["failed"])
             seg = [f"{n_step} langkah"]
             if n_file:
@@ -1265,7 +1294,10 @@ def main(resume: bool = False) -> None:
         for m in agent.memory.messages:
             role, content = m.get("role"), (m.get("content") or "")
             if role == "user":
-                console.print(f"\n  [bold #cba6f7]❯[/] [#cba6f7]{content}[/]")
+                # WAJIB di-escape: teks pengguna yang memuat '[i]' / '[red]'
+                # (lazim di kode, mis. arr[i]) akan ditafsirkan rich sebagai
+                # markup — teks berubah gaya & kurungnya hilang saat replay.
+                console.print(f"\n  [bold #cba6f7]❯[/] [#cba6f7]{_esc(content)}[/]")
             elif role == "assistant" and content:
                 console.print("\n  [bold #89b4fa]🤖 bagas-ai[/]")
                 console.print(Padding(_md(content), (0, 3, 1, 3)))
@@ -1334,6 +1366,14 @@ def main(resume: bool = False) -> None:
             return a.get("name", "")
         if name == "remember":
             return a.get("fact", "") or "fakta"
+        # Tool lain: tunjukkan TARGETNYA (path/url/kueri) alih-alih nama tool
+        # mentah — "mengedit src/app.py" jauh lebih informatif daripada
+        # "bekerja edit_file". Urutan kunci dipilih dari argumen paling khas.
+        for k in ("path", "source", "dest_path", "url", "query", "pattern",
+                  "bg_id"):
+            v = a.get(k)
+            if isinstance(v, str) and v:
+                return v
         return name
 
     # Saat prompt pilihan (ask_user) aktif, POLLER input di loop giliran (msvcrt/
@@ -1383,7 +1423,9 @@ def main(resume: bool = False) -> None:
 
     # Tool yang hasilnya berupa teks substansial & layak di-expand penuh.
     _EXPANDABLE = {"run_command", "run_python", "run_script",
-                   "read_file", "list_dir", "web_search"}
+                   "read_file", "list_dir", "web_search",
+                   "search_text", "glob_files", "fetch_url", "http_request",
+                   "validate_project", "diff_files", "bg_output", "media_info"}
 
     def on_tool(name: str, args: dict) -> None:
         """Mulai satu langkah: set fase + timer, dan untuk tulis/hapus tampilkan diff."""
@@ -1443,8 +1485,9 @@ def main(resume: bool = False) -> None:
         elif name in _EXPANDABLE and nlines > 0:
             unit = "hasil" if name == "web_search" else "baris"
             console.print(f"     [dim]{nlines} {unit}[/]")
-        elif name == "write_file":
-            # Tampilkan status cek sintaks bila ada di hasil.
+        elif name in _TOOL_DIFF:
+            # Tampilkan status cek sintaks bila ada di hasil — edit_file &
+            # append_file juga mengembalikannya, bukan cuma write_file.
             m = re.search(r"\[cek sintaks\]\s*(.+)", text)
             if m:
                 ok = m.group(1).startswith("OK")
@@ -1953,8 +1996,7 @@ def main(resume: bool = False) -> None:
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
             if stps:
-                n_file = sum(1 for s in stps
-                             if s["name"] in ("write_file", "delete_file"))
+                n_file = sum(1 for s in stps if s["name"] in _TOOL_UBAH_FILE)
                 n_fail = sum(1 for s in stps if s["failed"])
                 seg = [f"{len(stps)} langkah"]
                 if n_file:
@@ -1971,8 +2013,7 @@ def main(resume: bool = False) -> None:
     def _reindex_if_edited() -> None:
         """Bila giliran barusan menulis/menghapus file, segarkan PETA PROYEK &
         system prompt supaya pemahaman bagas-ai selalu sesuai kode terbaru."""
-        if any(s.get("name") in ("write_file", "delete_file")
-               for s in steps.values()):
+        if any(s.get("name") in _TOOL_UBAH_FILE for s in steps.values()):
             try:
                 projectindex.invalidate()   # jangan pakai memo basi pasca-edit
                 agent.refresh_system_prompt()
