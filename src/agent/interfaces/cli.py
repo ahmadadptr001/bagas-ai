@@ -28,6 +28,8 @@ from InquirerPy import inquirer  # noqa: E402
 from InquirerPy.base.control import Choice  # noqa: E402
 from prompt_toolkit import PromptSession  # noqa: E402
 from prompt_toolkit.completion import Completer, Completion  # noqa: E402
+from prompt_toolkit.filters import (  # noqa: E402
+    completion_is_selected, has_completions)
 from prompt_toolkit.formatted_text import HTML  # noqa: E402
 from prompt_toolkit.key_binding import KeyBindings  # noqa: E402
 from prompt_toolkit.patch_stdout import patch_stdout  # noqa: E402
@@ -2782,6 +2784,21 @@ def main(resume: bool = False) -> None:
 
     kb.add("c-w")(_del_word)                   # Ctrl+W
     kb.add("escape", "backspace")(_del_word)   # Alt+Backspace
+
+    # Enter saat menu sugesti "/..." terbuka TAPI belum ada yang tersorot:
+    # langsung terapkan opsi PERTAMA (mis. "/mod" -> "/model") tanpa perlu
+    # menekan panah bawah dulu. Setelah terisi, menu tertutup; Enter berikutnya
+    # menjalankan perintahnya seperti biasa. Bila pengguna SUDAH menyorot sebuah
+    # opsi (panah bawah/Tab), filter completion_is_selected mematikan handler ini
+    # sehingga Enter-nya menerima pilihan itu apa adanya.
+    @kb.add("enter", filter=has_completions & ~completion_is_selected)
+    def _pilih_sugesti_pertama(event):
+        buf = event.current_buffer
+        state = buf.complete_state
+        if state and state.completions:
+            buf.apply_completion(state.completions[0])
+        else:  # tak seharusnya terjadi (filter menjamin ada) — aman-amankan
+            buf.validate_and_handle()
     # Gaya status bar: latar gelap "catppuccin" + aksen warna per segmen.
     _pt_style = PTStyle.from_dict({
         "bottom-toolbar": "bg:#181825 #cdd6f4 noreverse",
