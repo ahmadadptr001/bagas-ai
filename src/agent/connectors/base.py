@@ -810,7 +810,7 @@ class WebConnector:
         if entry is None:
             raise BrowserError(f"opsi '{label}' tak dikenal untuk {self.label}")
         path = entry[1]
-        # Tombol pembuka khusus aksi ini (bila ada) — penting untuk situs yang
+        # Tombol pxembuka khusus aksi ini (bila ada) — penting untuk situs yang
         # kontrolnya tersebar di beberapa tempat.
         opener = entry[3] if len(entry) > 3 and entry[3] else self.web_model_button
         return hub().submit(

@@ -13,6 +13,7 @@ from .browser import (
 )
 from .kimi import KimiConnector
 from .qwen import QwenConnector
+from .gemini import GeminiConnector
 
 # service -> kelas connector.
 # Connector "claude" DIHAPUS (2026-08-01): claude.ai menolak protokol [[TOOL]]
