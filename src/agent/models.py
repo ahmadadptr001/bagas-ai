@@ -27,7 +27,7 @@ from dataclasses import dataclass
 class ModelSpec:
     id: str  # ID internal, selalu berbentuk "web/<service>"
     label: str  # nama tampilan
-    # Nama service connector ("kimi", "qwen") -> agent/connectors.
+    # Nama service connector ("kimi", "qwen", "gemini") -> agent/connectors.
     # Selalu terisi: semua model bagas-ai kini berbasis browser.
     connector: str = ""
     multimodal: bool = True  # semua situs AI web menerima lampiran gambar
@@ -46,6 +46,12 @@ MODELS: dict[str, ModelSpec] = {
         label="Kimi (web)",
         connector="kimi",
         note="Via browser kimi.com — jago agentic & coding, konteks panjang",
+    ),
+    "gemini-web": ModelSpec(
+        id="web/gemini",
+        label="Gemini (web)",
+        connector="gemini",
+        note="Via browser gemini.google.com/app — multibahasa & cepat",
     ),
     "qwen-web": ModelSpec(
         id="web/qwen",
