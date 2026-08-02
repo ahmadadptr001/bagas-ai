@@ -21,6 +21,7 @@ from .gemini import GeminiConnector
 _REGISTRY: dict[str, type[WebConnector]] = {
     "kimi": KimiConnector,
     "qwen": QwenConnector,
+    "gemini": GeminiConnector,
 }
 
 # service -> instance (cache; sesi browser bertahan lintas giliran).
