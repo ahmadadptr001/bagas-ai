@@ -1492,7 +1492,7 @@ def main(resume: bool = False) -> None:
                 # WAJIB di-escape: teks pengguna yang memuat '[i]' / '[red]'
                 # (lazim di kode, mis. arr[i]) akan ditafsirkan rich sebagai
                 # markup — teks berubah gaya & kurungnya hilang saat replay.
-                console.print(f"\n  [bold #cba6f7]❯[/] [#cba6f7]{_esc(content)}[/]")
+                console.print(f"\n  [bold #cba6f7]❯[/] [white]{_esc(content)}[/]")
             elif role == "assistant" and content:
                 console.print("\n  [bold #89b4fa]🤖 bagas-ai[/]")
                 console.print(Padding(_md(content), (0, 3, 1, 3)))
@@ -2055,7 +2055,7 @@ def main(resume: bool = False) -> None:
                     # baliknya. (Gema kedua saat prompt ini benar-benar
                     # dikerjakan sengaja tak ada — lihat gelung utama.)
                     _commit([_oneline(Text.from_markup(
-                        f"  [bold #cba6f7]❯[/] [#cba6f7]{_esc(teks)}[/]"))])
+                        f"  [bold #cba6f7]❯[/] [white]{_esc(teks)}[/]"))])
                 return True
             if ch in ("\x08", "\x7f"):             # Backspace / Ctrl+Backspace
                 # KEDUANYA hapus 1 HURUF. Arah byte-nya tak bisa dipercaya:
@@ -3237,8 +3237,12 @@ def main(resume: bool = False) -> None:
             # dihapus, jadi tak ada celah yang terlihat di bawah gema.
             if raw.strip():
                 _ke_dasar_layar()
+                # Teksnya PUTIH, hanya "❯"-nya yang beraksen: pesan pengguna
+                # adalah teks yang paling sering dibaca ulang saat menggulung
+                # riwayat, jadi ia yang paling butuh kontras tertinggi — bukan
+                # warna tema yang meredupkannya.
                 console.print(f"  [bold #cba6f7]❯[/] "
-                              f"[#cba6f7]{_esc(raw.strip())}[/]")
+                              f"[white]{_esc(raw.strip())}[/]")
         text = raw.strip()
         if not text:
             continue

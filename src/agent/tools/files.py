@@ -699,3 +699,91 @@ def make_dir(path: str) -> str:
     sudah = target.is_dir()
     target.mkdir(parents=True, exist_ok=True)
     return (f"Folder {'sudah ada' if sudah else 'dibuat'}: {_display(target)}")
+
+
+# --- pemangkas bolak-balik --------------------------------------------------
+#
+# Satu panggilan tool = satu bolak-balik ke situs AI web (belasan detik). Jadi
+# "baca 3 berkas" yang wajar-wajar saja di agent ber-API menjadi mahal di sini:
+# tiga giliran, tiga kali menunggu. Dua tool di bawah menyatukan pekerjaan yang
+# memang sudah pasti akan dilakukan berurutan.
+#
+# Batasnya dipatok ketat & disengaja: situs AI web MEMOTONG pesan panjang
+# ("Output stopped"), dan blok yang terpotong tak bisa dieksekusi sama sekali —
+# jadi menggabungkan terlalu banyak justru menghanguskan seluruh giliran, bukan
+# menghematnya.
+_MAKS_BERKAS_SEKALI = 5
+_MAKS_EDIT_SEKALI = 8
+
+
+@tool
+def read_files(paths: str, outline: bool = False) -> str:
+    """Baca BEBERAPA berkas sekaligus dalam satu panggilan (maksimal 5). Pakai ini menggantikan read_file berulang saat kamu sudah tahu berkas mana saja yang perlu dilihat — tiga read_file terpisah berarti tiga kali menunggu, satu read_files cukup sekali.
+
+    paths: daftar path dipisah koma atau baris baru, mis. "src/a.py, src/b.py".
+    outline: true = kirim PETA tiap berkas (definisi + nomor baris) alih-alih
+        isinya. Jauh lebih hemat untuk berkas besar; baca bagian yang kamu
+        butuh sesudahnya lewat read_file(start_line/end_line).
+    """
+    daftar = [p.strip() for p in (paths or "").replace("\n", ",").split(",")
+              if p.strip()]
+    if not daftar:
+        return "[error] paths kosong — contoh: read_files('src/a.py, src/b.py')"
+    kelebihan = daftar[_MAKS_BERKAS_SEKALI:]
+    daftar = daftar[:_MAKS_BERKAS_SEKALI]
+    bagian = []
+    for p in daftar:
+        try:
+            isi = read_file(p, outline=outline)
+        except Exception as e:  # noqa: BLE001 - satu berkas gagal != semua gagal
+            isi = f"[error] {e}"
+        bagian.append(f"===== {p} =====\n{isi}")
+    if kelebihan:
+        bagian.append(f"[catatan] {len(kelebihan)} path lain TIDAK dibaca "
+                      f"(batas {_MAKS_BERKAS_SEKALI} berkas per panggilan): "
+                      + ", ".join(kelebihan))
+    return "\n\n".join(bagian)
+
+
+@tool
+def edit_files(edits: list) -> str:
+    """Terapkan BEBERAPA suntingan kecil sekaligus (maksimal 8), boleh lintas berkas — pengganti edit_file berulang saat kamu sudah tahu persis semua titik yang perlu diubah. Tiap suntingan tetap ditampilkan sebagai diff berwarna ke pengguna, sama seperti edit_file satuan.
+
+    Berhenti di suntingan pertama yang GAGAL (mis. old_text tak ketemu) dan
+    melaporkan mana yang sudah terpakai — supaya kamu tak salah kira semuanya
+    berhasil. Yang sudah terlanjur diterapkan TIDAK dibatalkan; perbaiki sisanya
+    lalu lanjutkan.
+
+    edits: daftar objek {"path": "...", "old_text": "...", "new_text": "...",
+        "count": 1}. `count` opsional (default 1; -1 = semua kemunculan).
+        Untuk MENGHAPUS potongan, isi new_text dengan string kosong.
+    """
+    if not isinstance(edits, list) or not edits:
+        return ('[error] edits harus berupa daftar, mis. [{"path": "a.py", '
+                '"old_text": "x", "new_text": "y"}]')
+    if len(edits) > _MAKS_EDIT_SEKALI:
+        return (f"[error] {len(edits)} suntingan melewati batas "
+                f"{_MAKS_EDIT_SEKALI} per panggilan — pesan sepanjang itu "
+                "berisiko dipotong situs dan hangus. Pecah jadi beberapa "
+                "panggilan.")
+    hasil = []
+    for i, e in enumerate(edits, 1):
+        if not isinstance(e, dict):
+            return f"[error] suntingan #{i} bukan objek JSON."
+        path = str(e.get("path", "")).strip()
+        old = e.get("old_text", "")
+        new = e.get("new_text", "")
+        if not path or not old:
+            return f"[error] suntingan #{i}: 'path' dan 'old_text' wajib diisi."
+        try:
+            r = edit_file(path, str(old), str(new), int(e.get("count", 1) or 1))
+        except Exception as ex:  # noqa: BLE001
+            r = f"[error] {ex}"
+        if r.startswith("[error]") or r.startswith("[GAGAL"):
+            terpakai = "\n".join(hasil) or "(belum ada yang diterapkan)"
+            return (f"BERHENTI di suntingan #{i} ({path}) karena gagal:\n{r}\n\n"
+                    f"Yang SUDAH diterapkan sebelum ini:\n{terpakai}\n\n"
+                    "Perbaiki suntingan yang gagal itu saja, lalu kirim sisanya "
+                    "— jangan mengulang yang sudah berhasil.")
+        hasil.append(f"#{i} {path}: {r}")
+    return f"{len(hasil)} suntingan diterapkan:\n" + "\n".join(hasil)

@@ -406,3 +406,89 @@ def validate_project(paths: str = "") -> str:
         kepala += (" Ada yang GAGAL — baca detailnya, PERBAIKI kodenya, lalu "
                    "validasi lagi. JANGAN nyatakan tugas selesai.")
     return kepala + "\n\n" + "\n\n".join(bagian)
+
+
+# --- project_info -----------------------------------------------------------
+#
+# Pengetahuan yang dipakai validate_project untuk memilih pemeriksaan (ekosistem
+# apa, package manager mana, skrip apa saja yang tersedia) selama ini TERKUNCI di
+# dalamnya — model tak bisa melihatnya, jadi tiap sesi ia mengulang penjajakan
+# yang sama: list_dir, read_file package.json, read_file pyproject.toml. Tiga
+# bolak-balik ke situs AI hanya untuk tahu hal yang sudah kita ketahui.
+# project_info membukanya dalam satu panggilan.
+_PENANDA = (
+    ("package.json", "Node/JavaScript"),
+    ("pyproject.toml", "Python"),
+    ("setup.py", "Python"),
+    ("requirements.txt", "Python"),
+    ("Cargo.toml", "Rust"),
+    ("go.mod", "Go"),
+    ("composer.json", "PHP"),
+    ("pom.xml", "Java (Maven)"),
+    ("build.gradle", "Java/Kotlin (Gradle)"),
+    ("Gemfile", "Ruby"),
+    ("pubspec.yaml", "Dart/Flutter"),
+    ("Makefile", "Make"),
+)
+# Framework dikenali dari dependency-nya, bukan dari struktur folder: struktur
+# gampang menipu (folder `app/` ada di banyak framework), sedangkan dependency
+# tak bisa berbohong.
+_FRAMEWORK = (
+    ("next", "Next.js"), ("nuxt", "Nuxt"), ("@angular/core", "Angular"),
+    ("svelte", "Svelte"), ("vue", "Vue"), ("react", "React"),
+    ("vite", "Vite"), ("astro", "Astro"), ("express", "Express"),
+    ("fastify", "Fastify"), ("electron", "Electron"),
+    ("tailwindcss", "Tailwind CSS"), ("typescript", "TypeScript"),
+)
+
+
+@tool
+def project_info() -> str:
+    """Ringkasan TEKNIS proyek dalam satu panggilan: bahasa/ekosistemnya, framework yang dipakai, package manager, skrip yang tersedia (npm run apa saja), entry point, dan apakah ini repo git. Panggil ini DI AWAL sebelum menjelajah — ia menggantikan rangkaian list_dir + membaca package.json/pyproject.toml satu per satu.
+
+    Tidak mengubah apa pun.
+    """
+    baris: list[str] = [f"root: {ROOT}"]
+
+    eko = []
+    for berkas, nama in _PENANDA:
+        if (ROOT / berkas).is_file() and nama not in eko:
+            eko.append(nama)
+    baris.append("ekosistem: " + (", ".join(eko) if eko else
+                                  "tak terdeteksi (tak ada berkas penanda)"))
+
+    deps = _pkg_deps()
+    if deps:
+        fw = [nama for kunci, nama in _FRAMEWORK if kunci in deps]
+        if fw:
+            baris.append("framework/pustaka kunci: " + ", ".join(fw))
+        baris.append(f"jumlah dependency: {len(deps)}")
+
+    pm = _pm()
+    if (ROOT / "package.json").is_file():
+        baris.append(f"package manager: {pm or 'tak ada npm/pnpm/yarn di PATH'}")
+
+    skrip = _pkg_scripts()
+    if skrip:
+        pakai = pm or "npm"
+        baris.append("skrip tersedia:")
+        for nama, isi in list(skrip.items())[:20]:
+            teks = str(isi)
+            if len(teks) > 70:
+                teks = teks[:67] + "…"
+            baris.append(f"  {pakai} run {nama}  →  {teks}")
+
+    # Entry point: yang benar-benar ADA saja, supaya model tak mencoba menjalankan
+    # berkas yang tak pernah ada.
+    kandidat = ("main.py", "app.py", "manage.py", "run.py", "index.js",
+                "server.js", "src/main.py", "src/index.ts", "src/main.ts",
+                "src/App.tsx", "app/page.tsx", "src/app/page.tsx", "main.go",
+                "src/main.rs", "Cargo.toml")
+    ada = [k for k in kandidat if (ROOT / k).is_file()]
+    if ada:
+        baris.append("entry point yang ada: " + ", ".join(ada[:8]))
+
+    baris.append("git: " + ("ya — pakai git_status/git_diff untuk melihat "
+                            "perubahan yang belum di-commit"
+                            if (ROOT / ".git").exists() else "bukan repo git"))
+    return "\n".join(baris)

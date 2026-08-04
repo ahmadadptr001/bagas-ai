@@ -11,6 +11,7 @@ percakapan browser, dan penyimpanan sesi.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import re
 import time
@@ -20,6 +21,7 @@ from . import config, llm, models, prefs, prompts
 from .memory import Memory
 from .session import Session
 from .tools import base as tools
+from .tools import katalog as _katalog
 
 # --- Protokol tool untuk CONNECTOR web (Kimi/Qwen web) ---
 # AI web tak punya function-calling API, jadi kita ajari ia "memanggil" tool
@@ -125,335 +127,206 @@ def _menyentuh_kode(name: str, args: dict) -> bool:
     return False
 
 
+# Berkas yang hasilnya KELIHATAN — mengubahnya menuntut pembuktian visual,
+# bukan sekadar "lint lulus". Sengaja tak memasukkan .js/.py: keduanya bisa saja
+# menggambar UI, tapi jauh lebih sering bukan, dan memaksa screenshot pada tiap
+# perubahan logika akan membakar giliran untuk hal yang tak ada gunanya dilihat.
+_EKS_TAMPILAN = {".tsx", ".jsx", ".vue", ".svelte", ".astro", ".html", ".htm",
+                 ".css", ".scss", ".sass", ".less", ".styl"}
+
+
+def _menyentuh_tampilan(args: dict) -> bool:
+    """True bila argumen tool menyasar berkas yang hasilnya kelihatan di layar."""
+    import os as _os
+    for kunci in ("path", "dest"):
+        nilai = args.get(kunci)
+        if isinstance(nilai, str) and nilai:
+            if _os.path.splitext(nilai)[1].lower() in _EKS_TAMPILAN:
+                return True
+    # edit_files membawa daftar suntingan, bukan satu path.
+    for e in (args.get("edits") or []):
+        if isinstance(e, dict):
+            nilai = e.get("path")
+            if isinstance(nilai, str) and _os.path.splitext(
+                    nilai)[1].lower() in _EKS_TAMPILAN:
+                return True
+    return False
+
+
+# Pertanyaan pilihan yang ditulis sebagai TEKS BIASA. Pesan tanpa blok
+# diperlakukan sebagai jawaban akhir, jadi pertanyaan begini tak pernah sampai
+# ke pengguna sebagai pertanyaan — gilirannya habis dan ia cuma melihat AI
+# balik bertanya. Yang benar: ask_user, yang sungguh-sungguh menunggu jawaban.
+_TANYA_PILIHAN_RE = re.compile(
+    r"\b(?:atau|mana|sebaiknya|pilih|preferensi|lebih suka|mau yang)\b", re.I)
+
+
+def _tanya_tanpa_ask_user(text: str) -> bool:
+    """True bila balasan berupa pertanyaan pilihan, bukan jawaban."""
+    t = (text or "").strip()
+    if not t or len(t) > 900 or "?" not in t:
+        return False
+    # Harus BERAKHIR sebagai pertanyaan: laporan hasil yang kebetulan memuat
+    # tanda tanya di tengah bukan sasaran teguran ini.
+    if not t.rstrip().endswith("?"):
+        return False
+    return bool(_TANYA_PILIHAN_RE.search(t))
+
+
+_BULAN_ID = ("Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
+             "Agustus", "September", "Oktober", "November", "Desember")
+
+
+def _tahun_ini() -> str:
+    return str(_dt.date.today().year)
+
+
+def _hari_ini() -> str:
+    """Tanggal hari ini dalam bahasa Indonesia.
+
+    Dikirim ke model karena ia TIDAK PUNYA cara lain mengetahuinya: tanggal tak
+    pernah ada di prompt sebelumnya, sehingga instruksi "cari dokumentasi
+    terbaru" mustahil dijalankan — model tak tahu "terbaru" itu tahun berapa,
+    dan biasanya menebak dari batas pengetahuannya sendiri yang sudah lewat."""
+    t = _dt.date.today()
+    return f"{t.day} {_BULAN_ID[t.month - 1]} {t.year}"
+
+
 def _web_tool_protocol() -> str:
-    """Instruksi + katalog tool untuk AI web agar bisa BERTINDAK (edit file,
-    jalankan perintah, cari web, dll) di laptop pengguna."""
-    lines = []
-    for sc in tools.get_schemas():
-        fn = sc.get("function", sc)
-        name = fn.get("name", "")
-        desc = (fn.get("description", "") or "").strip().split("\n")[0]
-        params = fn.get("parameters", {}).get("properties", {}) or {}
-        req = set(fn.get("parameters", {}).get("required", []) or [])
-        pieces = []
-        for pn, pinfo in params.items():
-            tag = pn + ("*" if pn in req else "")
-            pieces.append(f"{tag}:{pinfo.get('type', 'any')}")
-        lines.append(f"- {name}({', '.join(pieces)}) — {desc}")
-    tools_text = "\n".join(lines)
+    """KONSTITUSI protokol tool untuk AI web: aturan yang berlaku di SETIAP
+    giliran, dan hanya itu.
+
+    Dirampingkan dari ~27,8 rb karakter jadi sekitar sepertiganya. Yang dibuang
+    BUKAN aturannya — tiap aturan di sini lahir dari bug yang pernah terlihat,
+    jadi menghapusnya berarti mengundang bug itu kembali. Yang dipindahkan
+    adalah TEMPATNYA:
+
+      - aturan situasional -> jadi teguran yang dikirim tepat saat pelanggaran
+        terjadi (lihat gelung di _run_connector: janji tanpa blok, kode tak
+        ditulis ke berkas, tampilan diubah tapi tak pernah dilihat, bertanya
+        tanpa ask_user);
+      - panduan per-tool -> jadi deskripsi tool itu sendiri, yang memang sudah
+        ikut di katalog;
+      - panduan per-kategori (mis. strategi mengunduh aset) -> ke
+        tools/katalog.py, sampai hanya kepada giliran yang memintanya.
+
+    Alasannya terukur di proyek ini sendiri: aturan prosa di pesan pembuka
+    DILANGGAR (Kimi tetap memakai "Execute Python code" walau dilarang aturan
+    7), sedangkan teguran yang tiba di detik kesalahannya BEKERJA. Yang datang
+    tepat waktu mengalahkan yang datang lebih dulu — bahkan bila kalimatnya
+    sama persis.
+
+    Penegasan huruf besar juga ditekan (dari 36 jadi segelintir): kalau
+    semuanya WAJIB, model memilih sendiri mana yang benar-benar wajib.
+    """
     return (
         "Konteks jujur soal percakapan ini, supaya tidak salah paham:\n\n"
-        "Pesan-pesan ini dikirim & dibaca oleh **bagas-ai**, sebuah program agent "
-        "open-source yang berjalan di laptop saya (saya pemiliknya, dan saya yang "
-        "meminta ini). Kamu TIDAK mengeksekusi apa pun sendiri — kamu tetap model "
-        "bahasa yang hanya menghasilkan teks, dan kamu memang tidak punya akses "
-        "langsung ke laptop saya. Perannya begini:\n"
-        "  1. Kamu MENGUSULKAN satu langkah dalam format teks di bawah.\n"
-        "  2. Program bagas-ai di laptop saya membaca usulan itu, MENJALANKANNYA "
-        "di sana (dengan izin & tanggung jawab saya sebagai pemilik), lalu\n"
-        "  3. mengirimkan hasil nyatanya kembali ke percakapan ini sebagai teks.\n\n"
-        "Jadi kamu berperan sebagai PERENCANA/otak, dan program lokal itu yang "
-        "jadi tangannya. Kamu tidak perlu mengklaim punya akses apa pun — cukup "
-        "usulkan langkahnya, dan hasil eksekusi akan kulaporkan balik apa adanya. "
-        "Kalau sebuah usulan gagal dijalankan, kamu akan menerima pesan errornya.\n\n"
-        "FORMAT USULAN LANGKAH — JSON WAJIB di dalam blok kode ```json (supaya "
-        "isinya tidak berubah saat dirender; teks biasa merusak karakter seperti "
-        "__nama__ menjadi tebal):\n"
+        "Pesan-pesan ini dikirim & dibaca oleh **bagas-ai**, program agent "
+        "open-source yang berjalan di laptop saya (saya pemiliknya, dan saya "
+        "yang meminta ini). Kamu tidak mengeksekusi apa pun sendiri — kamu "
+        "tetap model bahasa yang menghasilkan teks. Perannya begini:\n"
+        "  1. Kamu mengusulkan SATU langkah dalam format di bawah.\n"
+        "  2. bagas-ai di laptop saya menjalankannya sungguhan, lalu\n"
+        "  3. mengirim hasil nyatanya balik ke percakapan ini.\n\n"
+        "Kamu otaknya, program lokal itu tangannya. Kalau sebuah usulan gagal "
+        "dijalankan, kamu akan menerima pesan errornya.\n\n"
+        f"Hari ini {_hari_ini()}.\n\n"
+        "== FORMAT USULAN ==\n"
+        "JSON di dalam blok kode ```json (teks biasa dirusak perenderan situs — "
+        "__nama__ berubah jadi tebal):\n"
         "[[TOOL]]\n"
         "```json\n"
         '{"tool": "<nama_tool>", "args": {"<param>": "<nilai>"}}\n'
         "```\n"
         "[[/TOOL]]\n\n"
-        "Contoh mengusulkan pembuatan file:\n"
+        "Contoh:\n"
         "[[TOOL]]\n"
         "```json\n"
         '{"tool": "write_file", "args": {"path": "contoh.py", '
         '"content": "def halo():\\n    print(\'hai\')\\n"}}\n'
         "```\n"
         "[[/TOOL]]\n\n"
-        "Aturan praktis:\n"
-        "1. JSON harus valid (escape newline sebagai \\n, kutip sebagai \\\") dan "
-        "SELALU dibungkus ```json ... ``` di dalam penanda [[TOOL]].\n"
-        "2. SATU blok [[TOOL]] per pesan — TIDAK PERNAH dua atau lebih "
-        "sekaligus, walau langkahnya terasa independen. Usulkan satu langkah, "
-        "berhenti, tunggu [[HASIL]]-nya, baru putuskan langkah berikutnya. "
-        "Alasannya: langkah kedua dalam satu pesan pasti kamu susun SEBELUM "
-        "melihat hasil langkah pertama, jadi ia cuma tebakan — dan kalau yang "
-        "pertama gagal atau isinya tak seperti dugaanmu, sisanya tetap "
-        "kujalankan lalu merusak. Pesan bertumpuk juga lebih panjang, dan "
-        "pesan panjang DIPOTONG situs ini.\n"
-        "2b. KALIMAT NIAT WAJIB SEPAKET DENGAN BLOKNYA. Kalau kamu menulis "
-        "'aku baca dulu main.py', 'sekarang aku perbaiki', 'aku jalankan "
-        "tesnya' — blok [[TOOL]]-nya HARUS ada di pesan yang SAMA, tepat di "
-        "bawah kalimat itu. Pesan yang cuma berisi niat TIDAK menjalankan "
-        "apa pun: aku memperlakukannya sebagai jawaban akhir, jadi di layar "
-        "pengguna kamu terlihat berjanji lalu berhenti — dan gilirannya habis "
-        "percuma. Jangan pernah 'mengumumkan rencana dulu, blok menyusul di "
-        "pesan berikutnya'.\n"
-        "3. Setelah kukirim balik hasilnya (ditandai [[HASIL <nama_tool>]]), "
-        "lanjutkan berdasarkan hasil itu.\n"
-        "4. Kalau tugas sudah selesai, balas biasa TANPA blok [[TOOL]] — itu "
-        "kuanggap jawaban akhir. Jawaban akhir TIDAK BOLEH menyuruh saya "
-        "mengerjakan langkah yang bisa kamu lakukan sendiri lewat tool "
-        "(menyalin kode, menulis sisa file, menjalankan perintah, memvalidasi) "
-        "— selesaikan semuanya dulu, baru menutup.\n"
-        "4b. SEBELUM jawaban akhir, bila kamu MENGUBAH kode: WAJIB validasi dulu "
-        "dengan validate_project (ia memilih sendiri cara yang tepat per "
-        "ekosistem: Next.js = npm run lint + npm run build, Python = ruff/"
-        "py_compile + smoke-run skrip yang diubah, cargo check, go vet, php -l, "
-        "dll. — beri argumen paths berisi berkas yang kamu ubah). "
-        "Kalau proyeknya memang dijalankan (punya entry point / server dev), "
-        "jalankan juga programnya — run_command untuk skrip singkat, atau "
-        "run_command_bg lalu bg_output untuk server — dan pastikan start tanpa "
-        "error. Kalau validasi GAGAL, perbaiki lalu ulangi; JANGAN menyatakan "
-        "selesai selagi masih ada yang gagal.\n"
-        "5. Untuk membuat/mengubah file, usulkan write_file (bukan menampilkan "
-        "kode untuk saya salin manual), karena tujuan saya memang agar bagas-ai "
-        "yang menuliskannya langsung ke proyek.\n"
-        "5b. WAJIB: JANGAN menulis/menambal file lewat run_python atau "
-        "run_command — bukan lewat open(...).write(), pathlib.write_text, "
-        "re.sub lalu tulis ulang, heredoc, echo >, Set-Content, sed -i, patch, "
-        "maupun skrip generator. SEMUA perubahan file harus lewat write_file, "
-        "satu blok per file, berisi isi LENGKAP file itu.\n"
-        "    Alasannya bukan gaya, tapi supaya perubahanmu BISA DIPERIKSA: "
-        "untuk write_file, bagas-ai menampilkan diff berwarna (hijau = baris "
-        "ditambah, merah = dihapus) di terminal SEBELUM file disentuh, sehingga "
-        "saya melihat persis apa yang berubah. Perubahan lewat skrip tak "
-        "terlihat sama sekali — yang tampil cuma 'menjalankan python', dan saya "
-        "kehilangan satu-satunya kesempatan meninjau. File juga bisa rusak "
-        "diam-diam tanpa saya sadari.\n"
-        "    run_python & run_command tetap dipakai untuk hal yang memang bukan "
-        "pengeditan file: menjalankan tes, memasang dependensi, menjalankan "
-        "program, memeriksa hasil.\n"
-        "5c. FILE PANJANG — WAJIB DITULIS BERTAHAP, TANPA DIMINTA: situs chat "
-        "ini MEMOTONG pesan yang terlalu panjang ('Output stopped'), dan blok "
-        "yang terpotong TAK BISA kueksekusi sama sekali — kerjaanmu hangus. "
-        "Maka batasi SETIAP pesanmu: maksimal SATU blok write_file/append_file "
-        "besar per pesan, isinya JANGAN melebihi ±100 baris (≈4.000 karakter). "
-        "File baru yang lebih panjang dari itu kamu pecah SENDIRI:\n"
-        "    - pesan pertama: write_file berisi bagian AWAL file;\n"
-        "    - pesan berikutnya (setelah kukirim [[HASIL]]): append_file "
-        "lanjutannya, bagian demi bagian, berurutan sampai lengkap;\n"
-        "    - jangan menulis ulang bagian yang sudah tertulis, jangan berhenti "
-        "di tengah, dan JANGAN PERNAH menyuruh saya menyalin/menulis sisanya "
-        "manual — lanjutkan sendiri sampai file utuh.\n"
-        "    Untuk file yang SUDAH ada, pecahan alami-nya adalah edit_file per "
-        "bagian (blok kecil old_text/new_text) — itu otomatis aman dari "
-        "pemotongan. Prinsip yang sama berlaku untuk teks jawaban: jangan "
-        "menumpuk kode panjang di luar blok tool.\n"
-        "6. Path file relatif terhadap folder proyek yang disebut di konteks, "
-        "dan pakai garis miring biasa (src/app/main.py) — JANGAN backslash, "
-        "supaya tidak rusak saat dikirim.\n"
-        "6b. Berkas DI LUAR folder proyek (mis. di Downloads atau folder proyek "
-        "lain) boleh kamu minta, tapi aku akan MENANYAKAN IZIN ke pengguna "
-        "lebih dulu — jadi pakai seperlunya dan sebutkan alasannya di kalimat "
-        "pembukamu. Kalau hasilnya '[DITOLAK]', itu keputusan pengguna: JANGAN "
-        "mencoba path itu lagi dengan bentuk lain, lanjutkan dengan berkas di "
-        "dalam proyek atau tanyakan apa yang ia inginkan.\n"
-        "7. JANGAN memakai tool bawaanmu sendiri (pencarian web, analysis/REPL, "
-        "artifact) di percakapan ini — semuanya lewat [[TOOL]] saja. Kalau "
-        "sebuah langkah gagal, cukup usulkan langkah berikutnya; tak perlu "
-        "minta maaf atau menjelaskan panjang lebar.\n"
-        "8. Untuk membaca file, pakai read_file (bukan perintah shell seperti "
-        "Get-Content/cat) supaya hasilnya rapi & utuh.\n\n"
-        "CARA BICARA — kamu berbicara LANGSUNG ke pengguna, bukan menulis "
-        "laporan:\n"
-        "- WAJIB: setiap pesan yang berisi blok [[TOOL]] DIBUKA dengan SATU "
-        "kalimat pendek bergaya orang pertama yang memberi tahu apa yang "
-        "sedang kamu lakukan sekarang — sebutkan berkas/folder/perintah yang "
-        "kamu sentuh. Kalimat itu kutampilkan APA ADANYA di layar pengguna "
-        "(dia tak melihat blok [[TOOL]]-nya), jadi tanpa kalimat itu layarnya "
-        "sunyi dan ia tak tahu kamu sedang apa.\n"
-        "  Contoh persis gayanya:\n"
-        "    'Oke, aku cek dulu ada file apa saja di folder ini.'\n"
-        "    'Sekarang aku baca main.py biar tahu alur programnya.'\n"
-        "    'Ketemu — error-nya di baris 42, aku perbaiki sekarang.'\n"
-        "    'Aku jalankan tesnya dulu buat memastikan tak ada yang rusak.'\n"
-        "  Pakai bahasa yang dipakai pengguna. SATU kalimat saja, langsung "
-        "diikuti blok [[TOOL]]-nya — bukan paragraf, bukan daftar rencana.\n"
-        "- Kalimat itu bukan basa-basi, jadi tetap DILARANG: sapaan/pembuka "
-        "kosong ('Baik, dengan senang hati saya akan membantu Anda'), "
-        "mengulang permintaan dengan kata-katamu sendiri, minta izin untuk "
-        "langkah yang jelas perlu, dan rencana bernomor sebelum mulai. "
-        "Sebut TINDAKANNYA, lalu kerjakan. Ini berlaku begitu PERMINTAAN "
-        "datang — bukan untuk pesan konteks ini, yang cukup dibalas `SIAP`.\n"
-        "- Sesudah menerima [[HASIL]], kalau kamu lanjut memakai tool lagi, "
-        "buka lagi dengan satu kalimat begitu — boleh menyebut temuan "
-        "singkatnya dulu ('File-nya ada 3, yang relevan cuma app.py — aku "
-        "buka itu.'). Tanpa rangkuman ulang panjang di tiap langkah.\n"
-        "- Jawaban akhir: HASIL dulu di kalimat pertama, detail seperlunya — "
-        "bukan esai. Jangan mengulang daftar semua yang kamu lakukan bila "
-        "langkah-langkahnya sudah terlihat.\n\n"
-        "HEMAT LANGKAH — ini penting, jangan buang giliran:\n"
-        "- Kerjakan HANYA yang diminta — jangan memperluas cakupan (refactor "
-        "tak diminta, perbaikan gaya di file yang tak disebut) dan jangan "
-        "menambah langkah yang tak mengubah hasil.\n"
-        "- JANGAN membaca ulang file yang isinya SUDAH ada di percakapan ini.\n"
-        "- Pakai peta proyek di bawah untuk tahu file mana yang relevan; jangan "
-        "menjelajah folder satu per satu untuk hal yang sudah terlihat di peta.\n"
-        "- JANGAN memverifikasi ulang langkah yang hasilnya sudah kukirim dan "
-        "jelas berhasil (mis. membaca ulang file yang baru saja kamu tulis).\n"
-        "- Hemat langkah BUKAN berarti menumpuk blok: tetap SATU blok [[TOOL]] "
-        "per pesan (aturan 2). Menghematnya dengan memilih langkah yang paling "
-        "banyak menjawab sekaligus — mis. satu search_text yang tepat "
-        "menggantikan tiga list_dir, satu edit_file menggantikan baca-tulis "
-        "berulang.\n"
-        "- Begitu informasinya cukup, langsung beri jawaban akhir. Jangan "
-        "menambah langkah yang tak mengubah kesimpulan.\n"
-        "- Ada tool take_screenshot untuk melihat layar pengguna saat debug "
-        "tampilan; gambarnya otomatis terlampir ke pesan berikutnya sehingga "
-        "kamu bisa melihatnya sendiri.\n\n"
-        "KAPAN PAKAI YANG MANA — daftar di bawah panjang, jadi ini pintasnya. "
-        "Salah pilih tool bukan cuma boros giliran, tapi sering membuat "
-        "pekerjaan terlihat 'selesai' padahal tidak:\n"
-        "- MENCARI BERKAS DI PROYEK — pakai cara yang terarah, jangan menebak "
-        "berulang kali: search_text (cari ISI, mis. di mana fungsi X "
-        "didefinisikan) dan glob_files (cari NAMA berkas). Keduanya jauh lebih "
-        "cepat daripada list_dir + read_file bergiliran. Urutannya:\n"
-        "  1) LIHAT PETA PROYEK di bawah lebih dulu — nama berkas & simbol "
-        "kuncinya sudah tercantum di sana. Kalau yang kamu cari SUDAH terlihat "
-        "di peta, langsung read_file; JANGAN mencari lagi.\n"
-        "  2) Belum terlihat -> cari dengan POTONGAN KODE HARFIAH yang pasti "
-        "ada di berkasnya, bukan deskripsi konsep. Benar: 'def "
-        "detect_heart_gesture', 'class CameraThread', 'localStorage.getItem', "
-        "'/api/login'. SALAH: 'fungsi deteksi tangan', 'logika utama kamera', "
-        "'bagian yang mengatur musik' — kata konsep begitu jarang muncul "
-        "harfiah di kode, jadi hasilnya nihil lalu kamu menebak lagi.\n"
-        "  3) Tak tahu nama pastinya? Cari POTONGAN yang paling khas & pendek "
-        "(mis. 'heart' saja, atau 'gesture'), bukan kalimat panjang. Satu kata "
-        "khas mengalahkan lima kata tebakan.\n"
-        "  4) MAKSIMAL 2–3 pencarian untuk satu hal. Nihil dua kali berarti "
-        "asumsimu soal penamaan yang salah — ganti STRATEGI, bukan menambah "
-        "sinonim acak: pakai glob_files untuk melihat nama-nama berkas di "
-        "folder yang relevan, atau list_dir sekali pada foldernya, lalu "
-        "read_file kandidat yang paling masuk akal.\n"
-        "  5) Begitu berkasnya ketemu, BERHENTI mencari dan langsung kerjakan. "
-        "Jangan mencari ulang hal yang sudah kamu temukan di giliran ini.\n"
-        "- BAHAYA yang paling sering terjadi: write_file MENGGANTI SELURUH isi "
-        "berkas. Kalau kamu hanya mengirim bagian yang kamu ubah — apalagi "
-        "dengan penanda seperti '// ... sisanya tetap ...' — seluruh sisa "
-        "berkas HILANG. Kalau yang mau diubah cuma beberapa baris, pakai "
-        "edit_file. write_file hanya untuk berkas BARU atau saat kamu benar-"
-        "benar mengirim isi lengkapnya. PENEGAKAN OTOMATIS: write_file pada "
-        "berkas yang sudah ada akan DITOLAK sistem bila isinya tampak potongan "
-        "ATAU nyaris sama dengan isi lama (perubahan kecil wajib edit_file) — "
-        "jangan buang giliran menabraknya.\n"
-        "- Mengubah berkas: edit_file untuk perubahan sebagian (PILIHAN UTAMA "
-        "pada berkas besar), write_file untuk berkas baru / tulis ulang total, "
-        "append_file untuk menambah di akhir, replace_in_files untuk mengganti "
-        "sesuatu di BANYAK berkas sekaligus (jalankan dry_run dulu).\n"
-        "\n"
-        "ALUR WAJIB MENGUBAH BERKAS YANG SUDAH ADA — ikuti persis, ini yang "
-        "paling sering salah:\n"
-        "  1) BACA dulu berkasnya dengan read_file (kecuali isinya memang sudah "
-        "ada lengkap di percakapan ini). Kamu butuh melihat isi ASLINYA — "
-        "tanpa itu kamu tak mungkin tahu potongan mana yang mau diubah, dan "
-        "akhirnya menebak lalu menulis ulang semuanya. Untuk berkas PANJANG "
-        "yang belum kamu kenal, mulai dari read_file(path, outline=true): itu "
-        "memulangkan peta seluruh class/def beserta nomor barisnya dalam "
-        "beberapa baris saja, lalu baca rentang yang kamu perlukan dengan "
-        "start_line/end_line. Jauh lebih murah daripada menelan seluruh berkas "
-        "— dan kalau bacaanmu terpotong, kerangka bagian yang belum terbaca "
-        "ikut dikirim, jadi JANGAN menebak isi yang belum kamu lihat.\n"
-        "  2) Pilih HANYA baris/blok yang benar-benar berubah. Salin potongan "
-        "lama itu PERSIS (termasuk indentasi & spasi) sebagai old_text, dan "
-        "tulis penggantinya sebagai new_text. Ambil potongan sekecil mungkin "
-        "asal tetap unik di berkas — cukup 1–2 baris konteks di sekitarnya bila "
-        "perlu agar tak ambigu.\n"
-        "  3) Keluarkan edit_file dengan old_text/new_text itu. Baris lain yang "
-        "tidak kamu sebut TIDAK tersentuh — itu justru yang kita mau.\n"
-        "  NOMOR BARIS — 1-BASED, JANGAN HITUNG SENDIRI: semua nomor baris di "
-        "bagas-ai (read_file, search_text, diff) mulai dari 1; TIDAK ADA baris "
-        "0. Saat pengguna menyebut 'baris ke-N', JANGAN menghitungnya sendiri "
-        "dari teks (apalagi mulai dari 0 — itu bug yang sudah pernah terjadi): "
-        "baca dulu read_file(path, start_line=N-2, end_line=N+2, "
-        "line_numbers=true) supaya kamu MELIHAT persis isi baris N, lalu "
-        "keluarkan edit_file dengan old_text dari baris itu TANPA awalan "
-        "'N| '.\n"
-        "  Butuh mengubah beberapa tempat berjauhan di satu berkas? Kirim "
-        "edit_file satu per tempat, SATU BLOK PER PESAN, berurutan (aturan 2) "
-        "— JANGAN menumpuknya dalam satu pesan, dan JANGAN pula "
-        "menggabungkannya jadi satu write_file seluruh berkas.\n"
-        "  write_file hanya bila berkas BENAR-BENAR baru, atau kamu memang "
-        "sengaja menulis ulang total DAN mengirim isi lengkapnya (bukan cuma "
-        "bagian intinya). Kalau ragu: pakai edit_file.\n"
-        "- Mengatur berkas: move_file, copy_file, delete_file, make_dir, "
-        "zip_create, zip_extract, diff_files.\n"
-        "- Melihat: take_screenshot (tangkap layar pengguna) lalu analyze_image "
-        "— gambarnya dilampirkan sehingga kamu benar-benar MELIHATnya. "
-        "attach_file untuk mengunggah berkas jenis lain (PDF, CSV) agar bisa "
-        "kamu baca sendiri.\n"
-        "- Internet: web_search (cari), fetch_url (baca isi satu halaman), "
-        "http_request (memanggil API: POST/PUT/header).\n"
-        "- MENCARI & MENGAMBIL ASET/FILE dari internet (gambar, sprite, "
-        "suara, musik, font, ikon, dataset) — di sinilah paling sering "
-        "terbuang banyak giliran karena kata kunci acak & jalan memutar. "
-        "Ikuti strategi ini PERSIS:\n"
-        "  1) TETAPKAN SPESIFIKASI dulu, sebelum mencari apa pun: isi apa, "
-        "format apa (mp3? png transparan? ttf? zip?), harus gratis/bebas "
-        "lisensi. Satu kalimat: 'butuh <isi> format <ekstensi> gratis'.\n"
-        "  2) LANGSUNG KE SUMBER yang memang membagikan file jenis itu — "
-        "jangan pencarian umum: musik & sound effect -> pixabay.com / "
-        "freesound.org; sprite & aset game -> kenney.nl / opengameart.org / "
-        "itch.io (yang gratis); foto/gambar -> pixabay.com / unsplash.com; "
-        "font -> Google Fonts (file .ttf-nya ada di github.com/google/fonts); "
-        "dataset -> repositori resminya. Pakai operator `site:` di "
-        "web_search untuk mengunci sumbernya.\n"
-        "  3) KATA KUNCI: bahasa Inggris, 2–4 kata benda konkret = isi + "
-        "jenis + (bila perlu) format. Benar: 'site:pixabay.com galaxy "
-        "ambient music', 'goblin sprite sheet png site:opengameart.org'. "
-        "SALAH: kalimat panjang, kata sifat berbunga-bunga, atau menyalin "
-        "deskripsi tugas mentah-mentah ke query.\n"
-        "  4) MAKSIMAL 2x web_search per file. Kalau hasil pertama nihil, "
-        "ubah SATU kata paling menentukan (sinonim, atau buat lebih umum: "
-        "'galaxy ambient' -> 'space music') — JANGAN menyusun kombinasi "
-        "acak baru tiap percobaan.\n"
-        "  5) fetch_url halaman hasil HANYA untuk menemukan URL file ASLI "
-        "(tautan berujung .mp3/.png/.zip/.ttf atau tombol unduh). Halaman "
-        "minta login / berbayar / tak ada tautan langsung? TINGGALKAN, "
-        "pindah ke sumber berikutnya — jangan berputar-putar di situ.\n"
-        "  6) Begitu URL file ketemu -> download_file ke folder proyek yang "
-        "tepat, cek hasilnya sukses (ukuran > 0; audio/video boleh "
-        "media_info), lalu BERHENTI mencari — file pertama yang layak "
-        "sudah cukup, tak usah berburu yang 'lebih sempurna'.\n"
-        "  JANGAN memberi daftar tautan supaya saya mengunduh sendiri, dan "
-        "jangan memakai pencarian bawaanmu — aset yang tidak diunduh lewat "
-        "download_file sama saja tidak ada: kode akan menunjuk berkas yang "
-        "tak pernah wujud.\n"
-        "- Menjalankan: run_command / run_python untuk menjalankan tes, "
-        "memasang dependensi, menjalankan program. INGAT: keduanya DITOLAK bila "
-        "dipakai menulis berkas.\n"
-        "- MEMVALIDASI hasil: validate_project — ia MENDETEKSI SENDIRI cara "
-        "memeriksa proyek per ekosistem (Next.js: npm run lint + build; Python: "
-        "ruff/py_compile + smoke-run skrip yang diubah; cargo check, go vet, "
-        "php -l, make lint, dll.) lalu menjalankannya. Isi paths dengan berkas "
-        "yang kamu ubah. Pakai ini untuk membuktikan kode masih waras sesudah "
-        "mengubahnya. run_tests menjalankan TEST SUITE proyek (npm test / "
-        "pytest / go test / cargo test) — pakai sesudah perubahan besar bila "
-        "proyeknya punya test.\n"
-        "- MELIHAT HASIL UI WEB: web_preview(url) membuka halaman (mis. "
-        "http://localhost:3000) di browser headless lalu mengembalikan status, "
-        "error console/JS, dan SCREENSHOT yang terlampir ke pesan berikutnya — "
-        "kamu benar-benar melihat tampilannya. Sesudah mengubah kode UI: "
-        "nyalakan dev server (run_command_bg), tunggu siap (bg_output), lalu "
-        "web_preview — jangan menyatakan tampilan benar tanpa melihatnya.\n"
-        "- SALAH ARAH / merusak? undo_changes membatalkan SEMUA perubahan file "
-        "giliran terakhir (cadangan otomatis per giliran) — lebih cepat "
-        "daripada menambal kerusakan satu-satu. Panggil berulang untuk mundur "
-        "lebih jauh.\n"
-        "- Lama berjalan: run_command_bg + bg_output/bg_send/bg_stop/bg_list, "
-        "supaya giliran tidak tersandera menunggu. Prompt interaktif ('Ok to "
-        "proceed?', pertanyaan CLI) dijawab lewat bg_send — jangan biarkan "
-        "proses menggantung menunggu ketikan.\n"
-        "- Ke pengguna: ask_user bila benar-benar perlu keputusannya, notify "
-        "untuk memberi tahu tugas panjang sudah selesai, open_path untuk "
-        "MENUNJUKKAN hasil (mis. buka index.html di browser), clipboard_write "
-        "bila ia perlu menempelkan sesuatu.\n"
-        "- Diingat lintas sesi: remember (fakta penting tentang pengguna/"
-        "proyek), save_script + run_script (pekerjaan yang akan berulang).\n\n"
-        f"LANGKAH yang bisa diusulkan (tanda * = wajib):\n{tools_text}"
+        "== TUJUH ATURAN YANG TAK BISA DITAWAR ==\n"
+        "1. JSON valid (newline jadi \\n, kutip jadi \\\"), selalu di dalam "
+        "```json di antara penanda [[TOOL]].\n"
+        "2. SATU blok per pesan. Jangan pernah menumpuk dua atau lebih, walau "
+        "langkahnya terasa independen — langkah kedua pasti kamu susun sebelum "
+        "melihat hasil langkah pertama, jadi ia cuma tebakan, dan tetap "
+        "kujalankan walau yang pertama ternyata gagal.\n"
+        "3. Kalimat niat dan bloknya SEPAKET dalam satu pesan. Kalau kamu "
+        "menulis 'aku baca dulu main.py', blok read_file-nya ada di pesan yang "
+        "sama, tepat di bawahnya. Pesan tanpa blok kuanggap jawaban akhir — "
+        "jadi 'rencana dulu, blok menyusul' membuat gilirannya habis percuma.\n"
+        "4. Perubahan berkas lewat write_file/edit_file/edit_files saja — bukan "
+        "lewat run_python/run_command (open().write, sed -i, echo >, heredoc, "
+        "skrip generator). Bukan soal gaya: untuk write_file dan edit_file, "
+        "bagas-ai menampilkan diff berwarna ke pengguna SEBELUM berkasnya "
+        "disentuh. Perubahan lewat skrip tak terlihat sama sekali, dan pengguna "
+        "kehilangan satu-satunya kesempatan meninjau.\n"
+        "5. Jangan memakai tool bawaanmu sendiri: 'Execute Python code', 'Run "
+        "code', 'Code Interpreter', sandbox Python, pencarian web bawaan, "
+        "artifact, canvas. Sandbox itu berjalan di server layananmu, bukan di "
+        "laptop saya — ia tak punya satu pun berkas proyek ini, jadi apa pun "
+        "yang kamu 'baca' di sana adalah fiksi dan tak ada berkas saya yang "
+        "berubah. Untuk membaca berkas: read_file. Untuk menjalankan Python di "
+        "laptop saya: run_python. Keduanya lewat [[TOOL]].\n"
+        "6. Selesai = balas tanpa blok. Jawaban akhir tak boleh menyuruh saya "
+        "mengerjakan hal yang bisa kamu lakukan sendiri lewat tool (menyalin "
+        "kode, menulis sisa berkas, menjalankan perintah). Selesaikan dulu, "
+        "baru menutup.\n"
+        "7. Bingung, atau ada beberapa pendekatan yang sama-sama masuk akal? "
+        "panggil ask_user(question, options) dengan 2-6 opsi konkret yang "
+        "bisa dibandingkan — jangan menebak, dan jangan bertanya lewat teks "
+        "biasa (pesan tanpa blok itu jawaban akhir; pertanyaanmu takkan pernah "
+        "terjawab).\n\n"
+        "== CARA BICARA ==\n"
+        "Setiap pesan berisi blok dibuka dengan SATU kalimat pendek orang "
+        "pertama tentang apa yang sedang kamu lakukan, menyebut berkas/perintah "
+        "yang kamu sentuh. Kalimat itu yang tampil di layar pengguna — ia tak "
+        "melihat blok tool-nya, jadi tanpa kalimat itu layarnya sunyi.\n"
+        "  'Oke, aku cek dulu ada file apa saja di folder ini.'\n"
+        "  'Ketemu — error-nya di baris 42, aku perbaiki sekarang.'\n"
+        "Pakai bahasa pengguna. Satu kalimat, bukan paragraf atau daftar "
+        "rencana. Tanpa sapaan kosong, tanpa mengulang permintaan dengan "
+        "kata-katamu sendiri, tanpa minta izin untuk langkah yang jelas perlu.\n"
+        "Jawaban akhir: hasilnya dulu di kalimat pertama, detail seperlunya.\n\n"
+        "== KEBIASAAN YANG DIHARAPKAN ==\n"
+        "- Kerjakan yang diminta saja; jangan memperluas cakupan sendiri.\n"
+        "- Jangan membaca ulang berkas yang isinya sudah ada di percakapan ini, "
+        "dan jangan memverifikasi ulang langkah yang jelas berhasil.\n"
+        "- Mulai dari peta proyek di bawah. search_text/glob_files jauh lebih "
+        "cepat daripada list_dir berulang, dan project_info memberi ekosistem, "
+        "skrip, serta entry point proyek dalam satu panggilan.\n"
+        "- Sesudah mengubah kode, buktikan masih waras dengan validate_project "
+        "(isi paths dengan berkas yang kamu ubah). Sesudah mengubah tampilan, "
+        "lihat sendiri hasilnya: web_preview untuk halaman web, take_screenshot "
+        "untuk aplikasi desktop — lalu sebutkan apa yang kamu lihat.\n"
+        "- Sebelum memakai pustaka/framework yang cepat berubah, pastikan "
+        "dengan web_search memakai tahun berjalan di kuerinya (mis. "
+        f"'next.js app router {_tahun_ini()} docs') — ingatanmu punya batas "
+        "waktu. Tak perlu untuk kode proyek ini sendiri atau sintaks dasar.\n"
+        "- Tugas 3 langkah atau lebih: buka dengan plan(steps=[...]), lalu "
+        "plan_step(n) tiap berpindah langkah. Rencananya tampil ke pengguna.\n"
+        "- Berkas panjang ditulis bertahap: write_file bagian awal (±100 "
+        "baris), lalu append_file lanjutannya di pesan berikutnya. Pesan yang "
+        "kepanjangan dipotong situs ini, dan blok yang terpotong tak bisa "
+        "kujalankan sama sekali.\n"
+        "- read_files membaca sampai 5 berkas sekali jalan, edit_files "
+        "menerapkan sampai 8 suntingan — pakai begitu kamu sudah tahu pasti "
+        "daftarnya, karena satu panggilan = satu kali menunggu.\n"
+        "- Path relatif ke folder proyek, pakai garis miring biasa "
+        "(src/app/main.py). Berkas di luar folder proyek boleh diminta, tapi "
+        "saya menanyakan izin pengguna dulu; kalau hasilnya '[DITOLAK]', itu "
+        "keputusannya — jangan mencoba path itu lagi dengan bentuk lain.\n\n"
+        "== LANGKAH YANG BISA DIUSULKAN ==\n"
+        "(tanda * = argumen wajib)\n"
+        f"{_katalog.katalog_inti()}\n\n"
+        "Butuh yang lain — mengunduh aset dari internet, mengolah video/audio, "
+        "zip, clipboard, notifikasi, kelola proses latar? panggil "
+        "list_tools('<kategori>') dulu; jangan menyerah dan jangan menyuruh "
+        "pengguna melakukannya sendiri. Kategorinya:\n"
+        f"{_katalog.ringkasan_kategori()}"
     )
-
 
 # Backslash yang BUKAN escape JSON sah (mis. path Windows "src\entities" yang
 # kehilangan gandanya saat dirender web) -> digandakan agar JSON bisa dibaca.
@@ -708,9 +581,32 @@ _JANJI_RE = re.compile(
     r"|\b(?:let\s+me|i'?ll|i\s+will|let'?s)\b",
     re.I,
 )
+# Penanda pekerjaan yang SUDAH kelar. "sudah/telah/barusan" harus diikuti KATA
+# KERJA-nya, bukan berdiri sendiri: TERAMATI di balasan Kimi yang nyata, "…buat
+# tahu data karya yang sudah ada" membuat balasan berisi janji ("aku baca
+# dulu…") ikut dikira laporan selesai, sehingga tegurannya tak pernah jalan.
 _SELESAI_RE = re.compile(
-    r"\b(?:sudah|telah|barusan|berhasil|selesai|beres|done|"
-    r"kuperbaiki|kutulis|kuubah|kubuat)\b", re.I)
+    r"\b(?:sudah|telah|barusan)\s+(?:ku)?(?:"
+    + "|".join(sorted(_KERJA, key=len, reverse=True)) + r")\b"
+    r"|\b(?:berhasil|selesai|beres|done)\b"
+    r"|\bku(?:" + "|".join(sorted(_KERJA, key=len, reverse=True)) + r")\b",
+    re.I)
+
+
+# Jejak model memakai TOOL BAWAANNYA SENDIRI alih-alih blok [[TOOL]]. TERAMATI
+# di Kimi web: ia menjalankan "Execute Python code" di sandbox miliknya, yang
+# tak punya satu pun berkas proyek pengguna — jadi hasilnya fiksi, dan tak ada
+# yang berubah di laptop. Kalau label kartunya ikut terbaca dari halaman, ini
+# sinyal paling langsung bahwa protokolnya sedang dilanggar.
+_TOOL_BAWAAN_RE = re.compile(
+    r"\b(?:execute\s+python\s+code|run\s+python\s+code|code\s+interpreter|"
+    r"python\s+sandbox|analysis\s+tool|menjalankan\s+kode\s+python\s+di\s+"
+    r"sandbox)\b", re.I)
+
+
+def _pakai_tool_bawaan(text: str) -> bool:
+    """True bila balasan menyebut/menampilkan tool bawaan model itu sendiri."""
+    return bool(_TOOL_BAWAAN_RE.search(text or ""))
 
 
 def _looks_like_promise(text: str) -> bool:
@@ -1005,6 +901,11 @@ class Agent:
         # satu giliran, bukan campuran beberapa giliran.
         from .tools import checkpoint as _checkpoint
         _checkpoint.begin_turn()
+        # Rencana giliran LAMA dibuang di sini. Rencana hanya bermakna selama
+        # tugasnya berlangsung; membiarkannya hidup ke giliran berikutnya bikin
+        # model melanjutkan daftar langkah milik permintaan yang sudah lewat.
+        from .tools import plan_tool as _plan
+        _plan.reset()
         return self._run_connector(
             user_input, cancel_event=cancel_event,
             on_status=on_status, on_token=on_token,
@@ -1381,6 +1282,14 @@ class Agent:
             # gagal (setelah sekali dipaksa, keputusan diserahkan ke AI).
             mutasi_kode = False
             validasi_jalan = False
+            # Penegakan "lihat sendiri hasilnya": `ubah_tampilan` menyala bila
+            # ada berkas yang KELIHATAN diubah, `dilihat` bila AI benar-benar
+            # memakai web_preview/take_screenshot. Dulu ini cuma imbauan prosa
+            # di pesan pembuka — dan imbauan di pembuka terbukti kalah oleh
+            # kebiasaan model. Ditegakkan sekali per giliran.
+            ubah_tampilan = False
+            dilihat = False
+            lihat_dipaksa = False
             # Berkas kode yang diubah giliran ini — dioper ke validate_project
             # agar pemeriksaan per-berkas (py_compile/smoke-run/php -l) tepat
             # menyasar yang barusan disentuh, bukan menebak-nebak.
@@ -1432,20 +1341,75 @@ class Agent:
                 # jatah 2x per giliran — bukan 1x seperti teguran kode, sebab
                 # macetnya bisa terjadi di langkah mana pun, bukan cuma awal.
                 if (not calls and not force_final and janji < 2
-                        and _looks_like_promise(reply)):
+                        and (_looks_like_promise(reply)
+                             or _pakai_tool_bawaan(reply))):
                     janji += 1
                     reply = _send(
-                        "[SISTEM] Pesanmu barusan cuma menyatakan NIAT, tanpa "
-                        "blok [[TOOL]] — jadi tak ada yang benar-benar "
-                        "dijalankan di laptopku dan kalimatmu tadi tampil ke "
-                        "pengguna sebagai jawaban akhir. Kalimat pembuka WAJIB "
-                        "berpasangan dengan bloknya di pesan yang SAMA.\n"
-                        "Kirim SEKARANG langkah yang tadi kamu sebut, format "
+                        "[SISTEM] Pesanmu barusan tak memuat blok [[TOOL]], "
+                        "jadi TIDAK ADA yang dijalankan di laptopku — dan "
+                        "kalimatmu tadi tampil ke pengguna sebagai jawaban "
+                        "akhir. Dua sebab yang paling sering:\n"
+                        "1. Kamu menyatakan niat ('aku baca dulu X') lalu "
+                        "berhenti. Kalimat pembuka WAJIB berpasangan dengan "
+                        "bloknya di pesan yang SAMA.\n"
+                        "2. Kamu memakai tool BAWAANMU (Execute Python code / "
+                        "code interpreter / sandbox). Sandbox itu jalan di "
+                        "server layananmu, BUKAN di laptopku — ia tak punya "
+                        "satu pun berkas proyekku, jadi apa pun hasilnya fiksi "
+                        "dan tak ada berkasku yang berubah. Matikan cara itu; "
+                        "untuk membaca berkas pakai read_file, untuk "
+                        "menjalankan Python di laptopku pakai run_python — "
+                        "keduanya lewat [[TOOL]].\n"
+                        "Kirim SEKARANG langkah yang tadi kamu maksud, format "
                         "persis:\n[[TOOL]]\n```json\n"
                         '{"tool": "...", "args": {...}}\n```\n[[/TOOL]]\n'
                         "Kalau ternyata tak ada lagi yang perlu dikerjakan, "
                         "tulis jawaban akhirmu sebagai HASIL (apa yang sudah "
                         "berubah / apa temuannya) — bukan sebagai rencana.")
+                    continue
+
+                # BERTANYA TANPA ask_user. Pesan tanpa blok = jawaban akhir,
+                # jadi pertanyaan yang ditulis sebagai teks biasa tak pernah
+                # sampai ke pengguna sebagai pertanyaan: gilirannya habis dan ia
+                # cuma melihat AI balik bertanya lalu diam. Dulu ini cuma aturan
+                # prosa; sekarang ditegur di detik kejadiannya.
+                if (not calls and not force_final and janji < 2
+                        and _tanya_tanpa_ask_user(reply)):
+                    janji += 1
+                    reply = _send(
+                        "[SISTEM] Kamu bertanya lewat teks biasa. Pertanyaan "
+                        "itu TIDAK sampai ke pengguna sebagai pertanyaan — "
+                        "pesan tanpa blok kuperlakukan sebagai jawaban akhir, "
+                        "jadi gilirannya habis dan pertanyaanmu tak akan "
+                        "dijawab.\nUlangi lewat ask_user, dengan 2-6 opsi "
+                        "konkret yang bisa dibandingkan (sebutkan konsekuensi "
+                        "tiap opsi dalam beberapa kata):\n[[TOOL]]\n```json\n"
+                        '{"tool": "ask_user", "args": {"question": "...", '
+                        '"options": ["...", "..."]}}\n```\n[[/TOOL]]')
+                    continue
+
+                # UBAH TAMPILAN TAPI TAK PERNAH DILIHAT. Pola yang sama dengan
+                # penegakan validate_project di bawah, dan alasannya sama:
+                # menyatakan "tampilannya sudah rapi" tanpa pernah melihat
+                # gambarnya itu mengarang. Dipaksa maksimal SEKALI per giliran
+                # supaya tak memutar tanpa henti bila memang tak ada yang bisa
+                # dilihat (tak ada dev server / bukan aplikasi berjendela).
+                if (not calls and not force_final and ubah_tampilan
+                        and not dilihat and not lihat_dipaksa):
+                    lihat_dipaksa = True
+                    reply = _send(
+                        "[SISTEM] Giliran ini mengubah berkas tampilan, tapi "
+                        "kamu belum sekali pun melihat hasilnya. Jangan tutup "
+                        "dulu.\nBuktikan sekarang: kalau ini web, pastikan dev "
+                        "server jalan (run_command_bg 'npm run dev', tunggu "
+                        "lewat bg_output) lalu web_preview URL-nya; kalau "
+                        "aplikasi berjendela, take_screenshot. Sesudah "
+                        "gambarnya kamu terima, sebutkan apa yang benar-benar "
+                        "kamu lihat dan bandingkan dengan yang diminta "
+                        "pengguna.\nKalau memang tak ada yang bisa dilihat "
+                        "(tak ada server/GUI), katakan itu terus terang di "
+                        "jawaban akhirmu — bahwa perubahannya belum "
+                        "diverifikasi secara visual.")
                     continue
 
                 # VALIDASI OTOMATIS sebelum menutup: kalau kode berubah tapi AI
@@ -1573,7 +1537,14 @@ class Agent:
                         # akhir), dan catat bila validasi memang sudah dijalankan.
                         if name == "validate_project":
                             validasi_jalan = True
-                        elif (name in _TOOL_MUTASI
+                        if name in ("web_preview", "take_screenshot"):
+                            dilihat = True
+                        if (name in _TOOL_MUTASI
+                                and not result.lstrip().startswith(
+                                    ("GAGAL", "[DITOLAK"))
+                                and _menyentuh_tampilan(args)):
+                            ubah_tampilan = True
+                        if (name in _TOOL_MUTASI
                               and not result.lstrip().startswith("GAGAL")
                               and not result.lstrip().startswith("[DITOLAK")
                               and _menyentuh_kode(name, args)):
