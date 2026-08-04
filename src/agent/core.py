@@ -182,6 +182,14 @@ def _web_tool_protocol() -> str:
         "pertama gagal atau isinya tak seperti dugaanmu, sisanya tetap "
         "kujalankan lalu merusak. Pesan bertumpuk juga lebih panjang, dan "
         "pesan panjang DIPOTONG situs ini.\n"
+        "2b. KALIMAT NIAT WAJIB SEPAKET DENGAN BLOKNYA. Kalau kamu menulis "
+        "'aku baca dulu main.py', 'sekarang aku perbaiki', 'aku jalankan "
+        "tesnya' — blok [[TOOL]]-nya HARUS ada di pesan yang SAMA, tepat di "
+        "bawah kalimat itu. Pesan yang cuma berisi niat TIDAK menjalankan "
+        "apa pun: aku memperlakukannya sebagai jawaban akhir, jadi di layar "
+        "pengguna kamu terlihat berjanji lalu berhenti — dan gilirannya habis "
+        "percuma. Jangan pernah 'mengumumkan rencana dulu, blok menyusul di "
+        "pesan berikutnya'.\n"
         "3. Setelah kukirim balik hasilnya (ditandai [[HASIL <nama_tool>]]), "
         "lanjutkan berdasarkan hasil itu.\n"
         "4. Kalau tugas sudah selesai, balas biasa TANPA blok [[TOOL]] — itu "
@@ -663,6 +671,66 @@ def _looks_like_unapplied_code(text: str) -> bool:
         return False
     # Cukup panjang untuk benar-benar berupa berkas/patch, bukan cuplikan sebaris.
     return len(t) > 400
+
+
+# Kalimat yang MENJANJIKAN langkah berikutnya. Sengaja hanya bentuk NIAT
+# (sekarang/akan), tak pernah bentuk SELESAI ("sudah kuperbaiki", "berhasil"):
+# jawaban akhir yang sah kerap menceritakan apa yang tadi dikerjakan, dan itu
+# tak boleh ikut tertangkap.
+#
+# Bentuk berimbuhan ditulis lengkap, bukan ditebak lewat pola awalan me-:
+# "menjalankan"/"memperbaiki"/"mengecek" terlalu beragam untuk satu pola, dan
+# pola yang terlalu longgar justru menyerempet kata lain. Diurutkan dari yang
+# TERPANJANG supaya alternasi tak berhenti di bentuk pendek yang jadi awalan
+# bentuk panjang ("menambah" vs "menambahkan").
+_KERJA = (
+    "baca", "membaca", "cek", "mengecek", "periksa", "memeriksa",
+    "buka", "membuka", "lihat", "melihat", "telusuri", "menelusuri",
+    "cari", "mencari", "pindai", "memindai",
+    "perbaiki", "memperbaiki", "betulkan", "membetulkan",
+    "ubah", "mengubah", "edit", "mengedit", "tulis", "menulis",
+    "buat", "membuat", "bikin", "membikin",
+    "tambah", "menambah", "menambahkan", "hapus", "menghapus",
+    "ganti", "mengganti", "jalankan", "menjalankan",
+    "eksekusi", "mengeksekusi", "uji", "menguji", "tes", "mengetes",
+    "validasi", "memvalidasi", "pasang", "memasang", "install", "menginstall",
+)
+_JANJI_RE = re.compile(
+    # Subjeknya WAJIB ada. Tanpa itu, kalimat yang cuma MENJELASKAN ikut
+    # tertangkap ("kode ini membaca file lalu menulis hasilnya") — dan salah
+    # tangkap di sini mahal: ia menyuruh AI mengeluarkan tool padahal
+    # jawabannya sudah benar.
+    r"\b(?:aku|saya|gue|gw)\b\s+(?:akan\s+)?"
+    r"(?:coba\s+|langsung\s+|lanjut\s+)?"
+    r"(?:" + "|".join(sorted(_KERJA, key=len, reverse=True)) + r")(?:\s|$)"
+    r"|\b(?:sekarang|selanjutnya|berikutnya|setelah\s+ini)\s+(?:aku|saya|ku)\b"
+    r"|\bmari\s+(?:kita\s+)?(?:mulai|lihat|cek|periksa)\b"
+    r"|\b(?:let\s+me|i'?ll|i\s+will|let'?s)\b",
+    re.I,
+)
+_SELESAI_RE = re.compile(
+    r"\b(?:sudah|telah|barusan|berhasil|selesai|beres|done|"
+    r"kuperbaiki|kutulis|kuubah|kubuat)\b", re.I)
+
+
+def _looks_like_promise(text: str) -> bool:
+    """True bila balasan MENJANJIKAN langkah tapi tak membawa blok [[TOOL]].
+
+    Gejala yang paling sering dikeluhkan: AI menulis "Oke, aku baca dulu
+    main.py" lalu berhenti di situ. Tanpa blok, pesan itu jadi JAWABAN AKHIR —
+    layar menampilkan niat yang tak pernah dikerjakan, dan giliran habis
+    percuma. Menegurnya jauh lebih murah daripada menyuruh pengguna mengetik
+    ulang permintaannya.
+
+    Dijaga agar tak salah tangkap: hanya berlaku untuk balasan PENDEK (jawaban
+    akhir yang sungguhan hampir selalu lebih panjang), tanpa blok kode, dan
+    yang tidak memuat kata penanda sudah-selesai."""
+    t = (text or "").strip()
+    if not t or len(t) > 400 or "```" in t:
+        return False
+    if _SELESAI_RE.search(t):
+        return False
+    return bool(_JANJI_RE.search(t))
 
 
 def _strip_tool_json(text: str) -> str:
@@ -1295,6 +1363,7 @@ class Agent:
             fail_streak = 0
             force_final = False
             nudges = 0    # teguran "kode ditampilkan tapi tak ditulis ke file"
+            janji = 0     # teguran "menjanjikan langkah tapi tanpa blok [[TOOL]]"
             # Berapa kali AI web menumpuk >1 blok [[TOOL]] dalam satu pesan.
             # Protokolnya SATU langkah per pesan (lihat aturan 2 di
             # _web_tool_protocol) justru karena langkah ke-2 dst pasti disusun
@@ -1354,6 +1423,29 @@ class Agent:
                         "potongan yang berubah); untuk file BARU pakai write_file "
                         "isi lengkap. Kalau memang hanya penjelasan, ulangi "
                         "jawaban akhirmu tanpa blok tool.")
+                    continue
+
+                # AI menjanjikan langkah ("aku baca dulu main.py") tapi tak
+                # membawa bloknya. Tanpa teguran ini, kalimat niat itu jadi
+                # jawaban akhir: pengguna melihat AI berjanji lalu berhenti,
+                # dan giliran habis tanpa satu pun pekerjaan nyata. Diberi
+                # jatah 2x per giliran — bukan 1x seperti teguran kode, sebab
+                # macetnya bisa terjadi di langkah mana pun, bukan cuma awal.
+                if (not calls and not force_final and janji < 2
+                        and _looks_like_promise(reply)):
+                    janji += 1
+                    reply = _send(
+                        "[SISTEM] Pesanmu barusan cuma menyatakan NIAT, tanpa "
+                        "blok [[TOOL]] — jadi tak ada yang benar-benar "
+                        "dijalankan di laptopku dan kalimatmu tadi tampil ke "
+                        "pengguna sebagai jawaban akhir. Kalimat pembuka WAJIB "
+                        "berpasangan dengan bloknya di pesan yang SAMA.\n"
+                        "Kirim SEKARANG langkah yang tadi kamu sebut, format "
+                        "persis:\n[[TOOL]]\n```json\n"
+                        '{"tool": "...", "args": {...}}\n```\n[[/TOOL]]\n'
+                        "Kalau ternyata tak ada lagi yang perlu dikerjakan, "
+                        "tulis jawaban akhirmu sebagai HASIL (apa yang sudah "
+                        "berubah / apa temuannya) — bukan sebagai rencana.")
                     continue
 
                 # VALIDASI OTOMATIS sebelum menutup: kalau kode berubah tapi AI

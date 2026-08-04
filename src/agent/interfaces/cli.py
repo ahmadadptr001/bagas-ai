@@ -463,7 +463,12 @@ def _row(lineno: str, sign: str, text, style: str) -> Text:
     dicetak SEKALI (atomik). Dulu tiap baris dicetak terpisah — selagi region
     live me-refresh ~12x/detik, footer animasi bisa menyela DI ANTARA dua baris
     diff dan tampilan diff tampak tertimpa/terpotong kotak animasi."""
-    inner = max(20, min(console.width - 2 * _LPAD, 108))
+    # Selebar terminal (dikurangi margin kiri), TANPA batas atas: diff adalah
+    # satu-satunya kesempatan meninjau perubahan sebelum berkas disentuh, jadi
+    # memotongnya di kolom 108 pada terminal 160 kolom berarti membuang 50
+    # kolom kode yang sebenarnya muat — dan yang terpotong justru ujung baris,
+    # tempat perubahan JSX/atribut panjang biasanya berada.
+    inner = max(20, console.width - _LPAD)
     line = Text(" " * _LPAD)  # margin kiri tanpa background
     line.append(f" {lineno:>4} {sign} ", style=style)
     if isinstance(text, Text):
