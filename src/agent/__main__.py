@@ -86,11 +86,43 @@ def _cmd_update() -> None:
     """Cek & terapkan pembaruan bagas-ai dari GitHub (dari terminal)."""
     from . import updater
 
-    print("🔄 Memeriksa pembaruan di GitHub…")
+    print("🔄 Memeriksa pembaruan (GitHub + paket yang benar-benar terpasang)…")
     res = updater.check()
     st = res.get("status")
+
+    def _ringkas_versi() -> None:
+        try:
+            v = updater.versions()
+        except Exception:  # noqa: BLE001
+            return
+        baris = f"  terpasang {v.get('terpasang') or '?'}"
+        if v.get("repo"):
+            baris += f"   repo {v['repo']}"
+        if v.get("remote") and v["remote"] != v.get("repo"):
+            baris += f"   remote {v['remote']}"
+        if v.get("commit_lokal"):
+            baris += f"   commit {v['commit_lokal']}"
+        print(baris)
+
     if st == "up_to_date":
         print(f"✓ bagas-ai sudah versi terbaru. ({res.get('local','')})")
+        _ringkas_versi()
+        return
+
+    if st == "stale_install":
+        # Yang menentukan apa yang berjalan adalah salinan terpasang, bukan repo.
+        print("⚠ Repo sudah mutakhir, tapi paket yang TERPASANG tertinggal:")
+        for b in (res.get("beda") or [])[:10]:
+            print("  • " + str(b))
+        try:
+            ans = input("Pasang ulang sekarang? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans in ("n", "no", "t", "tidak"):
+            print("Dilewati.")
+            return
+        print("⏳ Memasang ulang…")
+        _lapor_update(updater.apply(), _ringkas_versi)
         return
     if st == "no_git":
         print("✖ git tidak ditemukan — pasang git dulu agar bisa memperbarui.")
@@ -133,30 +165,35 @@ def _cmd_update() -> None:
         print(f"✖ status tak terduga: {st}")
         return
 
-    out = updater.apply()
+    _lapor_update(updater.apply(), _ringkas_versi)
+
+
+def _lapor_update(out: dict, ringkas_versi=None) -> None:
+    """Laporkan hasil apply() apa adanya — dan hanya sebut 'berhasil' bila
+    isinya BENAR-BENAR terverifikasi sama dengan repo, bukan karena pip pulang
+    dengan kode 0 (yang pernah terbukti berbohong)."""
     if out.get("status") != "updated":
         print(f"✖ gagal ({out.get('status')}): {out.get('detail','')}")
         return
 
-    if out.get("reinstalled"):
-        print("✓ bagas-ai diperbarui! Jalankan ulang perintah bagas-ai.")
+    if out.get("verified"):
+        print(f"✓ bagas-ai diperbarui & diverifikasi (v{out.get('version','')}).")
+        if out.get("how") == "langsung":
+            print("  Kode terbaru SUDAH aktif — tak ada yang perlu ditutup "
+                  "atau ditunggu. Jalankan ulang perintahnya saja.")
+        else:
+            print("  Jalankan ulang perintah bagas-ai.")
+        if out.get("note"):
+            print("  ℹ " + out["note"])
+        if ringkas_versi:
+            ringkas_versi()
         return
 
-    # BELUM terpasang. Dua keadaan yang SANGAT berbeda, dan dulu keduanya
-    # ditampilkan sama: sepotong OSError pip yang terpotong di tengah kalimat.
-    # Padahal saat .exe terkunci (karena update dijalankan DARI bagas-ai),
-    # pemasangannya sudah dijadwalkan otomatis — pengguna cuma perlu menutup
-    # bagas-ai, bukan panik melihat error yang sebenarnya sudah ditangani.
-    if out.get("scheduled"):
-        print("✓ Kode terbaru sudah ditarik.")
-        print("  ⏳ " + (out.get("note")
-                        or "Pemasangan berjalan otomatis begitu bagas-ai "
-                           "ditutup — cukup TUTUP lalu buka lagi."))
-        return
-
-    print("⚠ Kode terbaru sudah ditarik, tapi pemasangannya belum jalan.")
+    print("⚠ Pembaruan belum tuntas.")
     if out.get("note"):
         print("  " + out["note"])
+    for b in (out.get("diff") or [])[:6]:
+        print("  • " + str(b))
     detail = (out.get("pip_detail") or "").strip()
     if detail:
         print(f"  catatan pip: {detail}")
@@ -270,14 +307,23 @@ def _enforce_update() -> None:
         cache = updater.read_cache()
     except Exception:
         return
-    if cache.get("status") != "update_available":
+    st = cache.get("status")
+    if st not in ("update_available", "stale_install"):
         return
 
-    local, remote = cache.get("local", "?"), cache.get("remote", "?")
-    print(f"⬆ Pembaruan bagas-ai tersedia ({local} → {remote}) — "
-          f"dipasang otomatis dulu…")
-    for line in (cache.get("log") or "").splitlines()[:5]:
-        print("   • " + line)
+    if st == "stale_install":
+        # Repo mutakhir tapi paket yang dijalankan tertinggal — tak terlihat
+        # oleh pemeriksaan versi mana pun yang cuma membaca angka.
+        print("⬆ Paket bagas-ai yang terpasang tertinggal dari repo — "
+              "dipasang ulang dulu…")
+        for b in (cache.get("beda") or [])[:5]:
+            print("   • " + str(b))
+    else:
+        local, remote = cache.get("local", "?"), cache.get("remote", "?")
+        print(f"⬆ Pembaruan bagas-ai tersedia ({local} → {remote}) — "
+              f"dipasang otomatis dulu…")
+        for line in (cache.get("log") or "").splitlines()[:5]:
+            print("   • " + line)
     try:
         out = updater.apply()
     except KeyboardInterrupt:
@@ -288,17 +334,25 @@ def _enforce_update() -> None:
         print("  Lanjut pakai versi sekarang; coba `bagas-ai update` nanti.\n")
         return
 
-    if out.get("status") == "updated" and out.get("reinstalled"):
+    # `verified`, bukan `reinstalled`: memulai ulang hanya masuk akal bila kode
+    # barunya BENAR-BENAR sudah mendarat. Proses ini masih memegang modul lama
+    # di memori, jadi exec ulang itulah yang mengaktifkannya.
+    if out.get("status") == "updated" and out.get("verified"):
         print("✓ bagas-ai diperbarui — memulai ulang…\n")
         import subprocess
         rc = subprocess.call(
             [sys.executable, "-m", __package__ or "agent", *sys.argv[1:]])
         sys.exit(rc)
     if out.get("status") == "updated":
-        # Ter-update sebagian (mis. .exe terkunci di Windows) -> wajib buka ulang.
-        print("✓ Kode terbaru sudah ditarik. "
-              + (out.get("note") or "Tutup lalu buka lagi bagas-ai."))
-        sys.exit(0)
+        # Sisa kasus yang benar-benar tak bisa dipasang sekarang. Sejak kode
+        # bisa disalin langsung ke site-packages, jalur ini jarang terpakai.
+        print("⚠ Kode terbaru sudah ditarik, tapi pemasangannya belum tuntas.")
+        if out.get("note"):
+            print("  " + out["note"])
+        for b in (out.get("diff") or [])[:5]:
+            print("  • " + str(b))
+        print("  Lanjut pakai versi sekarang.\n")
+        return
     # Gagal (jaringan/git) -> jangan kunci pengguna dari AI-nya; beri tahu & lanjut.
     print(f"⚠ Gagal memasang pembaruan ({out.get('status')}): "
           f"{out.get('detail', '')}")

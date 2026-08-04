@@ -13,13 +13,16 @@ benar-benar dijalankan ikut ter-update, bukan cuma repo-nya.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import site
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -104,6 +107,136 @@ def _is_user_install() -> bool:
         return False
 
 
+# --- versi & sidik isi: sumber kebenaran BERLAPIS --------------------------
+#
+# GitHub saja TIDAK cukup untuk menjawab "apakah aku sudah terbaru". Yang
+# benar-benar dijalankan adalah salinan di site-packages, dan ia bisa menyimpang
+# dari repo tanpa satu pun tanda: pip melewati pemasangan bila nomor versinya
+# sama, build/lib bisa menyimpan kode basi, dan modul yang sudah DIHAPUS dari
+# repo bisa tertinggal sebagai berkas yatim yang tetap bisa diimpor.
+#
+# TERUKUR di laptop ini: metadata melaporkan 1.0.53 dan isi tiap berkas cocok,
+# tapi dua modul peninggalan versi lama (connectors/claude.py,
+# interfaces/winmouse.py) masih nangkring di site-packages — tak terlihat oleh
+# pemeriksaan versi mana pun yang cuma membandingkan angka.
+#
+# Maka versi diperiksa dari TIGA tempat — paket yang benar-benar terpasang,
+# pyproject di repo lokal, dan pyproject di upstream — plus sidik isi berkas,
+# satu-satunya yang bisa membuktikan ketiganya memang sama.
+
+_RE_VERSI = re.compile(r'^version\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
+
+
+def _installed_pkg_dir() -> Path | None:
+    """Folder paket `agent` yang BENAR-BENAR diimpor proses ini."""
+    pkg = _pkg_path()
+    return pkg.parent if pkg else None
+
+
+def installed_version() -> str:
+    """Versi paket menurut metadata yang terpasang ('' bila tak diketahui)."""
+    try:
+        from importlib.metadata import version
+        return version("bagasai")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _versi_teks(teks: str) -> str:
+    m = _RE_VERSI.search(teks or "")
+    return m.group(1) if m else ""
+
+
+def repo_version(repo: Path) -> str:
+    """Versi menurut pyproject.toml di repo."""
+    try:
+        return _versi_teks((repo / "pyproject.toml").read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+
+
+def _remote_version(repo: Path, upstream: str) -> str:
+    """Versi menurut pyproject.toml di upstream — tanpa perlu menariknya."""
+    if not upstream:
+        return ""
+    r = _run(["git", "show", f"{upstream}:pyproject.toml"], repo, timeout=60)
+    return _versi_teks(r.stdout) if r.returncode == 0 else ""
+
+
+def _berkas_py(root: Path) -> dict[str, bytes]:
+    """Isi tiap modul .py di bawah `root`, akhir-barisnya dinormalkan.
+
+    Normalisasi CRLF penting: repo bisa ter-checkout dengan akhir baris Windows
+    sementara salinan terpasang memakai LF (atau sebaliknya), dan tanpa ini
+    setiap berkas akan tampak berbeda padahal isinya identik."""
+    keluar: dict[str, bytes] = {}
+    if not root or not root.is_dir():
+        return keluar
+    for p in root.rglob("*.py"):
+        rel = p.relative_to(root).as_posix()
+        if "__pycache__" in rel:
+            continue
+        try:
+            keluar[rel] = p.read_bytes().replace(b"\r\n", b"\n")
+        except OSError:
+            continue
+    return keluar
+
+
+def _bandingkan(repo: Path) -> tuple[bool, list[str]]:
+    """(sinkron, daftar beda) antara paket TERPASANG dan sumber di repo."""
+    dipasang = _installed_pkg_dir()
+    sumber = repo / "src" / "agent"
+    if not dipasang or not sumber.is_dir():
+        return True, []
+    try:
+        if dipasang.resolve() == sumber.resolve():
+            return True, []      # dijalankan langsung dari sumber (editable/dev)
+    except OSError:
+        pass
+    a, b = _berkas_py(dipasang), _berkas_py(sumber)
+    if not a or not b:
+        return True, []
+    beda: list[str] = []
+    for rel in sorted(set(b) - set(a)):
+        beda.append(f"belum terpasang: {rel}")
+    for rel in sorted(set(a) - set(b)):
+        beda.append(f"yatim (sisa versi lama): {rel}")
+    for rel in sorted(set(a) & set(b)):
+        if a[rel] != b[rel]:
+            beda.append(f"isinya basi: {rel}")
+    return not beda, beda
+
+
+def versions() -> dict:
+    """Laporan versi dari SEMUA sumber sekaligus, bukan cuma GitHub.
+
+    Kunci: terpasang / repo / remote (nomor versi), commit_lokal & commit_remote,
+    `sinkron` (isi berkas terpasang == sumber di repo) dan `beda` (rinciannya)."""
+    info: dict = {
+        "terpasang": installed_version(),
+        "lokasi": str(_installed_pkg_dir() or ""),
+        "repo": "", "remote": "",
+        "commit_lokal": "", "commit_remote": "",
+        "sinkron": True, "beda": [],
+    }
+    repo = find_repo()
+    if not repo:
+        return info
+    info["repo_dir"] = str(repo)
+    info["repo"] = repo_version(repo)
+    if _git_available():
+        info["commit_lokal"] = _run(
+            ["git", "rev-parse", "--short", "HEAD"], repo).stdout.strip()
+        up = _upstream(repo)
+        if up:
+            info["commit_remote"] = _run(
+                ["git", "rev-parse", "--short", up], repo).stdout.strip()
+            info["remote"] = _remote_version(repo, up)
+    info["sinkron"], info["beda"] = _bandingkan(repo)
+    return info
+
+
 def clone_repo() -> dict:
     """Clone repo ke ~/.bagasai/src untuk MENGAKTIFKAN auto-update.
 
@@ -184,7 +317,19 @@ def check() -> dict:
     if not remote:
         return {"status": "no_upstream", "repo": str(repo)}
     if local == remote:
-        return {"status": "up_to_date", "local": local[:7], "repo": str(repo)}
+        # Repo sudah mutakhir BUKAN berarti yang berjalan juga mutakhir. Yang
+        # dieksekusi adalah salinan di site-packages, dan ia bisa tertinggal
+        # tanpa satu pun tanda — inilah kenapa versi tak boleh diperiksa dari
+        # GitHub saja.
+        sinkron, beda = _bandingkan(repo)
+        dasar = {
+            "local": local[:7], "repo": str(repo),
+            "versi_terpasang": installed_version(),
+            "versi_repo": repo_version(repo),
+        }
+        if not sinkron:
+            return {"status": "stale_install", "beda": beda[:12], **dasar}
+        return {"status": "up_to_date", **dasar}
 
     behind = _run(["git", "rev-list", "--count", f"HEAD..{upstream}"], repo).stdout.strip()
     log = _run(["git", "log", "--oneline", "-8", f"HEAD..{upstream}"], repo).stdout.strip()
@@ -427,6 +572,120 @@ def _schedule_post_exit_install(repo: Path, argv: list[str]) -> bool:
         return False
 
 
+def _salin_pohon(sumber: Path, tujuan: Path) -> tuple[int, int, list[str]]:
+    """Timpa `tujuan` dengan isi `sumber` & buang berkas yatim.
+
+    Return (jumlah_disalin, jumlah_dibuang, daftar_galat)."""
+    tujuan.mkdir(parents=True, exist_ok=True)
+    galat: list[str] = []
+    punya_sumber: set[str] = set()
+    n_salin = 0
+    for p in sorted(sumber.rglob("*")):
+        rel = p.relative_to(sumber)
+        if "__pycache__" in rel.parts:
+            continue
+        punya_sumber.add(rel.as_posix())
+        t = tujuan / rel
+        try:
+            if p.is_dir():
+                t.mkdir(parents=True, exist_ok=True)
+                continue
+            t.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, t)
+            n_salin += 1
+        except OSError as e:
+            galat.append(f"{rel.as_posix()}: {e}")
+    # Berkas yatim WAJIB dibuang: modul yang sudah dihapus dari repo tapi masih
+    # ada di site-packages tetap bisa diimpor, jadi kode mati bisa hidup lagi
+    # diam-diam. .pyc lama ikut disapu supaya tak menyembunyikan sumber yang
+    # sudah tiada.
+    n_hapus = 0
+    for p in sorted(tujuan.rglob("*"), key=lambda x: -len(x.parts)):
+        rel = p.relative_to(tujuan)
+        yatim = rel.as_posix() not in punya_sumber
+        if "__pycache__" in rel.parts:
+            yatim = True
+        if not yatim:
+            continue
+        try:
+            if p.is_file():
+                p.unlink()
+                n_hapus += 1
+            elif p.is_dir():
+                p.rmdir()
+        except OSError:
+            pass          # sisa yang bandel tak sebanding menggagalkan update
+    return n_salin, n_hapus, galat
+
+
+def _pasang_distinfo(singgah: Path, site_dir: Path) -> None:
+    """Pindahkan *.dist-info hasil build supaya `pip show` & metadata ikut baru."""
+    baru = [d for d in singgah.glob("bagasai-*.dist-info") if d.is_dir()]
+    if not baru:
+        return
+    for lama in site_dir.glob("bagasai-*.dist-info"):
+        if lama.is_dir():
+            shutil.rmtree(lama, ignore_errors=True)
+    try:
+        shutil.copytree(baru[0], site_dir / baru[0].name, dirs_exist_ok=True)
+    except OSError:
+        pass
+
+
+def _pasang_langsung(repo: Path) -> dict:
+    """Pasang kode ke site-packages TANPA menyentuh .exe yang terkunci.
+
+    Ini jawaban atas "update selalu tertunda lalu gagal". Penyebabnya bukan
+    kebetulan dan bukan sesekali: yang mengunci bagas-ai.exe adalah PERINTAH
+    UPDATE ITU SENDIRI. Menjalankan `bagas-ai update` berarti bagas-ai.exe
+    sedang berjalan, jadi pip praktis TAK PERNAH bisa menimpanya — pemasangan
+    selalu diundur ke "nanti setelah ditutup", dan di sana pun sering gagal.
+    Pengguna melihatnya sebagai pembaruan yang tak pernah benar-benar terjadi.
+
+    Kuncinya: .exe console-script hanyalah STUB peluncur — isinya path
+    interpreter + nama fungsi entry point, TANPA sepotong pun kode paket. Kode
+    yang dijalankan ada di site-packages/agent, dan berkas .py di sana tidak
+    dikunci Windows meski modulnya sedang diimpor (yang terkunci cuma .exe).
+    Jadi paket dibangun ke folder singgah lalu disalin sendiri ke tempatnya:
+    pembaruan langsung berlaku, .exe lama tetap meluncurkan kode BARU, dan tak
+    ada yang perlu ditunggu."""
+    tujuan = _installed_pkg_dir()
+    if tujuan is None:
+        return {"ok": False, "detail": "lokasi paket terpasang tak diketahui"}
+    try:
+        if tujuan.resolve() == (repo / "src" / "agent").resolve():
+            return {"ok": True, "catatan": "kode aktif langsung dari repo"}
+    except OSError:
+        pass
+    singgah = Path(tempfile.mkdtemp(prefix="bagasai-pasang-"))
+    try:
+        _purge_build(repo)
+        r = _run([sys.executable, "-m", "pip", "install", "--no-deps",
+                  "--quiet", "--upgrade", "--target", str(singgah), str(repo)],
+                 repo, timeout=600)
+        if r.returncode != 0 and "no module named pip" in (
+                r.stderr + r.stdout).lower():
+            _ensure_pip()
+            r = _run([sys.executable, "-m", "pip", "install", "--no-deps",
+                      "--quiet", "--upgrade", "--target", str(singgah),
+                      str(repo)], repo, timeout=600)
+        if r.returncode != 0:
+            return {"ok": False,
+                    "detail": (r.stderr or r.stdout).strip()[:300]}
+        sumber = singgah / "agent"
+        if not (sumber / "__init__.py").is_file():
+            return {"ok": False, "detail": "hasil build tak memuat paket agent"}
+        n_salin, n_hapus, galat = _salin_pohon(sumber, tujuan)
+        _pasang_distinfo(singgah, tujuan.parent)
+        if galat:
+            return {"ok": False, "detail": "; ".join(galat[:3])}
+        return {"ok": True, "disalin": n_salin, "dibuang": n_hapus}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"[:300]}
+    finally:
+        shutil.rmtree(singgah, ignore_errors=True)
+
+
 def _reinstall(repo: Path) -> dict:
     """Pasang ulang dari `repo`, mempertahankan cara pasang asli (--user, editable)."""
     editable = _is_editable(repo)
@@ -480,18 +739,46 @@ def _reinstall(repo: Path) -> dict:
     if inst.returncode != 0:
         _restore_scripts(digeser)
 
-    # Terkunci oleh bagas-ai ini sendiri -> jadwalkan pemasangan begitu ia keluar.
-    # Tanpa ini pengguna cuma diberi tahu "tutup lalu ulangi", dan pada praktiknya
-    # pembaruan gagal diam-diam berkali-kali.
+    ok = inst.returncode == 0
+    cara = "pip"
+    # VERIFIKASI, bukan percaya kode-keluar pip. pip bisa melaporkan sukses
+    # padahal yang terpasang masih kode lama (cache build/lib, versi dianggap
+    # sama, berkas yatim tertinggal) — persis kegagalan senyap yang membuat
+    # "sudah update" terasa bohong.
+    sinkron, beda = _bandingkan(repo)
+    if editable:
+        sinkron, beda = True, []      # kode aktif langsung dari repo
+
+    # Jalur langsung dipakai bila pip GAGAL (umumnya .exe terkunci oleh perintah
+    # update itu sendiri) MAUPUN bila pip mengaku sukses tapi hasilnya tak
+    # cocok. Dua-duanya berakhir sebagai pembaruan yang tidak terjadi.
+    langsung: dict = {}
+    if not editable and (not ok or not sinkron):
+        langsung = _pasang_langsung(repo)
+        if langsung.get("ok"):
+            sinkron, beda = _bandingkan(repo)
+            if sinkron:
+                ok, cara, locked = True, "langsung", False
+
+    # Menjadwalkan pemasangan untuk "nanti setelah ditutup" kini benar-benar
+    # jalan TERAKHIR: ia hanya menunda masalah, dan pengguna melaporkan bahwa
+    # penundaan itulah yang paling sering berujung gagal.
     dijadwalkan = False
-    if locked:
+    if not ok and locked:
         dijadwalkan = _schedule_post_exit_install(repo, base + flags + target)
 
+    detail = ""
+    if not ok:
+        detail = (langsung.get("detail")
+                  or (inst.stderr or inst.stdout).strip())[:250]
     return {
-        "ok": inst.returncode == 0,
+        "ok": ok,
+        "cara": cara,
         "locked": locked,
         "scheduled": dijadwalkan,
-        "detail": "" if inst.returncode == 0 else (inst.stderr or inst.stdout).strip()[:200],
+        "terverifikasi": sinkron,
+        "beda": beda[:8],
+        "detail": detail,
         "editable": editable,
     }
 
@@ -544,16 +831,27 @@ def background_refresh(min_interval: float = 3 * 3600) -> None:
         pass
 
 
-def apply() -> dict:
+def apply(force: bool = True) -> dict:
     """Siapkan repo bila perlu, tarik pembaruan, lalu pasang ulang.
 
-    status: no_git | no_repo | clone_error | pull_error | updated
+    force=True (bawaan) berarti POKOKNYA DIPASANG: setiap hambatan yang dulu
+    memulangkan "gagal" kini punya jalan memutar yang tak merusak apa pun —
+      * checkout pengembangan tak bisa fast-forward (ada kerja lokal) ->
+        pembaruan dipasang dari klon terpisah di ~/.bagasai/src; checkout
+        pengguna TIDAK disentuh sama sekali;
+      * fetch gagal (offline) tapi salinan terpasang ternyata basi ->
+        tetap dipasang ulang dari repo lokal yang sudah ada;
+      * .exe terkunci oleh perintah update itu sendiri -> kode disalin
+        langsung ke site-packages (lihat _pasang_langsung), tanpa penundaan.
+
+    status: no_git | no_repo | clone_error | pull_error | fetch_error | updated
     """
     if not _git_available():
         return {"status": "no_git"}
 
     repo = find_repo()
     pull_out = ""
+    beralih = ""
     if not repo:
         # Belum ada repo penopang -> siapkan dengan clone (mengaktifkan update
         # untuk instalasi salinan / installer-dari-folder).
@@ -571,57 +869,99 @@ def apply() -> dict:
         if fetch.returncode != 0:
             # Tanpa fetch sukses, reset hanya menyelaraskan ke upstream BASI ->
             # akan keliru melaporkan "updated" padahal tidak menarik apa pun.
-            return {
-                "status": "fetch_error",
-                "detail": (fetch.stderr or fetch.stdout).strip()[:300],
-                "repo": str(repo),
-            }
-        up = _upstream(repo) or f"origin/{config.REPO_BRANCH}"
-        r = _run(["git", "reset", "--hard", up], repo, timeout=120)
-        if r.returncode != 0:
-            return {
-                "status": "pull_error",
-                "detail": (r.stderr or r.stdout).strip()[:300],
-                "repo": str(repo),
-            }
-        _run(["git", "clean", "-fd"], repo, timeout=120)
-        pull_out = f"diselaraskan ke {up}"
+            # Tapi bila salinan TERPASANG ternyata basi terhadap repo lokal,
+            # masih ada pekerjaan nyata yang bisa diselesaikan sekarang juga:
+            # pasang ulang dari yang sudah ada. Itu jauh lebih berguna daripada
+            # memulangkan "gagal" pada pengguna yang cuma sedang offline.
+            sinkron, _ = _bandingkan(repo)
+            if not (force and not sinkron):
+                return {
+                    "status": "fetch_error",
+                    "detail": (fetch.stderr or fetch.stdout).strip()[:300],
+                    "repo": str(repo),
+                }
+            pull_out = ("tak bisa menghubungi remote — dipasang ulang dari "
+                        "salinan lokal yang sudah ada")
+        else:
+            up = _upstream(repo) or f"origin/{config.REPO_BRANCH}"
+            r = _run(["git", "reset", "--hard", up], repo, timeout=120)
+            if r.returncode != 0:
+                return {
+                    "status": "pull_error",
+                    "detail": (r.stderr or r.stdout).strip()[:300],
+                    "repo": str(repo),
+                }
+            _run(["git", "clean", "-fd"], repo, timeout=120)
+            pull_out = f"diselaraskan ke {up}"
     else:
-        # Checkout PENGEMBANGAN milik pengguna -> JANGAN paksa (bisa hilang kerja).
+        # Checkout PENGEMBANGAN milik pengguna -> JANGAN dipaksa reset: kerja
+        # yang belum di-commit bisa lenyap, dan itu kerugian yang jauh lebih
+        # besar daripada gagal update.
         pull = _run(["git", "pull", "--ff-only"], repo, timeout=180)
         if pull.returncode != 0:
             detail = (pull.stderr or pull.stdout).strip()[:300]
-            return {
-                "status": "pull_error",
-                "detail": (detail + "  — ada perubahan lokal / riwayat menyimpang. "
-                           "Commit/stash dulu, atau update lewat installer."),
-                "repo": str(repo),
-            }
-        pull_out = pull.stdout.strip()[:300]
+            if not force:
+                return {
+                    "status": "pull_error",
+                    "detail": (detail + "  — ada perubahan lokal / riwayat "
+                               "menyimpang. Commit/stash dulu, atau update "
+                               "lewat installer."),
+                    "repo": str(repo),
+                }
+            # force: jangan menyerah DAN jangan menyentuh kerja pengguna —
+            # ambil pembaruannya dari klon terpisah milik kita sendiri.
+            c = clone_repo()
+            if not c.get("ok"):
+                return {"status": c.get("status", "no_repo"),
+                        "detail": c.get("detail", "") or detail}
+            asal = repo
+            repo = c["repo"]
+            f2 = _run(["git", "fetch", "--all", "--quiet"], repo, timeout=180)
+            if f2.returncode == 0:
+                up = _upstream(repo) or f"origin/{config.REPO_BRANCH}"
+                _run(["git", "reset", "--hard", up], repo, timeout=120)
+                _run(["git", "clean", "-fd"], repo, timeout=120)
+            beralih = (f"checkout-mu di {asal} tak bisa fast-forward (ada "
+                       "perubahan lokal), jadi pembaruan dipasang dari klon "
+                       f"terpisah di {repo}. Checkout-mu TIDAK disentuh.")
+            pull_out = beralih
+        else:
+            pull_out = pull.stdout.strip()[:300]
 
     reinst = _reinstall(repo)
     # Bersihkan cache notifikasi startup supaya tak lagi menampilkan "usang".
     _write_cache({"status": "up_to_date", "ts": time.time()})
-    note = ""
-    if not reinst["ok"] and reinst.get("locked"):
+    note = beralih
+    if reinst["ok"] and reinst.get("cara") == "langsung":
+        note = ((note + "  ") if note else "") + (
+            "berkas .exe sedang dipakai oleh perintah update ini sendiri, jadi "
+            "kodenya dipasang langsung ke site-packages — pembaruan SUDAH "
+            "aktif, tak ada yang perlu ditunggu atau ditutup.")
+    elif not reinst["ok"] and reinst.get("locked"):
         if reinst.get("scheduled"):
-            note = ("skrip bagas-ai sedang dipakai (kamu menjalankan update DARI "
-                    "bagas-ai), jadi .exe-nya belum bisa ditimpa sekarang. "
-                    "Pemasangan SUDAH DIJADWALKAN dan akan berjalan sendiri "
-                    "begitu bagas-ai ditutup — cukup TUTUP lalu buka lagi, tak "
-                    f"perlu mengetik apa pun. (log: ~/.bagasai/{_PENDING_LOG})")
+            note = ("pemasangan langsung maupun lewat pip sama-sama tak bisa "
+                    "diselesaikan sekarang, jadi dijadwalkan berjalan sendiri "
+                    "begitu bagas-ai ditutup. "
+                    f"(log: ~/.bagasai/{_PENDING_LOG})")
         else:
-            note = ("skrip bagas-ai sedang dipakai (kamu menjalankan update DARI "
-                    "bagas-ai), jadi file .exe tak bisa ditimpa. "
-                    + ("Kode sudah ter-update — cukup TUTUP lalu buka lagi bagas-ai."
+            note = ("kode sudah ditarik, tapi pemasangannya belum berhasil. "
+                    + ("Kode aktif langsung dari repo — cukup jalankan ulang."
                        if reinst.get("editable") else
-                       "Tutup semua bagas-ai lalu jalankan `bagas-ai update` sekali lagi."))
+                       f"Rincian: {reinst.get('detail', '')}"))
+    elif not reinst.get("terverifikasi"):
+        note = ((note + "  ") if note else "") + (
+            "pemasangan selesai tapi isi paket masih belum sama dengan repo: "
+            + "; ".join(reinst.get("beda") or [])[:200])
     return {
         "status": "updated",
         "pull": pull_out,
         # Instalasi editable: kode aktif langsung dari repo -> git pull SUDAH
         # meng-update meski pip gagal menimpa .exe yang terkunci.
         "reinstalled": reinst["ok"] or bool(reinst.get("locked") and reinst.get("editable")),
+        # Bukti, bukan sekadar kode-keluar pip: isi paket terpasang == sumber repo.
+        "verified": bool(reinst.get("terverifikasi")),
+        "diff": reinst.get("beda") or [],
+        "how": reinst.get("cara", ""),
         "locked": bool(reinst.get("locked")),
         # Terkunci TAPI sudah dijadwalkan: pemasangan berjalan sendiri sesudah
         # bagas-ai ditutup, jadi ini bukan kegagalan yang menuntut tindakan.
@@ -629,4 +969,5 @@ def apply() -> dict:
         "note": note,
         "pip_detail": reinst["detail"],
         "repo": str(repo),
+        "version": repo_version(repo),
     }

@@ -2302,8 +2302,29 @@ def main(resume: bool = False) -> None:
             title="[bold #cba6f7]❔ Bantuan[/]", title_align="left",
             border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2)))
 
+    def _baris_versi() -> None:
+        """Versi dari SEMUA sumber, bukan cuma GitHub — yang menentukan apa yang
+        benar-benar jalan adalah salinan terpasang, bukan isi repo."""
+        try:
+            v = updater.versions()
+        except Exception:  # noqa: BLE001
+            return
+        t = Text("  ")
+        t.append("terpasang ", style="dim")
+        t.append(v.get("terpasang") or "?", style="#89b4fa")
+        if v.get("repo"):
+            t.append("   repo ", style="dim")
+            t.append(v["repo"], style="#a6e3a1")
+        if v.get("remote") and v["remote"] != v.get("repo"):
+            t.append("   remote ", style="dim")
+            t.append(v["remote"], style="#f9e2af")
+        if v.get("commit_lokal"):
+            t.append(f"   commit {v['commit_lokal']}", style="dim")
+        console.print(_oneline(t))
+
     def do_update() -> None:
-        console.print("\n  [dim]🔄 memeriksa pembaruan di GitHub…[/dim]")
+        console.print("\n  [dim]🔄 memeriksa pembaruan (GitHub + paket yang "
+                      "benar-benar terpasang)…[/dim]")
         try:
             res = updater.check()
         except Exception as e:  # noqa: BLE001
@@ -2314,8 +2335,38 @@ def main(resume: bool = False) -> None:
         if st == "up_to_date":
             console.print(
                 f"  [bold #a6e3a1]✓ bagas-ai sudah versi terbaru.[/]  "
-                f"[dim]({res.get('local','')})[/dim]\n"
+                f"[dim]({res.get('local','')})[/dim]"
             )
+            _baris_versi()
+            console.print()
+            return
+
+        if st == "stale_install":
+            # Repo mutakhir TAPI yang terpasang tidak. Tanpa pemeriksaan ini
+            # keadaannya tak terlihat sama sekali: git bilang aman, versi sama,
+            # padahal kode yang jalan masih yang lama.
+            body = Text()
+            body.append("Repo sudah mutakhir, tapi paket yang TERPASANG "
+                        "tertinggal.\n\n", style="bold #f9e2af")
+            body.append("Yang benar-benar dijalankan adalah salinan di "
+                        "site-packages, dan isinya berbeda dari repo:\n\n",
+                        style="dim")
+            for b in (res.get("beda") or [])[:10]:
+                body.append("  • ", style="#89b4fa")
+                body.append(b + "\n")
+            pout(Panel(body, title="[bold #cba6f7]🔄 Pemasangan tertinggal[/]",
+                       title_align="left", border_style="#f9e2af",
+                       box=box.ROUNDED, padding=(1, 2)))
+            try:
+                go = inquirer.confirm(message="Pasang ulang sekarang?",
+                                      default=True).execute()
+            except (KeyboardInterrupt, EOFError):
+                go = False
+            if not go:
+                console.print("  [dim](dilewati)[/dim]\n")
+                return
+            console.print("  [dim]⏳ memasang ulang…[/dim]")
+            _terapkan_update()
             return
         if st == "no_git":
             console.print("  [red]✖ git tidak ditemukan[/red] — pasang git dulu agar bisa memperbarui.\n")
@@ -2377,6 +2428,9 @@ def main(resume: bool = False) -> None:
             console.print(f"  [red]✖ status tak terduga:[/red] {st}\n")
             return
 
+        _terapkan_update()
+
+    def _terapkan_update() -> None:
         try:
             out = updater.apply()
         except Exception as e:  # noqa: BLE001
@@ -2392,17 +2446,32 @@ def main(resume: bool = False) -> None:
         if ost != "updated":
             console.print(f"  [red]✖ gagal ({ost}):[/red] {out.get('detail','')}\n")
             return
-        if out.get("note"):
-            note = f"\n  [#f9e2af]ℹ {_esc(out['note'])}[/]"
-        elif not out.get("reinstalled"):
-            note = f"  [dim](catatan pip: {_esc(out.get('pip_detail', ''))})[/dim]"
-        else:
-            note = ""
-        console.print(
-            "  [bold #a6e3a1]✓ bagas-ai diperbarui![/]  "
-            "[dim]jalankan ulang[/dim] [#94e2d5]bagas-ai[/] "
-            "[dim]agar perubahan aktif.[/dim]" + note + "\n"
-        )
+
+        note = f"\n  [#f9e2af]ℹ {_esc(out['note'])}[/]" if out.get("note") else ""
+        if out.get("verified"):
+            # TERVERIFIKASI = isi paket terpasang benar-benar sama dengan repo,
+            # bukan sekadar "pip keluar dengan kode 0". Bedanya penting: yang
+            # kedua pernah berbohong.
+            langsung = out.get("how") == "langsung"
+            console.print(
+                "  [bold #a6e3a1]✓ bagas-ai diperbarui & diverifikasi[/]  "
+                f"[dim]v{_esc(out.get('version', ''))}[/dim]"
+                + ("\n  [dim]kode terbaru sudah aktif — cukup jalankan ulang "
+                   "perintahnya, tak ada yang perlu ditunggu.[/dim]"
+                   if langsung else
+                   "\n  [dim]jalankan ulang[/dim] [#94e2d5]bagas-ai[/] "
+                   "[dim]agar perubahan aktif.[/dim]")
+                + note)
+            _baris_versi()
+            console.print()
+            return
+
+        console.print("  [bold #f9e2af]⚠ pembaruan belum tuntas.[/]" + note)
+        for b in (out.get("diff") or [])[:6]:
+            console.print(f"    [dim]• {_esc(b)}[/dim]")
+        if out.get("pip_detail"):
+            console.print(f"    [dim]pip: {_esc(out['pip_detail'])}[/dim]")
+        console.print()
 
     def _dir_tree_panel(p, title: str) -> None:
         body = Text()

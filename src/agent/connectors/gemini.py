@@ -123,18 +123,38 @@ class GeminiConnector(WebConnector):
     new_chat_selector = ('[data-test-id="new-chat-button"]',)
 
     # --- deteksi belum-login ---
-    # Sengaja DIKOSONGKAN. Gemini tak menyajikan komposer untuk tamu: pengunjung
-    # yang belum masuk dilempar ke accounts.google.com, dan URL itu sudah
-    # tertangkap login_url_markers bawaan base ("signin"/"login"). Menebak
-    # tombol berteks "Masuk"/"Sign in" justru berbahaya di UI yang teksnya
-    # mengikuti bahasa akun.
-    logged_out_selector = ""
-    # BUKTI POSITIF sudah login: kerangka aplikasi bersidebar. Keduanya milik
-    # halaman ber-akun dan DIVERIFIKASI hadir di semua lebar viewport. Dua
-    # penanda, bukan satu, supaya penggantian nama salah satunya tak langsung
-    # membuat sesi yang sehat divonis "belum login".
+    #
+    # DIUKUR LANGSUNG pada dua profil Chrome (2026-08-04): satu profil kosong
+    # (tamu) dan satu profil bagas-ai yang sudah masuk. Anggapan lama — "Gemini
+    # tak menyajikan komposer untuk tamu, pengunjung dilempar ke
+    # accounts.google.com" — TERBUKTI SALAH, dan itulah sebab sesi yang belum
+    # masuk dicap sudah login:
+    #
+    #   penanda                     tamu          sudah login
+    #   --------------------------  ------------  ------------
+    #   URL                         tetap /app    tetap /app     -> penanda URL tak pernah kena
+    #   chat-history-container      ADA           ada            -> TAK membedakan
+    #   rich-textarea .ql-editor    ADA, terlihat ada, terlihat  -> TAK membedakan
+    #   new-chat-button             tidak ada     ADA
+    #   a[href*="SignOutOptions"]   tidak ada     ADA
+    #   a[href*="ServiceLogin"]     ADA           tidak ada
+    #
+    # Jadi tamu memang mendapat komposer yang tampak aktif — "input terlihat"
+    # sama sekali bukan bukti — dan chat-history-container yang dulu dipakai
+    # sebagai bukti positif justru hadir di kedua keadaan.
+    #
+    # Penanda BELUM login: tautan sign-in Google. Hadir pada tamu (tersembunyi,
+    # tapi _looks_logged_out memeriksa KEBERADAAN, bukan visibilitas) dan
+    # terbukti TIDAK ada pada sesi yang sudah masuk — jadi ia tak bisa
+    # menjatuhkan sesi yang sehat.
+    logged_out_selector = 'a[href*="ServiceLogin"]'
+    # BUKTI POSITIF sudah login. Keduanya terbukti ABSEN pada tamu dan HADIR
+    # saat sudah masuk. Dua penanda, bukan satu, supaya penggantian nama salah
+    # satunya tak langsung membuat sesi yang sehat divonis "belum login":
+    # new-chat-button milik Gemini sendiri, SignOutOptions milik bilah akun
+    # Google yang dipakai seragam di seluruh produknya.
     logged_in_selector = (
-        '[data-test-id="new-chat-button"], [data-test-id="chat-history-container"]'
+        '[data-test-id="new-chat-button"], a[href*="SignOutOptions"]'
     )
 
     # --- jawaban ---
