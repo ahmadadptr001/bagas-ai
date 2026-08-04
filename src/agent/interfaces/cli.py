@@ -13,14 +13,10 @@ satu pun teks di layar yang membahas antrean.
 from __future__ import annotations
 
 import difflib
-import html
 import re
-import shutil
 import sys
-import tempfile
 import threading
 import time
-from pathlib import Path
 
 try:  # keyboard non-blocking (Windows): ketikan-selama-giliran & Ctrl+C
     import msvcrt as _msvcrt
@@ -489,52 +485,53 @@ def _row(lineno: str, sign: str, text, style: str) -> Text:
 
 # --- kotak chat: SATU komponen, selalu di tempat yang sama -----------------
 #
-# Ia menempel persis di atas status bar, baik saat idle (kamu mengetik perintah)
-# maupun saat giliran berjalan (kamu mengantre perintah berikutnya). Bentuk dan
+# Selebar terminal, menempel langsung di atas bar status, dan keduanya dipaku di
+# DASAR LAYAR — saat kamu mengetik maupun saat AI masih bekerja. Bentuk dan
 # posisinya tak pernah berubah, jadi tempat mengetik selalu satu dan itu-itu
-# saja — tak perlu dicari ulang tiap kali layar berubah.
-_KOTAK_MAKS = 100
+# saja: tak perlu dicari ulang tiap kali layar berubah.
 _GARIS_KOTAK = "#585b70"
 
 
 def _lebar_kotak() -> int:
-    """Lebar kotak chat, mengikuti terminal tapi tak pernah melar terlalu jauh."""
-    return max(28, min(console.width - 2 * _LPAD, _KOTAK_MAKS))
+    """Lebar kotak chat = LEBAR PENUH terminal.
+
+    Bukan dibatasi _KOTAK_MAKS lagi: kotak chat dan bar status adalah satu
+    kesatuan yang menempel di dasar layar, dan bar status memang selebar
+    terminal. Kotak yang lebih sempit membuat keduanya tampak tak sejajar."""
+    return max(20, console.width)
 
 
-# Baris kosong pemberi napas. Kotak chat SELALU diapit satu baris kosong di
-# atas & di bawah — di mode mengalir, mode klasik, maupun saat idle (di sana
-# KotakChat memasang Window kosong yang sama). Tanpa itu ia menempel rapat ke
-# spinner dan ke bar status sehingga ketiganya terbaca sebagai satu gumpalan.
+# Baris kosong pemberi napas DI ATAS kotak chat saja. Di BAWAHNYA sengaja tak
+# ada: kotak dan bar status satu kesatuan yang menempel di dasar layar, jadi
+# celah di antara keduanya justru memutus kesatuan itu.
 _KOSONG = Text("")
 
 
 def _kotak_chat(isi: str = "") -> list:
-    """Tiga baris kotak chat: tepi atas, baris isi, tepi bawah.
+    """Tiga baris kotak chat selebar terminal: tepi atas, baris isi, tepi bawah.
 
     Kembarannya saat idle adalah KotakChat (prompt_toolkit) — bentuk, lebar,
-    padding kiri, dan warna "❯"-nya sengaja dibuat sama persis supaya kotak
-    chat terasa satu benda yang sama, bukan dua tampilan yang mirip."""
+    dan warna "❯"-nya sengaja dibuat sama persis supaya kotak chat terasa satu
+    benda yang sama, bukan dua tampilan yang mirip."""
     lebar = _lebar_kotak()
-    m = " " * _LPAD
-    atas = Text(m)
+    atas = Text()
     atas.append("╭" + "─" * (lebar - 2) + "╮", style=_GARIS_KOTAK)
-    baris = Text(m)
+    baris = Text()
     baris.append("│ ", style=_GARIS_KOTAK)
     baris.append("❯ ", style="bold #cba6f7")
     if isi:
         # Ekor yang ditampilkan, bukan kepala: yang mau dilihat pengguna adalah
         # huruf yang BARU saja ia ketik.
-        baris.append(isi[-(lebar - 8):], style="#cdd6f4")
+        baris.append(isi[-(lebar - 6):], style="#cdd6f4")
         baris.append("▌", style="#cba6f7")
     # Potong dulu, baru ratakan sampai tepi kanan — kalau tidak, isi yang
     # kepanjangan mendorong tepi kanannya keluar layar dan kotaknya patah.
-    baris.truncate(_LPAD + lebar - 1, overflow="ellipsis")
-    pad = (_LPAD + lebar - 1) - baris.cell_len
+    baris.truncate(lebar - 1, overflow="ellipsis")
+    pad = (lebar - 1) - baris.cell_len
     if pad > 0:
         baris.append(" " * pad)
     baris.append("│", style=_GARIS_KOTAK)
-    bawah = Text(m)
+    bawah = Text()
     bawah.append("╰" + "─" * (lebar - 2) + "╯", style=_GARIS_KOTAK)
     return [_oneline(atas), _oneline(baris), _oneline(bawah)]
 
@@ -542,95 +539,106 @@ def _kotak_chat(isi: str = "") -> list:
 # Tinggi maksimum daftar sugesti "/..." di dalam kotak chat.
 _MENU_MAKS = 8
 
-# --- hasil penuh sebuah langkah: dibuka dengan KLIK, bukan diketik ----------
+# --- hasil sebuah langkah: LANGSUNG di terminal, di tempatnya --------------
 #
-# Dulu ini perintah `/expand N`, dan justru karena itu tiap langkah harus
-# memamerkan nomornya ("#3") — nomor yang tak berguna untuk apa pun selain
-# diketik ulang. Sekarang ringkasan "42 baris" ITU SENDIRI yang jadi tautan:
-# Ctrl+klik di terminal (Windows Terminal, iTerm2, GNOME Terminal, dsb.)
-# membuka hasil penuhnya di aplikasi teks bawaan.
+# Sejarah singkat supaya tak berputar lagi ke jalan yang sudah buntu:
 #
-# Kenapa tautan dan bukan klik biasa: menangkap klik biasa mengharuskan mouse
-# capture, dan mouse capture MENELAN scroll wheel — terminal tak bisa digulung
-# lagi. Itu persis alasan fitur klik yang lama dicabut. Tautan OSC 8 tak
-# menyentuh mode mouse sama sekali, jadi scroll & seleksi teks tetap milik
-# terminal sepenuhnya.
-_DIR_LANGKAH: Path | None = None
+#   1. `/expand N` — harus diketik, dan memaksa tiap langkah memamerkan nomor
+#      yang tak berguna untuk hal lain. Dibuang.
+#   2. Berkas .html + tautan yang dibuka dengan Ctrl-klik — bisa diklik, tapi
+#      menaburkan berkas di disk dan membuka jendela lain. Dibuang.
+#   3. Menangkap KLIK di baris langkahnya sendiri — TIDAK BISA, dan bukan soal
+#      kemauan: (a) klik hanya sampai ke aplikasi bila mouse capture menyala,
+#      dan itu menelan scroll wheel; (b) begitu tercetak, baris langkah jadi
+#      scrollback milik terminal — aplikasi tak punya cara tahu baris apa yang
+#      ada di koordinat yang diklik, apalagi menulis ulang di sana.
+#
+# Maka hasilnya ditampilkan saja SEKARANG, di tempatnya, dengan latar abu-abu
+# gelap sebagai pembeda — dibatasi beberapa baris supaya keluaran 400 baris tak
+# menenggelamkan riwayat.
+_PRATINJAU_BARIS = 8
+_BG_HASIL = "#1e1e2e"
 
 
-def _dir_langkah() -> Path | None:
-    """Folder sementara berisi hasil penuh tiap langkah (per sesi, sekali buat).
+def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
+    """Blok pratinjau keluaran sebuah langkah, berlatar abu-abu gelap.
 
-    Isi folder sesi LAMA dibersihkan di sini: berkasnya cuma berguna selama
-    terminalnya masih terbuka, dan tanpa sapuan ini ia menumpuk diam-diam di
-    %TEMP% seumur pemakaian."""
-    global _DIR_LANGKAH
-    if _DIR_LANGKAH is not None:
-        return _DIR_LANGKAH
+    Baris kosong di ujung dibuang lebih dulu: keluaran perintah hampir selalu
+    berakhir dengan newline, dan tanpa ini blok abu-abunya punya baris kosong
+    menggantung yang membuatnya terlihat seperti salah render."""
+    isi = [ln.rstrip() for ln in lines]
+    while isi and not isi[-1].strip():
+        isi.pop()
+    while isi and not isi[0].strip():
+        isi.pop(0)
+    if not isi:
+        return []
+    sisa = len(isi) - _PRATINJAU_BARIS
+    tampil = isi[:_PRATINJAU_BARIS]
+    if sisa > 0:
+        tampil.append(f"… {sisa} baris lagi")
+    lebar = max(20, console.width - 5)
+    gaya = f"on {_BG_HASIL}"
+    tepi = "#f38ba8" if gagal else "#585b70"
+    out = []
+    for i, ln in enumerate(tampil):
+        baris = Text("     ")
+        # Garis tepi kiri: penanda "ini satu blok", jauh lebih murah daripada
+        # bingkai penuh yang bakal beradu dengan kotak chat satu-satunya.
+        baris.append("▏", style=f"{tepi} {gaya}")
+        redup = sisa > 0 and i == len(tampil) - 1
+        baris.append(" " + ln, style=f"{'#7f849c italic' if redup else '#a6adc8'} {gaya}")
+        baris.truncate(lebar, overflow="ellipsis")
+        pad = lebar - baris.cell_len
+        if pad > 0:
+            baris.append(" " * pad, style=gaya)
+        out.append(_oneline(baris))
+    return out
+
+
+# --- memaku tampilan ke DASAR LAYAR ----------------------------------------
+#
+# Saat idle tak ada yang perlu dilakukan: prompt_toolkit selalu memberi aplikasi
+# non-fullscreen setinggi sisa baris di bawah kursor, dan Window pendorong di
+# KotakChat._rakit mendorong kotak + bar mentok ke bawah.
+#
+# rich.Live tak punya mekanisme itu — ia menggambar di posisi kursor apa adanya,
+# jadi kalau layar masih lowong regionnya menggantung di tengah. Karena itu
+# kursornya didorong dulu ke baris terakhir SEBELUM region mulai menggambar.
+# Sesudah menyentuh dasar, ia tinggal di sana sendiri: tiap baris baru yang
+# tercetak di atasnya menggulung layar, bukan menggeser regionnya turun.
+_KELUARAN_PT: dict = {"out": None, "menyerah": False}
+
+
+def _sisa_baris_bawah() -> int | None:
+    """Jumlah baris dari kursor sampai baris terakhir layar (kursornya ikut).
+
+    Dipinjam dari prompt_toolkit karena ia sudah menyediakannya per-platform
+    (di Windows lewat GetConsoleScreenBufferInfo). None = terminalnya tak bisa
+    ditanya; itu bukan kegagalan, cuma berarti tampilan tak bisa dipaku ke dasar
+    di sana — semua yang lain tetap jalan seperti biasa."""
+    if _KELUARAN_PT["menyerah"]:
+        return None
     try:
-        induk = Path(tempfile.gettempdir()) / "bagasai-langkah"
-        induk.mkdir(parents=True, exist_ok=True)
-        batas = time.time() - 86400          # sisa kemarin -> buang
-        for lama in induk.iterdir():
-            try:
-                if lama.is_dir() and lama.stat().st_mtime < batas:
-                    shutil.rmtree(lama, ignore_errors=True)
-            except OSError:
-                pass
-        _DIR_LANGKAH = Path(tempfile.mkdtemp(prefix="sesi-", dir=str(induk)))
-    except Exception:  # noqa: BLE001 - tanpa folder, tautan tinggal dilewati
+        if _KELUARAN_PT["out"] is None:
+            from prompt_toolkit.output.defaults import create_output
+            _KELUARAN_PT["out"] = create_output(stdout=sys.stdout)
+        return _KELUARAN_PT["out"].get_rows_below_cursor_position()
+    except Exception:  # noqa: BLE001 - sekali gagal, jangan dicoba tiap giliran
+        _KELUARAN_PT["menyerah"] = True
         return None
-    return _DIR_LANGKAH
 
 
-# Halaman hasil-penuh. Sengaja HTML, bukan .txt: yang dibuka harus TERLIHAT
-# sebagai "tampilan expand" — latar abu-abu gelap, monospace, palet yang sama
-# dengan terminal — bukan lembar putih Notepad yang tak bisa dibedakan dari
-# berkas mana pun. Semua gaya ditanam di berkasnya sendiri (tanpa aset luar),
-# jadi ia tetap utuh walau dibuka offline atau dipindahkan.
-_HAL_HASIL = """<!doctype html><meta charset="utf-8">
-<title>{judul_tab}</title>
-<style>
-  :root {{ color-scheme: dark; }}
-  body {{ margin:0; padding:28px 22px; background:#181825; color:#cdd6f4;
-         font:13px/1.55 "Cascadia Code","JetBrains Mono",Consolas,monospace; }}
-  header {{ max-width:1100px; margin:0 auto 16px; }}
-  h1 {{ margin:0 0 4px; font-size:15px; color:#cba6f7; font-weight:700; }}
-  .sub {{ color:#7f849c; font-size:12px; }}
-  .sub b {{ color:#{warna_status}; font-weight:600; }}
-  pre {{ max-width:1100px; margin:0 auto; padding:18px 20px; background:#1e1e2e;
-        border:1px solid #313244; border-left:3px solid #{warna_status};
-        border-radius:10px; white-space:pre-wrap; word-break:break-word; }}
-</style>
-<header><h1>{judul}</h1>
-<div class="sub"><b>{status}</b> · {n_baris} baris · langkah {n}</div></header>
-<pre>{isi}</pre>
-"""
+def _ke_dasar_layar() -> None:
+    """Dorong kursor ke baris TERAKHIR layar memakai baris kosong.
 
+    Baris kosongnya jatuh di petak yang barusan ditinggalkan kotak idle (sudah
+    dihapus, jadi memang kosong), sehingga tak ada celah baru yang terlihat."""
+    sisa = _sisa_baris_bawah()
+    if sisa and sisa > 1:
+        console.file.write("\n" * (sisa - 1))
+        console.file.flush()
 
-def _tautan_hasil(n: int, judul: str, isi: str, *, gagal: bool = False) -> str | None:
-    """Tulis hasil penuh langkah #n jadi halaman, kembalikan URL-nya (atau None).
-
-    Dipanggil sekali per langkah, saat langkahnya selesai — berkasnya harus
-    sudah ada SEBELUM tautannya tercetak, karena sesudah itu barisnya jadi
-    scrollback biasa yang tak bisa disentuh lagi."""
-    d = _dir_langkah()
-    if d is None:
-        return None
-    try:
-        f = d / f"langkah-{n}.html"
-        f.write_text(_HAL_HASIL.format(
-            judul_tab=html.escape(f"langkah {n} · {judul}"[:80]),
-            judul=html.escape(judul),
-            status="gagal" if gagal else "selesai",
-            warna_status="f38ba8" if gagal else "a6e3a1",
-            n_baris=len(isi.splitlines()),
-            n=n,
-            isi=html.escape(isi) or "<i>(tidak ada keluaran)</i>",
-        ), encoding="utf-8", errors="replace")
-        return f.resolve().as_uri()
-    except Exception:  # noqa: BLE001 - gagal menulis != langkah gagal
-        return None
 
 # --- bar status permanen ---------------------------------------------------
 #
@@ -765,17 +773,23 @@ class KotakChat:
                     filter=has_completions),
                 self._tepi("╰", "╯"),
             ],
-            width=lambda: D.exact(_lebar_kotak()),
-        )
+        )   # tanpa `width`: kotak mengisi LEBAR PENUH terminal (lihat
+            # _lebar_kotak), sejajar dengan bar status di bawahnya.
         return HSplit([
-            # Baris kosong pengapit — kembaran _KOSONG di sisi rich, supaya
-            # jarak kotak ke sekelilingnya tak berubah sedikit pun saat giliran
-            # selesai dan tampilannya berpindah tangan dari rich ke sini.
+            # PENDORONG. Inilah yang memakukan kotak + bar ke DASAR LAYAR:
+            # prompt_toolkit selalu memberi aplikasi non-fullscreen setinggi
+            # sisa baris di bawah kursor (renderer: height = max(
+            # _min_available_height, …)), jadi ruang itu memang sudah ada —
+            # dulu saja seluruhnya menumpuk di atas sehingga kotaknya
+            # menggantung di tengah layar. Window lentur ini menelan sisa
+            # ruangnya, dan yang di bawahnya terdorong mentok ke bawah.
+            Window(),
+            # Satu baris napas di atas kotak — kembaran _KOSONG di sisi rich,
+            # supaya jaraknya tak berubah sedikit pun saat giliran selesai dan
+            # tampilannya berpindah tangan dari rich ke sini.
             Window(height=1),
-            # Padding kiri sama seperti seluruh UI rich -> kotak idle dan kotak
-            # saat giliran berjalan berdiri di kolom yang sama persis.
-            VSplit([Window(width=_LPAD), kotak, Window()]),
-            Window(height=1),
+            kotak,
+            # TANPA baris kosong di sini: bar status menempel langsung.
             Window(FormattedTextControl(self._status), height=1,
                    dont_extend_height=True, style="class:bottom-toolbar"),
         ])
@@ -1049,7 +1063,6 @@ class Status:
             self._baris_status(),
             _KOSONG,
             *_kotak_chat(),
-            _KOSONG,
             _bar_status(self.agent, self.total()),
         )
 
@@ -1122,7 +1135,7 @@ _TIPS = (
     "perintah menetap (mis. npm run dev) otomatis jalan di latar — terminal tetap bebas",
     "Ctrl+C sekali = batalkan dengan aman; ketik 'lanjutkan' untuk meneruskan",
     "bagas-ai --resume melanjutkan percakapan terakhir di folder ini",
-    "ringkasan \"N baris\" di bawah tiap langkah bisa di-Ctrl+klik — hasil penuhnya terbuka",
+    "keluaran tiap langkah langsung tampil di bawahnya, dipotong biar riwayat tetap terbaca",
     "tiap perubahan file ditampilkan sebagai diff dulu, sebelum berkasnya disentuh",
     "/memory menyimpan fakta yang harus diingat lintas sesi",
     "/effort memilih varian model & mode berpikir langsung di situs modelnya",
@@ -1271,8 +1284,8 @@ class TurnView:
         kepala (✓/✗ + label) lalu ringkasan "N baris" yang BISA DIKLIK.
 
         Nomor langkah tak lagi ditampilkan: satu-satunya gunanya dulu adalah
-        diketik ulang sebagai `/expand N`, dan sekarang hasil penuhnya dibuka
-        dengan Ctrl+klik pada ringkasannya sendiri."""
+        diketik ulang sebagai `/expand N`, dan hasilnya kini tampil langsung
+        di bawah barisnya sendiri."""
         label = rec["label"] or ""
         if len(label) > 64:
             label = label[:61] + "…"
@@ -1283,20 +1296,7 @@ class TurnView:
             f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"))]
         lines = rec.get("_lines") or []
         if lines:
-            unit = "hasil" if rec["name"] == "web_search" else "baris"
-            ringkas = Text("     ", style="dim")
-            if failed:
-                ringkas.append("gagal · ", style="#f38ba8")
-            ringkas.append(f"{rec.get('_nlines', 0)} {unit}")
-            url = _tautan_hasil(rec["n"], f"{phase} · {label}",
-                                "\n".join(lines), gagal=failed)
-            if url:
-                # Digarisbawahi supaya terlihat BISA diklik — di terminal, teks
-                # bertaut yang tak ditandai apa-apa tak pernah dicoba orang.
-                ringkas.stylize(Style(link=url, underline=True), 5,
-                                ringkas.cell_len)
-                ringkas.append("  Ctrl+klik", style="dim italic")
-            out.append(_oneline(ringkas))
+            out.extend(_pratinjau_hasil(lines, gagal=failed))
         return out
 
     def __rich__(self):
@@ -1323,7 +1323,6 @@ class TurnView:
         # Satu baris kosong di atas & di bawah kotak chat — lihat _KOSONG.
         rows.append(_KOSONG)
         rows.extend(self._kotak_ketikan())
-        rows.append(_KOSONG)
         rows.append(_bar_status(self.agent, self.total()))
         return Group(*rows)
 
@@ -1528,11 +1527,10 @@ def main(resume: bool = False) -> None:
     status_obj = Status(agent, total=_total_global)
 
     # --- Jejak langkah -------------------------------------------------------
-    # Tiap pemanggilan tool = satu "langkah" bernomor. Nomornya kini tak pernah
-    # tampil di layar — ia cuma penamaan berkas hasil-penuh (langkah-N.html)
-    # yang dibuka lewat Ctrl+klik. `steps` menyimpan ringkasannya untuk
-    # ringkasan giliran & pemicu indeks ulang; `cur_step` menjembatani
-    # on_tool -> on_tool_result.
+    # Tiap pemanggilan tool = satu "langkah" bernomor. Nomornya tak pernah
+    # tampil di layar lagi — ia cuma urutan internal. `steps` menyimpan
+    # ringkasannya untuk ringkasan giliran & pemicu indeks ulang; `cur_step`
+    # menjembatani on_tool -> on_tool_result.
     steps: dict[int, dict] = {}
     step_ctr = {"n": 0}
     cur_step: dict = {}
@@ -1685,29 +1683,16 @@ def main(resume: bool = False) -> None:
         console.print(f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
                       f"   [dim]{dur_s}[/]")
 
-        # Baris kedua: ringkasan hasil, sekaligus tautan ke hasil penuhnya.
+        # Di bawahnya: pratinjau keluarannya, berlatar abu-abu gelap. Langkah
+        # GAGAL pun ikut ditampilkan — justru di situlah isinya paling
+        # dibutuhkan (pesan galat, jejak tumpukan, keluaran perintah yang
+        # error); menyembunyikannya di balik satu kata "gagal" memaksa pengguna
+        # menyuruh AI mengulang cuma untuk melihat sebabnya.
         body = re.sub(r"^exit_code=\S+\n?", "", text)
         bersih = _bersih_kendali(body)
-        nlines = len([ln for ln in bersih.splitlines() if ln.strip()])
-        if failed or (name in _EXPANDABLE and nlines > 0):
-            # Langkah GAGAL pun diberi tautan — justru di situlah isi hasilnya
-            # paling dibutuhkan (pesan galat, jejak tumpukan, keluaran perintah
-            # yang error). Menyembunyikannya di balik satu kata "gagal" memaksa
-            # pengguna menyuruh AI mengulang cuma untuk melihat sebabnya.
-            unit = "hasil" if name == "web_search" else "baris"
-            ringkas = Text("     ", style="dim")
-            if failed:
-                ringkas.append("gagal", style="#f38ba8")
-                if nlines:
-                    ringkas.append(f" · {nlines} {unit}")
-            else:
-                ringkas.append(f"{nlines} {unit}")
-            url = _tautan_hasil(n, f"{phase} · {label}", bersih, gagal=failed)
-            if url:
-                ringkas.stylize(Style(link=url, underline=True), 5,
-                                ringkas.cell_len)
-                ringkas.append("  Ctrl+klik", style="dim italic")
-            console.print(ringkas)
+        if failed or (name in _EXPANDABLE and bersih.strip()):
+            for baris in _pratinjau_hasil(bersih.splitlines(), gagal=failed):
+                console.print(baris)
         elif name in _TOOL_DIFF:
             # Tampilkan status cek sintaks bila ada di hasil — edit_file &
             # append_file juga mengembalikannya, bukan cuma write_file.
@@ -1922,7 +1907,7 @@ def main(resume: bool = False) -> None:
         """Jalankan satu giliran INLINE (tanpa layar-penuh, tetap di alur terminal
         biasa). Semua konten (langkah, diff, jawaban) MENGALIR statis ke
         scrollback; yang hidup hanya footer status kecil di baris paling bawah.
-        Hasil penuh langkah dibuka lewat Ctrl+klik pada ringkasannya. Ctrl+C
+        Keluaran tiap langkah tampil langsung di bawah barisnya. Ctrl+C
         membatalkan. Bila gagal, jatuh ke process_classic.
 
         Model CONNECTOR web (Kimi/Qwen web) memakai jalur yang SAMA: ia kini
@@ -2041,11 +2026,9 @@ def main(resume: bool = False) -> None:
 
         # Mouse capture SENGAJA tak dipakai lagi: dulu ia ada untuk klik-buka
         # langkah di region live, tapi ia MENELAN event scroll wheel (terminal
-        # tak bisa digulung). Ia TETAP tak dipakai walau hasil langkah kini bisa
-        # diklik: yang diklik adalah TAUTAN (OSC 8), dan tautan ditangani
-        # terminal sendiri tanpa mode mouse apa pun — jadi scroll & seleksi teks
-        # tetap 100% native, sekaligus baris yang sudah tergulir jauh ke atas
-        # pun masih bisa dibuka (aplikasi tak pernah tahu isi scrollback).
+        # tak bisa digulung) — dan kini keluaran tiap langkah sudah tercetak
+        # statis ke scrollback, jadi tak ada lagi yang perlu diklik sama sekali.
+        # Scroll & seleksi teks tetap 100% native.
         worker_thread = threading.Thread(target=worker, daemon=True)
         interrupted = False
 
@@ -2093,6 +2076,10 @@ def main(resume: bool = False) -> None:
             return False                            # kontrol lain (^R/^C dsb.)
 
         try:
+            # Jaring pengaman: kalau ada yang menggeser kursor sesudah gema
+            # (menu, notifikasi bot, layar dibersihkan), region hidup tetap
+            # mulai dari dasar layar. No-op bila kursornya memang sudah di sana.
+            _ke_dasar_layar()
             with Live(view, console=console, refresh_per_second=12,
                       transient=False, vertical_overflow="visible") as live:
                 live_holder["live"] = live
@@ -2235,6 +2222,7 @@ def main(resume: bool = False) -> None:
         interrupted = False
         forced = False
         try:
+            _ke_dasar_layar()          # sama seperti mode mengalir — lihat di sana
             with Live(status_obj, console=console, refresh_per_second=12,
                       transient=True) as live:
                 live_holder["live"] = live
@@ -3238,7 +3226,12 @@ def main(resume: bool = False) -> None:
             # Kotaknya menghilang begitu Enter ditekan (erase_when_done), jadi
             # yang mengabadikan pesan ke riwayat adalah gema ini — bentuknya
             # sama persis dengan gema pesan yang diantrekan.
+            #
+            # Didorong ke dasar layar SEBELUM gemanya, bukan sesudah: baris
+            # kosong pendorongnya lalu jatuh di petak bekas kotak yang barusan
+            # dihapus, jadi tak ada celah yang terlihat di bawah gema.
             if raw.strip():
+                _ke_dasar_layar()
                 console.print(f"  [bold #cba6f7]❯[/] "
                               f"[#cba6f7]{_esc(raw.strip())}[/]")
         text = raw.strip()
