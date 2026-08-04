@@ -397,6 +397,50 @@ def _row(lineno: str, sign: str, text, style: str) -> Text:
     return line
 
 
+# --- kotak chat: SATU komponen, selalu di tempat yang sama -----------------
+#
+# Ia menempel persis di atas status bar, baik saat idle (kamu mengetik perintah)
+# maupun saat giliran berjalan (kamu mengantre perintah berikutnya). Bentuk dan
+# posisinya tak pernah berubah, jadi tempat mengetik selalu satu dan itu-itu
+# saja — tak perlu dicari ulang tiap kali layar berubah.
+_KOTAK_MAKS = 100
+_GARIS_KOTAK = "#585b70"
+
+
+def _lebar_kotak() -> int:
+    """Lebar kotak chat, mengikuti terminal tapi tak pernah melar terlalu jauh."""
+    return max(28, min(console.width - 2 * _LPAD, _KOTAK_MAKS))
+
+
+def _kotak_chat(isi: str, *, kosong: str = "", aktif: bool = True) -> list:
+    """Tiga baris kotak chat: tepi atas, baris isi, tepi bawah."""
+    lebar = _lebar_kotak()
+    m = " " * _LPAD
+    atas = Text(m)
+    atas.append("╭" + "─" * (lebar - 2) + "╮", style=_GARIS_KOTAK)
+    baris = Text(m)
+    baris.append("│ ", style=_GARIS_KOTAK)
+    if isi:
+        baris.append("❯ ", style="bold #cba6f7")
+        # Ekor yang ditampilkan, bukan kepala: yang mau dilihat pengguna adalah
+        # huruf yang BARU saja ia ketik.
+        baris.append(isi[-(lebar - 8):], style="#cdd6f4")
+        baris.append("▌", style="#cba6f7")
+    else:
+        baris.append("❯ ", style=_GARIS_KOTAK)
+        baris.append(kosong, style="dim italic" if aktif else "dim")
+    # Potong dulu, baru ratakan sampai tepi kanan — kalau tidak, isi yang
+    # kepanjangan mendorong tepi kanannya keluar layar dan kotaknya patah.
+    baris.truncate(_LPAD + lebar - 1, overflow="ellipsis")
+    pad = (_LPAD + lebar - 1) - baris.cell_len
+    if pad > 0:
+        baris.append(" " * pad)
+    baris.append("│", style=_GARIS_KOTAK)
+    bawah = Text(m)
+    bawah.append("╰" + "─" * (lebar - 2) + "╯", style=_GARIS_KOTAK)
+    return [_oneline(atas), _oneline(baris), _oneline(bawah)]
+
+
 # Tool yang MENGUBAH ISI file -> perubahannya ditampilkan sebagai diff berwarna
 # SEBELUM file disentuh. Dulu hanya write_file, sehingga perubahan lewat
 # edit_file/append_file lolos tanpa bisa ditinjau — padahal justru edit_file yang
@@ -861,82 +905,40 @@ class TurnView:
         except Exception:  # noqa: BLE001 - pratinjau tak boleh menggagalkan giliran
             return
 
-    # Tinggi panel chat SELALU tetap: tepi atas + N baris teks + tepi bawah.
-    # Bukan gaya belaka — region live yang tingginya berubah tiap frame membuat
-    # rich menggambar ulang kacau (kedip & baris hantu). Karena itu barisnya
-    # dibungkus SENDIRI ke lebar tetap lalu dipaksa berjumlah persis _CHAT_BARIS,
-    # bukan diserahkan ke pembungkus otomatis rich.
-    _CHAT_BARIS = 3
+    def _baris_aliran(self):
+        """Satu baris POLOS berisi ekor kalimat yang sedang ditulis AI.
 
-    def _lebar_chat(self) -> int:
-        return max(28, min(console.width - 2 * _LPAD, 96))
-
-    @staticmethod
-    def _bungkus_ekor(teks: str, lebar: int, n: int) -> list[str]:
-        """`n` baris TERAKHIR dari `teks` yang dibungkus selebar `lebar`.
-
-        Yang ditampilkan adalah ekornya — bagian yang baru saja diketik AI —
-        jadi panelnya terasa seperti teks berjalan, bukan potongan awal yang
-        membeku sementara tulisannya sudah jauh di depan."""
-        # Cukup ambil ekor yang pasti melebihi kapasitas panel; membungkus
-        # ribuan karakter tiap frame sia-sia.
-        potong = teks[-(lebar * (n + 2)):]
-        baris: list[str] = []
-        kini = ""
-        for kata in potong.split(" "):
-            if not kini:
-                kini = kata
-            elif len(kini) + 1 + len(kata) <= lebar:
-                kini += " " + kata
-            else:
-                baris.append(kini)
-                kini = kata
-            # Satu "kata" yang lebih panjang dari panel (URL, path) dipenggal
-            # keras supaya tak pernah meluber dan menambah tinggi region.
-            while len(kini) > lebar:
-                baris.append(kini[:lebar])
-                kini = kini[lebar:]
-        if kini:
-            baris.append(kini)
-        baris = baris[-n:]
-        return [""] * (n - len(baris)) + baris
-
-    def _panel_chat(self):
-        """Gelembung chat berukuran TETAP tepat di atas footer.
-
-        Isinya teks BERSIH yang sedang ditulis AI — kalimat yang memang
-        ditujukan ke pengguna, tanpa sepotong pun blok [[TOOL]] (lihat
-        note_stream). Dibuat berbeda dari sisa UI (bertepi & berlabel) supaya
-        jelas ini SUARA AI yang sedang berjalan, bukan log langkah: log
-        mengalir ke scrollback dan tinggal, sedangkan yang ini hidup lalu
-        digantikan versi rapinya begitu balasannya utuh."""
+        Sengaja TANPA bingkai: yang bertepi di layar ini cuma satu, yaitu kotak
+        chat. Kalimat AI yang mengalir bukan komponen tetap — ia numpang lewat
+        lalu digantikan versi rapinya di scrollback begitu balasannya utuh, jadi
+        memberinya bingkai sendiri justru membuatnya tampak sederajat dengan
+        kotak chat dan layar terasa penuh kotak."""
         teks = " ".join((self._bersih or "").split())
         if not teks:
             return None
-        lebar = self._lebar_chat()
-        m = " " * _LPAD
-        judul = " 🤖 bagas-ai "
-        # cell_len, BUKAN len: emoji memakan DUA kolom terminal, jadi menghitung
-        # panjang karakter membuat tepi atas lebih lebar satu kolom dari tepi
-        # bawah — miring sedikit, tapi langsung kelihatan.
-        sisa = max(0, lebar - Text(judul).cell_len - 3)
-        atas = Text(m, style="")
-        atas.append("╭─", style="#585b70")
-        atas.append(judul, style="bold #89b4fa")
-        atas.append("─" * sisa + "╮", style="#585b70")
-        rows = [_oneline(atas)]
-        isi = self._bungkus_ekor(teks, lebar - 4, self._CHAT_BARIS)
-        for ke, b in enumerate(isi):
-            baris = Text(m, style="")
-            baris.append("│ ", style="#585b70")
-            baris.append(b, style="#cdd6f4")
-            if ke == self._CHAT_BARIS - 1:
-                baris.append("▌", style="#89b4fa")   # kursor: ini masih berjalan
-            rows.append(_oneline(baris))
-        bawah = Text(m, style="")
-        bawah.append("╰" + "─" * (lebar - 2) + "╯", style="#585b70")
-        rows.append(_oneline(bawah))
-        return Group(*rows)
+        lebar = max(20, _lebar_kotak() - 2)
+        if len(teks) > lebar:
+            # Ekornya yang ditampilkan (bagian yang baru saja ditulis), tapi
+            # jangan mulai di tengah kata: "…ca connectors/browser.py" terbaca
+            # seperti tampilan rusak, bukan seperti kalimat yang sedang jalan.
+            ekor = teks[-(lebar - 2):]
+            spasi = ekor.find(" ")
+            if 0 <= spasi <= 24:
+                ekor = ekor[spasi + 1:]
+            teks = "… " + ekor
+        return _oneline(Text("  " + teks, style="#7f849c"))
+
+    def _kotak_ketikan(self) -> list:
+        """Kotak chat yang SAMA seperti saat idle, dipakai untuk mengantre.
+
+        Sengaja identik bentuknya dengan prompt biasa: mengetik selama giliran
+        berjalan itu tetap "mengetik pesan", jadi tempatnya tak boleh berpindah
+        atau berganti rupa. Kalau tampilannya beda, Enter terasa seperti
+        tindakan lain — padahal ia cuma mengantre."""
+        return _kotak_chat(
+            self.typing,
+            kosong="ketik untuk mengantre perintah berikutnya…",
+            aktif=bool(self.typing))
 
     # --- render satu langkah (dipanggil SEKALI saat langkah selesai) ---
     def _render_step(self, rec: dict) -> list:
@@ -977,9 +979,12 @@ class TurnView:
         if self.done:
             return Text("")
         rows = []
-        chat = self._panel_chat()
-        if chat is not None:
-            rows.extend(chat.renderables)
+        aliran = self._baris_aliran()
+        if aliran is not None:
+            rows.append(aliran)
+        # Kotak chat DI ATAS status bar — susunan yang sama persis seperti saat
+        # idle, jadi tempat mengetik tak pernah berpindah.
+        rows.extend(self._kotak_ketikan())
         footer = self._footer()
         if isinstance(footer, Group):
             rows.extend(footer.renderables)
@@ -1020,16 +1025,13 @@ class TurnView:
             f"[dim]token[/]{effseg}{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
         rows = [status]
-        # Ketikan yang sedang berlangsung + antrean prompt — supaya pengguna
-        # MELIHAT ketikannya mendarat (terminal biasa tak menggemakan apa pun
-        # selama giliran berjalan) dan yakin Enter = antre, bukan batal.
+        # Ketikannya sendiri tampil di KOTAK CHAT (lihat _kotak_ketikan), bukan
+        # di sini — supaya bentuk & tempatnya sama persis dengan prompt idle.
+        # Yang tersisa di footer cuma penegasan bahwa Enter itu mengantre.
         if self.typing:
-            ket = Text("  ❯ ", style="bold #cba6f7")
-            ket.append(self.typing, style="#cdd6f4")
-            ket.append("▌", style="#cba6f7")
-            ket.append("   Enter = antre (tidak membatalkan)",
-                       style="dim italic")
-            rows.append(_oneline(ket))
+            rows.append(_oneline(Text(
+                "  Enter = antre (tidak membatalkan giliran ini)",
+                style="dim italic")))
         if self.queue_n:
             rows.append(_oneline(Text(
                 f"  ⏳ {self.queue_n} prompt di antrean — dikerjakan setelah "
@@ -2822,6 +2824,12 @@ def main(resume: bool = False) -> None:
     # Gaya status bar: latar gelap "catppuccin" + aksen warna per segmen.
     _pt_style = PTStyle.from_dict({
         "bottom-toolbar": "bg:#181825 #cdd6f4 noreverse",
+        # Tepi kotak chat. `bg:default` WAJIB pada tepi bawah: ia tinggal di
+        # dalam bottom_toolbar, dan tanpa ini latar bar ikut mewarnai seluruh
+        # baris sehingga garisnya tampak sebagai pita pekat, bukan tepi kotak.
+        "garis": "#585b70",
+        "tutup": "bg:default #585b70 noreverse",
+        "rprompt": "bg:default",
         "sep": "#45475a",
         "brand": "#cba6f7 bold",
         "model": "#89b4fa bold",
@@ -2845,6 +2853,23 @@ def main(resume: bool = False) -> None:
         complete_while_typing=True,  # sugesti muncul otomatis saat mengetik
     )
 
+    # Kotak chat idle. Tepi ATAS + "│ ❯ " jadi prompt; tepi KANAN dipasang lewat
+    # rprompt (prompt_toolkit menaruhnya di ujung kanan baris input); tepi BAWAH
+    # jadi baris pertama bottom_toolbar. Itulah satu-satunya cara menutup kotak
+    # di sekeliling baris input yang tingginya bisa berubah saat teks membungkus.
+    def _pt_kotak_atas() -> str:
+        return "─" * (_lebar_kotak() - 2)
+
+    def prompt_kotak():
+        return HTML(
+            f'<garis>╭{_pt_kotak_atas()}╮</garis>\n'
+            '<garis>│</garis> <style fg="#cba6f7"><b>❯</b></style> ')
+
+    def prompt_lanjutan(width, line_number, is_soft_wrap):
+        # Baris kedua dst (teks membungkus / multi-baris): tepi kirinya harus
+        # ikut turun, kalau tidak kotaknya bolong di tengah.
+        return HTML('<garis>│</garis>   ')
+
     # Status bar token PERMANEN di paling bawah (selalu terlihat & rapi).
     def bottom_toolbar():
         s = agent.tokens_session
@@ -2855,6 +2880,7 @@ def main(resume: bool = False) -> None:
         eff = ""
         sep = " <sep>│</sep> "
         return HTML(
+            f'<tutup>╰{_pt_kotak_atas()}╯</tutup>\n'
             " <brand>⬢ bagas-ai</brand>"
             + sep
             + f"{kind} <model>{spec.label}</model>{eff}"
@@ -2884,7 +2910,9 @@ def main(resume: bool = False) -> None:
                 typing_state["buf"] = ""
                 with patch_stdout(raw=True):
                     raw = session_pt.prompt(
-                        HTML('<style fg="#cba6f7"><b>❯</b></style> '),
+                        prompt_kotak,
+                        rprompt=HTML("<garis>│</garis>"),
+                        prompt_continuation=prompt_lanjutan,
                         bottom_toolbar=bottom_toolbar,
                         default=prefill)
             except KeyboardInterrupt:
