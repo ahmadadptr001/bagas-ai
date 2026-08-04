@@ -173,6 +173,58 @@ def _tanya_tanpa_ask_user(text: str) -> bool:
     return bool(_TANYA_PILIHAN_RE.search(t))
 
 
+# --- pesan susulan: pengguna mengetik SELAGI giliran berjalan ---------------
+#
+# Sebelumnya pesan begitu diparkir sampai giliran sekarang benar-benar tuntas,
+# lalu dijalankan sebagai giliran terpisah. Itu benar secara mesin tapi salah
+# secara percakapan: pengguna sering mengirimnya justru KARENA melihat arah
+# kerjanya meleset ("bukan itu", "sekalian rapikan header-nya"), dan menahannya
+# berarti AI meneruskan pekerjaan yang sudah tak diinginkan sampai selesai.
+#
+# Sekarang ia DISISIPKAN ke giliran yang sedang berjalan, di batas langkah
+# berikutnya — yaitu bersama [[HASIL]]. Batas itu dipilih dengan sengaja: di
+# situ AI baru saja menutup satu pesan, jadi tak ada balasan yang terpotong di
+# tengah, dan ia memang sedang memutuskan langkah berikutnya.
+#
+# Urutan kerjanya diserahkan ke AI, bukan dipaksa dari sini: hanya ia yang tahu
+# seberapa jauh pekerjaan sekarang sudah berjalan dan seberapa berat permintaan
+# barunya. Yang dipaksa cuma satu — keputusannya harus DIUCAPKAN, supaya
+# pengguna tak menebak-nebak mana yang sedang dikerjakan.
+def _blok_sisipan(pesan: list[str]) -> str:
+    """Rakit blok "pesan baru dari pengguna" untuk ditempel ke [[HASIL]]."""
+    bersih = []
+    for t in pesan:
+        t = (t or "").strip()
+        if not t:
+            continue
+        # Penanda protokol DINETRALKAN. Pengguna bisa saja mengetik "[[HASIL]]"
+        # atau "[[/TOOL]]" — entah tak sengaja saat menempel log, entah iseng —
+        # dan penanda asli di tengah teks pengguna akan mengacaukan pembacaan
+        # blok di giliran ini.
+        bersih.append(t.replace("[[", "⟦").replace("]]", "⟧"))
+    if not bersih:
+        return ""
+    isi = "\n\n".join(bersih)
+    ganda = len(bersih) > 1
+    return (
+        "\n\n[[PESAN BARU DARI PENGGUNA]]\n" + isi + "\n[[/PESAN BARU]]\n"
+        + (f"({len(bersih)} pesan, urut dari yang paling awal.)\n" if ganda else "")
+        + "Pesan itu dikirim SELAGI kamu bekerja, jadi pengguna belum melihat "
+        "hasil langkah di atas.\n"
+        "Putuskan sendiri urutannya lalu KERJAKAN — jangan balik bertanya mana "
+        "dulu. Pegangannya:\n"
+        "- Mengubah/membatalkan tugas yang sedang berjalan (mis. 'bukan itu', "
+        "'ganti jadi…') -> hentikan yang lama, kerjakan yang baru.\n"
+        "- Cepat & tak bergantung pekerjaan sekarang -> selesaikan yang cepat "
+        "dulu, lalu lanjutkan yang tadi.\n"
+        "- Berat & berdiri sendiri -> tuntaskan dulu yang sedang berjalan, baru "
+        "kerjakan ini. Jangan tinggalkan pekerjaan setengah jadi.\n"
+        "Sebutkan pilihanmu dalam satu kalimat pembuka (mis. 'Aku selesaikan "
+        "dulu X yang tinggal sedikit, baru kukerjakan Y.') supaya pengguna tahu "
+        "mana yang sedang berjalan. Tetap satu blok [[TOOL]] per pesan."
+    )
+
+
 _BULAN_ID = ("Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
              "Agustus", "September", "Oktober", "November", "Desember")
 
@@ -877,6 +929,9 @@ class Agent:
         on_status: Callable[[str], None] | None = None,
         on_token: Callable[[str], None] | None = None,
         attachments: list[str] | None = None,
+        # Diambil di tiap batas langkah; mengembalikan pesan pengguna
+        # yang mengantre supaya bisa DISISIPKAN ke giliran berjalan.
+        ambil_sisipan: Callable[[], list[str]] | None = None,
     ) -> str:
         """Proses satu giliran. Kembalikan teks jawaban final.
 
@@ -912,6 +967,7 @@ class Agent:
             on_tool=on_tool, on_message=on_message,
             on_tool_result=on_tool_result, on_notice=on_notice,
             on_retry=on_retry, attachments=attachments,
+            ambil_sisipan=ambil_sisipan,
         )
 
     def _run_connector(
@@ -927,6 +983,9 @@ class Agent:
         on_notice: Callable[[str], None] | None = None,
         on_retry: Callable[[int, float, Exception], None] | None = None,
         attachments: list[str] | None = None,
+        # Diambil di tiap batas langkah; mengembalikan pesan pengguna
+        # yang mengantre supaya bisa DISISIPKAN ke giliran berjalan.
+        ambil_sisipan: Callable[[], list[str]] | None = None,
     ) -> str:
         """Jalankan giliran lewat AI web (browser) sebagai AGENT penuh.
 
@@ -1619,6 +1678,34 @@ class Agent:
                     if on_notice:
                         on_notice("langkah gagal/timeout beruntun — beralih ke "
                                   "kesimpulan")
+
+                # SISIPKAN pesan susulan pengguna, tepat di batas langkah ini.
+                # TIDAK dilakukan saat force_final: di sana AI justru sedang
+                # disuruh berhenti memakai tool dan menyimpulkan, jadi menaruh
+                # tugas baru di pesan yang sama itu perintah yang saling
+                # bertabrakan. Pesannya dibiarkan di antrean & dikerjakan
+                # sebagai giliran berikutnya — tak ada yang hilang.
+                if ambil_sisipan is not None and not force_final:
+                    try:
+                        susulan = list(ambil_sisipan() or [])
+                    except Exception:  # noqa: BLE001 - antrean rusak != giliran gagal
+                        susulan = []
+                    blok = _blok_sisipan(susulan)
+                    if blok:
+                        follow += blok
+                        # Dicatat ke memory sebagai ucapan pengguna yang memang
+                        # terjadi di titik ini — kalau tidak, sesi yang di-resume
+                        # memperlihatkan AI tiba-tiba mengerjakan hal yang tak
+                        # pernah diminta siapa pun.
+                        for t in susulan:
+                            if (t or "").strip():
+                                self.memory.add_user(t.strip())
+                        if on_notice:
+                            n = len([t for t in susulan if (t or "").strip()])
+                            on_notice(
+                                f"{n} pesan susulanmu disisipkan ke giliran ini"
+                                if n > 1 else
+                                "pesan susulanmu disisipkan ke giliran ini")
                 reply = _send(follow, attachments=images)
         except llm.Cancelled:
             self.memory.repair_dangling_tools()

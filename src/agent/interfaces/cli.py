@@ -2000,8 +2000,18 @@ def main(resume: bool = False) -> None:
                 view.note_phase(_web_phase(msg))
 
         def _on_notice(msg: str) -> None:
-            """bagas-ai naik-kelas / anti-macet otomatis — beri tahu pengguna.
-            Deskripsi naik-kelas selalu memuat '→' (mis. 'effort a → b')."""
+            """Kabar dari mesin giliran: pesan susulan disisipkan, naik kelas,
+            atau tindakan anti-macet.
+
+            Labelnya dipilih dari ISI pesannya. Penyisipan diperiksa LEBIH DULU
+            dan tanpa embel-embel "konteks dipertahankan": kalimat itu benar
+            untuk pemulihan anti-macet, tapi jadi membingungkan pada peristiwa
+            yang sama sekali bukan pemulihan."""
+            if "disisipkan" in msg:
+                _commit([Text.from_markup(
+                    f"  [#89b4fa]✉ {_esc(msg)}[/] "
+                    f"[dim]— bagas-ai yang menentukan urutannya[/]")])
+                return
             label = ("⚡ naik kelas otomatis:" if "→" in msg
                      else "🛟 anti-macet:")
             _commit([Text.from_markup(
@@ -2011,13 +2021,29 @@ def main(resume: bool = False) -> None:
         cancel_event = threading.Event()
         result: dict = {"answer": None, "error": None}
 
+        def _ambil_sisipan() -> list[str]:
+            """Ambil-dan-kosongkan pesan yang diketik selagi giliran berjalan.
+
+            Dipanggil dari THREAD WORKER, sementara `_ketik` mengisinya dari
+            thread utama. Aman tanpa kunci karena keduanya cuma memakai operasi
+            list yang atomik di CPython (append & slice-assignment), dan
+            polanya ambil-semua-lalu-kosongkan: pesan yang datang persis di
+            sela dua baris ini tidak hilang — ia tinggal di antrean dan ikut
+            pada penyisipan berikutnya, atau jadi giliran sendiri bila giliran
+            ini sudah keburu selesai."""
+            if not prompt_queue:
+                return []
+            diambil = prompt_queue[:]
+            del prompt_queue[:len(diambil)]
+            return diambil
+
         def worker() -> None:
             try:
                 result["answer"] = agent.run(
                     text, on_tool=_on_tool, on_message=_on_msg,
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
-                    on_status=_on_status,
+                    on_status=_on_status, ambil_sisipan=_ambil_sisipan,
                     # on_token SENGAJA tak diteruskan: pratinjau kalimat yang
                     # sedang ditulis sudah dihapus dari layar, jadi tak ada lagi
                     # yang memakainya. Efek sampingnya justru menguntungkan —
@@ -2040,8 +2066,11 @@ def main(resume: bool = False) -> None:
         def _ketik(ch: str) -> bool:
             """Tangani SATU karakter ketikan selama giliran berjalan.
 
-            Enter = masukkan buffer ke ANTREAN (BUKAN membatalkan — Ctrl+C tetap
-            satu-satunya jalan membatalkan). Return True bila karakter sudah
+            Enter = kirim pesannya (BUKAN membatalkan — Ctrl+C tetap
+            satu-satunya jalan membatalkan). Pesan itu DISISIPKAN ke giliran
+            yang sedang berjalan pada batas langkah berikutnya, dan AI sendiri
+            yang memutuskan mana didahulukan; kalau gilirannya keburu selesai,
+            ia jadi giliran berikutnya. Return True bila karakter sudah
             ditangani di sini (pemanggil tak perlu memprosesnya lagi)."""
             if ch in ("\r", "\n"):
                 teks = typing_state["buf"].strip()
@@ -2051,9 +2080,9 @@ def main(resume: bool = False) -> None:
                     prompt_queue.append(teks)
                     # Gema pesannya SEKARANG, sama persis seperti pesan yang
                     # dikirim dari kotak idle — pengguna cuma perlu tahu
-                    # pesannya terkirim, bukan bahwa ada mesin antrean di
-                    # baliknya. (Gema kedua saat prompt ini benar-benar
-                    # dikerjakan sengaja tak ada — lihat gelung utama.)
+                    # pesannya terkirim, bukan bagaimana ia disalurkan.
+                    # (Gema kedua saat prompt ini benar-benar dikerjakan
+                    # sengaja tak ada — lihat gelung utama.)
                     _commit([_oneline(Text.from_markup(
                         f"  [bold #cba6f7]❯[/] [white]{_esc(teks)}[/]"))])
                 return True
