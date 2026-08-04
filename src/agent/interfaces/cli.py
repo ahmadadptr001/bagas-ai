@@ -1229,11 +1229,18 @@ class TurnView:
             return
         if self.commit:
             out = []
-            if not self._said:
+            # Header "🤖 bagas-ai" dan kalimatnya adalah SATU blok, jadi
+            # jarak di atas cuma diberi sekali: oleh header bila ia
+            # muncul, oleh kalimatnya bila tidak. Kalau keduanya sama-sama
+            # memberi jarak, headernya tampak melayang terpisah dari
+            # ucapan yang ia perkenalkan.
+            baru_bicara = not self._said
+            if baru_bicara:
                 out.append(Padding(Text("🤖 bagas-ai", style="bold #fc9018"),
                                    (1, 0, 0, 2)))
                 self._said = True
-            out.append(Padding(_md(text.strip()), (0, 3, 1, 3)))
+            out.append(Padding(_md(text.strip()),
+                               (0 if baru_bicara else 1, 3, 0, 3)))
             self.commit(out)
 
     def start_step(self, n: int, name: str, label: str) -> dict:
@@ -1302,7 +1309,7 @@ class TurnView:
         failed = rec["failed"]
         icon = "[#f0603c]✗[/]" if failed else "[#9fc93c]✓[/]"
         phase = _PHASE.get(rec["name"], "langkah")
-        out = [_oneline(Text.from_markup(
+        out = [_KOSONG, _oneline(Text.from_markup(
             f"  {icon} [#f2e3cc]{phase}[/]  [white]{_esc(label)}[/]"))]
         lines = rec.get("_lines") or []
         if lines:
@@ -1497,10 +1504,10 @@ def main(resume: bool = False) -> None:
                 # WAJIB di-escape: teks pengguna yang memuat '[i]' / '[red]'
                 # (lazim di kode, mis. arr[i]) akan ditafsirkan rich sebagai
                 # markup — teks berubah gaya & kurungnya hilang saat replay.
-                console.print(f"\n  [bold #fcc048]❯[/] [white]{_esc(content)}[/]")
+                console.print(f"\n  [bold #fcc048]❯[/] [bold #ffffff]{_esc(content)}[/]")
             elif role == "assistant" and content:
                 console.print("\n  [bold #fc9018]🤖 bagas-ai[/]")
-                console.print(Padding(_md(content), (0, 3, 1, 3)))
+                console.print(Padding(_md(content), (1, 3, 0, 3)))
         console.print(Rule("[dim]lanjut di bawah[/dim]", style="#3a2a1a"))
     if os_status in ("added", "updated"):
         verb = "terdeteksi & disimpan" if os_status == "added" else "diperbarui"
@@ -1690,6 +1697,7 @@ def main(resume: bool = False) -> None:
         icon = "[#f0603c]✗[/]" if failed else "[#9fc93c]✓[/]"
         phase = _PHASE.get(name, "selesai")
         dur_s = f"{dur:.1f}s" if dur >= 0.05 else ""
+        console.print()          # satu baris kosong di ATAS blok (aturan irama)
         console.print(f"  {icon} [#f2e3cc]{phase}[/]  [white]{_esc(label)}[/]"
                       f"   [dim]{dur_s}[/]")
 
@@ -2017,6 +2025,12 @@ def main(resume: bool = False) -> None:
                     f"  [#fc9018]✉ {_esc(msg)}[/] "
                     f"[dim]— bagas-ai yang menentukan urutannya[/]")])
                 return
+            if "langkah" in msg and "batas" in msg:
+                # Batas langkah bukan kegagalan maupun pemulihan — ia keputusan
+                # yang bisa ditindaklanjuti pengguna, jadi ditandai tersendiri
+                # supaya tak terbaca sebagai error.
+                _commit([Text.from_markup(f"  [#f7d488]⏱ {_esc(msg)}[/]")])
+                return
             label = ("⚡ naik kelas otomatis:" if "→" in msg
                      else "🛟 anti-macet:")
             _commit([Text.from_markup(
@@ -2089,7 +2103,7 @@ def main(resume: bool = False) -> None:
                     # (Gema kedua saat prompt ini benar-benar dikerjakan
                     # sengaja tak ada — lihat gelung utama.)
                     _commit([_oneline(Text.from_markup(
-                        f"  [bold #fcc048]❯[/] [white]{_esc(teks)}[/]"))])
+                        f"  [bold #fcc048]❯[/] [bold #ffffff]{_esc(teks)}[/]"))])
                 return True
             if ch in ("\x08", "\x7f"):             # Backspace / Ctrl+Backspace
                 # KEDUANYA hapus 1 HURUF. Arah byte-nya tak bisa dipercaya:
@@ -2183,9 +2197,11 @@ def main(resume: bool = False) -> None:
                 console.print()
                 # Header bot cukup SEKALI per giliran — kalau narasi sudah
                 # menampilkannya, jawaban akhir tak perlu header kedua.
-                if not view._said:
+                ada_header = not view._said
+                if ada_header:
                     console.print("  [bold #fc9018]🤖 bagas-ai[/]")
-                console.print(Padding(_md(ans), (0, 3, 1, 3)))
+                console.print(Padding(_md(ans),
+                                      (0 if ada_header else 1, 3, 0, 3)))
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
             if stps:
@@ -2199,7 +2215,7 @@ def main(resume: bool = False) -> None:
                 seg += [_fmt_elapsed(time.time() - view.start),
                         f"⚡ {_fmt(agent.tokens_last.total)} token"]
                 console.print(Padding(Text.from_markup(
-                    "[dim]" + " · ".join(seg) + "[/]"), (0, 3, 1, 3)))
+                    "[dim]" + " · ".join(seg) + "[/]"), (1, 3, 0, 3)))
         _reindex_if_edited()
 
     def _reindex_if_edited() -> None:
@@ -2227,11 +2243,13 @@ def main(resume: bool = False) -> None:
             """Tampilkan ucapan/narasi bagas-ai: 1 header per giliran, indentasi rapi."""
             if not content or not content.strip():
                 return
-            console.print()
-            if not header["shown"]:
+            baru_bicara = not header["shown"]
+            if baru_bicara:
+                console.print()
                 console.print("  [bold #fc9018]🤖 bagas-ai[/]")
                 header["shown"] = True
-            console.print(Padding(_md(content.strip()), (0, 3, 1, 3)))
+            console.print(Padding(_md(content.strip()),
+                                  (0 if baru_bicara else 1, 3, 0, 3)))
 
         def on_retry(attempt: int, wait: float, exc: Exception) -> None:
             """Dipertahankan demi kecocokan; jalur web tak memakai on_retry —
@@ -2324,7 +2342,8 @@ def main(resume: bool = False) -> None:
         parts.append(el)
         parts.append(f"⚡ {tok} token")
         body = " [dim]·[/] ".join(parts)
-        console.print(Padding(Text.from_markup(f"[dim]{body}[/dim]"), (0, 3, 1, 3)))
+        console.print(Padding(Text.from_markup(f"[dim]{body}[/dim]"),
+                              (1, 3, 0, 3)))
 
     # --- aksi menu (inquirer) ---
     def pick_model() -> str | None:
@@ -3271,12 +3290,14 @@ def main(resume: bool = False) -> None:
             # dihapus, jadi tak ada celah yang terlihat di bawah gema.
             if raw.strip():
                 _ke_dasar_layar()
-                # Teksnya PUTIH, hanya "❯"-nya yang beraksen: pesan pengguna
-                # adalah teks yang paling sering dibaca ulang saat menggulung
-                # riwayat, jadi ia yang paling butuh kontras tertinggi — bukan
-                # warna tema yang meredupkannya.
+                # PUTIH MURNI (#ffffff) & TEBAL, bukan `white` milik rich —
+                # `white` dipetakan ke warna 7 palet terminal, yang di banyak
+                # tema justru abu-abu. Pesan pengguna adalah penanda batas
+                # antar-giliran: satu-satunya baris yang harus bisa ditemukan
+                # seketika saat menggulung riwayat panjang, jadi ia diberi
+                # kontras tertinggi di layar.
                 console.print(f"  [bold #fcc048]❯[/] "
-                              f"[white]{_esc(raw.strip())}[/]")
+                              f"[bold #ffffff]{_esc(raw.strip())}[/]")
         text = raw.strip()
         if not text:
             continue

@@ -73,7 +73,23 @@ _WEB_REMINDER = (
     "kutinjau sebelum file disentuh.]"
 )
 # Batas langkah tool per giliran web (jaring anti-loop-liar).
-_WEB_MAX_STEPS = 24
+#
+# Dinaikkan dari 24 ke 60 karena batasnya TERLALU SERING tercapai pada pekerjaan
+# yang sah, bukan pada loop liar: membangun satu halaman baru saja gampang
+# menghabiskan 20+ langkah (peta proyek, baca beberapa berkas, tulis komponen,
+# perbaiki impor, jalankan dev server, preview, perbaiki tampilan, preview
+# lagi). Giliran yang terpotong di tengah lebih merugikan daripada giliran yang
+# kepanjangan — pekerjaan setengah jadi harus diulang dari awal oleh pengguna.
+#
+# Menaikkannya tetap aman karena loop liar sudah dijaga oleh penjaga LAIN yang
+# jauh lebih cepat bereaksi dan tak bergantung pada angka ini: dup_hits
+# (langkah persis sama berulang) dan fail_streak (gagal/timeout beruntun),
+# keduanya menyerah setelah 3 kali. Batas ini cuma jaring terakhir.
+_WEB_MAX_STEPS = 60
+# Sisa langkah saat pengguna & model mulai diberi tahu bahwa batasnya dekat.
+# Diberi tahu SEBELUM mentok, bukan sesudah: kalau sudah mentok, satu-satunya
+# yang bisa dilakukan tinggal menyesal.
+_SISA_LANGKAH_PERINGATAN = 8
 
 # Label UI yang DISISIPKAN situs saat memotong jawaban yang terlalu panjang
 # (terlihat di kimi.com sebagai "Output stopped" di bawah kode). Dijangkar ke
@@ -569,8 +585,39 @@ def _strip_web_markers(text: str) -> str:
     if sisa:
         out = out[:min(m.start() for m in sisa)]
     out = _WEB_MARKER_RE.sub("", out)
-    # Sisa pagar kode kosong akibat blok yang dibuang.
-    out = re.sub(r"^\s*```[a-zA-Z0-9_+-]*\s*$", "", out, flags=re.MULTILINE)
+    # CATATAN: dulu di sini ada penyapuan "semua baris yang isinya cuma pagar
+    # kode". Maksudnya membersihkan pagar yatim sisa blok tool yang dibuang,
+    # tapi polanya tak bisa membedakan pagar yatim dari pagar SUNGGUHAN milik
+    # jawaban — jadi setiap ```bash / ```json di jawaban AI ikut lenyap, dan
+    # blok kodenya jatuh jadi paragraf biasa. Persis keluhan "```-nya jadi
+    # baris kosong". Pembersihan pagar yatim kini dilakukan di _rapikan_pagar,
+    # yang hanya menyentuh pagar yang benar-benar TAK BERPASANGAN.
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+_PAGAR_BARIS_RE = re.compile(r"^[ \t]*```[a-zA-Z0-9_+-]*[ \t]*$", re.MULTILINE)
+
+
+def _rapikan_pagar(text: str) -> str:
+    """Buang pagar kode yang YATIM & blok kode yang jadi kosong.
+
+    Dipanggil sesudah blok usulan tool dibuang, karena pembuangan itulah yang
+    bisa menyisakan pagar tanpa pasangan (mis. JSON telanjang yang dipagari
+    ```json — pembukanya ikut terbuang bersama bloknya, penutupnya tertinggal).
+
+    Yang BERPASANGAN tidak disentuh sama sekali: pagar milik jawaban AI adalah
+    isi yang sah, bukan sampah protokol."""
+    out = text or ""
+    # 1. Blok yang isinya habis -> buang sepasang pagarnya sekalian, jangan
+    #    tinggalkan kotak kode kosong yang membingungkan.
+    out = re.sub(r"^[ \t]*```[a-zA-Z0-9_+-]*[ \t]*\n\s*```[ \t]*$", "",
+                 out, flags=re.MULTILINE)
+    # 2. Sisa pagar ganjil = ada satu yang yatim. Yang dibuang HANYA yang
+    #    terakhir: pagar-pagar sebelumnya sudah berpasangan dengan benar.
+    posisi = [m.span() for m in _PAGAR_BARIS_RE.finditer(out)]
+    if len(posisi) % 2 == 1:
+        a, b = posisi[-1]
+        out = out[:a] + out[b:]
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
@@ -681,6 +728,32 @@ def _looks_like_promise(text: str) -> bool:
     return bool(_JANJI_RE.search(t))
 
 
+def _tampak_usulan_tool(obj: Any) -> bool:
+    """True HANYA bila objek JSON ini sungguh-sungguh usulan tool.
+
+    Syaratnya diperketat karena penyaring ini MENGHAPUS: dulu cukup ada kunci
+    "tool" ATAU "name", sehingga cuplikan package.json di jawaban AI —
+    {"name": "portfolio", "version": "1.0.0"} — dikira usulan tool lalu lenyap
+    dari layar tanpa jejak. Kehilangan isi jawaban jauh lebih merugikan
+    daripada sesekali membiarkan satu JSON mesin ikut tercetak.
+
+    Yang dituntut sekarang: nama tool-nya BENAR-BENAR ADA di registry, dan
+    bentuknya salah satu dari dua yang dipakai model — {"tool":…, "args":…}
+    atau {"name":…, "arguments":…} gaya OpenAI.
+    """
+    if not isinstance(obj, dict):
+        return False
+    nama = obj.get("tool") or obj.get("name")
+    if not isinstance(nama, str) or nama not in tools.REGISTRY:
+        return False
+    if "tool" in obj:
+        return True
+    # Bentuk {"name": ...} terlalu lazim di JSON biasa (package.json, manifest,
+    # konfigurasi komponen), jadi ia baru dipercaya bila DITEMANI wadah argumen.
+    return isinstance(obj.get("arguments"), dict) or isinstance(
+        obj.get("args"), dict)
+
+
 def _strip_tool_json(text: str) -> str:
     """Buang objek JSON USULAN TOOL yang ditulis tanpa penanda.
 
@@ -692,7 +765,7 @@ def _strip_tool_json(text: str) -> str:
     while True:
         mulai = out.find("{", i)
         if mulai < 0:
-            return re.sub(r"\n{3,}", "\n\n", out).strip()
+            return _rapikan_pagar(out)
         # Cari kurung penutup yang berpasangan (abaikan kurung di dalam string).
         depth, j, dalam_string, escape = 0, mulai, False, False
         while j < len(out):
@@ -714,13 +787,22 @@ def _strip_tool_json(text: str) -> str:
                     break
             j += 1
         if j >= len(out):
-            return re.sub(r"\n{3,}", "\n\n", out).strip()
+            return _rapikan_pagar(out)
         blok = out[mulai:j + 1]
-        if _json_tool_obj(blok) is not None:
+        # Sengaja BUKAN `_json_tool_obj(blok) is not None`: pengenal itu longgar
+        # dan memang harus longgar untuk PARSER (nama tool salah ketik tetap
+        # terbaca, lalu dijawab "[error] tool tak ditemukan" yang bisa
+        # diperbaiki model). Untuk penyaring yang MENGHAPUS, longgar berarti
+        # menelan isi jawaban — lihat _tampak_usulan_tool.
+        if _tampak_usulan_tool(_json_tool_obj(blok)):
             # Buang blok + label bahasa/nomor baris yang menempel sebelumnya.
             depan = re.sub(r"(?:```[a-zA-Z0-9_+-]*|\b[a-z]{2,10}\d*)\s*$", "",
                            out[:mulai])
-            out = depan + out[j + 1:]
+            # Pagar PENUTUP tepat sesudah blok ikut dibuang, supaya tak
+            # tertinggal sebagai pagar yatim.
+            belakang = re.sub(r"^\s*```[ \t]*$", "", out[j + 1:], count=1,
+                              flags=re.MULTILINE)
+            out = depan + belakang
             i = len(depan)
         else:
             i = mulai + 1
@@ -1324,6 +1406,7 @@ class Agent:
             force_final = False
             nudges = 0    # teguran "kode ditampilkan tapi tak ditulis ke file"
             janji = 0     # teguran "menjanjikan langkah tapi tanpa blok [[TOOL]]"
+            peringatan_batas = False   # sekali saja per giliran
             # Berapa kali AI web menumpuk >1 blok [[TOOL]] dalam satu pesan.
             # Protokolnya SATU langkah per pesan (lihat aturan 2 di
             # _web_tool_protocol) justru karena langkah ke-2 dst pasti disusun
@@ -1525,8 +1608,16 @@ class Agent:
                             f"Yang terbaca dari layar:\n```\n{mentah or '(kosong)'}\n```"
                         )
                     if steps >= _WEB_MAX_STEPS and calls:
-                        answer += ("\n\n_(batas langkah tool tercapai — sebagian "
-                                   "aksi mungkin belum tuntas.)_")
+                        answer += (
+                            f"\n\n_(Batas {_WEB_MAX_STEPS} langkah tool "
+                            "tercapai, jadi giliran ini kuhentikan di sini — "
+                            "sebagian aksi mungkin belum tuntas. Kirim "
+                            "'lanjutkan' untuk meneruskan dari titik ini.)_")
+                        if on_notice:
+                            on_notice(
+                                f"batas {_WEB_MAX_STEPS} langkah tool tercapai "
+                                "— giliran dihentikan, ketik 'lanjutkan' untuk "
+                                "meneruskan")
                     break
 
                 # Narasi sebelum tool = teks di luar blok tool. JSON usulan yang
@@ -1678,6 +1769,27 @@ class Agent:
                     if on_notice:
                         on_notice("langkah gagal/timeout beruntun — beralih ke "
                                   "kesimpulan")
+
+                # BATAS LANGKAH SUDAH DEKAT. Diberi tahu ke DUA pihak sekaligus:
+                # ke model supaya ia menyusun ulang prioritas selagi masih
+                # sempat (menuntaskan yang hampir jadi, bukan memulai hal baru),
+                # dan ke terminal supaya pengguna tak kaget menemukan giliran
+                # berhenti tanpa sebab yang terlihat. Sekali saja per giliran.
+                sisa_langkah = _WEB_MAX_STEPS - steps
+                if 0 < sisa_langkah <= _SISA_LANGKAH_PERINGATAN \
+                        and not peringatan_batas:
+                    peringatan_batas = True
+                    follow += (
+                        f"\n\n[SISTEM] Sisa {sisa_langkah} langkah tool lagi "
+                        f"sebelum batas {_WEB_MAX_STEPS} dan giliran ini "
+                        "kuhentikan otomatis. Prioritaskan: tuntaskan yang "
+                        "sudah hampir jadi, jangan memulai pekerjaan baru. "
+                        "Kalau tak akan cukup, lebih baik berhenti sekarang "
+                        "dengan jawaban akhir yang menyebut jujur apa yang "
+                        "sudah selesai dan apa yang tersisa.")
+                    if on_notice:
+                        on_notice(f"sisa {sisa_langkah} langkah tool sebelum "
+                                  "batas giliran")
 
                 # SISIPKAN pesan susulan pengguna, tepat di batas langkah ini.
                 # TIDAK dilakukan saat force_final: di sana AI justru sedang
