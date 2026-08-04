@@ -678,7 +678,25 @@ class Status:
         if self.tool is None and text:
             self.phase = text
 
-    def __rich__(self) -> Text:
+    def __rich__(self):
+        """Kotak chat + satu baris status — susunan yang SAMA seperti mode
+        mengalir dan seperti prompt idle.
+
+        Kotaknya ikut hadir di sini justru supaya ia tak pernah hilang: mode
+        klasik dipakai saat /live dimatikan DAN sebagai cadangan bila jalur
+        mengalir gagal, jadi tanpa ini kolom chat lenyap persis di saat
+        tampilannya sedang paling tidak menentu.
+
+        Ajakannya sengaja BEDA dari mode mengalir: mode klasik tidak menangkap
+        ketikan selama giliran berjalan, jadi menjanjikan "ketik untuk
+        mengantre" di sini akan bohong."""
+        return Group(
+            *_kotak_chat("", kosong="menunggu giliran ini selesai…",
+                         aktif=False),
+            self._baris_status(),
+        )
+
+    def _baris_status(self) -> Text:
         el = time.time() - self.start
         now = time.time()
         frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
