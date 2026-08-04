@@ -3,6 +3,7 @@ dari type hints + docstring, plus registry global."""
 from __future__ import annotations
 
 import contextvars
+import json
 import inspect
 import re
 from dataclasses import dataclass, field
@@ -218,11 +219,141 @@ def tool_aktif() -> str:
     return _tool_aktif.get()
 
 
+# --- menyelaraskan bentuk argumen dari model ------------------------------
+#
+# Model web menyusun JSON-nya sendiri, dan ia kerap memilih bentuk yang PALING
+# MASUK AKAL menurut nama parameternya — bukan yang tertulis di skema. Contoh
+# nyata yang menjatuhkan giliran pengguna: read_files(paths) berskema string,
+# tapi namanya jamak, jadi model mengirim ["a.py", "b.py"]; tool-nya memanggil
+# .replace() pada list dan meledak dengan pesan yang tak bisa ditindaklanjuti
+# ("'list' object has no attribute 'replace'").
+#
+# Menyalahkan modelnya tidak menyelesaikan apa pun: mengirim daftar untuk
+# parameter bernama "paths" itu tebakan yang wajar. Yang salah adalah tool yang
+# hancur oleh bentuk masukan paling alami. Maka penyelarasan dilakukan DI SINI,
+# sekali, untuk seluruh tool — bukan ditambal satu per satu tiap kali ketahuan.
+#
+# Batasnya dijaga: hanya bentuk yang artinya TAK BERUBAH yang diselaraskan.
+# Yang meragukan dibiarkan lewat apa adanya supaya tool-nya sendiri yang
+# menolak dengan pesan yang lebih paham konteks.
+def _gabung_baris(nilai: list) -> str:
+    """Gabungkan list jadi string dengan BARIS BARU, bukan koma.
+
+    Baris baru dipilih dengan sengaja: parameter yang menerima daftar path
+    (read_files, validate_project) memang memecah pada baris baru maupun koma,
+    sedangkan parameter berisi ISI BERKAS hanya benar bila digabung dengan
+    baris baru. Koma akan merusak yang kedua — file jadi satu baris panjang
+    berkoma, dan kerusakannya senyap."""
+    return "\n".join("" if x is None else str(x) for x in nilai)
+
+
+def _paksa_tipe(nilai: Any, tipe: str) -> Any:
+    """Selaraskan `nilai` ke `tipe` skema bila artinya tak berubah."""
+    if tipe == "string" and not isinstance(nilai, str):
+        if isinstance(nilai, (list, tuple)):
+            return _gabung_baris(list(nilai))
+        if isinstance(nilai, (int, float, bool)):
+            return str(nilai)
+        return nilai                      # dict/None -> biar tool yang menolak
+    if tipe == "array" and not isinstance(nilai, list):
+        if isinstance(nilai, str):
+            teks = nilai.strip()
+            if teks.startswith("["):      # model menuliskan JSON sebagai teks
+                try:
+                    hasil = json.loads(teks)
+                    return hasil if isinstance(hasil, list) else [hasil]
+                except Exception:  # noqa: BLE001 - jatuh ke pemisahan biasa
+                    pass
+            if not teks:
+                return []
+            pecah = [p.strip() for p in teks.replace("\n", ",").split(",")]
+            return [p for p in pecah if p]
+        if isinstance(nilai, (tuple, set)):
+            return list(nilai)
+        if isinstance(nilai, dict):
+            return [nilai]                # satu item ditulis tanpa pembungkus
+        return nilai
+    if tipe == "integer" and not isinstance(nilai, int):
+        try:
+            return int(str(nilai).strip())
+        except (TypeError, ValueError):
+            return nilai                  # bukan angka -> tool yang menjelaskan
+    if tipe == "boolean" and not isinstance(nilai, bool):
+        if isinstance(nilai, str):
+            t = nilai.strip().lower()
+            if t in ("true", "ya", "yes", "1"):
+                return True
+            if t in ("false", "tidak", "no", "0", ""):
+                return False
+        if isinstance(nilai, (int, float)):
+            return bool(nilai)
+    return nilai
+
+
+# Nama argumen yang SERING dipakai model padahal bukan nama resminya. Tiap
+# entri harus memenuhi tiga syarat, kalau tidak ia berbahaya:
+#   1. artinya benar-benar sama (bukan konsep lain yang kebetulan mirip);
+#   2. hanya dipakai bila nama resminya TIDAK ikut dikirim;
+#   3. hanya dipakai bila tool-nya memang punya nama resmi itu.
+# Yang tak memenuhi syarat sengaja dibiarkan gagal dengan pesan jelas: menebak
+# lalu keliru jauh lebih mahal daripada satu bolak-balik untuk membetulkan.
+_ALIAS_UMUM = {
+    "file": "path", "filename": "path", "filepath": "path", "file_path": "path",
+    "berkas": "path", "nama_file": "path",
+    "cmd": "command", "perintah": "command",
+    "q": "query", "kueri": "query", "keyword": "query",
+    "text": "content", "isi": "content", "data": "content",
+    "url_": "url", "link": "url",
+}
+# Khusus per tool, untuk hal yang tak berlaku umum. replace_in_files: `pattern`
+# memang mencocokkan PATH RELATIF bila memuat "/" (lihat implementasinya), jadi
+# path satu berkas yang dikirim sebagai `path` artinya persis sama.
+_ALIAS_TOOL = {
+    "replace_in_files": {"path": "pattern", "paths": "pattern"},
+}
+
+
+def _terapkan_alias(nama: str, arguments: dict[str, Any],
+                    props: dict) -> dict[str, Any]:
+    """Ganti nama argumen yang keliru-tapi-jelas-maksudnya ke nama resminya."""
+    peta = {**_ALIAS_UMUM, **_ALIAS_TOOL.get(nama, {})}
+    out = dict(arguments)
+    for salah, benar in peta.items():
+        if salah in out and benar in props and benar not in out:
+            out[benar] = out.pop(salah)
+    return out
+
+
+def _selaraskan(tool_obj: "Tool", arguments: dict[str, Any]) -> dict[str, Any]:
+    """Salinan `arguments` yang bentuknya sudah sesuai skema tool."""
+    props = (tool_obj.schema.get("function", {})
+             .get("parameters", {}).get("properties", {}) or {})
+    out = {}
+    for k, v in arguments.items():
+        prop = props.get(k)
+        out[k] = _paksa_tipe(v, prop.get("type", "string")) if prop else v
+    return out
+
+
 def execute(name: str, arguments: dict[str, Any]) -> str:
     """Jalankan tool berdasarkan nama; selalu kembalikan string untuk LLM."""
     tool_obj = REGISTRY.get(name)
     if tool_obj is None:
         return f"[error] tool '{name}' tidak ditemukan."
+    if not isinstance(arguments, dict):
+        return (f"[error] args untuk '{name}' harus objek JSON "
+                f"(mis. {{\"path\": \"...\"}}), bukan {type(arguments).__name__}.")
+    props = (tool_obj.schema.get("function", {})
+             .get("parameters", {}).get("properties", {}) or {})
+    arguments = _terapkan_alias(name, arguments, props)
+    # Argumen bernama asing TIDAK dibuang diam-diam: kalau model salah menamai
+    # parameter berisi konten, membuangnya berarti menulis berkas kosong tanpa
+    # ada yang sadar. Lebih baik gagal jujur sambil menyebut nama yang benar.
+    asing = [k for k in arguments if k not in props]
+    if asing and props:
+        return (f"[error] '{name}' tak punya argumen {', '.join(asing)}. "
+                f"Yang diterima: {', '.join(props)}.")
+    arguments = _selaraskan(tool_obj, arguments)
     tolak = _tolak_tulis_file(name, arguments)
     if tolak:
         return tolak

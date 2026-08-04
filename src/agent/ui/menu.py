@@ -38,15 +38,19 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.utils import get_cwidth
 
-# Palet mengikuti tema yang sudah dipakai CLI (catppuccin-ish) supaya prompt
-# ini menyatu dengan panel & jejak langkah di sekitarnya.
-UNGU = "fg:#cba6f7"
-BIRU = "fg:#89b4fa"
-HIJAU = "fg:#a6e3a1"
-KUNING = "fg:#f9e2af"
-MERAH = "fg:#f38ba8"
-REDUP = "fg:#6c7086"
-TEKS = "fg:#cdd6f4"
+# Palet mengikuti tema kuning-oranye yang dipakai CLI supaya prompt ini
+# menyatu dengan panel & jejak langkah di sekitarnya.
+#
+# Namanya sengaja diganti bersamaan dengan nilainya: dulu EMAS/ORANYE, dan
+# konstanta warna yang namanya tak lagi cocok dengan isinya adalah jebakan
+# yang menunggu — pembaca berikutnya akan memakai "ORANYE" mengira ia biru.
+EMAS = "fg:#fcc048"
+ORANYE = "fg:#fc9018"
+HIJAU = "fg:#9fc93c"
+KUNING = "fg:#f7d488"
+MERAH = "fg:#f0603c"
+REDUP = "fg:#8f7a62"
+TEKS = "fg:#f2e3cc"
 
 # Sebanyak-banyaknya baris pilihan yang tampil sekaligus; sisanya digulung.
 _MAKS_TAMPIL = 9
@@ -142,7 +146,7 @@ def _bungkus_teks(teks: str, lebar: int) -> list[str]:
 
 
 def _kotak(judul: str, isi: list[list[tuple[str, str]]], footer: str,
-           warna: str = UNGU) -> FormattedText:
+           warna: str = EMAS) -> FormattedText:
     """Bungkus baris-baris isi dengan bingkai bersisi tiga (lihat docstring).
 
     Judul PANJANG — mis. permintaan izin yang memuat path lengkap — tidak
@@ -207,7 +211,7 @@ def _batal(judul: str) -> None:
 
 # ------------------------------------------------------------------ select
 def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
-           hint: str = "", warna: str = UNGU, ringkas: bool = True,
+           hint: str = "", warna: str = EMAS, ringkas: bool = True,
            **_lain: Any) -> Any:
     """Menu pilih-satu. Kembalikan `value` pilihan; batal -> KeyboardInterrupt."""
     opsi = _sebagai_choices(choices)
@@ -363,7 +367,7 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
 
 # ---------------------------------------------------------------- checkbox
 def checkbox(message: str = "", choices: Sequence[Any] = (), hint: str = "",
-             warna: str = BIRU, ringkas: bool = True, **_lain: Any) -> list[Any]:
+             warna: str = ORANYE, ringkas: bool = True, **_lain: Any) -> list[Any]:
     """Menu pilih-banyak. Kembalikan daftar `value` yang dicentang."""
     opsi = _sebagai_choices(choices)
     if not opsi:
@@ -554,11 +558,11 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
 
     if not _interaktif():
         raise KeyboardInterrupt
-    print_formatted_text(_kotak(message, [], hint, BIRU))
+    print_formatted_text(_kotak(message, [], hint, ORANYE))
     sesi: Any = PromptSession()
     try:
         return sesi.prompt(
-            FormattedText([(f"{UNGU} bold", "  ❯ ")]),
+            FormattedText([(f"{EMAS} bold", "  ❯ ")]),
             is_password=rahasia, default=default or "",
             completer=completer, complete_while_typing=bool(completer),
         )

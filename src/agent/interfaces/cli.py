@@ -71,36 +71,39 @@ from ..session import Session  # noqa: E402
 # Prompt interaktif MILIK SENDIRI (dulu InquirerPy) — lihat ui/menu.py.
 from ..ui.menu import Choice, inquirer  # noqa: E402
 
-# Tema Markdown selaras palet "catppuccin" agar jawaban AI (heading, list, kutipan,
+# Tema Markdown selaras palet "zenitsu" (kuning-oranye) agar jawaban AI
+# (heading, list, kutipan,
 # kode, tautan) serasi dengan seluruh UI — bukan warna default rich yang kontras.
 _MD_THEME = Theme({
-    "markdown.h1": "bold #cba6f7",
-    "markdown.h1.border": "#cba6f7",
-    "markdown.h2": "bold #89b4fa",
-    "markdown.h3": "bold #94e2d5",
-    "markdown.h4": "bold #a6e3a1",
-    "markdown.h5": "bold #f9e2af",
-    "markdown.h6": "bold #fab387",
-    "markdown.item.bullet": "bold #cba6f7",
-    "markdown.item.number": "bold #89b4fa",
-    "markdown.code": "#f5c2e7 on #313244",       # `inline code`
-    "markdown.link": "#89b4fa underline",
-    "markdown.link_url": "dim #74c7ec",
-    "markdown.block_quote": "italic #f9e2af",
-    "markdown.block_quote_border": "#585b70",
-    "markdown.hr": "#45475a",
-    "markdown.strong": "bold #f5e0dc",
-    "markdown.emph": "italic #cdd6f4",
-    "markdown.text": "#cdd6f4",
+    "markdown.h1": "bold #fcc048",
+    "markdown.h1.border": "#fcc048",
+    "markdown.h2": "bold #fc9018",
+    "markdown.h3": "bold #ffb861",
+    "markdown.h4": "bold #9fc93c",
+    "markdown.h5": "bold #f7d488",
+    "markdown.h6": "bold #fca830",
+    "markdown.item.bullet": "bold #fcc048",
+    "markdown.item.number": "bold #fc9018",
+    "markdown.code": "#ffd9a0 on #3a2a1a",       # `inline code`
+    "markdown.link": "#fc9018 underline",
+    "markdown.link_url": "dim #ffcf8a",
+    "markdown.block_quote": "italic #f7d488",
+    "markdown.block_quote_border": "#7a5c3a",
+    "markdown.hr": "#4a3826",
+    "markdown.strong": "bold #f7e6d0",
+    "markdown.emph": "italic #f2e3cc",
+    "markdown.text": "#f2e3cc",
 })
 console = Console(theme=_MD_THEME)  # auto-detect VT -> warna/emoji mulus
 
-# Tema penyorotan sintaks blok kode ```lang``` — 'dracula' paling dekat dengan
-# nuansa catppuccin (pastel ungu/pink/hijau). Fallback aman bila tak tersedia.
+# Tema penyorotan sintaks blok kode ```lang``` — 'gruvbox-dark' dipilih karena
+# palet dasarnya memang hangat (kuning/oranye/cokelat), jadi kode di dalam
+# jawaban tak lagi memercikkan ungu-pink ke tengah tema kuning-oranye.
+# Fallback aman bila versi pygments-nya belum punya.
 try:  # pragma: no cover - bergantung versi pygments
     from pygments.styles import get_style_by_name as _gsbn
-    _gsbn("dracula")
-    _CODE_THEME = "dracula"
+    _gsbn("gruvbox-dark")
+    _CODE_THEME = "gruvbox-dark"
 except Exception:  # pragma: no cover
     _CODE_THEME = "monokai"
 
@@ -167,8 +170,8 @@ def _pagari_pohon(text: str) -> str:
 
 
 def _md(text: str) -> Markdown:
-    """Markdown bertema catppuccin (inline code pakai style `markdown.code`,
-    blok kode ```lang``` disorot tema `dracula`).
+    """Markdown bertema zenitsu (inline code pakai style `markdown.code`,
+    blok kode ```lang``` disorot tema `gruvbox-dark`).
 
     Escape ANSI dibuang DI SINI karena inilah satu-satunya pintu yang dilewati
     SEMUA teks model menuju layar: narasi antar-langkah dan jawaban akhir. Dulu
@@ -271,9 +274,9 @@ def _update_notice() -> None:
             local, remote = cache.get("local", ""), cache.get("remote", "")
             ver = f" ({local} → {remote})" if local and remote else ""
             pout(
-                f"[#f9e2af]⬆ Pembaruan bagas-ai tersedia[/] "
+                f"[#f7d488]⬆ Pembaruan bagas-ai tersedia[/] "
                 f"[dim]— {n} commit lebih baru{ver} (pemasangan otomatis "
-                f"gagal).[/dim]  Ketik [#94e2d5]/update[/] untuk mencoba lagi.",
+                f"gagal).[/dim]  Ketik [#ffb861]/update[/] untuk mencoba lagi.",
                 bottom=0,
             )
         # Segarkan cache di thread latar; startup berikutnya otomatis
@@ -283,7 +286,9 @@ def _update_notice() -> None:
         pass
 
 # Gradasi ungu -> biru (magenta neon) untuk teks shadow.
-_GRAD = ["#f0abfc", "#e879f9", "#c084fc", "#a855f7", "#7c3aed", "#4f46e5", "#2563eb"]
+# Gradasi wordmark: emas terang -> oranye -> cokelat bara, arah
+# yang sama dengan cahaya di latar tema ini.
+_GRAD = ["#fde68a", "#fcc048", "#fca830", "#fc9018", "#e8760c", "#c25a08", "#9c4800"]
 
 
 def _fmt(n: int) -> str:
@@ -404,7 +409,7 @@ _GUT_D = "#96565a on #170808"
 # (.highlight), bukan sebagai renderable. Warna latar dari temanya dibuang dan
 # diganti latar diff kita, sementara warna DEPAN tiap token dibiarkan menimpa —
 # jadi kode tetap berwarna di atas bg hijau/merah, persis seperti diff editor.
-_TEMA_KODE = "material"     # pastel & terbaca di atas bg gelap hijau/merah
+_TEMA_KODE = "gruvbox-dark"  # hangat & terbaca di atas bg gelap hijau/merah
 _MAKS_WARNAI = 400_000      # berkas raksasa: lewati saja, tak sebanding biayanya
 
 
@@ -494,7 +499,7 @@ def _row(lineno: str, sign: str, text, style: str) -> Text:
 # DASAR LAYAR — saat kamu mengetik maupun saat AI masih bekerja. Bentuk dan
 # posisinya tak pernah berubah, jadi tempat mengetik selalu satu dan itu-itu
 # saja: tak perlu dicari ulang tiap kali layar berubah.
-_GARIS_KOTAK = "#585b70"
+_GARIS_KOTAK = "#7a5c3a"
 
 
 def _lebar_kotak() -> int:
@@ -523,12 +528,12 @@ def _kotak_chat(isi: str = "") -> list:
     atas.append("╭" + "─" * (lebar - 2) + "╮", style=_GARIS_KOTAK)
     baris = Text()
     baris.append("│ ", style=_GARIS_KOTAK)
-    baris.append("❯ ", style="bold #cba6f7")
+    baris.append("❯ ", style="bold #fcc048")
     if isi:
         # Ekor yang ditampilkan, bukan kepala: yang mau dilihat pengguna adalah
         # huruf yang BARU saja ia ketik.
-        baris.append(isi[-(lebar - 6):], style="#cdd6f4")
-        baris.append("▌", style="#cba6f7")
+        baris.append(isi[-(lebar - 6):], style="#f2e3cc")
+        baris.append("▌", style="#fcc048")
     # Potong dulu, baru ratakan sampai tepi kanan — kalau tidak, isi yang
     # kepanjangan mendorong tepi kanannya keluar layar dan kotaknya patah.
     baris.truncate(lebar - 1, overflow="ellipsis")
@@ -562,7 +567,7 @@ _MENU_MAKS = 8
 # gelap sebagai pembeda — dibatasi beberapa baris supaya keluaran 400 baris tak
 # menenggelamkan riwayat.
 _PRATINJAU_BARIS = 8
-_BG_HASIL = "#1e1e2e"
+_BG_HASIL = "#241a10"
 
 
 def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
@@ -584,7 +589,7 @@ def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
         tampil.append(f"… {sisa} baris lagi")
     lebar = max(20, console.width - 5)
     gaya = f"on {_BG_HASIL}"
-    tepi = "#f38ba8" if gagal else "#585b70"
+    tepi = "#f0603c" if gagal else "#7a5c3a"
     out = []
     for i, ln in enumerate(tampil):
         baris = Text("     ")
@@ -592,7 +597,7 @@ def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
         # bingkai penuh yang bakal beradu dengan kotak chat satu-satunya.
         baris.append("▏", style=f"{tepi} {gaya}")
         redup = sisa > 0 and i == len(tampil) - 1
-        baris.append(" " + ln, style=f"{'#7f849c italic' if redup else '#a6adc8'} {gaya}")
+        baris.append(" " + ln, style=f"{'#a89078 italic' if redup else '#d9c4a6'} {gaya}")
         baris.truncate(lebar, overflow="ellipsis")
         pad = lebar - baris.cell_len
         if pad > 0:
@@ -652,7 +657,7 @@ def _ke_dasar_layar() -> None:
 # masih menyusun jawabannya. Saat idle ia digambar prompt_toolkit (lihat
 # KotakChat), saat giliran berjalan ia digambar rich dari sini; isinya dijaga
 # sama persis supaya perpindahan antar keduanya tak terlihat.
-_BG_BAR = "#181825"
+_BG_BAR = "#1a120b"
 
 
 def _bar_status(agent: Agent, total: int) -> Text:
@@ -660,21 +665,21 @@ def _bar_status(agent: Agent, total: int) -> Text:
     s = agent.tokens_session
     spec = agent.model_spec
     bar = Text(style=f"on {_BG_BAR}")
-    bar.append(" ⬢ bagas-ai", style="bold #cba6f7")
-    sep = ("  │  ", "#45475a")
+    bar.append(" ⬢ bagas-ai", style="bold #fcc048")
+    sep = ("  │  ", "#4a3826")
     bar.append(*sep)
     bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
-    bar.append(spec.label, style="bold #89b4fa")
+    bar.append(spec.label, style="bold #fc9018")
     bar.append(*sep)
-    bar.append(f"⚡ {_fmt(s.total)}", style="#f9e2af")
-    bar.append(" sesi", style="#7f849c")
+    bar.append(f"⚡ {_fmt(s.total)}", style="#f7d488")
+    bar.append(" sesi", style="#a89078")
     bar.append(*sep)
-    bar.append(f"🔋 {_fmt(total)}", style="#a6e3a1")
-    bar.append(" total", style="#7f849c")
+    bar.append(f"🔋 {_fmt(total)}", style="#9fc93c")
+    bar.append(" total", style="#a89078")
     bar.append(*sep)
-    bar.append("/menu", style="#94e2d5")
-    bar.append(" · ", style="#7f849c")
-    bar.append("/exit", style="#f38ba8")
+    bar.append("/menu", style="#ffb861")
+    bar.append(" · ", style="#a89078")
+    bar.append("/exit", style="#f0603c")
     # Diratakan sampai ujung terminal supaya latarnya jadi PITA penuh, bukan
     # potongan pendek yang menggantung di tengah baris.
     pad = console.width - bar.cell_len
@@ -963,7 +968,7 @@ def show_logo() -> None:
         bar.append("━" * per, style=col)
     console.print(bar)
     sub = Text(m)
-    sub.append("AI agent serbaguna", style="bold #cdd6f4")
+    sub.append("AI agent serbaguna", style="bold #f2e3cc")
     sub.append("  ·  terminal · telegram · multitasking", style="dim")
     console.print(_oneline(sub))
 
@@ -1076,13 +1081,13 @@ class Status:
         now = time.time()
         frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
 
-        dot = "[#45475a]•[/]"
+        dot = "[#4a3826]•[/]"
 
         # Mode membatalkan: Ctrl+C ditekan, menunggu langkah aman berhenti.
         if self.cancelling:
             t = Text()
-            t.append(f"  {frame} ", style="bold #f38ba8")
-            t.append("membatalkan — menunggu langkah aman berhenti", style="#f38ba8")
+            t.append(f"  {frame} ", style="bold #f0603c")
+            t.append("membatalkan — menunggu langkah aman berhenti", style="#f0603c")
             t.append("     Ctrl+C lagi = paksa", style="dim italic")
             return _oneline(t)
 
@@ -1090,11 +1095,11 @@ class Status:
         if now < self.retry_until:
             left = self.retry_until - now
             t = Text()
-            t.append(f"  {frame} ", style="bold #f9e2af")
-            t.append("layanan sibuk — menunggu lalu melanjutkan", style="#f9e2af")
-            t.append(f"  {left:.0f}s", style="bold #fab387")
+            t.append(f"  {frame} ", style="bold #f7d488")
+            t.append("layanan sibuk — menunggu lalu melanjutkan", style="#f7d488")
+            t.append(f"  {left:.0f}s", style="bold #fca830")
             if self.retry_msg:
-                t.append(f"  ·  {self.retry_msg}", style="dim #f9e2af")
+                t.append(f"  ·  {self.retry_msg}", style="dim #f7d488")
             t.append("     Ctrl+C batal", style="dim italic")
             return _oneline(t)
 
@@ -1103,21 +1108,21 @@ class Status:
         if abs(target - self.disp) < 1:
             self.disp = target
         t = Text()
-        t.append(f"  {frame} ", style="bold #cba6f7")
-        t.append(self.phase, style="#cba6f7")
-        t.append(f"  {_fmt_elapsed(el)}", style="bold #89b4fa")
+        t.append(f"  {frame} ", style="bold #fcc048")
+        t.append(self.phase, style="#fcc048")
+        t.append(f"  {_fmt_elapsed(el)}", style="bold #fc9018")
         t.append("   ")
         t.append_text(Text.from_markup(dot))
-        t.append(f"  ⚡ {_fmt(int(self.disp))}", style="#f9e2af")
+        t.append(f"  ⚡ {_fmt(int(self.disp))}", style="#f7d488")
         t.append(" token", style="dim")
         if self.tool:
             t.append("   ")
             t.append_text(Text.from_markup(dot))
-            t.append(f"  🔧 {self.tool}", style="#f5c2e7")
+            t.append(f"  🔧 {self.tool}", style="#ffd9a0")
         if self.step:
             t.append("   ")
             t.append_text(Text.from_markup(dot))
-            t.append(f"  langkah {self.step}", style="dim #94e2d5")
+            t.append(f"  langkah {self.step}", style="dim #ffb861")
         t.append("     Ctrl+C batal", style="dim italic")
         return _oneline(t)
 
@@ -1225,7 +1230,7 @@ class TurnView:
         if self.commit:
             out = []
             if not self._said:
-                out.append(Padding(Text("🤖 bagas-ai", style="bold #89b4fa"),
+                out.append(Padding(Text("🤖 bagas-ai", style="bold #fc9018"),
                                    (1, 0, 0, 2)))
                 self._said = True
             out.append(Padding(_md(text.strip()), (0, 3, 1, 3)))
@@ -1295,10 +1300,10 @@ class TurnView:
         if len(label) > 64:
             label = label[:61] + "…"
         failed = rec["failed"]
-        icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
+        icon = "[#f0603c]✗[/]" if failed else "[#9fc93c]✓[/]"
         phase = _PHASE.get(rec["name"], "langkah")
         out = [_oneline(Text.from_markup(
-            f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"))]
+            f"  {icon} [#f2e3cc]{phase}[/]  [white]{_esc(label)}[/]"))]
         lines = rec.get("_lines") or []
         if lines:
             out.extend(_pratinjau_hasil(lines, gagal=failed))
@@ -1337,13 +1342,13 @@ class TurnView:
         now = time.time()
         if self.cancelling:
             return _oneline(Text.from_markup(
-                f"  [bold #f38ba8]{frame}[/] [#f38ba8]membatalkan — "
+                f"  [bold #f0603c]{frame}[/] [#f0603c]membatalkan — "
                 f"menunggu langkah aman berhenti[/]   [dim italic]Ctrl+C lagi = paksa[/]"))
         if now < self.retry_until:
             left = self.retry_until - now
             return _oneline(Text.from_markup(
-                f"  [bold #f9e2af]{frame}[/] [#f9e2af]layanan sibuk — menunggu lalu "
-                f"melanjutkan[/] [bold #fab387]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]"))
+                f"  [bold #f7d488]{frame}[/] [#f7d488]layanan sibuk — menunggu lalu "
+                f"melanjutkan[/] [bold #fca830]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]"))
         target = float(self.agent.tokens_live)
         self.disp += (target - self.disp) * 0.30
         if abs(target - self.disp) < 1:
@@ -1355,14 +1360,14 @@ class TurnView:
             if len(lbl) > 40:
                 lbl = lbl[:37] + "…"
             lbl = f" [dim]{_esc(lbl)}[/]" if lbl else ""
-            extra = f"   [dim]·[/]   [#f5c2e7]🔧 {self.tool}[/]{lbl}"
+            extra = f"   [dim]·[/]   [#ffd9a0]🔧 {self.tool}[/]{lbl}"
         # Segmen "◇ effort" DIHAPUS: sejak semua model lewat browser,
         # agent.effort selalu None (mesin effort ala API ikut terhapus bersama
         # model ber-API-key), jadi ia tak pernah tampil — cuma menyisakan cabang
         # mati yang menyesatkan pembaca kode.
         status = _oneline(Text.from_markup(
-            f"  [bold #cba6f7]{frame}[/] [#cba6f7]{self.phase}[/]   [dim]·[/]   "
-            f"[#89b4fa]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f9e2af]⚡ {tok}[/] "
+            f"  [bold #fcc048]{frame}[/] [#fcc048]{self.phase}[/]   [dim]·[/]   "
+            f"[#fc9018]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f7d488]⚡ {tok}[/] "
             f"[dim]token[/]{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
         rows = [status]
@@ -1393,34 +1398,34 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
     kind = "🌐 via browser"
     # Kolom label rata kanan (abu) + nilai berwarna -> sejajar & profesional.
     grid = Table.grid(padding=(0, 2))
-    grid.add_column(justify="right", style="#7f849c", min_width=7)
+    grid.add_column(justify="right", style="#a89078", min_width=7)
     grid.add_column(overflow="fold")
-    eff = (f"   [#7f849c]·[/]   [#f5c2e7]◇ {agent.effort}[/]"
+    eff = (f"   [#a89078]·[/]   [#ffd9a0]◇ {agent.effort}[/]"
            if agent.effort else "")
     tag = "dilanjutkan" if resumed else "sesi baru"
-    grid.add_row("Model", f"[bold #89b4fa]{spec.label}[/]   [dim]{kind}[/]{eff}")
-    grid.add_row("Folder", f"[#a6e3a1]{config.PROJECT_ROOT}[/]")
-    grid.add_row("Sesi", f"[#f9e2af]{agent.session.id}[/]   [dim]· {tag}[/]")
+    grid.add_row("Model", f"[bold #fc9018]{spec.label}[/]   [dim]{kind}[/]{eff}")
+    grid.add_row("Folder", f"[#9fc93c]{config.PROJECT_ROOT}[/]")
+    grid.add_row("Sesi", f"[#f7d488]{agent.session.id}[/]   [dim]· {tag}[/]")
     # Mode lewati-izin TIDAK boleh senyap: selama ini aktif, bagas-ai boleh
     # menulis & menghapus di folder mana pun tanpa satu pun konfirmasi, jadi
     # keadaannya harus terbaca sekali lihat.
     if permissions.skip_aktif():
-        grid.add_row("Izin", "[bold #f38ba8]⚠ --skip-permissions[/]   "
+        grid.add_row("Izin", "[bold #f0603c]⚠ --skip-permissions[/]   "
                              "[dim]akses ke SEMUA folder tanpa konfirmasi[/]")
 
     head = Text.assemble(
-        ("● ", "bold #a6e3a1"), ("siap", "bold #a6e3a1"),
+        ("● ", "bold #9fc93c"), ("siap", "bold #9fc93c"),
         ("   dimana pun, dari terminal ini", "dim italic"),
     )
     hint = Text.from_markup(
         "[dim]ketik pesan untuk mengobrol[/dim]   "
-        "[#94e2d5]/menu[/] [dim]menu[/dim]   "
-        "[#94e2d5]/model[/] [dim]ganti model[/dim]   "
-        "[#f38ba8]/exit[/] [dim]keluar[/dim]"
+        "[#ffb861]/menu[/] [dim]menu[/dim]   "
+        "[#ffb861]/model[/] [dim]ganti model[/dim]   "
+        "[#f0603c]/exit[/] [dim]keluar[/dim]"
     )
-    body = Group(head, Text(), grid, Rule(style="#313244"), hint)
-    return Panel(body, border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2),
-                 title="[bold #cba6f7]⬢ bagas-ai[/]", title_align="left")
+    body = Group(head, Text(), grid, Rule(style="#3a2a1a"), hint)
+    return Panel(body, border_style="#fcc048", box=box.ROUNDED, padding=(1, 2),
+                 title="[bold #fcc048]⬢ bagas-ai[/]", title_align="left")
 
 
 # ---------------------------------------------------------------------------
@@ -1485,18 +1490,18 @@ def main(resume: bool = False) -> None:
     pout(_banner(agent, resumed), bottom=0)
     if resumed:
         console.print(Padding(Rule("[dim]percakapan sebelumnya[/dim]",
-                                    style="#313244"), (1, 0, 0, 0)))
+                                    style="#3a2a1a"), (1, 0, 0, 0)))
         for m in agent.memory.messages:
             role, content = m.get("role"), (m.get("content") or "")
             if role == "user":
                 # WAJIB di-escape: teks pengguna yang memuat '[i]' / '[red]'
                 # (lazim di kode, mis. arr[i]) akan ditafsirkan rich sebagai
                 # markup — teks berubah gaya & kurungnya hilang saat replay.
-                console.print(f"\n  [bold #cba6f7]❯[/] [white]{_esc(content)}[/]")
+                console.print(f"\n  [bold #fcc048]❯[/] [white]{_esc(content)}[/]")
             elif role == "assistant" and content:
-                console.print("\n  [bold #89b4fa]🤖 bagas-ai[/]")
+                console.print("\n  [bold #fc9018]🤖 bagas-ai[/]")
                 console.print(Padding(_md(content), (0, 3, 1, 3)))
-        console.print(Rule("[dim]lanjut di bawah[/dim]", style="#313244"))
+        console.print(Rule("[dim]lanjut di bawah[/dim]", style="#3a2a1a"))
     if os_status in ("added", "updated"):
         verb = "terdeteksi & disimpan" if os_status == "added" else "diperbarui"
         pout(f"[dim]🖥  OS {verb}: {osinfo.summary()} — perintah terminal akan "
@@ -1506,7 +1511,7 @@ def main(resume: bool = False) -> None:
     _pn = _primed_map.count("\n- ")
     if _pn:
         pout(f"[dim]🗺  peta proyek siap (~{_pn} file) — disegarkan di latar; "
-             f"ketik [/][#94e2d5]/scan[/][dim] untuk paksa pindai ulang.[/]",
+             f"ketik [/][#ffb861]/scan[/][dim] untuk paksa pindai ulang.[/]",
              bottom=0)
     else:
         pout("[dim]🗺  peta proyek dibangun di latar — langsung ngetik aja, "
@@ -1682,10 +1687,10 @@ def main(resume: bool = False) -> None:
         label = _step_label(name, args)
         if len(label) > 64:
             label = label[:61] + "…"
-        icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
+        icon = "[#f0603c]✗[/]" if failed else "[#9fc93c]✓[/]"
         phase = _PHASE.get(name, "selesai")
         dur_s = f"{dur:.1f}s" if dur >= 0.05 else ""
-        console.print(f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
+        console.print(f"  {icon} [#f2e3cc]{phase}[/]  [white]{_esc(label)}[/]"
                       f"   [dim]{dur_s}[/]")
 
         # Di bawahnya: pratinjau keluarannya, berlatar abu-abu gelap. Langkah
@@ -1704,7 +1709,7 @@ def main(resume: bool = False) -> None:
             m = re.search(r"\[cek sintaks\]\s*(.+)", text)
             if m:
                 ok = m.group(1).startswith("OK")
-                col = "#a6e3a1" if ok else "#f38ba8"
+                col = "#9fc93c" if ok else "#f0603c"
                 console.print(f"     [{col}]{_esc(m.group(1).strip())}[/]")
         # Langkah tool selesai -> kembali ke fase "berpikir" untuk generasi berikut.
         status_obj.note_thinking()
@@ -1777,7 +1782,7 @@ def main(resume: bool = False) -> None:
 
         def render():
             return Text.from_markup(
-                f"  [#94e2d5]◐[/] [dim]{_esc(state['status'])}[/]")
+                f"  [#ffb861]◐[/] [dim]{_esc(state['status'])}[/]")
 
         wt = threading.Thread(target=worker, daemon=True)
         interrupted = False
@@ -1804,12 +1809,12 @@ def main(resume: bool = False) -> None:
             _pick_web_chat(connectors.get_connector(spec.connector))
             if result["login"]:
                 console.print(
-                    f"  [#a6e3a1]✓ login berhasil — terhubung ke "
+                    f"  [#9fc93c]✓ login berhasil — terhubung ke "
                     f"[bold]{_esc(spec.label)}[/bold]. Jendela diminimalkan; "
                     f"chat & jawaban di terminal ini.[/]\n")
             else:
                 console.print(
-                    f"  [#a6e3a1]✓ terhubung — sesi login [bold]"
+                    f"  [#9fc93c]✓ terhubung — sesi login [bold]"
                     f"{_esc(spec.label)}[/bold] masih aktif, langsung ke chat.[/]\n")
             return
         err = result["error"]
@@ -1858,7 +1863,7 @@ def main(resume: bool = False) -> None:
             return
         agent.use_web_chat(sel)
         title = next((r.get("title") for r in rows if r.get("id") == sel), sel)
-        console.print(f"  [#a6e3a1]✓ melanjutkan:[/] [bold]{_esc(str(title))}[/] "
+        console.print(f"  [#9fc93c]✓ melanjutkan:[/] [bold]{_esc(str(title))}[/] "
                       f"[dim]— konteks proyek sudah ada di percakapan itu.[/]")
 
     def _delete_web_chats_of(sessions_deleted: list) -> None:
@@ -2009,13 +2014,13 @@ def main(resume: bool = False) -> None:
             yang sama sekali bukan pemulihan."""
             if "disisipkan" in msg:
                 _commit([Text.from_markup(
-                    f"  [#89b4fa]✉ {_esc(msg)}[/] "
+                    f"  [#fc9018]✉ {_esc(msg)}[/] "
                     f"[dim]— bagas-ai yang menentukan urutannya[/]")])
                 return
             label = ("⚡ naik kelas otomatis:" if "→" in msg
                      else "🛟 anti-macet:")
             _commit([Text.from_markup(
-                f"  [#f9e2af]{label}[/] [dim]{_esc(msg)} "
+                f"  [#f7d488]{label}[/] [dim]{_esc(msg)} "
                 f"— konteks dipertahankan[/]")])
 
         cancel_event = threading.Event()
@@ -2084,7 +2089,7 @@ def main(resume: bool = False) -> None:
                     # (Gema kedua saat prompt ini benar-benar dikerjakan
                     # sengaja tak ada — lihat gelung utama.)
                     _commit([_oneline(Text.from_markup(
-                        f"  [bold #cba6f7]❯[/] [white]{_esc(teks)}[/]"))])
+                        f"  [bold #fcc048]❯[/] [white]{_esc(teks)}[/]"))])
                 return True
             if ch in ("\x08", "\x7f"):             # Backspace / Ctrl+Backspace
                 # KEDUANYA hapus 1 HURUF. Arah byte-nya tak bisa dipercaya:
@@ -2179,7 +2184,7 @@ def main(resume: bool = False) -> None:
                 # Header bot cukup SEKALI per giliran — kalau narasi sudah
                 # menampilkannya, jawaban akhir tak perlu header kedua.
                 if not view._said:
-                    console.print("  [bold #89b4fa]🤖 bagas-ai[/]")
+                    console.print("  [bold #fc9018]🤖 bagas-ai[/]")
                 console.print(Padding(_md(ans), (0, 3, 1, 3)))
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
@@ -2190,7 +2195,7 @@ def main(resume: bool = False) -> None:
                 if n_file:
                     seg.append(f"{n_file} file")
                 if n_fail:
-                    seg.append(f"[#f38ba8]{n_fail} gagal[/]")
+                    seg.append(f"[#f0603c]{n_fail} gagal[/]")
                 seg += [_fmt_elapsed(time.time() - view.start),
                         f"⚡ {_fmt(agent.tokens_last.total)} token"]
                 console.print(Padding(Text.from_markup(
@@ -2224,7 +2229,7 @@ def main(resume: bool = False) -> None:
                 return
             console.print()
             if not header["shown"]:
-                console.print("  [bold #89b4fa]🤖 bagas-ai[/]")
+                console.print("  [bold #fc9018]🤖 bagas-ai[/]")
                 header["shown"] = True
             console.print(Padding(_md(content.strip()), (0, 3, 1, 3)))
 
@@ -2315,7 +2320,7 @@ def main(resume: bool = False) -> None:
         if n_file:
             parts.append(f"{n_file} file")
         if n_fail:
-            parts.append(f"[#f38ba8]{n_fail} gagal[/]")
+            parts.append(f"[#f0603c]{n_fail} gagal[/]")
         parts.append(el)
         parts.append(f"⚡ {tok} token")
         body = " [dim]·[/] ".join(parts)
@@ -2409,7 +2414,7 @@ def main(resume: bool = False) -> None:
                 while wt.is_alive():
                     frame = FRAMES[int(time.time() * 10) % len(FRAMES)]
                     live.update(_oneline(Text.from_markup(
-                        f"  [#cba6f7]{frame}[/] [dim]{_esc(state['msg'])}[/]")))
+                        f"  [#fcc048]{frame}[/] [dim]{_esc(state['msg'])}[/]")))
                     wt.join(timeout=0.1)
         except KeyboardInterrupt:
             # Sama seperti pembatalan giliran: bereskan di latar, dan HANYA
@@ -2421,7 +2426,7 @@ def main(resume: bool = False) -> None:
         if result["error"] is not None:
             console.print(f"  [yellow]⚠ {_esc(str(result['error']))}[/yellow]\n")
         else:
-            console.print(f"  [#a6e3a1]✓ {_esc(str(result['ok']))}[/]\n")
+            console.print(f"  [#9fc93c]✓ {_esc(str(result['ok']))}[/]\n")
 
     def _web_service_pick() -> str:
         """Pilih service web mana yang dikelola (kalau lebih dari satu punya
@@ -2463,7 +2468,7 @@ def main(resume: bool = False) -> None:
                 while wt.is_alive():
                     frame = FRAMES[int(time.time() * 10) % len(FRAMES)]
                     live.update(_oneline(Text.from_markup(
-                        f"  [#cba6f7]{frame}[/] [dim]{_esc(msg)}[/]")))
+                        f"  [#fcc048]{frame}[/] [dim]{_esc(msg)}[/]")))
                     wt.join(timeout=0.1)
         except KeyboardInterrupt:
             _reset_web_hub_if_stuck(wt)
@@ -2487,7 +2492,7 @@ def main(resume: bool = False) -> None:
         own = conn.own_chats()
         console.print(
             f"  [dim]Layanan:[/] [bold]{_esc(conn.label)}[/]   "
-            f"[dim]chat tercatat dibuat bagas-ai:[/] [#94e2d5]{len(own)}[/]\n")
+            f"[dim]chat tercatat dibuat bagas-ai:[/] [#ffb861]{len(own)}[/]\n")
 
         choices = [
             Choice("prune", "🧹 Hapus chat lama buatan bagas-ai (sisakan N terbaru)"),
@@ -2514,7 +2519,7 @@ def main(resume: bool = False) -> None:
                 return
             ok = _br.forget_profile(svc)
             console.print(
-                f"  [#a6e3a1]✓ profil {_esc(conn.label)} dihapus — login ulang "
+                f"  [#9fc93c]✓ profil {_esc(conn.label)} dihapus — login ulang "
                 f"saat dipakai lagi.[/]\n" if ok else
                 f"  [yellow]⚠ sebagian file profil masih terkunci; tutup Chrome "
                 f"lalu coba lagi.[/]\n")
@@ -2542,7 +2547,7 @@ def main(resume: bool = False) -> None:
             n, err = _web_busy(f"menghapus {len(own) - keep} chat lama…",
                                lambda: conn.prune_own_chats(keep))
             if err is None:
-                console.print(f"  [#a6e3a1]✓ {n} chat lama dihapus, "
+                console.print(f"  [#9fc93c]✓ {n} chat lama dihapus, "
                               f"{keep} terbaru disimpan.[/]\n")
             elif not isinstance(err, KeyboardInterrupt):
                 console.print(f"  [yellow]⚠ {_esc(str(err))}[/]\n")
@@ -2562,7 +2567,7 @@ def main(resume: bool = False) -> None:
             n, err = _web_busy(f"menghapus {len(own)} chat…",
                                lambda: conn.prune_own_chats(0))
             if err is None:
-                console.print(f"  [#a6e3a1]✓ {n} chat dihapus.[/]\n")
+                console.print(f"  [#9fc93c]✓ {n} chat dihapus.[/]\n")
             elif not isinstance(err, KeyboardInterrupt):
                 console.print(f"  [yellow]⚠ {_esc(str(err))}[/]\n")
             return
@@ -2597,7 +2602,7 @@ def main(resume: bool = False) -> None:
                            lambda: conn.delete_chats(list(picked)))
         if err is None:
             conn.forget_chats(set(picked))
-            console.print(f"  [#a6e3a1]✓ {n} chat dihapus.[/]\n")
+            console.print(f"  [#9fc93c]✓ {n} chat dihapus.[/]\n")
         elif not isinstance(err, KeyboardInterrupt):
             console.print(f"  [yellow]⚠ {_esc(str(err))}[/]\n")
 
@@ -2633,7 +2638,7 @@ def main(resume: bool = False) -> None:
         _delete_web_chats_of(removed)
 
     def show_help() -> None:
-        c = "#94e2d5"
+        c = "#ffb861"
         pout(Panel(
             "[dim]ketik pesan biasa untuk mengobrol dengan bagas-ai[/dim]\n\n"
             f"[{c}]/menu[/]     menu interaktif        [{c}]/model[/]    pilih model + saran\n"
@@ -2645,9 +2650,9 @@ def main(resume: bool = False) -> None:
             f"[{c}]/review[/]   cari bug seluruh proyek [{c}]/scan[/]     segarkan peta proyek\n"
             f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
             f"[{c}]/live[/]     tampilan mengalir      [{c}]/scripts[/]  script memory\n"
-            f"[{c}]/update[/]   cek pembaruan          [#f38ba8]/exit[/]     keluar",
-            title="[bold #cba6f7]❔ Bantuan[/]", title_align="left",
-            border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2)))
+            f"[{c}]/update[/]   cek pembaruan          [#f0603c]/exit[/]     keluar",
+            title="[bold #fcc048]❔ Bantuan[/]", title_align="left",
+            border_style="#fcc048", box=box.ROUNDED, padding=(1, 2)))
 
     def _baris_versi() -> None:
         """Versi dari SEMUA sumber, bukan cuma GitHub — yang menentukan apa yang
@@ -2658,13 +2663,13 @@ def main(resume: bool = False) -> None:
             return
         t = Text("  ")
         t.append("terpasang ", style="dim")
-        t.append(v.get("terpasang") or "?", style="#89b4fa")
+        t.append(v.get("terpasang") or "?", style="#fc9018")
         if v.get("repo"):
             t.append("   repo ", style="dim")
-            t.append(v["repo"], style="#a6e3a1")
+            t.append(v["repo"], style="#9fc93c")
         if v.get("remote") and v["remote"] != v.get("repo"):
             t.append("   remote ", style="dim")
-            t.append(v["remote"], style="#f9e2af")
+            t.append(v["remote"], style="#f7d488")
         if v.get("commit_lokal"):
             t.append(f"   commit {v['commit_lokal']}", style="dim")
         console.print(_oneline(t))
@@ -2681,7 +2686,7 @@ def main(resume: bool = False) -> None:
 
         if st == "up_to_date":
             console.print(
-                f"  [bold #a6e3a1]✓ bagas-ai sudah versi terbaru.[/]  "
+                f"  [bold #9fc93c]✓ bagas-ai sudah versi terbaru.[/]  "
                 f"[dim]({res.get('local','')})[/dim]"
             )
             _baris_versi()
@@ -2694,15 +2699,15 @@ def main(resume: bool = False) -> None:
             # padahal kode yang jalan masih yang lama.
             body = Text()
             body.append("Repo sudah mutakhir, tapi paket yang TERPASANG "
-                        "tertinggal.\n\n", style="bold #f9e2af")
+                        "tertinggal.\n\n", style="bold #f7d488")
             body.append("Yang benar-benar dijalankan adalah salinan di "
                         "site-packages, dan isinya berbeda dari repo:\n\n",
                         style="dim")
             for b in (res.get("beda") or [])[:10]:
-                body.append("  • ", style="#89b4fa")
+                body.append("  • ", style="#fc9018")
                 body.append(b + "\n")
-            pout(Panel(body, title="[bold #cba6f7]🔄 Pemasangan tertinggal[/]",
-                       title_align="left", border_style="#f9e2af",
+            pout(Panel(body, title="[bold #fcc048]🔄 Pemasangan tertinggal[/]",
+                       title_align="left", border_style="#f7d488",
                        box=box.ROUNDED, padding=(1, 2)))
             try:
                 go = inquirer.confirm(message="Pasang ulang sekarang?",
@@ -2733,11 +2738,11 @@ def main(resume: bool = False) -> None:
             # folder). Bisa disiapkan otomatis: clone lalu reinstall.
             body = Text()
             body.append("Auto-update belum disiapkan untuk instalasi ini.\n\n",
-                        style="bold #f9e2af")
+                        style="bold #f7d488")
             body.append(f"Sumber : {res.get('repo_url','')}\n", style="dim")
             body.append(f"Branch : {res.get('branch','')}", style="dim")
-            pout(Panel(body, title="[bold #cba6f7]🔄 Siapkan pembaruan[/]",
-                       title_align="left", border_style="#cba6f7",
+            pout(Panel(body, title="[bold #fcc048]🔄 Siapkan pembaruan[/]",
+                       title_align="left", border_style="#fcc048",
                        box=box.ROUNDED, padding=(1, 2)))
             try:
                 go = inquirer.confirm(message="Siapkan & perbarui sekarang?",
@@ -2752,15 +2757,15 @@ def main(resume: bool = False) -> None:
             n = res.get("behind", "?")
             log = res.get("log", "")
             body = Text()
-            body.append(f"{n} pembaruan tersedia  ", style="bold #f9e2af")
+            body.append(f"{n} pembaruan tersedia  ", style="bold #f7d488")
             body.append(f"({res.get('local','')} → {res.get('remote','')})\n\n",
                         style="dim")
             if log:
                 for line in log.splitlines():
-                    body.append("  • ", style="#89b4fa")
+                    body.append("  • ", style="#fc9018")
                     body.append(line + "\n")
-            pout(Panel(body, title="[bold #cba6f7]🔄 Pembaruan bagas-ai[/]",
-                       title_align="left", border_style="#cba6f7",
+            pout(Panel(body, title="[bold #fcc048]🔄 Pembaruan bagas-ai[/]",
+                       title_align="left", border_style="#fcc048",
                        box=box.ROUNDED, padding=(1, 2)))
             try:
                 go = inquirer.confirm(message="Terapkan pembaruan sekarang?",
@@ -2794,26 +2799,26 @@ def main(resume: bool = False) -> None:
             console.print(f"  [red]✖ gagal ({ost}):[/red] {out.get('detail','')}\n")
             return
 
-        note = f"\n  [#f9e2af]ℹ {_esc(out['note'])}[/]" if out.get("note") else ""
+        note = f"\n  [#f7d488]ℹ {_esc(out['note'])}[/]" if out.get("note") else ""
         if out.get("verified"):
             # TERVERIFIKASI = isi paket terpasang benar-benar sama dengan repo,
             # bukan sekadar "pip keluar dengan kode 0". Bedanya penting: yang
             # kedua pernah berbohong.
             langsung = out.get("how") == "langsung"
             console.print(
-                "  [bold #a6e3a1]✓ bagas-ai diperbarui & diverifikasi[/]  "
+                "  [bold #9fc93c]✓ bagas-ai diperbarui & diverifikasi[/]  "
                 f"[dim]v{_esc(out.get('version', ''))}[/dim]"
                 + ("\n  [dim]kode terbaru sudah aktif — cukup jalankan ulang "
                    "perintahnya, tak ada yang perlu ditunggu.[/dim]"
                    if langsung else
-                   "\n  [dim]jalankan ulang[/dim] [#94e2d5]bagas-ai[/] "
+                   "\n  [dim]jalankan ulang[/dim] [#ffb861]bagas-ai[/] "
                    "[dim]agar perubahan aktif.[/dim]")
                 + note)
             _baris_versi()
             console.print()
             return
 
-        console.print("  [bold #f9e2af]⚠ pembaruan belum tuntas.[/]" + note)
+        console.print("  [bold #f7d488]⚠ pembaruan belum tuntas.[/]" + note)
         for b in (out.get("diff") or [])[:6]:
             console.print(f"    [dim]• {_esc(b)}[/dim]")
         if out.get("pip_detail"):
@@ -2822,10 +2827,10 @@ def main(resume: bool = False) -> None:
 
     def _dir_tree_panel(p, title: str) -> None:
         body = Text()
-        body.append(f"{p}\n\n", style="bold #a6e3a1")
+        body.append(f"{p}\n\n", style="bold #9fc93c")
         body.append(workspace.tree(p), style="dim")
         pout(Panel(body, title=title, title_align="left",
-                   border_style="#a6e3a1", box=box.ROUNDED, padding=(1, 2)))
+                   border_style="#9fc93c", box=box.ROUNDED, padding=(1, 2)))
 
     def do_add_dir(path: str) -> None:
         try:
@@ -2834,7 +2839,7 @@ def main(resume: bool = False) -> None:
             console.print(f"  [red]✖[/red] {e}\n")
             return
         agent.refresh_system_prompt()  # bagas-ai langsung "paham" folder ini
-        _dir_tree_panel(p, "[bold #a6e3a1]📂 Folder konteks ditambahkan[/]")
+        _dir_tree_panel(p, "[bold #9fc93c]📂 Folder konteks ditambahkan[/]")
         console.print(
             "  [dim]bagas-ai kini memahami & bisa baca/tulis file di folder ini "
             "(pakai path absolut).[/dim]\n"
@@ -2843,7 +2848,7 @@ def main(resume: bool = False) -> None:
     def do_rm_dir(path: str) -> None:
         if workspace.remove(path):
             agent.refresh_system_prompt()
-            console.print(f"  [#a6e3a1]✓ Folder konteks dilepas:[/] [dim]{path}[/dim]\n")
+            console.print(f"  [#9fc93c]✓ Folder konteks dilepas:[/] [dim]{path}[/dim]\n")
         else:
             console.print(f"  [yellow]ℹ Folder itu tidak ada di daftar konteks.[/yellow]\n")
 
@@ -2872,19 +2877,19 @@ def main(resume: bool = False) -> None:
         if not dirs:
             console.print(
                 "  [dim]Belum ada folder konteks tambahan.[/dim]  "
-                "Ketik [#94e2d5]/add-dir[/] untuk menambah (muncul box input "
-                "path), atau langsung [#94e2d5]/add-dir <path>[/].\n"
+                "Ketik [#ffb861]/add-dir[/] untuk menambah (muncul box input "
+                "path), atau langsung [#ffb861]/add-dir <path>[/].\n"
             )
             return
         body = Text()
         body.append("Folder yang bagas-ai pahami (selain root project):\n\n",
                     style="dim")
         for d in dirs:
-            body.append("  📂 ", style="#a6e3a1")
+            body.append("  📂 ", style="#9fc93c")
             body.append(f"{d}\n")
         body.append("\nLepas dengan /rm-dir <path>.", style="dim")
-        pout(Panel(body, title="[bold #a6e3a1]📂 Folder konteks[/]",
-                   title_align="left", border_style="#a6e3a1",
+        pout(Panel(body, title="[bold #9fc93c]📂 Folder konteks[/]",
+                   title_align="left", border_style="#9fc93c",
                    box=box.ROUNDED, padding=(1, 2)))
 
     def do_action(action: str) -> bool:
@@ -2925,15 +2930,15 @@ def main(resume: bool = False) -> None:
         elif action == "memory":
             facts = longmem.all_facts()
             pout(Panel("\n".join(f"• {f}" for f in facts) or "[dim]kosong[/dim]",
-                       title="[bold #a6e3a1]🧠 Memory jangka panjang[/]",
-                       title_align="left", border_style="#a6e3a1",
+                       title="[bold #9fc93c]🧠 Memory jangka panjang[/]",
+                       title_align="left", border_style="#9fc93c",
                        box=box.ROUNDED, padding=(1, 2)))
         elif action == "scripts":
             items = scripts.index_list()
-            txt = "\n".join(f"• [#89b4fa]{it['name']}[/]: {it.get('description') or '-'}"
+            txt = "\n".join(f"• [#fc9018]{it['name']}[/]: {it.get('description') or '-'}"
                             for it in items) or "[dim]belum ada[/dim]"
-            pout(Panel(txt, title="[bold #89b4fa]📜 Script memory[/]",
-                       title_align="left", border_style="#89b4fa",
+            pout(Panel(txt, title="[bold #fc9018]📜 Script memory[/]",
+                       title_align="left", border_style="#fc9018",
                        box=box.ROUNDED, padding=(1, 2)))
         elif action == "help":
             show_help()
@@ -2954,7 +2959,7 @@ def main(resume: bool = False) -> None:
             agent.refresh_system_prompt()
             nfiles = txt.count("\n- ")
             console.print(
-                f"  [#a6e3a1]✓ peta proyek diperbarui[/] [dim]· ~{nfiles} file · "
+                f"  [#9fc93c]✓ peta proyek diperbarui[/] [dim]· ~{nfiles} file · "
                 f"{len(txt):,} karakter — bagas-ai kini paham struktur terbaru tanpa "
                 f"baca ulang.[/]\n".replace(",", "."))
         except Exception as e:  # noqa: BLE001
@@ -2982,12 +2987,12 @@ def main(resume: bool = False) -> None:
     def _tg_emit(kind: str, text: str) -> None:
         t = _esc(text or "")
         if kind == "in":
-            console.print(f"\n  [#89b4fa]📲 Telegram ▸[/] [#cdd6f4]{t}[/]")
+            console.print(f"\n  [#fc9018]📲 Telegram ▸[/] [#f2e3cc]{t}[/]")
         elif kind == "out":
             snip = t if len(t) <= 600 else t[:600] + "…"
-            console.print(f"  [#a6e3a1]  ↳ balasan:[/] [dim]{snip}[/]")
+            console.print(f"  [#9fc93c]  ↳ balasan:[/] [dim]{snip}[/]")
         elif kind == "perm":
-            console.print(f"\n  [#f9e2af]🔔 {t}[/]")
+            console.print(f"\n  [#f7d488]🔔 {t}[/]")
         elif kind == "error":
             console.print(f"  [red]📲 error:[/] {t}")
         else:
@@ -3005,7 +3010,7 @@ def main(resume: bool = False) -> None:
             except Exception:  # noqa: BLE001
                 pass
             tg_service["svc"] = None
-            console.print("  [#f9e2af]○ bot Telegram MATI.[/]\n")
+            console.print("  [#f7d488]○ bot Telegram MATI.[/]\n")
             return
         if not config.TELEGRAM_BOT_TOKEN:
             console.print("  [red]✖ TELEGRAM_BOT_TOKEN belum diisi di .env[/] "
@@ -3026,17 +3031,17 @@ def main(resume: bool = False) -> None:
             idtxt = (str(ids) if ids
                      else "belum ada — kirim pesan pertama dari HP, kamu otomatis jadi pemilik")
             console.print(
-                f"  [#a6e3a1]✓ bot Telegram AKTIF[/] [dim]— kontrol bagas-ai dari HP-mu "
+                f"  [#9fc93c]✓ bot Telegram AKTIF[/] [dim]— kontrol bagas-ai dari HP-mu "
                 f"selama sesi ini hidup. Folder: {config.PROJECT_ROOT}\n"
                 f"     ID diizinkan: {idtxt}. Aktivitas tampil di sini. "
-                f"Atur izin: [/][#94e2d5]/permissions-bot[/][dim].[/]\n")
+                f"Atur izin: [/][#ffb861]/permissions-bot[/][dim].[/]\n")
         elif svc.error is not None:
             console.print(f"  [red]✖ gagal menyalakan bot:[/] {svc.error}\n")
         elif svc.alive():
             # Belum 'running' tapi thread masih menyala (jaringan lambat) -> SIMPAN
             # supaya tak jadi bot yatim & tetap bisa dimatikan via /bot.
             tg_service["svc"] = svc
-            console.print("  [#f9e2af]… bot lambat menyala[/] [dim]— tunggu sebentar "
+            console.print("  [#f7d488]… bot lambat menyala[/] [dim]— tunggu sebentar "
                           "lalu coba kirim pesan; /bot lagi untuk mematikan.[/]\n")
         else:
             console.print("  [red]✖ bot berhenti tak terduga saat menyala.[/]\n")
@@ -3047,10 +3052,10 @@ def main(resume: bool = False) -> None:
             pend = telegram_perms.pending()
             allowed = sorted(telegram_perms.allowed_ids())
             head = Text.from_markup(
-                f"[bold #89b4fa]🔐 Izin bot Telegram[/]\n"
+                f"[bold #fc9018]🔐 Izin bot Telegram[/]\n"
                 f"[dim]Diizinkan:[/] {allowed or '(belum ada)'}\n"
                 f"[dim]Menunggu izin:[/] {len(pend)}")
-            pout(Panel(head, border_style="#89b4fa", box=box.ROUNDED, padding=(1, 2)))
+            pout(Panel(head, border_style="#fc9018", box=box.ROUNDED, padding=(1, 2)))
             choices = []
             for cid, info in pend.items():
                 choices.append(Choice(("approve", int(cid)),
@@ -3191,26 +3196,26 @@ def main(resume: bool = False) -> None:
         else:
             event.app.exit(exception=EOFError, style="class:exiting")
 
-    # Gaya status bar: latar gelap "catppuccin" + aksen warna per segmen.
+    # Gaya status bar: latar gelap hangat + aksen kuning-oranye per segmen.
     _pt_style = PTStyle.from_dict({
-        "bottom-toolbar": "bg:#181825 #cdd6f4 noreverse",
-        "garis": "#585b70",      # tepi kotak chat
-        "tanda": "bold #cba6f7",  # "❯" di dalam kotak
-        "sep": "#45475a",
-        "brand": "#cba6f7 bold",
-        "model": "#89b4fa bold",
-        "eff": "#f5c2e7",
-        "sesi": "#f9e2af",
-        "total": "#a6e3a1",
-        "cmd": "#94e2d5",
-        "exit": "#f38ba8",
-        "muted": "#7f849c",
-        # Menu autocomplete "/..." — selaras tema catppuccin.
-        "completion-menu": "bg:#1e1e2e #cdd6f4",
-        "completion-menu.completion": "bg:#1e1e2e #cdd6f4",
-        "completion-menu.completion.current": "bg:#cba6f7 #1e1e2e bold",
-        "completion-menu.meta.completion": "bg:#181825 #7f849c",
-        "completion-menu.meta.completion.current": "bg:#45475a #cdd6f4",
+        "bottom-toolbar": "bg:#1a120b #f2e3cc noreverse",
+        "garis": "#7a5c3a",      # tepi kotak chat
+        "tanda": "bold #fcc048",  # "❯" di dalam kotak
+        "sep": "#4a3826",
+        "brand": "#fcc048 bold",
+        "model": "#fc9018 bold",
+        "eff": "#ffd9a0",
+        "sesi": "#f7d488",
+        "total": "#9fc93c",
+        "cmd": "#ffb861",
+        "exit": "#f0603c",
+        "muted": "#a89078",
+        # Menu autocomplete "/..." — selaras tema kuning-oranye.
+        "completion-menu": "bg:#241a10 #f2e3cc",
+        "completion-menu.completion": "bg:#241a10 #f2e3cc",
+        "completion-menu.completion.current": "bg:#fcc048 #241a10 bold",
+        "completion-menu.meta.completion": "bg:#1a120b #a89078",
+        "completion-menu.meta.completion.current": "bg:#4a3826 #f2e3cc",
     })
     # Status bar token PERMANEN di paling bawah (selalu terlihat & rapi).
     def status_bar():
@@ -3270,7 +3275,7 @@ def main(resume: bool = False) -> None:
                 # adalah teks yang paling sering dibaca ulang saat menggulung
                 # riwayat, jadi ia yang paling butuh kontras tertinggi — bukan
                 # warna tema yang meredupkannya.
-                console.print(f"  [bold #cba6f7]❯[/] "
+                console.print(f"  [bold #fcc048]❯[/] "
                               f"[white]{_esc(raw.strip())}[/]")
         text = raw.strip()
         if not text:
@@ -3322,11 +3327,11 @@ def main(resume: bool = False) -> None:
             elif cmd == "live":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:
-                    console.print("  [#a6e3a1]✓ tampilan mengalir AKTIF[/] "
+                    console.print("  [#9fc93c]✓ tampilan mengalir AKTIF[/] "
                                   "[dim]— langkah/diff/jawaban mengalir ke "
                                   "scrollback + footer status hidup di bawah.[/]\n")
                 else:
-                    console.print("  [#f9e2af]○ tampilan interaktif MATI[/] "
+                    console.print("  [#f7d488]○ tampilan interaktif MATI[/] "
                                   "[dim]— pakai tampilan mengalir biasa.[/]\n")
             else:
                 if do_action(cmd):
@@ -3354,7 +3359,7 @@ def main(resume: bool = False) -> None:
     except Exception:  # noqa: BLE001
         pass
     console.clear()
-    console.print("\n  [#cba6f7]⬢ bagas-ai[/]  [dim]— sampai jumpa! 👋[/dim]\n")
+    console.print("\n  [#fcc048]⬢ bagas-ai[/]  [dim]— sampai jumpa! 👋[/dim]\n")
 
 
 if __name__ == "__main__":
