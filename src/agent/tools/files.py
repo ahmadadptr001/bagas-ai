@@ -199,10 +199,43 @@ def _display(target: Path) -> str:
 _READ_CAP = 40000   # batas karakter per pembacaan (hemat konteks percakapan)
 
 
+_EKS_MD = {".md", ".markdown", ".mdx"}
+
+
+def _kerangka(teks: str, mulai: int = 1, batas: int = 60,
+              markdown: bool = False) -> str:
+    """Daftar baris definisi (class/def/function/…) beserta nomor barisnya.
+
+    Indentasi aslinya dipertahankan supaya sarangnya terbaca sekilas."""
+    from .search import _peta_definisi   # impor lokal: hindari siklus impor
+    peta = _peta_definisi(teks, mulai, batas, markdown)
+    if not peta:
+        return ""
+    return "\n".join(f"  {no:>5}| {baris}" for no, baris in peta)
+
+
+def _sisa_kerangka(text: str, sudah: int, markdown: bool = False) -> str:
+    """Kerangka bagian berkas yang BELUM terbaca, untuk ditempel saat dipotong.
+
+    Kenapa: bacaan yang terpotong dulu berakhir buntu — model tak tahu apa yang
+    ada di bawah sana, jadi ia menebak (lalu old_text edit_file-nya meleset)
+    atau membaca lagi berpotong-potong, dan tiap potongan = satu giliran browser
+    belasan detik. Dengan kerangkanya ikut terkirim, ia langsung tahu bagian
+    mana yang perlu dibaca berikutnya — sering cukup SATU bacaan susulan."""
+    baris = text.split("\n")[sudah:]
+    if not baris:
+        return ""
+    peta = _kerangka("\n".join(baris), sudah + 1, batas=30, markdown=markdown)
+    if not peta:
+        return ""
+    return ("\n\n[kerangka bagian yang BELUM terbaca — biar kamu tahu ada apa "
+            "di bawah sana]\n" + peta)
+
+
 @tool
 def read_file(path: str, start_line: int = 0, end_line: int = 0,
-              line_numbers: bool = False) -> str:
-    """Baca isi sebuah file teks di dalam root project atau folder konteks (add-dir). Untuk file BESAR, baca per bagian dengan start_line/end_line. NOMOR BARIS SELALU 1-BASED (baris pertama = baris 1) — saat pengguna menyebut "baris ke-N", verifikasi dengan start_line/end_line atau line_numbers=true, JANGAN menghitung sendiri dari 0.
+              line_numbers: bool = False, outline: bool = False) -> str:
+    """Baca isi sebuah file teks di dalam root project atau folder konteks (add-dir). Untuk file BESAR, mulailah dengan outline=true (peta semua definisi + nomor barisnya, hemat sekali), lalu baca bagian yang kamu butuh saja lewat start_line/end_line. Bila bacaan terpotong, kerangka sisanya ikut dikirim supaya kamu tak perlu menebak. NOMOR BARIS SELALU 1-BASED (baris pertama = baris 1) — saat pengguna menyebut "baris ke-N", verifikasi dengan start_line/end_line atau line_numbers=true, JANGAN menghitung sendiri dari 0.
 
     path: relatif terhadap root project, atau path ABSOLUT untuk file di folder
     konteks tambahan.
@@ -211,6 +244,9 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0,
     line_numbers: true = tiap baris diberi awalan "N| " (1-based) supaya kamu
         tahu pasti nomor tiap baris. Awalan itu BUKAN isi file — saat menyalin
         old_text untuk edit_file, buang awalannya.
+    outline: true = jangan kirim isinya, kirim PETA-nya saja (tiap class/def/
+        function/heading beserta nomor barisnya). Pakai ini lebih dulu untuk
+        berkas panjang yang belum kamu kenal.
     """
     target = _safe_path(path)
     if not target.is_file():
@@ -220,6 +256,26 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0,
         s, e = int(start_line or 0), int(end_line or 0)
     except (TypeError, ValueError):
         s = e = 0
+
+    md = target.suffix.lower() in _EKS_MD
+
+    if outline:
+        total = len(text.splitlines())
+        lines = text.splitlines(keepends=True)
+        a = max(1, s or 1)
+        z = total if e <= 0 else min(e, total)
+        potongan = "".join(lines[a - 1:z]) if (s or e) else text
+        peta = _kerangka(potongan, a, batas=400, markdown=md)
+        if not peta:
+            return (f"[peta {_display(target)} — {total} baris] tidak ada "
+                    "definisi yang terdeteksi (mungkin berkas data/teks biasa). "
+                    "Baca isinya langsung dengan read_file biasa.")
+        n = peta.count("\n") + 1
+        lingkup = f" baris {a}-{z}" if (s or e) else ""
+        return (f"[peta {_display(target)}{lingkup} — {total} baris, "
+                f"{n} definisi]\n{peta}\n\n"
+                "Baca bagian yang kamu perlukan saja: "
+                f'read_file("{path}", start_line=…, end_line=…)')
 
     def _bernomor(potongan: str, mulai: int) -> str:
         """Awalan 'N| ' per baris, N dari `mulai` (1-based)."""
@@ -242,8 +298,16 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0,
         if line_numbers:
             cuplikan = _bernomor(cuplikan, s)
         if len(cuplikan) > _READ_CAP:
-            cuplikan = cuplikan[:_READ_CAP] + \
-                "\n... [dipotong — persempit rentang barisnya]"
+            potong = cuplikan[:_READ_CAP]
+            batas = potong.rfind("\n")
+            if batas > 0:
+                potong = potong[:batas + 1]
+            terbaca = s - 1 + potong.count("\n")
+            cuplikan = (potong + f"... [dipotong: baru baris {s}-{terbaca} "
+                        f"dari rentang yang kamu minta. Lanjutkan dengan "
+                        f"read_file(path, start_line={terbaca + 1}, "
+                        f"end_line={e})]"
+                        + _sisa_kerangka(text, terbaca, md))
         # Header di baris tersendiri: tanpa line_numbers, isi di bawahnya tetap
         # byte apa adanya — aman disalin persis sebagai old_text edit_file.
         return f"[{_display(target)} baris {s}-{e} dari {n}]\n" + cuplikan
@@ -259,7 +323,8 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0,
             total = len(text.splitlines())
             return (potong + f"... [dipotong: baris 1-{n_tampil} dari {total}. "
                     f"Lanjutkan dengan read_file(path, start_line="
-                    f"{n_tampil + 1}, line_numbers=true)]")
+                    f"{n_tampil + 1}, line_numbers=true)]"
+                    + _sisa_kerangka(text, n_tampil, md))
         return bernomor
 
     if len(text) > _READ_CAP:
@@ -273,7 +338,8 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0,
         n_tampil = potong.count("\n")
         total = len(text.splitlines())
         return (potong + f"... [dipotong: baru baris 1-{n_tampil} dari {total}. "
-                f"Lanjutkan dengan read_file(path, start_line={n_tampil + 1})]")
+                f"Lanjutkan dengan read_file(path, start_line={n_tampil + 1})]"
+                + _sisa_kerangka(text, n_tampil, md))
     return text
 
 

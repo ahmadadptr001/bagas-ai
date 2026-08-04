@@ -39,6 +39,8 @@ from rich.markup import escape as _esc  # noqa: E402
 from rich.padding import Padding  # noqa: E402
 from rich.panel import Panel  # noqa: E402
 from rich.rule import Rule  # noqa: E402
+from rich.style import Style  # noqa: E402
+from rich.syntax import Syntax  # noqa: E402
 from rich.table import Table  # noqa: E402
 from rich.text import Text  # noqa: E402
 from rich.theme import Theme  # noqa: E402
@@ -303,8 +305,73 @@ _GUT_A = "#5bd66f on #0d2a14"
 _GUT_D = "#e06b6b on #2a0d0d"
 
 
-def _row(lineno: str, sign: str, text: str, style: str) -> Text:
+# --- pewarnaan sintaks DI DALAM diff ---------------------------------------
+#
+# Kenapa perlu: latar hijau/merah cuma memberi tahu baris mana yang berubah, dan
+# di situ seluruh kode tampil satu warna rata. Padahal yang dibaca pengguna
+# justru KODE-nya — `return`, `def`, `console.log`, string, angka. Tanpa warna
+# token, meninjau perubahan di terminal jauh lebih lambat daripada di editor,
+# dan pratinjau diff inilah satu-satunya kesempatan meninjau sebelum berkas
+# disentuh.
+#
+# Caranya: rich.Syntax dipakai HANYA sebagai penghasil Text berwarna
+# (.highlight), bukan sebagai renderable. Warna latar dari temanya dibuang dan
+# diganti latar diff kita, sementara warna DEPAN tiap token dibiarkan menimpa —
+# jadi kode tetap berwarna di atas bg hijau/merah, persis seperti diff editor.
+_TEMA_KODE = "material"     # pastel & terbaca di atas bg gelap hijau/merah
+_MAKS_WARNAI = 400_000      # berkas raksasa: lewati saja, tak sebanding biayanya
+
+
+def _tanpa_latar(t: Text) -> Text:
+    """Salinan `t` yang mempertahankan warna DEPAN token tapi membuang LATARnya.
+
+    Wajib: rich.Syntax menempelkan latar temanya (mis. #263238) pada SETIAP
+    span token, bukan cuma sebagai gaya dasar. Kalau dibiarkan, tiap potongan
+    kode membawa latar abu-abunya sendiri dan pita hijau/merah diff jadi
+    belang-belang — persis hal yang membuat baris berubah gampang dikenali
+    justru hilang."""
+    out = Text(t.plain, no_wrap=True)
+    for span in t.spans:
+        st = span.style
+        if not isinstance(st, Style):
+            continue
+        out.stylize(Style(color=st.color, bold=st.bold, italic=st.italic,
+                          underline=st.underline), span.start, span.end)
+    return out
+
+
+def _pewarna(path: str, kode: str):
+    """Daftar Text per baris hasil pewarnaan `kode`, atau None bila tak bisa.
+
+    Seluruh isi diwarnai SEKALI lalu dipecah per baris — bukan baris demi baris
+    — supaya konteks lintas-baris (docstring, string multi-baris, komentar blok)
+    tidak salah warna."""
+    if not kode or len(kode) > _MAKS_WARNAI:
+        return None
+    try:
+        lexer = Syntax.guess_lexer(path, code=kode)
+        if not lexer or lexer in ("text", "default"):
+            return None
+        syn = Syntax("", lexer, theme=_TEMA_KODE)
+        return [_tanpa_latar(b) for b in syn.highlight(kode).split("\n")]
+    except Exception:  # noqa: BLE001 - pewarnaan gagal != diff gagal
+        return None
+
+
+def _ambil(baris_warna, i: int):
+    """Baris ke-i (1-based) dari hasil pewarnaan, atau None bila di luar batas."""
+    if not baris_warna or i < 1 or i > len(baris_warna):
+        return None
+    return baris_warna[i - 1]
+
+
+def _row(lineno: str, sign: str, text, style: str) -> Text:
     """Satu baris gaya editor '123 + kode' dengan bg + margin tepi.
+
+    `text` boleh str biasa ATAU Text yang sudah diwarnai sintaks. Untuk yang
+    kedua, `style` dipasang sebagai gaya DASAR (latar hijau/merah + warna depan
+    cadangan) lalu span token milik pygments ditempel di atasnya — karena span
+    yang belakangan hanya menyetel warna depan, latarnya lolos utuh.
 
     MENGEMBALIKAN Text, tidak mencetak sendiri: seluruh diff dirakit dulu lalu
     dicetak SEKALI (atomik). Dulu tiap baris dicetak terpisah — selagi region
@@ -313,8 +380,13 @@ def _row(lineno: str, sign: str, text: str, style: str) -> Text:
     inner = max(20, min(console.width - 2 * _LPAD, 108))
     line = Text(" " * _LPAD)  # margin kiri tanpa background
     line.append(f" {lineno:>4} {sign} ", style=style)
-    body = f"{text}".replace("\t", "    ")
-    line.append(body, style=style)
+    if isinstance(text, Text):
+        body = text.copy()
+        body.expand_tabs(4)
+        body.style = style          # gaya dasar; token menimpa warna depannya
+        line.append_text(body)
+    else:
+        line.append(f"{text}".replace("\t", "    "), style=style)
     # Baris panjang DIPOTONG (bukan wrap): wrap membuat background hijau/merah
     # meluber tak beraturan ke baris berikutnya.
     line.truncate(_LPAD + inner, overflow="ellipsis")
@@ -398,6 +470,10 @@ def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200) -
     diff = list(difflib.unified_diff(old.splitlines(), new.splitlines(),
                                      lineterm="", n=2))
     body = diff[2:] if len(diff) >= 2 and diff[0].startswith("---") else diff
+    # Kedua sisi diwarnai dari isi LENGKAPNYA masing-masing: baris yang dihapus
+    # harus diwarnai menurut berkas LAMA, yang ditambah menurut berkas BARU.
+    warna_lama = _pewarna(path, old)
+    warna_baru = _pewarna(path, new)
     old_ln = new_ln = 0
     shown = 0
     for line in body:
@@ -413,10 +489,12 @@ def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200) -
             continue
         tag, content = line[:1], line[1:]
         if tag == "+":
-            rows.append(_row(str(new_ln), "+", content, _ADD))
+            rows.append(_row(str(new_ln), "+",
+                             _ambil(warna_baru, new_ln) or content, _ADD))
             new_ln += 1
         elif tag == "-":
-            rows.append(_row(str(old_ln), "-", content, _DEL))
+            rows.append(_row(str(old_ln), "-",
+                             _ambil(warna_lama, old_ln) or content, _DEL))
             old_ln += 1
         else:
             rows.append(_row(str(new_ln), " ", content, _CTX))
@@ -429,11 +507,12 @@ def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200) -
 def _print_delete(path: str, content: str, limit: int = 80) -> None:
     rows: list = [Text.from_markup(
         f"\n  [bold]🗑 [cyan]{_esc(path)}[/cyan][/bold] [dim](dihapus)[/dim]")]
+    warna = _pewarna(path, content)
     for i, line in enumerate(content.splitlines(), start=1):
         if i > limit:
             rows.append(Text("  ... (dipotong)", style="dim"))
             break
-        rows.append(_row(str(i), "-", line, _DEL))
+        rows.append(_row(str(i), "-", _ambil(warna, i) or line, _DEL))
     console.print(Group(*rows))
 
 
@@ -638,9 +717,13 @@ class TurnView:
 
     Yang DITAMPILKAN dijaga tetap sedikit dan pasti: fase yang sedang berjalan,
     alat yang sedang dipakai, narasi AI, hasil tiap langkah, dan jawaban akhir.
-    Tak ada bar perkiraan waktu, dan tak ada pratinjau teks yang masih mengalir
-    — keduanya menampilkan hal yang belum jadi, dan yang kedua bahkan
-    membocorkan isi blok [[TOOL]] mentah ke layar."""
+    Tak ada bar perkiraan waktu — ia cuma menebak sisa waktu.
+
+    Di ATAS footer, dan selalu di tempat yang sama, ada gelembung chat
+    berukuran tetap berisi kalimat yang SEDANG ditulis AI (_panel_chat). Yang
+    masuk ke situ hanya teks yang sudah disaring bersih dari blok [[TOOL]] —
+    percakapan mesin tak pernah bocor ke layar — dan tingginya tak pernah
+    berubah, jadi ia tak bisa menimpa ketikan pengguna maupun diff."""
 
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -778,12 +861,82 @@ class TurnView:
         except Exception:  # noqa: BLE001 - pratinjau tak boleh menggagalkan giliran
             return
 
-    def _baris_aliran(self):
-        """Satu baris hidup berisi EKOR teks bersih yang sedang ditulis."""
+    # Tinggi panel chat SELALU tetap: tepi atas + N baris teks + tepi bawah.
+    # Bukan gaya belaka — region live yang tingginya berubah tiap frame membuat
+    # rich menggambar ulang kacau (kedip & baris hantu). Karena itu barisnya
+    # dibungkus SENDIRI ke lebar tetap lalu dipaksa berjumlah persis _CHAT_BARIS,
+    # bukan diserahkan ke pembungkus otomatis rich.
+    _CHAT_BARIS = 3
+
+    def _lebar_chat(self) -> int:
+        return max(28, min(console.width - 2 * _LPAD, 96))
+
+    @staticmethod
+    def _bungkus_ekor(teks: str, lebar: int, n: int) -> list[str]:
+        """`n` baris TERAKHIR dari `teks` yang dibungkus selebar `lebar`.
+
+        Yang ditampilkan adalah ekornya — bagian yang baru saja diketik AI —
+        jadi panelnya terasa seperti teks berjalan, bukan potongan awal yang
+        membeku sementara tulisannya sudah jauh di depan."""
+        # Cukup ambil ekor yang pasti melebihi kapasitas panel; membungkus
+        # ribuan karakter tiap frame sia-sia.
+        potong = teks[-(lebar * (n + 2)):]
+        baris: list[str] = []
+        kini = ""
+        for kata in potong.split(" "):
+            if not kini:
+                kini = kata
+            elif len(kini) + 1 + len(kata) <= lebar:
+                kini += " " + kata
+            else:
+                baris.append(kini)
+                kini = kata
+            # Satu "kata" yang lebih panjang dari panel (URL, path) dipenggal
+            # keras supaya tak pernah meluber dan menambah tinggi region.
+            while len(kini) > lebar:
+                baris.append(kini[:lebar])
+                kini = kini[lebar:]
+        if kini:
+            baris.append(kini)
+        baris = baris[-n:]
+        return [""] * (n - len(baris)) + baris
+
+    def _panel_chat(self):
+        """Gelembung chat berukuran TETAP tepat di atas footer.
+
+        Isinya teks BERSIH yang sedang ditulis AI — kalimat yang memang
+        ditujukan ke pengguna, tanpa sepotong pun blok [[TOOL]] (lihat
+        note_stream). Dibuat berbeda dari sisa UI (bertepi & berlabel) supaya
+        jelas ini SUARA AI yang sedang berjalan, bukan log langkah: log
+        mengalir ke scrollback dan tinggal, sedangkan yang ini hidup lalu
+        digantikan versi rapinya begitu balasannya utuh."""
         teks = " ".join((self._bersih or "").split())
         if not teks:
             return None
-        return _oneline(Text("  │ " + teks[-400:], style="#7f849c"))
+        lebar = self._lebar_chat()
+        m = " " * _LPAD
+        judul = " 🤖 bagas-ai "
+        # cell_len, BUKAN len: emoji memakan DUA kolom terminal, jadi menghitung
+        # panjang karakter membuat tepi atas lebih lebar satu kolom dari tepi
+        # bawah — miring sedikit, tapi langsung kelihatan.
+        sisa = max(0, lebar - Text(judul).cell_len - 3)
+        atas = Text(m, style="")
+        atas.append("╭─", style="#585b70")
+        atas.append(judul, style="bold #89b4fa")
+        atas.append("─" * sisa + "╮", style="#585b70")
+        rows = [_oneline(atas)]
+        isi = self._bungkus_ekor(teks, lebar - 4, self._CHAT_BARIS)
+        for ke, b in enumerate(isi):
+            baris = Text(m, style="")
+            baris.append("│ ", style="#585b70")
+            baris.append(b, style="#cdd6f4")
+            if ke == self._CHAT_BARIS - 1:
+                baris.append("▌", style="#89b4fa")   # kursor: ini masih berjalan
+            rows.append(_oneline(baris))
+        bawah = Text(m, style="")
+        bawah.append("╰" + "─" * (lebar - 2) + "╯", style="#585b70")
+        rows.append(_oneline(bawah))
+        return Group(*rows)
 
     # --- render satu langkah (dipanggil SEKALI saat langkah selesai) ---
     def _render_step(self, rec: dict) -> list:
@@ -812,7 +965,11 @@ class TurnView:
         return out
 
     def __rich__(self):
-        """Region live = FOOTER SAJA (status + ketikan + antrean + tips).
+        """Region live = gelembung chat + FOOTER (status + ketikan + antrean).
+
+        Urutannya tetap: gelembung chat SELALU menempel persis di atas footer,
+        jadi mata pengguna punya satu tempat tetap untuk melihat apa yang
+        sedang dikatakan AI — tidak berpindah-pindah mengikuti panjang log.
 
         Semua baris _oneline anti-wrap -> tinggi kecil & stabil, selalu muat di
         layar, tak pernah menimpa konten yang sudah tercetak. Saat done, region
@@ -820,9 +977,9 @@ class TurnView:
         if self.done:
             return Text("")
         rows = []
-        aliran = self._baris_aliran()
-        if aliran is not None:
-            rows.append(aliran)
+        chat = self._panel_chat()
+        if chat is not None:
+            rows.extend(chat.renderables)
         footer = self._footer()
         if isinstance(footer, Group):
             rows.extend(footer.renderables)
