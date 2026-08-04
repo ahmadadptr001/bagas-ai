@@ -673,6 +673,13 @@ class TurnView:
         #
         # Perekaman durasi di connector (web_timing.record) sengaja DIBIARKAN:
         # ia tak menampilkan apa pun, cuma menabung statistik.
+        #
+        # Yang TETAP mengalir hidup: satu baris berisi teks BERSIH balasan yang
+        # sedang ditulis (lihat note_stream). `_mentah` menampung apa adanya
+        # dari situs, `_bersih` hasil saringannya — hanya yang kedua yang
+        # pernah tampil.
+        self._mentah = ""
+        self._bersih = ""
         # Ketikan pengguna SELAMA giliran berjalan (fitur antrean prompt):
         # `typing` = buffer yang sedang diketik (tampil di footer), `queue_n` =
         # berapa prompt yang sudah antre. Enter TIDAK membatalkan apa pun —
@@ -734,8 +741,49 @@ class TurnView:
         """Set fase status langsung (dipakai connector web: 'menjawab', dsb).
         Diabaikan saat ada tool berjalan supaya fase tool tak tertimpa."""
         if self.tool is None and text and text != self.phase:
+            # Tiap kali fase MENJAWAB dimulai lagi (jawaban awal, lalu balasan
+            # atas hasil tool), aliran teksnya disetel ulang — yang ditampilkan
+            # harus balasan yang SEKARANG, bukan sisa balasan sebelumnya.
+            if text == "menjawab":
+                self._mentah = ""
+                self._bersih = ""
             self.phase = text
             self.phase_since = time.time()
+
+    def note_stream(self, delta: str) -> None:
+        """Potongan balasan yang baru saja muncul di situs (dari on_token).
+
+        Dipakai HANYA untuk satu baris hidup di footer, dan yang ditampilkan
+        cuma teks BERSIHNYA — isi blok [[TOOL]] beserta JSON-nya tak pernah
+        ikut. Penyaringnya memakai fungsi yang sama dengan jalur cetak
+        permanen (core._strip_web_markers + _strip_tool_json), termasuk
+        aturannya menahan segala sesuatu di belakang penanda pembuka yang
+        belum tertutup — jadi blok yang baru separuh diketik tak sempat
+        terlihat sedetik pun.
+
+        Kenapa hanya di footer dan tidak dibekukan ke riwayat: teks yang sama
+        akan dicetak rapi sebagai narasi/jawaban begitu balasannya utuh. Kalau
+        aliran ini ikut dibekukan, isinya tampil dua kali.
+
+        Tanpa baris ini, giliran yang lama terasa mati total: TERAMATI di
+        pemakaian nyata — AI sudah menulis "Aku mulai audit dari file paling
+        berisiko…" di browser, sementara terminal hanya menampilkan
+        "menjawab · 1m 0s" tanpa sepatah kata pun."""
+        if not delta:
+            return
+        self._mentah += _bersih_kendali(delta)
+        try:
+            from ..core import _strip_tool_json, _strip_web_markers
+            self._bersih = _strip_tool_json(_strip_web_markers(self._mentah))
+        except Exception:  # noqa: BLE001 - pratinjau tak boleh menggagalkan giliran
+            return
+
+    def _baris_aliran(self):
+        """Satu baris hidup berisi EKOR teks bersih yang sedang ditulis."""
+        teks = " ".join((self._bersih or "").split())
+        if not teks:
+            return None
+        return _oneline(Text("  │ " + teks[-400:], style="#7f849c"))
 
     # --- render satu langkah (dipanggil SEKALI saat langkah selesai) ---
     def _render_step(self, rec: dict) -> list:
@@ -771,8 +819,16 @@ class TurnView:
         dikosongkan: semuanya sudah berada di scrollback."""
         if self.done:
             return Text("")
+        rows = []
+        aliran = self._baris_aliran()
+        if aliran is not None:
+            rows.append(aliran)
         footer = self._footer()
-        return footer if isinstance(footer, Group) else Group(footer)
+        if isinstance(footer, Group):
+            rows.extend(footer.renderables)
+        else:
+            rows.append(footer)
+        return Group(*rows)
 
     def _footer(self):
         el = time.time() - self.start
@@ -1488,16 +1544,16 @@ def main(resume: bool = False) -> None:
 
         def worker() -> None:
             try:
-                # `on_token` sengaja TIDAK dioper: aliran mentah dari situs
-                # memuat isi blok [[TOOL]] apa adanya, dan menampilkannya
-                # berarti membocorkan percakapan mesin ke layar pengguna. Yang
-                # dicetak hanya hasil yang sudah bersih — narasi (on_message)
-                # dan jawaban akhir.
                 result["answer"] = agent.run(
                     text, on_tool=_on_tool, on_message=_on_msg,
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status,
+                    # Dipakai HANYA untuk satu baris hidup di footer, dan
+                    # disaring dulu sampai bersih dari blok tool — lihat
+                    # TurnView.note_stream. Tanpa ini, giliran panjang tampak
+                    # mati total padahal AI sudah menulis kalimatnya.
+                    on_token=view.note_stream,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc

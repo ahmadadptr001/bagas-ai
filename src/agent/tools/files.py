@@ -345,16 +345,138 @@ def list_dir(path: str = ".") -> str:
     return "\n".join(entries) if entries else "(kosong)"
 
 
+# --- pencocokan old_text yang TAHAN SALAH KETIK RINGAN ---------------------
+#
+# Kenapa ini ada: di bagas-ai, SATU panggilan tool = satu bolak-balik ke situs
+# AI web (belasan detik). Jadi edit_file yang gagal karena beda satu spasi
+# bukan sekadar menjengkelkan — ia membakar giliran, dan model lalu membaca
+# ulang berkasnya (satu giliran lagi) hanya untuk menyalin potongan yang
+# sebenarnya sudah benar isinya.
+#
+# Empat penyebab gagal yang TERUKUR paling sering, dan semuanya sepele:
+#   1. sisa awalan "12| " dari read_file(line_numbers=true);
+#   2. spasi di UJUNG baris ikut/tidak ikut tersalin;
+#   3. "\r\n" terbawa di dalam JSON usulan model;
+#   4. INDENTASI meleset — model menuliskan ulang potongannya rata kiri, atau
+#      dengan kedalaman yang berbeda dari berkas aslinya.
+# Tiga yang pertama tak mengubah makna kode sama sekali, dan yang keempat bisa
+# diperbaiki otomatis dengan menggeser indentasi penggantinya.
+_AWALAN_NOMOR = re.compile(r"^[ \t]*\d+\|[ ]?")
+
+
+def _baris_normal(baris: str, buang_indentasi: bool = False) -> str:
+    """Bentuk baku sebuah baris untuk dibandingkan (bukan untuk ditulis)."""
+    b = _AWALAN_NOMOR.sub("", baris.replace("\r", ""))
+    b = b.rstrip()
+    return b.lstrip() if buang_indentasi else b
+
+
+def _indentasi(baris: str) -> str:
+    return baris[: len(baris) - len(baris.lstrip())]
+
+
+def _geser_indentasi(teks: str, dari: str, ke: str) -> str:
+    """Geser indentasi tiap baris `teks` dari kedalaman `dari` ke `ke`.
+
+    Dipakai saat potongan lama ketemu dengan toleransi indentasi: penggantinya
+    ikut digeser supaya mendarat pada kedalaman yang benar di berkas."""
+    if dari == ke:
+        return teks
+    keluar = []
+    for baris in teks.split("\n"):
+        if not baris.strip():
+            keluar.append(baris)
+            continue
+        if dari and baris.startswith(dari):
+            keluar.append(ke + baris[len(dari):])
+        elif len(ke) >= len(dari):
+            keluar.append(ke[len(dari):] + baris)
+        else:
+            # Berkas lebih dangkal dari yang dikirim model: kupas selisihnya
+            # sebanyak yang memang berupa spasi/tab.
+            n = len(dari) - len(ke)
+            kupas = 0
+            while kupas < n and kupas < len(baris) and baris[kupas] in " \t":
+                kupas += 1
+            keluar.append(baris[kupas:])
+    return "\n".join(keluar)
+
+
+def _selaraskan_indentasi(pengganti: str, baris_old: list[str],
+                          blok_berkas: list[str]) -> str:
+    """Samakan indentasi `pengganti` dengan blok yang digantikannya di berkas.
+
+    Dua aturan, dan yang pertama menutup kasus paling lazim: model MENGETIK
+    ULANG blok yang sama rata kiri lalu mengubah satu barisnya. Di situ jumlah
+    barisnya sama persis, jadi tiap baris pengganti mewarisi indentasi baris
+    berkas pada posisi yang sama — hasilnya kembali rapi sampai ke dalam-dalam,
+    bukan cuma baris pertamanya.
+
+    Kalau jumlah barisnya BERBEDA (model memang menambah/mengurangi baris),
+    tak ada pasangan yang bisa diwarisi; yang dilakukan cuma menggeser seluruh
+    blok sebanyak selisih indentasi baris pertama, dan indentasi relatif yang
+    dikirim model dipertahankan apa adanya.
+
+    Hanya dipakai pada jalur yang MEMANG sudah longgar-indentasi — bila
+    potongan model cocok persis, indentasinya tak pernah disentuh."""
+    baris_baru = pengganti.split("\n")
+    if len(baris_baru) == len(blok_berkas):
+        return "\n".join(
+            (_indentasi(f) + b.lstrip()) if b.strip() else b
+            for b, f in zip(baris_baru, blok_berkas))
+    return _geser_indentasi(pengganti, _indentasi(baris_old[0]),
+                            _indentasi(blok_berkas[0]))
+
+
+def _cari_longgar(baris_isi: list[str], baris_old: list[str],
+                  buang_indentasi: bool) -> list[int]:
+    """Indeks baris awal setiap kemunculan `baris_old` di `baris_isi`."""
+    n, m = len(baris_isi), len(baris_old)
+    if m == 0 or m > n:
+        return []
+    target = [_baris_normal(b, buang_indentasi) for b in baris_old]
+    sumber = [_baris_normal(b, buang_indentasi) for b in baris_isi]
+    return [i for i in range(n - m + 1) if sumber[i:i + m] == target]
+
+
+def _tebak_terdekat(baris_isi: list[str], baris_old: list[str]) -> str:
+    """Petunjuk saat potongan tak ketemu: tunjukkan bagian berkas yang PALING
+    MIRIP beserta bedanya, supaya model bisa membetulkan dalam SATU giliran
+    alih-alih membaca ulang seluruh berkas."""
+    m = len(baris_old)
+    if not m or len(baris_isi) > 20000:
+        return ""
+    jarum = "\n".join(_baris_normal(b, True) for b in baris_old)
+    terbaik, skor_terbaik = -1, 0.0
+    for i in range(max(1, len(baris_isi) - m + 1)):
+        jerami = "\n".join(_baris_normal(b, True)
+                           for b in baris_isi[i:i + m])
+        skor = difflib.SequenceMatcher(None, jarum, jerami).ratio()
+        if skor > skor_terbaik:
+            terbaik, skor_terbaik = i, skor
+    if terbaik < 0 or skor_terbaik < 0.5:
+        return ""
+    beda = difflib.unified_diff(
+        [b.rstrip() + "\n" for b in baris_old],
+        [b.rstrip() + "\n" for b in baris_isi[terbaik:terbaik + m]],
+        fromfile="yang kamu kirim", tofile=f"isi berkas baris {terbaik + 1}",
+        n=0, lineterm="\n")
+    cuplik = "".join(list(beda)[:24])
+    return (f"\nYang PALING MIRIP ada di baris {terbaik + 1} "
+            f"(kemiripan {skor_terbaik * 100:.0f}%). Bedanya:\n{cuplik}")
+
+
 @tool
 def edit_file(path: str, old_text: str, new_text: str, count: int = 1) -> str:
-    """Ubah SEBAGIAN isi file: ganti potongan teks lama dengan yang baru (bedah presisi, tanpa menulis ulang seluruh file).
+    """Ubah SEBAGIAN isi file: ganti potongan lama dengan yang baru (bedah presisi, tanpa menulis ulang seluruh file). Pencocokannya TOLERAN: beda spasi ekor, sisa awalan "12| ", dan INDENTASI yang meleset tetap ketemu — indentasi penggantinya disesuaikan otomatis. Kalau tetap tak ketemu, hasilnya menunjukkan bagian berkas yang paling mirip beserta bedanya.
 
     Pakai ini untuk perubahan kecil pada file besar — jauh lebih hemat daripada
     write_file yang menuntut seluruh isi file. Perubahannya tetap tampil sebagai
     diff berwarna di terminal pengguna.
 
     path: relatif terhadap root project, atau path ABSOLUT untuk folder konteks.
-    old_text: potongan PERSIS yang mau diganti (termasuk spasi/indentasi).
+    old_text: potongan yang mau diganti. Usahakan persis, tapi tak apa bila
+        spasi ekor/indentasinya sedikit meleset.
     new_text: penggantinya. Kosongkan untuk MENGHAPUS potongan itu.
     count: berapa kemunculan diganti (default 1; -1 = semua).
     """
@@ -364,24 +486,74 @@ def edit_file(path: str, old_text: str, new_text: str, count: int = 1) -> str:
     if not old_text:
         return "[error] old_text kosong — sebutkan potongan yang mau diganti."
     isi = target.read_text(encoding="utf-8", errors="replace")
+
+    # --- tingkat 1: cocok PERSIS (jalur cepat, tak mengubah apa pun) ---
     n = isi.count(old_text)
-    if n == 0:
-        return (f"[error] potongan itu TIDAK ADA di {_display(target)}. "
-                "Baca dulu filenya (read_file) lalu salin potongannya persis "
-                "— termasuk spasi & indentasi.")
-    # Ambigu itu berbahaya: mengganti kemunculan yang salah merusak file diam-diam.
-    if n > 1 and count == 1:
-        return (f"[error] potongan itu muncul {n} kali di {_display(target)}. "
-                "Perpanjang old_text agar unik, atau set count=-1 bila memang "
-                "semua kemunculan harus diganti.")
-    baru = isi.replace(old_text, new_text, n if count == -1 else count)
+    catatan = ""
+    if n:
+        if n > 1 and count == 1:
+            baris_ke = [isi[:m.start()].count("\n") + 1
+                        for m in re.finditer(re.escape(old_text), isi)]
+            return (f"[error] potongan itu muncul {n} kali di "
+                    f"{_display(target)} — di baris "
+                    f"{', '.join(str(b) for b in baris_ke[:12])}"
+                    f"{'…' if n > 12 else ''}. Perpanjang old_text agar unik "
+                    "(tambahkan baris di atas/bawahnya), atau set count=-1 "
+                    "bila memang semua kemunculan harus diganti.")
+        baru = isi.replace(old_text, new_text, n if count == -1 else count)
+        diganti = n if count == -1 else min(count, n)
+    else:
+        # --- tingkat 2 & 3: toleran (spasi ekor/awalan nomor, lalu indentasi) ---
+        baris_isi = isi.split("\n")
+        baris_old = old_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        # Baris kosong di ujung potongan yang dikirim model sering artefak
+        # perenderan situs, bukan bagian sungguhan dari kodenya.
+        while baris_old and not baris_old[-1].strip():
+            baris_old.pop()
+        while baris_old and not baris_old[0].strip():
+            baris_old.pop(0)
+        if not baris_old:
+            return "[error] old_text kosong — sebutkan potongan yang mau diganti."
+
+        posisi = _cari_longgar(baris_isi, baris_old, False)
+        longgar_indentasi = False
+        if not posisi:
+            posisi = _cari_longgar(baris_isi, baris_old, True)
+            longgar_indentasi = bool(posisi)
+        if not posisi:
+            return (f"[error] potongan itu TIDAK ADA di {_display(target)}, "
+                    "bahkan setelah mengabaikan beda spasi & indentasi."
+                    + _tebak_terdekat(baris_isi, baris_old)
+                    + "\nBaca ulang bagian itu (read_file dengan start_line/"
+                      "end_line) lalu kirim potongannya sesuai isi berkas.")
+        if len(posisi) > 1 and count == 1:
+            return (f"[error] potongan itu cocok di {len(posisi)} tempat di "
+                    f"{_display(target)} — baris "
+                    f"{', '.join(str(i + 1) for i in posisi[:12])}. "
+                    "Perpanjang old_text agar unik, atau set count=-1.")
+
+        m = len(baris_old)
+        dipakai = posisi if count == -1 else posisi[:max(1, count)]
+        pengganti_dasar = new_text.replace("\r\n", "\n").replace("\r", "\n")
+        # Diterapkan dari BELAKANG supaya indeks baris di depannya tak bergeser.
+        for i in sorted(dipakai, reverse=True):
+            ganti = pengganti_dasar
+            if longgar_indentasi:
+                ganti = _selaraskan_indentasi(
+                    ganti, baris_old, baris_isi[i:i + m])
+            baris_isi[i:i + m] = ganti.split("\n") if ganti else []
+        baru = "\n".join(baris_isi)
+        diganti = len(dipakai)
+        catatan = ("\n[dicocokkan longgar] indentasi & spasi disamakan dengan "
+                   "isi berkas" if longgar_indentasi else
+                   "\n[dicocokkan longgar] beda spasi ekor/awalan nomor diabaikan")
+
     if baru == isi:
         return "[error] tidak ada yang berubah."
     _snapshot(target)   # pre-image untuk undo_changes
     target.write_text(baru, encoding="utf-8")
-    diganti = n if count == -1 else min(count, n)
     msg = (f"Diubah: {_display(target)} ({diganti} kemunculan, "
-           f"{len(isi)} -> {len(baru)} karakter).")
+           f"{len(isi)} -> {len(baru)} karakter).{catatan}")
     chk = _syntax_check(target)
     if chk:
         msg += f"\n[cek sintaks] {chk}"
