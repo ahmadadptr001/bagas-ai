@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.0.57"
+version = "1.0.58"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,11 @@ dependencies = [
     # bukan lagi pelengkap opsional seperti dulu.
     "playwright>=1.40.0",
     "rich>=13.0.0",
+    # WAJIB: kotak chat, menu interaktif (ui/menu.py), dan seluruh line editing
+    # dibangun di atasnya. Selama ini cuma kebetulan ikut terpasang lewat
+    # InquirerPy — padahal InquirerPy sendiri sudah tak dipakai lagi, jadi di
+    # mesin bersih impornya bisa gagal saat startup.
+    "prompt_toolkit>=3.0.39",
     "pyfiglet>=1.0.0",
     "ddgs>=6.0.0",
     "python-telegram-bot>=21.0",

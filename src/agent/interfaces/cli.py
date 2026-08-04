@@ -3,15 +3,24 @@
 Desain: rich memegang terminal penuh (warna/emoji/panel mulus, tanpa bocor kode
 ANSI). Animasi loading realtime (spinner + token + waktu) NEMPEL inline pada tiap
 task via rich Live. Input pakai prompt_toolkit (hanya saat idle) supaya
-Ctrl+Backspace bisa hapus per-kata. Tanpa antrean — satu tugas satu waktu.
+Ctrl+Backspace bisa hapus per-kata.
+
+Kotak chat SATU-SATUNYA: bentuk & tempatnya (menempel di atas status bar) sama
+persis saat idle maupun saat AI bekerja. Mengetik selagi AI belum selesai tetap
+"mengirim pesan" — pesannya cuma dikerjakan setelah giliran ini beres, tanpa
+satu pun teks di layar yang membahas antrean.
 """
 from __future__ import annotations
 
 import difflib
+import html
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 try:  # keyboard non-blocking (Windows): ketikan-selama-giliran & Ctrl+C
     import msvcrt as _msvcrt
@@ -24,11 +33,20 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-from prompt_toolkit import PromptSession  # noqa: E402
+from prompt_toolkit.application import Application  # noqa: E402
+from prompt_toolkit.buffer import Buffer  # noqa: E402
 from prompt_toolkit.completion import Completer, Completion  # noqa: E402
+from prompt_toolkit.document import Document  # noqa: E402
 from prompt_toolkit.filters import has_completions  # noqa: E402
 from prompt_toolkit.formatted_text import HTML  # noqa: E402
+from prompt_toolkit.history import InMemoryHistory  # noqa: E402
 from prompt_toolkit.key_binding import KeyBindings  # noqa: E402
+from prompt_toolkit.keys import Keys  # noqa: E402
+from prompt_toolkit.layout import Layout  # noqa: E402
+from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, VSplit, Window  # noqa: E402
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl  # noqa: E402
+from prompt_toolkit.layout.dimension import Dimension as D  # noqa: E402
+from prompt_toolkit.layout.menus import CompletionsMenu  # noqa: E402
 from prompt_toolkit.patch_stdout import patch_stdout  # noqa: E402
 from prompt_toolkit.styles import Style as PTStyle  # noqa: E402
 from rich import box  # noqa: E402
@@ -91,6 +109,67 @@ except Exception:  # pragma: no cover
     _CODE_THEME = "monokai"
 
 
+# Garis penghubung gambar pohon direktori (box-drawing, BUKAN ASCII '|').
+# Sengaja tak memuat '│' saja: banyak teks biasa memakainya sebagai pemisah.
+_SAMBUNG_POHON = ("├", "└", "┣", "┗")
+_GARIS_POHON = _SAMBUNG_POHON + ("│", "─", "┃", "━")
+_PAGAR = re.compile(r"^\s*(```|~~~)")
+
+
+def _pagari_pohon(text: str) -> str:
+    """Bungkus gambar pohon direktori dengan pagar kode sebelum di-Markdown-kan.
+
+    Kenapa perlu: Markdown menganggap baris-baris berurutan sebagai SATU
+    paragraf lalu membungkusnya ulang mengikuti lebar terminal. Untuk kalimat
+    biasa itu benar, tapi gambar pohon ("├── agent/") jadi hancur — semua
+    barisnya ditempel berderet jadi satu paragraf dan bentuk pohonnya lenyap.
+    Model menuliskan pohon TANPA pagar kode jauh lebih sering daripada dengan,
+    jadi memagarinya di sini adalah satu-satunya cara agar tampilannya selamat.
+
+    Yang sudah berada di dalam pagar kode dibiarkan apa adanya.
+    """
+    if not any(c in text for c in _SAMBUNG_POHON):
+        return text                      # jalur cepat: tak ada pohon sama sekali
+    keluar: list[str] = []
+    blok: list[str] = []
+    dalam_pagar = False
+
+    def _tutup() -> None:
+        """Pindahkan blok yang tertampung ke keluaran, dipagari bila layak."""
+        if not blok:
+            return
+        # Pagari hanya bila benar-benar gambar pohon: minimal dua baris DAN ada
+        # sambungan sungguhan (├/└). Satu baris berhias garis cuma pemanis.
+        layak = len(blok) >= 2 and any(
+            any(c in b for c in _SAMBUNG_POHON) for b in blok)
+        keluar.extend(["```text", *blok, "```"] if layak else blok)
+        blok.clear()
+
+    for baris in text.splitlines():
+        if _PAGAR.match(baris):
+            _tutup()
+            dalam_pagar = not dalam_pagar
+            keluar.append(baris)
+            continue
+        if dalam_pagar:
+            keluar.append(baris)
+            continue
+        if any(c in baris for c in _GARIS_POHON):
+            blok.append(baris)
+            continue
+        # Baris akar pohon ("src/", "proyek/") berada TEPAT di atas cabang
+        # pertamanya dan tak punya garis apa pun — tanpa ikut dipagari, ia
+        # tertinggal sebagai paragraf yatim di atas kotak kode.
+        if not blok and baris.strip().endswith(("/", "\\")) and \
+                not baris.lstrip().startswith(("#", ">", "-", "*", "+")):
+            blok.append(baris)
+            continue
+        _tutup()
+        keluar.append(baris)
+    _tutup()
+    return "\n".join(keluar)
+
+
 def _md(text: str) -> Markdown:
     """Markdown bertema catppuccin (inline code pakai style `markdown.code`,
     blok kode ```lang``` disorot tema `dracula`).
@@ -102,7 +181,7 @@ def _md(text: str) -> Markdown:
     PERMANEN: satu \x1b[2J dari log yang disalin model menghapus scrollback
     giliran sebelumnya, dan \x1b[31m tanpa reset mewarnai semua teks sesudahnya
     sampai terminal di-reset manual."""
-    return Markdown(_bersih_kendali(text), code_theme=_CODE_THEME)
+    return Markdown(_pagari_pohon(_bersih_kendali(text)), code_theme=_CODE_THEME)
 
 # Padding tepi supaya konten tidak mepet ke pinggir terminal (kiri/kanan/bawah).
 _LPAD = 2
@@ -125,7 +204,6 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("review", "cari bug & kesalahan sistem di seluruh proyek"),
     ("scan", "pindai ulang & segarkan peta proyek"),
     ("live", "hidup/matikan tampilan mengalir dengan footer status"),
-    ("expand", "cetak ulang hasil penuh · /expand N untuk satu langkah"),
     ("memory", "memory jangka panjang"),
     ("scripts", "script memory"),
     ("update", "cek pembaruan"),
@@ -231,26 +309,33 @@ def _fmt_elapsed(sec: float) -> str:
     return f"{d}d {h}h"
 
 
+# Kosakata fase di samping animasi loading. SENGAJA cuma segelintir kata, dan
+# semuanya bicara soal MODEL — bukan soal cara bagas-ai memakainya.
+#
+# Dulu status mentah connector diteruskan apa adanya ("menyiapkan jendela
+# Chrome…", "membuka percakapan baru…", "tab Kimi mati, mengulang…"). Itu
+# membocorkan jeroan ke layar: pengguna sedang menunggu jawaban, bukan sedang
+# mengurus browser, dan bagi dia "jendela Chrome" terbaca seperti ada yang
+# salah. Kalimat sedetail itu tempatnya di log, bukan di baris status.
+_FASE_SIAP = "menyiapkan model"
+_FASE_PIKIR = "berpikir"
+
+
 def _web_phase(msg: str) -> str:
-    """Ringkas status connector web jadi KATA FASE pendek untuk baris status,
-    supaya tampilannya seragam antar layanan web."""
+    """Ringkas status connector web jadi SATU kata fase untuk baris status."""
     m = (msg or "").lower()
-    if "menjawab" in m:
-        return "menjawab"
-    if "berpikir" in m:
-        return "berpikir"
+    # "menjawab" ikut jadi "berpikir": bagi yang menunggu, keduanya sama saja —
+    # model belum selesai. Membedakannya cuma menambah kata yang berkedip.
+    if "menjawab" in m or "berpikir" in m:
+        return _FASE_PIKIR
     if "login" in m or "sign-in" in m or "sign in" in m:
-        return "menunggu login di jendela Chrome"
-    if "mengetik" in m:
-        return "mengirim pesan"
-    # Sengaja hanya menangkap frasa UMUM-nya. Status yang lebih spesifik
-    # ("menyiapkan jendela Chrome", "membuka percakapan baru", "menunggu giliran
-    # browser sebelumnya selesai") dibiarkan lewat apa adanya lewat baris
-    # terakhir — justru ketepatan itulah gunanya, supaya jeda panjang di fase
-    # browser punya penjelasan alih-alih terlihat diam tanpa sebab.
-    if "menyiapkan sesi" in m or "menghubungkan" in m:
-        return "menyiapkan sesi web"
-    return (msg or "").strip().rstrip("…") or "bekerja"
+        return "menunggu login"
+    if "mengetik" in m or "mengirim" in m or "mengunggah" in m or "lampiran" in m:
+        return "analisis pesan"
+    # Sisanya — meluncurkan browser, memuat halaman, membuka percakapan baru,
+    # menyambung ulang tab yang mati, mengantre giliran browser — semuanya satu
+    # hal yang sama di mata pengguna: modelnya belum siap dipakai.
+    return _FASE_SIAP
 
 
 # Escape ANSI (CSI/OSC/dua-karakter) + karakter kendali lain. Keluaran tool nyata
@@ -297,12 +382,17 @@ def _oneline(t: Text) -> Text:
     return t
 
 
-# Warna gaya editor (GitHub-like): teks terang di atas bg gelap hijau/merah.
-_ADD = "#c9f5cf on #123d1c"
-_DEL = "#f5c9c9 on #3d1212"
+# Warna gaya editor (GitHub-like): teks kalem di atas bg gelap hijau/merah.
+#
+# Sengaja DIREDAM, bukan warna hijau/merah pekat: diff sering menutupi layar
+# berbaris-baris, dan warna cerah pada seluruh baris itu melelahkan sekaligus
+# menenggelamkan sorotan sintaks yang justru dicari mata (lihat _warna_kode).
+# Latarnya cukup untuk menandai baris mana yang berubah, tak lebih.
+_ADD = "#a3ccad on #0d2312"
+_DEL = "#cca3a3 on #230d0d"
 _CTX = "grey50"
-_GUT_A = "#5bd66f on #0d2a14"
-_GUT_D = "#e06b6b on #2a0d0d"
+_GUT_A = "#4f8f5c on #08170b"
+_GUT_D = "#96565a on #170808"
 
 
 # --- pewarnaan sintaks DI DALAM diff ---------------------------------------
@@ -412,23 +502,31 @@ def _lebar_kotak() -> int:
     return max(28, min(console.width - 2 * _LPAD, _KOTAK_MAKS))
 
 
-def _kotak_chat(isi: str, *, kosong: str = "", aktif: bool = True) -> list:
-    """Tiga baris kotak chat: tepi atas, baris isi, tepi bawah."""
+# Baris kosong pemberi napas. Kotak chat SELALU diapit satu baris kosong di
+# atas & di bawah — di mode mengalir, mode klasik, maupun saat idle (di sana
+# KotakChat memasang Window kosong yang sama). Tanpa itu ia menempel rapat ke
+# spinner dan ke bar status sehingga ketiganya terbaca sebagai satu gumpalan.
+_KOSONG = Text("")
+
+
+def _kotak_chat(isi: str = "") -> list:
+    """Tiga baris kotak chat: tepi atas, baris isi, tepi bawah.
+
+    Kembarannya saat idle adalah KotakChat (prompt_toolkit) — bentuk, lebar,
+    padding kiri, dan warna "❯"-nya sengaja dibuat sama persis supaya kotak
+    chat terasa satu benda yang sama, bukan dua tampilan yang mirip."""
     lebar = _lebar_kotak()
     m = " " * _LPAD
     atas = Text(m)
     atas.append("╭" + "─" * (lebar - 2) + "╮", style=_GARIS_KOTAK)
     baris = Text(m)
     baris.append("│ ", style=_GARIS_KOTAK)
+    baris.append("❯ ", style="bold #cba6f7")
     if isi:
-        baris.append("❯ ", style="bold #cba6f7")
         # Ekor yang ditampilkan, bukan kepala: yang mau dilihat pengguna adalah
         # huruf yang BARU saja ia ketik.
         baris.append(isi[-(lebar - 8):], style="#cdd6f4")
         baris.append("▌", style="#cba6f7")
-    else:
-        baris.append("❯ ", style=_GARIS_KOTAK)
-        baris.append(kosong, style="dim italic" if aktif else "dim")
     # Potong dulu, baru ratakan sampai tepi kanan — kalau tidak, isi yang
     # kepanjangan mendorong tepi kanannya keluar layar dan kotaknya patah.
     baris.truncate(_LPAD + lebar - 1, overflow="ellipsis")
@@ -439,6 +537,261 @@ def _kotak_chat(isi: str, *, kosong: str = "", aktif: bool = True) -> list:
     bawah = Text(m)
     bawah.append("╰" + "─" * (lebar - 2) + "╯", style=_GARIS_KOTAK)
     return [_oneline(atas), _oneline(baris), _oneline(bawah)]
+
+
+# Tinggi maksimum daftar sugesti "/..." di dalam kotak chat.
+_MENU_MAKS = 8
+
+# --- hasil penuh sebuah langkah: dibuka dengan KLIK, bukan diketik ----------
+#
+# Dulu ini perintah `/expand N`, dan justru karena itu tiap langkah harus
+# memamerkan nomornya ("#3") — nomor yang tak berguna untuk apa pun selain
+# diketik ulang. Sekarang ringkasan "42 baris" ITU SENDIRI yang jadi tautan:
+# Ctrl+klik di terminal (Windows Terminal, iTerm2, GNOME Terminal, dsb.)
+# membuka hasil penuhnya di aplikasi teks bawaan.
+#
+# Kenapa tautan dan bukan klik biasa: menangkap klik biasa mengharuskan mouse
+# capture, dan mouse capture MENELAN scroll wheel — terminal tak bisa digulung
+# lagi. Itu persis alasan fitur klik yang lama dicabut. Tautan OSC 8 tak
+# menyentuh mode mouse sama sekali, jadi scroll & seleksi teks tetap milik
+# terminal sepenuhnya.
+_DIR_LANGKAH: Path | None = None
+
+
+def _dir_langkah() -> Path | None:
+    """Folder sementara berisi hasil penuh tiap langkah (per sesi, sekali buat).
+
+    Isi folder sesi LAMA dibersihkan di sini: berkasnya cuma berguna selama
+    terminalnya masih terbuka, dan tanpa sapuan ini ia menumpuk diam-diam di
+    %TEMP% seumur pemakaian."""
+    global _DIR_LANGKAH
+    if _DIR_LANGKAH is not None:
+        return _DIR_LANGKAH
+    try:
+        induk = Path(tempfile.gettempdir()) / "bagasai-langkah"
+        induk.mkdir(parents=True, exist_ok=True)
+        batas = time.time() - 86400          # sisa kemarin -> buang
+        for lama in induk.iterdir():
+            try:
+                if lama.is_dir() and lama.stat().st_mtime < batas:
+                    shutil.rmtree(lama, ignore_errors=True)
+            except OSError:
+                pass
+        _DIR_LANGKAH = Path(tempfile.mkdtemp(prefix="sesi-", dir=str(induk)))
+    except Exception:  # noqa: BLE001 - tanpa folder, tautan tinggal dilewati
+        return None
+    return _DIR_LANGKAH
+
+
+# Halaman hasil-penuh. Sengaja HTML, bukan .txt: yang dibuka harus TERLIHAT
+# sebagai "tampilan expand" — latar abu-abu gelap, monospace, palet yang sama
+# dengan terminal — bukan lembar putih Notepad yang tak bisa dibedakan dari
+# berkas mana pun. Semua gaya ditanam di berkasnya sendiri (tanpa aset luar),
+# jadi ia tetap utuh walau dibuka offline atau dipindahkan.
+_HAL_HASIL = """<!doctype html><meta charset="utf-8">
+<title>{judul_tab}</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin:0; padding:28px 22px; background:#181825; color:#cdd6f4;
+         font:13px/1.55 "Cascadia Code","JetBrains Mono",Consolas,monospace; }}
+  header {{ max-width:1100px; margin:0 auto 16px; }}
+  h1 {{ margin:0 0 4px; font-size:15px; color:#cba6f7; font-weight:700; }}
+  .sub {{ color:#7f849c; font-size:12px; }}
+  .sub b {{ color:#{warna_status}; font-weight:600; }}
+  pre {{ max-width:1100px; margin:0 auto; padding:18px 20px; background:#1e1e2e;
+        border:1px solid #313244; border-left:3px solid #{warna_status};
+        border-radius:10px; white-space:pre-wrap; word-break:break-word; }}
+</style>
+<header><h1>{judul}</h1>
+<div class="sub"><b>{status}</b> · {n_baris} baris · langkah {n}</div></header>
+<pre>{isi}</pre>
+"""
+
+
+def _tautan_hasil(n: int, judul: str, isi: str, *, gagal: bool = False) -> str | None:
+    """Tulis hasil penuh langkah #n jadi halaman, kembalikan URL-nya (atau None).
+
+    Dipanggil sekali per langkah, saat langkahnya selesai — berkasnya harus
+    sudah ada SEBELUM tautannya tercetak, karena sesudah itu barisnya jadi
+    scrollback biasa yang tak bisa disentuh lagi."""
+    d = _dir_langkah()
+    if d is None:
+        return None
+    try:
+        f = d / f"langkah-{n}.html"
+        f.write_text(_HAL_HASIL.format(
+            judul_tab=html.escape(f"langkah {n} · {judul}"[:80]),
+            judul=html.escape(judul),
+            status="gagal" if gagal else "selesai",
+            warna_status="f38ba8" if gagal else "a6e3a1",
+            n_baris=len(isi.splitlines()),
+            n=n,
+            isi=html.escape(isi) or "<i>(tidak ada keluaran)</i>",
+        ), encoding="utf-8", errors="replace")
+        return f.resolve().as_uri()
+    except Exception:  # noqa: BLE001 - gagal menulis != langkah gagal
+        return None
+
+# --- bar status permanen ---------------------------------------------------
+#
+# Bar ini PASANGAN TETAP kotak chat: kotak selalu menempel persis di atasnya,
+# dan keduanya tak pernah menghilang — baik saat kamu mengetik maupun saat AI
+# masih menyusun jawabannya. Saat idle ia digambar prompt_toolkit (lihat
+# KotakChat), saat giliran berjalan ia digambar rich dari sini; isinya dijaga
+# sama persis supaya perpindahan antar keduanya tak terlihat.
+_BG_BAR = "#181825"
+
+
+def _bar_status(agent: Agent, total: int) -> Text:
+    """Satu baris: ⬢ bagas-ai · model · token sesi · token total · perintah."""
+    s = agent.tokens_session
+    spec = agent.model_spec
+    bar = Text(style=f"on {_BG_BAR}")
+    bar.append(" ⬢ bagas-ai", style="bold #cba6f7")
+    sep = ("  │  ", "#45475a")
+    bar.append(*sep)
+    bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
+    bar.append(spec.label, style="bold #89b4fa")
+    bar.append(*sep)
+    bar.append(f"⚡ {_fmt(s.total)}", style="#f9e2af")
+    bar.append(" sesi", style="#7f849c")
+    bar.append(*sep)
+    bar.append(f"🔋 {_fmt(total)}", style="#a6e3a1")
+    bar.append(" total", style="#7f849c")
+    bar.append(*sep)
+    bar.append("/menu", style="#94e2d5")
+    bar.append(" · ", style="#7f849c")
+    bar.append("/exit", style="#f38ba8")
+    # Diratakan sampai ujung terminal supaya latarnya jadi PITA penuh, bukan
+    # potongan pendek yang menggantung di tengah baris.
+    pad = console.width - bar.cell_len
+    if pad > 0:
+        bar.append(" " * pad)
+    return _oneline(bar)
+
+
+class KotakChat:
+    """Kotak chat saat idle: satu Application prompt_toolkit, tiga baris.
+
+    Kenapa merakit Application sendiri dan bukan memakai PromptSession:
+    PromptSession tak sanggup MENUTUP kotak di sekeliling baris ketikan, dan
+    dua akalannya sama-sama patah — terbukti pada tampilan rusak yang
+    dilaporkan:
+
+      1. Tepi kanan hanya bisa dititipkan ke `rprompt`, tapi prompt_toolkit
+         menempelkan rprompt di baris PERTAMA blok input. Karena tepi ATAS
+         kotak juga tinggal di sana (prompt berisi "\\n"), tepi kanan itu
+         mendarat di baris yang salah sekaligus di ujung terminal — bukan di
+         tepi kotak yang lebarnya dibatasi _lebar_kotak().
+      2. Tepi bawah hanya bisa dititipkan ke `bottom_toolbar`, padahal
+         PromptSession MEMESAN ruang menu autocomplete (reserve_space_for_menu,
+         bawaan 8 baris) tepat di ANTARA baris ketikan dan toolbar selama
+         complete_while_typing hidup. Ruang kosong itulah yang merobek kotak
+         jadi belasan baris menganga.
+
+    Di sini kotaknya container biasa: tepi atas/bawah satu Window teks, tepi
+    kiri/kanan Window ber-`char`. Jadi keempat sisinya rapat mengelilingi
+    ketikan berapa pun barisnya (teks yang membungkus ikut berbingkai), dan
+    daftar sugesti "/..." TUMBUH DI DALAM kotak alih-alih jadi lubang kosong.
+    """
+
+    def __init__(self, *, status, key_bindings, style, completer=None):
+        self._status = status
+        self.buffer = Buffer(
+            multiline=False,
+            completer=completer,
+            complete_while_typing=True,
+            history=InMemoryHistory(),
+            accept_handler=self._terima,
+        )
+        self._isi = Window(
+            BufferControl(self.buffer),
+            get_line_prefix=self._awalan_baris,
+            wrap_lines=True,
+            height=D(min=1),
+            dont_extend_height=True,
+        )
+        self.app: Application = Application(
+            layout=Layout(self._rakit(), focused_element=self._isi),
+            key_bindings=key_bindings,
+            style=style,
+            # Kotaknya HILANG begitu Enter ditekan; yang tertinggal di riwayat
+            # cuma gema "❯ pesan" yang dicetak pemanggil. Tanpa ini scrollback
+            # penuh potongan kotak setengah jadi (tepi atas + baris ketikan
+            # tanpa tepi bawah) — sisa render terakhir prompt_toolkit.
+            erase_when_done=True,
+        )
+
+    # --- potongan tampilan ---------------------------------------------------
+    @staticmethod
+    def _awalan_baris(nomor: int, lipat: int):
+        """"❯ " hanya di baris pertama; baris lipatan diberi lekuk selebar itu
+        supaya hurufnya tetap lurus di bawah huruf pertama."""
+        if nomor == 0 and lipat == 0:
+            return [("class:tanda", "❯ ")]
+        return [("", "  ")]
+
+    @staticmethod
+    def _tepi(kiri: str, kanan: str) -> Window:
+        def teks():
+            return [("class:garis", kiri + "─" * (_lebar_kotak() - 2) + kanan)]
+        return Window(FormattedTextControl(teks), height=1, dont_extend_height=True)
+
+    @staticmethod
+    def _sisi() -> Window:
+        return Window(width=1, char="│", style="class:garis")
+
+    def _tinggi_menu(self) -> D:
+        """Tinggi daftar sugesti = JUMLAH sugestinya (dibatasi _MENU_MAKS).
+
+        Dipatok tepat, bukan diserahkan ke tinggi pilihan menu: kalau tidak,
+        selalu tersisa satu baris kosong di antara sugesti terakhir dan tepi
+        bawah — kotak yang terlihat bocor lagi, walau cuma sebaris."""
+        st = self.buffer.complete_state
+        n = len(st.completions) if st else 0
+        return D.exact(max(1, min(n, _MENU_MAKS)))
+
+    def _rakit(self) -> HSplit:
+        kotak = HSplit(
+            [
+                self._tepi("╭", "╮"),
+                VSplit([self._sisi(), Window(width=1), self._isi,
+                        Window(width=1), self._sisi()]),
+                ConditionalContainer(
+                    VSplit([self._sisi(), Window(width=1),
+                            CompletionsMenu(max_height=_MENU_MAKS),
+                            Window(), self._sisi()],
+                           height=self._tinggi_menu),
+                    filter=has_completions),
+                self._tepi("╰", "╯"),
+            ],
+            width=lambda: D.exact(_lebar_kotak()),
+        )
+        return HSplit([
+            # Baris kosong pengapit — kembaran _KOSONG di sisi rich, supaya
+            # jarak kotak ke sekelilingnya tak berubah sedikit pun saat giliran
+            # selesai dan tampilannya berpindah tangan dari rich ke sini.
+            Window(height=1),
+            # Padding kiri sama seperti seluruh UI rich -> kotak idle dan kotak
+            # saat giliran berjalan berdiri di kolom yang sama persis.
+            VSplit([Window(width=_LPAD), kotak, Window()]),
+            Window(height=1),
+            Window(FormattedTextControl(self._status), height=1,
+                   dont_extend_height=True, style="class:bottom-toolbar"),
+        ])
+
+    # --- pemakaian -----------------------------------------------------------
+    def tanya(self, default: str = "") -> str:
+        """Tampilkan kotak sampai Enter, kembalikan teksnya.
+
+        `default` = sisa ketikan dari giliran sebelumnya, jadi tak ada ketikan
+        yang hilang. KeyboardInterrupt/EOFError diteruskan ke pemanggil."""
+        self.buffer.reset(Document(default, len(default)))
+        return self.app.run()
+
+    def _terima(self, buf: Buffer) -> bool:
+        self.app.exit(result=buf.text)
+        return False   # buffer dikosongkan & teksnya masuk riwayat ↑/↓
 
 
 # Tool yang MENGUBAH ISI file -> perubahannya ditampilkan sebagai diff berwarna
@@ -642,8 +995,10 @@ _PHASE = {
 class Status:
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-    def __init__(self, agent: Agent) -> None:
+    def __init__(self, agent: Agent, total=None) -> None:
         self.agent = agent
+        # total() -> token global sepanjang masa; dipakai bar status permanen.
+        self.total = total or (lambda: agent.tokens_session.total)
         self.start = time.time()
         self.tool: str | None = None
         self.phase = "berpikir"
@@ -679,21 +1034,23 @@ class Status:
             self.phase = text
 
     def __rich__(self):
-        """Kotak chat + satu baris status — susunan yang SAMA seperti mode
-        mengalir dan seperti prompt idle.
+        """Baris kerja · kotak chat · bar status — susunan yang SAMA PERSIS
+        seperti mode mengalir dan seperti saat idle.
 
-        Kotaknya ikut hadir di sini justru supaya ia tak pernah hilang: mode
-        klasik dipakai saat /live dimatikan DAN sebagai cadangan bila jalur
-        mengalir gagal, jadi tanpa ini kolom chat lenyap persis di saat
-        tampilannya sedang paling tidak menentu.
+        Kotak chat dan bar status ikut hadir di sini justru supaya keduanya tak
+        pernah hilang: mode klasik dipakai saat /live dimatikan DAN sebagai
+        cadangan bila jalur mengalir gagal, jadi tanpa ini kolom chat lenyap
+        persis di saat tampilannya sedang paling tidak menentu.
 
-        Ajakannya sengaja BEDA dari mode mengalir: mode klasik tidak menangkap
-        ketikan selama giliran berjalan, jadi menjanjikan "ketik untuk
-        mengantre" di sini akan bohong."""
+        Rupa kotaknya sama persis dengan kotak idle — kosong, tanpa teks ajakan
+        apa pun. Kotak chat cuma SATU, jadi ia tak boleh berganti wajah hanya
+        karena AI sedang sibuk."""
         return Group(
-            *_kotak_chat("", kosong="menunggu giliran ini selesai…",
-                         aktif=False),
             self._baris_status(),
+            _KOSONG,
+            *_kotak_chat(),
+            _KOSONG,
+            _bar_status(self.agent, self.total()),
         )
 
     def _baris_status(self) -> Text:
@@ -749,18 +1106,31 @@ class Status:
 
 # Tips singkat yang BERGANTIAN muncul di bawah status selama AI bekerja
 # (seperti Claude CLI) — biar waktu menunggu tetap informatif.
+#
+# ATURAN ISI: tiap tips WAJIB menggambarkan bagas-ai yang SEKARANG. Tips yang
+# menjanjikan hal usang lebih merugikan daripada tak ada tips sama sekali —
+# pengguna mencoba, gagal, lalu berhenti percaya pada seluruh barisan ini. Dua
+# yang sudah pernah basi dan kini diperbaiki: "/effort mengatur kedalaman
+# berpikir" (sejak semua model lewat browser, /effort MENGKLIK pemilih mode di
+# situsnya, bukan mengirim parameter API) dan "naik kelas otomatis" (mekanisme
+# itu ikut terhapus bersama model ber-API-key; yang tersisa penjaga anti-macet).
 _TIPS = (
-    "/model mengganti otak AI kapan saja — preferensimu tersimpan",
-    "/effort mengatur kedalaman berpikir: langsung → mendalam",
-    "/bot menyalakan kontrol lewat Telegram — perintah dari HP",
-    "/scan menyegarkan peta proyek · /review memburu bug proyek",
-    "perintah menetap (mis. npm run dev) otomatis jalan di latar",
+    "ketik pesan berikutnya kapan saja — Enter mengirimnya, dikerjakan sesudah ini",
+    "/model ganti model kapan saja — login cukup sekali, sesudah itu langsung jalan",
+    "/add-dir menambah folder lain ke konteks · /dirs melihat daftarnya",
+    "/scan menyegarkan peta proyek · /review memburu bug di seluruh proyek",
+    "perintah menetap (mis. npm run dev) otomatis jalan di latar — terminal tetap bebas",
     "Ctrl+C sekali = batalkan dengan aman; ketik 'lanjutkan' untuk meneruskan",
-    "bagas-ai --resume melanjutkan sesi terakhirmu di folder ini",
-    "/expand N membuka hasil lengkap sebuah langkah setelah selesai",
-    "kalau model macet/ngeloop, bagas-ai membatalkan & naik kelas sendiri",
-    "/memory menyimpan fakta jangka panjang lintas sesi",
-    "/live mengalihkan tampilan inline ↔ klasik bila terminal bermasalah",
+    "bagas-ai --resume melanjutkan percakapan terakhir di folder ini",
+    "ringkasan \"N baris\" di bawah tiap langkah bisa di-Ctrl+klik — hasil penuhnya terbuka",
+    "tiap perubahan file ditampilkan sebagai diff dulu, sebelum berkasnya disentuh",
+    "/memory menyimpan fakta yang harus diingat lintas sesi",
+    "/effort memilih varian model & mode berpikir langsung di situs modelnya",
+    "kalau model mengulang langkah yang sama, bagas-ai menyetopnya lalu cari jalan lain",
+    "/web merapikan chat yang menumpuk di situs model · sekalian logout kalau perlu",
+    "/bot menyalakan kontrol lewat Telegram — perintahkan bagas-ai dari HP",
+    "/scripts menyimpan perintah panjang jadi satu nama pendek",
+    "/live mengalihkan tampilan mengalir ↔ klasik bila terminalmu bermasalah",
 )
 
 
@@ -769,29 +1139,26 @@ class TurnView:
 
     SEMUA konten (narasi, langkah, diff, jawaban) dicetak STATIS ke scrollback
     begitu tersedia — tidak ada yang dirender di region tetap yang
-    menimpa/menutupi apa pun. Satu-satunya bagian yang hidup (rich.Live) adalah
-    FOOTER kecil di baris paling bawah: spinner status + ketikan yang sedang
-    berlangsung + antrean. Tingginya kecil & nyaris konstan (tiap baris
-    _oneline anti-wrap), jadi ia tak pernah lebih tinggi dari layar dan tak
-    pernah menutupi ketikan pengguna maupun diff — akar bug "kotak animasi
-    menimpa input" pada desain lama yang menaruh langkah + pratinjau di region
-    live.
+    menimpa/menutupi apa pun. Yang hidup (rich.Live) cuma empat baris di paling
+    bawah: spinner status, tips, KOTAK CHAT, lalu BAR STATUS. Tingginya kecil &
+    tetap (tiap baris _oneline anti-wrap), jadi ia tak pernah lebih tinggi dari
+    layar dan tak pernah menutupi ketikan pengguna maupun diff — akar bug
+    "kotak animasi menimpa input" pada desain lama yang menaruh langkah +
+    pratinjau di region live.
 
     Yang DITAMPILKAN dijaga tetap sedikit dan pasti: fase yang sedang berjalan,
     alat yang sedang dipakai, narasi AI, hasil tiap langkah, dan jawaban akhir.
-    Tak ada bar perkiraan waktu — ia cuma menebak sisa waktu.
-
-    Di ATAS footer, dan selalu di tempat yang sama, ada gelembung chat
-    berukuran tetap berisi kalimat yang SEDANG ditulis AI (_panel_chat). Yang
-    masuk ke situ hanya teks yang sudah disaring bersih dari blok [[TOOL]] —
-    percakapan mesin tak pernah bocor ke layar — dan tingginya tak pernah
-    berubah, jadi ia tak bisa menimpa ketikan pengguna maupun diff."""
+    Tak ada bar perkiraan waktu (cuma menebak sisa waktu) dan tak ada pratinjau
+    kalimat yang sedang ditulis (isinya berubah tiap frame, lalu tercetak lagi
+    ke scrollback beberapa detik kemudian)."""
 
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-    def __init__(self, agent: Agent, commit=None) -> None:
+    def __init__(self, agent: Agent, commit=None, total=None) -> None:
         self.agent = agent
         self.commit = commit          # commit(renderables) -> cetak ke riwayat
+        # total() -> token global sepanjang masa; dipakai bar status permanen.
+        self.total = total or (lambda: agent.tokens_session.total)
         self.start = time.time()
         self._lock = threading.Lock()
         self.all_steps: list[dict] = []            # SEMUA langkah (untuk ringkasan)
@@ -819,18 +1186,17 @@ class TurnView:
         # Perekaman durasi di connector (web_timing.record) sengaja DIBIARKAN:
         # ia tak menampilkan apa pun, cuma menabung statistik.
         #
-        # Yang TETAP mengalir hidup: satu baris berisi teks BERSIH balasan yang
-        # sedang ditulis (lihat note_stream). `_mentah` menampung apa adanya
-        # dari situs, `_bersih` hasil saringannya — hanya yang kedua yang
-        # pernah tampil.
-        self._mentah = ""
-        self._bersih = ""
-        # Ketikan pengguna SELAMA giliran berjalan (fitur antrean prompt):
-        # `typing` = buffer yang sedang diketik (tampil di footer), `queue_n` =
-        # berapa prompt yang sudah antre. Enter TIDAK membatalkan apa pun —
-        # prompt masuk antrean dan dikerjakan setelah giliran ini selesai.
+        # Pratinjau kalimat yang sedang ditulis AI (satu baris abu-abu di atas
+        # spinner) IKUT DIHAPUS atas permintaan pengguna. Ia memang mengabarkan
+        # giliran panjang belum mati, tapi harganya satu baris yang isinya
+        # berubah tiap frame tepat di sebelah kotak chat — dan yang sama akan
+        # tercetak rapi ke scrollback beberapa detik kemudian. Waktu berjalan
+        # + fase di baris spinner sudah cukup jadi tanda kehidupan.
+        # Ketikan pengguna SELAMA giliran berjalan, tampil di kotak chat yang
+        # sama seperti saat idle. Enter TIDAK membatalkan apa pun — prompt
+        # dikerjakan setelah giliran ini selesai. Itu urusan di balik layar:
+        # tak ada satu pun teks di layar yang menyebut-nyebut antrean.
         self.typing = ""
-        self.queue_n = 0
 
     # --- mutasi (dipanggil dari worker) ---
     def add_narasi(self, text: str) -> None:
@@ -883,113 +1249,65 @@ class TurnView:
         self.retry_msg = msg
 
     def note_phase(self, text: str) -> None:
-        """Set fase status langsung (dipakai connector web: 'menjawab', dsb).
+        """Set fase status langsung (dipakai connector web: 'berpikir', dsb).
         Diabaikan saat ada tool berjalan supaya fase tool tak tertimpa."""
         if self.tool is None and text and text != self.phase:
-            # Tiap kali fase MENJAWAB dimulai lagi (jawaban awal, lalu balasan
-            # atas hasil tool), aliran teksnya disetel ulang — yang ditampilkan
-            # harus balasan yang SEKARANG, bukan sisa balasan sebelumnya.
-            if text == "menjawab":
-                self._mentah = ""
-                self._bersih = ""
             self.phase = text
             self.phase_since = time.time()
 
-    def note_stream(self, delta: str) -> None:
-        """Potongan balasan yang baru saja muncul di situs (dari on_token).
-
-        Dipakai HANYA untuk satu baris hidup di footer, dan yang ditampilkan
-        cuma teks BERSIHNYA — isi blok [[TOOL]] beserta JSON-nya tak pernah
-        ikut. Penyaringnya memakai fungsi yang sama dengan jalur cetak
-        permanen (core._strip_web_markers + _strip_tool_json), termasuk
-        aturannya menahan segala sesuatu di belakang penanda pembuka yang
-        belum tertutup — jadi blok yang baru separuh diketik tak sempat
-        terlihat sedetik pun.
-
-        Kenapa hanya di footer dan tidak dibekukan ke riwayat: teks yang sama
-        akan dicetak rapi sebagai narasi/jawaban begitu balasannya utuh. Kalau
-        aliran ini ikut dibekukan, isinya tampil dua kali.
-
-        Tanpa baris ini, giliran yang lama terasa mati total: TERAMATI di
-        pemakaian nyata — AI sudah menulis "Aku mulai audit dari file paling
-        berisiko…" di browser, sementara terminal hanya menampilkan
-        "menjawab · 1m 0s" tanpa sepatah kata pun."""
-        if not delta:
-            return
-        self._mentah += _bersih_kendali(delta)
-        try:
-            from ..core import _strip_tool_json, _strip_web_markers
-            self._bersih = _strip_tool_json(_strip_web_markers(self._mentah))
-        except Exception:  # noqa: BLE001 - pratinjau tak boleh menggagalkan giliran
-            return
-
-    def _baris_aliran(self):
-        """Satu baris POLOS berisi ekor kalimat yang sedang ditulis AI.
-
-        Sengaja TANPA bingkai: yang bertepi di layar ini cuma satu, yaitu kotak
-        chat. Kalimat AI yang mengalir bukan komponen tetap — ia numpang lewat
-        lalu digantikan versi rapinya di scrollback begitu balasannya utuh, jadi
-        memberinya bingkai sendiri justru membuatnya tampak sederajat dengan
-        kotak chat dan layar terasa penuh kotak."""
-        teks = " ".join((self._bersih or "").split())
-        if not teks:
-            return None
-        lebar = max(20, _lebar_kotak() - 2)
-        if len(teks) > lebar:
-            # Ekornya yang ditampilkan (bagian yang baru saja ditulis), tapi
-            # jangan mulai di tengah kata: "…ca connectors/browser.py" terbaca
-            # seperti tampilan rusak, bukan seperti kalimat yang sedang jalan.
-            ekor = teks[-(lebar - 2):]
-            spasi = ekor.find(" ")
-            if 0 <= spasi <= 24:
-                ekor = ekor[spasi + 1:]
-            teks = "… " + ekor
-        return _oneline(Text("  " + teks, style="#7f849c"))
-
     def _kotak_ketikan(self) -> list:
-        """Kotak chat yang SAMA seperti saat idle, dipakai untuk mengantre.
+        """Kotak chat yang SAMA PERSIS seperti saat idle — termasuk kosongnya.
 
-        Sengaja identik bentuknya dengan prompt biasa: mengetik selama giliran
-        berjalan itu tetap "mengetik pesan", jadi tempatnya tak boleh berpindah
-        atau berganti rupa. Kalau tampilannya beda, Enter terasa seperti
-        tindakan lain — padahal ia cuma mengantre."""
-        return _kotak_chat(
-            self.typing,
-            kosong="ketik untuk mengantre perintah berikutnya…",
-            aktif=bool(self.typing))
+        Tak ada ajakan "ketik untuk mengantre" atau semacamnya: kotak chat cuma
+        SATU dan rupanya tak boleh berubah-ubah menurut sibuk/tidaknya AI.
+        Mengetik di sini tetap "mengetik pesan"; kalau AI kebetulan belum
+        selesai, pesannya dikerjakan setelah giliran ini — diam-diam, tanpa
+        perlu diumumkan lewat teks di layar."""
+        return _kotak_chat(self.typing)
 
     # --- render satu langkah (dipanggil SEKALI saat langkah selesai) ---
     def _render_step(self, rec: dict) -> list:
         """Blok statis sebuah langkah yang SELESAI, untuk dicetak ke riwayat:
-        kepala (✓/✗ + label + #n) lalu ringkasan 'N baris'. Hasil penuhnya
-        dibuka lewat /expand N — bukan ditampilkan semua di sini."""
-        n = rec["n"]
+        kepala (✓/✗ + label) lalu ringkasan "N baris" yang BISA DIKLIK.
+
+        Nomor langkah tak lagi ditampilkan: satu-satunya gunanya dulu adalah
+        diketik ulang sebagai `/expand N`, dan sekarang hasil penuhnya dibuka
+        dengan Ctrl+klik pada ringkasannya sendiri."""
         label = rec["label"] or ""
         if len(label) > 64:
             label = label[:61] + "…"
         failed = rec["failed"]
         icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
         phase = _PHASE.get(rec["name"], "langkah")
-        head = _oneline(Text.from_markup(
-            f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
-            f"   [dim #94e2d5]#{n}[/]"
-        ))
-        out = [head]
+        out = [_oneline(Text.from_markup(
+            f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"))]
         lines = rec.get("_lines") or []
-        nlines = rec.get("_nlines", 0)
         if lines:
             unit = "hasil" if rec["name"] == "web_search" else "baris"
-            tag = "[#f38ba8]gagal[/] · " if failed else ""
-            out.append(_oneline(Text.from_markup(
-                f"     [dim]{tag}{nlines} {unit} · /expand {n}[/]")))
+            ringkas = Text("     ", style="dim")
+            if failed:
+                ringkas.append("gagal · ", style="#f38ba8")
+            ringkas.append(f"{rec.get('_nlines', 0)} {unit}")
+            url = _tautan_hasil(rec["n"], f"{phase} · {label}",
+                                "\n".join(lines), gagal=failed)
+            if url:
+                # Digarisbawahi supaya terlihat BISA diklik — di terminal, teks
+                # bertaut yang tak ditandai apa-apa tak pernah dicoba orang.
+                ringkas.stylize(Style(link=url, underline=True), 5,
+                                ringkas.cell_len)
+                ringkas.append("  Ctrl+klik", style="dim italic")
+            out.append(_oneline(ringkas))
         return out
 
     def __rich__(self):
-        """Region live = gelembung chat + FOOTER (status + ketikan + antrean).
+        """Region live, dari atas ke bawah: kalimat yang sedang ditulis AI ·
+        spinner + tips · KOTAK CHAT · BAR STATUS.
 
-        Urutannya tetap: gelembung chat SELALU menempel persis di atas footer,
-        jadi mata pengguna punya satu tempat tetap untuk melihat apa yang
-        sedang dikatakan AI — tidak berpindah-pindah mengikuti panjang log.
+        Dua yang terakhir urutannya HARAM ditukar atau dilewati: kotak chat
+        menempel persis di atas bar status, sama seperti saat idle. Itulah yang
+        membuat tempat mengetik terasa satu benda yang tak pernah pindah —
+        segala yang hidup (spinner, tips, kalimat AI) tumbuh ke ATAS, bukan
+        menyelip di antara keduanya.
 
         Semua baris _oneline anti-wrap -> tinggi kecil & stabil, selalu muat di
         layar, tak pernah menimpa konten yang sudah tercetak. Saat done, region
@@ -997,17 +1315,16 @@ class TurnView:
         if self.done:
             return Text("")
         rows = []
-        aliran = self._baris_aliran()
-        if aliran is not None:
-            rows.append(aliran)
-        # Kotak chat DI ATAS status bar — susunan yang sama persis seperti saat
-        # idle, jadi tempat mengetik tak pernah berpindah.
-        rows.extend(self._kotak_ketikan())
         footer = self._footer()
         if isinstance(footer, Group):
             rows.extend(footer.renderables)
         else:
             rows.append(footer)
+        # Satu baris kosong di atas & di bawah kotak chat — lihat _KOSONG.
+        rows.append(_KOSONG)
+        rows.extend(self._kotak_ketikan())
+        rows.append(_KOSONG)
+        rows.append(_bar_status(self.agent, self.total()))
         return Group(*rows)
 
     def _footer(self):
@@ -1035,29 +1352,27 @@ class TurnView:
                 lbl = lbl[:37] + "…"
             lbl = f" [dim]{_esc(lbl)}[/]" if lbl else ""
             extra = f"   [dim]·[/]   [#f5c2e7]🔧 {self.tool}[/]{lbl}"
-        eff = getattr(self.agent, "effort", None)
-        effseg = f"   [dim]·[/]   [#f5c2e7]◇ effort {eff}[/]" if eff else ""
+        # Segmen "◇ effort" DIHAPUS: sejak semua model lewat browser,
+        # agent.effort selalu None (mesin effort ala API ikut terhapus bersama
+        # model ber-API-key), jadi ia tak pernah tampil — cuma menyisakan cabang
+        # mati yang menyesatkan pembaca kode.
         status = _oneline(Text.from_markup(
             f"  [bold #cba6f7]{frame}[/] [#cba6f7]{self.phase}[/]   [dim]·[/]   "
             f"[#89b4fa]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f9e2af]⚡ {tok}[/] "
-            f"[dim]token[/]{effseg}{extra}"
+            f"[dim]token[/]{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
         rows = [status]
         # Ketikannya sendiri tampil di KOTAK CHAT (lihat _kotak_ketikan), bukan
         # di sini — supaya bentuk & tempatnya sama persis dengan prompt idle.
-        # Yang tersisa di footer cuma penegasan bahwa Enter itu mengantre.
-        if self.typing:
-            rows.append(_oneline(Text(
-                "  Enter = antre (tidak membatalkan giliran ini)",
-                style="dim italic")))
-        if self.queue_n:
-            rows.append(_oneline(Text(
-                f"  ⏳ {self.queue_n} prompt di antrean — dikerjakan setelah "
-                "giliran ini selesai", style="dim #f9e2af")))
+        # Tak ada baris tambahan soal antrean: kotak chat satu-satunya UI chat.
+
         # Tips bergantian (tiap 10 dtk) — baru muncul setelah beberapa detik agar
-        # giliran singkat tak sempat kedip-kedip tips.
+        # giliran singkat tak sempat kedip-kedip tips. Diberi baris kosong di
+        # atasnya supaya ia terbaca sebagai catatan tersendiri, bukan sambungan
+        # baris status di atasnya.
         if el > 4:
             tip = _TIPS[int(el / 10) % len(_TIPS)]
+            rows.append(_KOSONG)
             rows.append(_oneline(Text(f"  ✦ tips: {tip}", style="dim italic")))
         return rows[0] if len(rows) == 1 else Group(*rows)
 
@@ -1196,7 +1511,6 @@ def main(resume: bool = False) -> None:
     console.print()
 
     live_holder: dict = {"live": None}
-    status_obj = Status(agent)
     tg_service: dict = {"svc": None}   # layanan bot Telegram di dalam sesi ini
     # Total token PERSISTEN lintas semua sesi ("dimanapun").
     # "sesi" (agent.tokens_session) kini persisten per-sesi (ikut saat --resume),
@@ -1207,12 +1521,18 @@ def main(resume: bool = False) -> None:
     def _save_total() -> None:
         prefs.set_total_tokens(grand["base"] + agent.tokens_session.total)
 
-    # --- Jejak langkah + hasil yang bisa di-expand ---------------------------
-    # Tiap pemanggilan tool = satu "langkah" bernomor. Hasil PENUH tiap langkah
-    # disimpan di `steps` agar bisa ditampilkan ulang lengkap lewat `/expand N`
-    # (terminal bergulir tak bisa buka-tutup output lama di tempat, jadi expand =
-    # cetak ulang hasil penuh atas permintaan). `step_ctr` bikin nomor unik &
-    # stabil sepanjang sesi; `cur_step` menjembatani on_tool -> on_tool_result.
+    def _total_global() -> int:
+        """Angka "🔋 total" di bar status — sama persis saat idle & saat sibuk."""
+        return grand["base"] + agent.tokens_session.total
+
+    status_obj = Status(agent, total=_total_global)
+
+    # --- Jejak langkah -------------------------------------------------------
+    # Tiap pemanggilan tool = satu "langkah" bernomor. Nomornya kini tak pernah
+    # tampil di layar — ia cuma penamaan berkas hasil-penuh (langkah-N.html)
+    # yang dibuka lewat Ctrl+klik. `steps` menyimpan ringkasannya untuk
+    # ringkasan giliran & pemicu indeks ulang; `cur_step` menjembatani
+    # on_tool -> on_tool_result.
     steps: dict[int, dict] = {}
     step_ctr = {"n": 0}
     cur_step: dict = {}
@@ -1335,22 +1655,24 @@ def main(resume: bool = False) -> None:
             _print_delete(p, content)
 
     def finish_step(name: str, result: str) -> None:
-        """Selesaikan langkah: catat hasil penuh (untuk /expand) + cetak baris jejak.
+        """Selesaikan langkah: cetak baris jejak + siapkan hasil penuhnya.
 
-        Baris jejak = ceklis ringkas (ikon, fase, target, durasi, #nomor). Hasil
-        yang layak di-expand diberi petunjuk `/expand N`; hasil gagal ditandai.
-        """
+        Baris jejak = ceklis ringkas (ikon, fase, target, durasi). Hasil yang
+        substansial diringkas jadi "N baris" yang BISA DI-CTRL+KLIK untuk
+        membuka isi penuhnya; hasil gagal ditandai."""
         n = cur_step.get("n", step_ctr["n"])
         args = cur_step.get("args", {})
         dur = time.time() - cur_step.get("start", time.time())
         text = (result or "").strip()
         failed = text.startswith("[GAGAL") or text.startswith("[error]")
 
-        # Simpan hasil PENUH agar bisa dibuka lagi via /expand.
+        # Catatan langkah — bukan lagi untuk menampilkan ulang hasilnya (itu
+        # kini urusan berkas langkah-N.html), melainkan untuk ringkasan giliran
+        # dan pemicu indeks-ulang peta proyek. Karena itu isinya cuma ringkasan;
+        # teks hasilnya tak ikut disimpan.
         steps[n] = {"name": name, "label": _step_label(name, args),
-                    "result": result or "", "failed": failed, "dur": dur}
-        # Batasi memori: simpan 200 langkah terakhir saja.
-        if len(steps) > 200:
+                    "failed": failed, "dur": dur}
+        if len(steps) > 200:            # batasi memori sesi panjang
             for old_n in sorted(steps)[:-200]:
                 steps.pop(old_n, None)
 
@@ -1360,18 +1682,32 @@ def main(resume: bool = False) -> None:
         icon = "[#f38ba8]✗[/]" if failed else "[#a6e3a1]✓[/]"
         phase = _PHASE.get(name, "selesai")
         dur_s = f"{dur:.1f}s" if dur >= 0.05 else ""
-        head = (f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
-                f"   [dim]{dur_s}[/]   [dim #94e2d5]#{n}[/]")
-        console.print(head)
+        console.print(f"  {icon} [#cdd6f4]{phase}[/]  [white]{_esc(label)}[/]"
+                      f"   [dim]{dur_s}[/]")
 
-        # Baris kedua: ringkasan hasil ringkas (buka & klik lewat penampil).
+        # Baris kedua: ringkasan hasil, sekaligus tautan ke hasil penuhnya.
         body = re.sub(r"^exit_code=\S+\n?", "", text)
-        nlines = len([ln for ln in body.splitlines() if ln.strip()])
-        if failed:
-            console.print("     [#f38ba8]gagal[/]")
-        elif name in _EXPANDABLE and nlines > 0:
+        bersih = _bersih_kendali(body)
+        nlines = len([ln for ln in bersih.splitlines() if ln.strip()])
+        if failed or (name in _EXPANDABLE and nlines > 0):
+            # Langkah GAGAL pun diberi tautan — justru di situlah isi hasilnya
+            # paling dibutuhkan (pesan galat, jejak tumpukan, keluaran perintah
+            # yang error). Menyembunyikannya di balik satu kata "gagal" memaksa
+            # pengguna menyuruh AI mengulang cuma untuk melihat sebabnya.
             unit = "hasil" if name == "web_search" else "baris"
-            console.print(f"     [dim]{nlines} {unit}[/]")
+            ringkas = Text("     ", style="dim")
+            if failed:
+                ringkas.append("gagal", style="#f38ba8")
+                if nlines:
+                    ringkas.append(f" · {nlines} {unit}")
+            else:
+                ringkas.append(f"{nlines} {unit}")
+            url = _tautan_hasil(n, f"{phase} · {label}", bersih, gagal=failed)
+            if url:
+                ringkas.stylize(Style(link=url, underline=True), 5,
+                                ringkas.cell_len)
+                ringkas.append("  Ctrl+klik", style="dim italic")
+            console.print(ringkas)
         elif name in _TOOL_DIFF:
             # Tampilkan status cek sintaks bila ada di hasil — edit_file &
             # append_file juga mengembalikannya, bukan cuma write_file.
@@ -1382,38 +1718,6 @@ def main(resume: bool = False) -> None:
                 console.print(f"     [{col}]{_esc(m.group(1).strip())}[/]")
         # Langkah tool selesai -> kembali ke fase "berpikir" untuk generasi berikut.
         status_obj.note_thinking()
-
-    def show_expand(n: int | None) -> None:
-        """Tampilkan ulang hasil PENUH sebuah langkah (perintah `/expand N`)."""
-        if not steps:
-            console.print("  [dim]belum ada langkah untuk di-expand.[/dim]\n")
-            return
-        if n is None:
-            n = max(steps)
-        rec = steps.get(n)
-        if not rec:
-            console.print(f"  [yellow]Langkah #{n} tak ada. Yang tersedia: "
-                          f"{', '.join('#' + str(k) for k in sorted(steps))}[/yellow]\n")
-            return
-        text = (rec["result"] or "").strip() or "(tidak ada output)"
-        lines = text.splitlines()
-        cap = 400
-        if len(lines) > cap:
-            text = "\n".join(lines[:cap]) + f"\n… [dipotong, {len(lines) - cap} baris lagi]"
-        color = "#f38ba8" if rec["failed"] else "#a6e3a1"
-        icon = "✗" if rec["failed"] else "✓"
-        title = f"[{color}]{icon} #{n} · {rec['name']}[/] [dim]· {_esc(rec['label'])[:56]}[/]"
-        panel = Panel(Text(text), title=title, title_align="left",
-                      border_style=color, box=box.ROUNDED, padding=(0, 1))
-        console.print(Padding(panel, (0, 3, 1, 3)))
-
-    def open_step_viewer() -> None:
-        """Cetak ulang hasil PENUH semua langkah giliran terakhir (inline, teks)."""
-        if not steps:
-            console.print("  [dim]belum ada langkah untuk dibuka.[/dim]\n")
-            return
-        for k in sorted(steps):
-            show_expand(k)
 
     # Berapa lama giliran web yang dibatalkan boleh "bernapas" sebelum sesi
     # browsernya dianggap benar-benar macet. Sengaja jauh lebih longgar dari
@@ -1618,8 +1922,8 @@ def main(resume: bool = False) -> None:
         """Jalankan satu giliran INLINE (tanpa layar-penuh, tetap di alur terminal
         biasa). Semua konten (langkah, diff, jawaban) MENGALIR statis ke
         scrollback; yang hidup hanya footer status kecil di baris paling bawah.
-        Hasil penuh langkah dibuka lewat /expand N. Ctrl+C membatalkan. Bila
-        gagal, jatuh ke process_classic.
+        Hasil penuh langkah dibuka lewat Ctrl+klik pada ringkasannya. Ctrl+C
+        membatalkan. Bila gagal, jatuh ke process_classic.
 
         Model CONNECTOR web (Kimi/Qwen web) memakai jalur yang SAMA: ia kini
         bisa memanggil tool (edit file, jalankan perintah, dll) lewat protokol
@@ -1646,9 +1950,7 @@ def main(resume: bool = False) -> None:
             if renderables:
                 console.print(Group(*renderables))
 
-        view = TurnView(agent, commit=_commit)
-        # Giliran ini mungkin datang DARI antrean — sisa antrean tetap tampil.
-        view.queue_n = len(prompt_queue)
+        view = TurnView(agent, commit=_commit, total=_total_global)
         ctr = {"n": 0}
 
         def _on_tool(name: str, args: dict) -> None:
@@ -1689,7 +1991,7 @@ def main(resume: bool = False) -> None:
             if rec is not None:
                 view.end_step(rec, result, failed)
             steps[n] = {"name": name, "label": _step_label(name, {}),
-                        "result": result or "", "failed": failed, "dur": 0.0}
+                        "failed": failed, "dur": 0.0}
             if rec is not None:
                 steps[n]["label"] = rec["label"]
             step_ctr["n"] = n
@@ -1726,20 +2028,24 @@ def main(resume: bool = False) -> None:
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status,
-                    # Dipakai HANYA untuk satu baris hidup di footer, dan
-                    # disaring dulu sampai bersih dari blok tool — lihat
-                    # TurnView.note_stream. Tanpa ini, giliran panjang tampak
-                    # mati total padahal AI sudah menulis kalimatnya.
-                    on_token=view.note_stream,
+                    # on_token SENGAJA tak diteruskan: pratinjau kalimat yang
+                    # sedang ditulis sudah dihapus dari layar, jadi tak ada lagi
+                    # yang memakainya. Efek sampingnya justru menguntungkan —
+                    # connector hanya boleh memulihkan diri dari tab yang mati
+                    # selama BELUM ada teks yang mengalir keluar (kalau sudah,
+                    # mengulang berarti mencetak jawaban dua kali). Tanpa
+                    # aliran, pemulihan itu selalu aman.
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
 
         # Mouse capture SENGAJA tak dipakai lagi: dulu ia ada untuk klik-buka
         # langkah di region live, tapi ia MENELAN event scroll wheel (terminal
-        # tak bisa digulung) — dan kini langkah dicetak statis ke scrollback,
-        # jadi tak ada lagi yang perlu diklik. Scroll & seleksi teks kembali
-        # 100% native. Hasil penuh langkah tetap bisa dibuka lewat /expand N.
+        # tak bisa digulung). Ia TETAP tak dipakai walau hasil langkah kini bisa
+        # diklik: yang diklik adalah TAUTAN (OSC 8), dan tautan ditangani
+        # terminal sendiri tanpa mode mouse apa pun — jadi scroll & seleksi teks
+        # tetap 100% native, sekaligus baris yang sudah tergulir jauh ke atas
+        # pun masih bisa dibuka (aplikasi tak pernah tahu isi scrollback).
         worker_thread = threading.Thread(target=worker, daemon=True)
         interrupted = False
 
@@ -1755,11 +2061,13 @@ def main(resume: bool = False) -> None:
                 view.typing = ""
                 if teks:
                     prompt_queue.append(teks)
-                    view.queue_n = len(prompt_queue)
-                    # Jejak permanen di riwayat supaya yang antre terlihat jelas.
+                    # Gema pesannya SEKARANG, sama persis seperti pesan yang
+                    # dikirim dari kotak idle — pengguna cuma perlu tahu
+                    # pesannya terkirim, bukan bahwa ada mesin antrean di
+                    # baliknya. (Gema kedua saat prompt ini benar-benar
+                    # dikerjakan sengaja tak ada — lihat gelung utama.)
                     _commit([_oneline(Text.from_markup(
-                        f"  [#f9e2af]⏳ diantrekan:[/] [#cdd6f4]{_esc(teks)}[/]"
-                        "  [dim](dikerjakan setelah giliran ini)[/]"))])
+                        f"  [bold #cba6f7]❯[/] [#cba6f7]{_esc(teks)}[/]"))])
                 return True
             if ch in ("\x08", "\x7f"):             # Backspace / Ctrl+Backspace
                 # KEDUANYA hapus 1 HURUF. Arah byte-nya tak bisa dipercaya:
@@ -1865,8 +2173,7 @@ def main(resume: bool = False) -> None:
                 seg += [_fmt_elapsed(time.time() - view.start),
                         f"⚡ {_fmt(agent.tokens_last.total)} token"]
                 console.print(Padding(Text.from_markup(
-                    "[dim]" + " · ".join(seg) + "[/]   [dim]·[/]   "
-                    "[#94e2d5]/expand N[/][dim] lihat penuh[/]"), (0, 3, 1, 3)))
+                    "[dim]" + " · ".join(seg) + "[/]"), (0, 3, 1, 3)))
         _reindex_if_edited()
 
     def _reindex_if_edited() -> None:
@@ -1881,10 +2188,10 @@ def main(resume: bool = False) -> None:
 
     def process_classic(text: str) -> None:
         nonlocal status_obj
-        status_obj = Status(agent)
+        status_obj = Status(agent, total=_total_global)
         header = {"shown": False}
         # Nomor langkah & hasil di-reset tiap giliran -> nomor tetap kecil (1..k)
-        # dan `/expand N` merujuk langkah giliran TERAKHIR yang barusan terlihat.
+        # dan berkas hasil-penuhnya pun ikut ditimpa per giliran.
         steps.clear()
         step_ctr["n"] = 0
         cur_step.clear()
@@ -1990,9 +2297,7 @@ def main(resume: bool = False) -> None:
         parts.append(el)
         parts.append(f"⚡ {tok} token")
         body = " [dim]·[/] ".join(parts)
-        hint = "   [dim]·[/]   [#94e2d5]/expand N[/][dim] lihat hasil penuh[/]"
-        console.print(Padding(
-            Text.from_markup(f"[dim]{body}[/dim]{hint}"), (0, 3, 1, 3)))
+        console.print(Padding(Text.from_markup(f"[dim]{body}[/dim]"), (0, 3, 1, 3)))
 
     # --- aksi menu (inquirer) ---
     def pick_model() -> str | None:
@@ -2317,7 +2622,7 @@ def main(resume: bool = False) -> None:
             f"[{c}]/reset[/]    kosongkan riwayat      [{c}]/clear[/]    bersihkan layar\n"
             f"[{c}]/review[/]   cari bug seluruh proyek [{c}]/scan[/]     segarkan peta proyek\n"
             f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
-            f"[{c}]/live[/]     tampilan mengalir      [{c}]/expand[/]   buka hasil penuh\n"
+            f"[{c}]/live[/]     tampilan mengalir      [{c}]/scripts[/]  script memory\n"
             f"[{c}]/update[/]   cek pembaruan          [#f38ba8]/exit[/]     keluar",
             title="[bold #cba6f7]❔ Bantuan[/]", title_align="left",
             border_style="#cba6f7", box=box.ROUNDED, padding=(1, 2)))
@@ -2839,15 +3144,36 @@ def main(resume: bool = False) -> None:
             pilih = state.current_completion or state.completions[0]
             buf.apply_completion(pilih)
         buf.validate_and_handle()
+
+    # Enter biasa (menu sugesti sedang tertutup) = kirim. Filternya ditulis
+    # eksplisit, bukan diandalkan pada urutan pendaftaran: prompt_toolkit
+    # memilih binding yang TERAKHIR cocok, jadi tanpa `~has_completions` binding
+    # ini akan menelan Enter milik menu sugesti di atas.
+    @kb.add("enter", filter=~has_completions)
+    def _kirim(event):
+        event.current_buffer.validate_and_handle()
+
+    # Ctrl+C / Ctrl+D: disediakan sendiri karena Application biasa (tak seperti
+    # PromptSession) tak membawa keduanya. Keys.SIGINT ikut dipasang untuk
+    # terminal yang mengirim sinyal alih-alih byte \x03.
+    @kb.add("c-c")
+    @kb.add(Keys.SIGINT)
+    def _batal_ketik(event):
+        event.app.exit(exception=KeyboardInterrupt, style="class:exiting")
+
+    @kb.add("c-d")
+    def _eof_ketik(event):
+        buf = event.current_buffer
+        if buf.text:
+            buf.delete()          # ada teks -> Ctrl+D = hapus 1 huruf di depan
+        else:
+            event.app.exit(exception=EOFError, style="class:exiting")
+
     # Gaya status bar: latar gelap "catppuccin" + aksen warna per segmen.
     _pt_style = PTStyle.from_dict({
         "bottom-toolbar": "bg:#181825 #cdd6f4 noreverse",
-        # Tepi kotak chat. `bg:default` WAJIB pada tepi bawah: ia tinggal di
-        # dalam bottom_toolbar, dan tanpa ini latar bar ikut mewarnai seluruh
-        # baris sehingga garisnya tampak sebagai pita pekat, bukan tepi kotak.
-        "garis": "#585b70",
-        "tutup": "bg:default #585b70 noreverse",
-        "rprompt": "bg:default",
+        "garis": "#585b70",      # tepi kotak chat
+        "tanda": "bold #cba6f7",  # "❯" di dalam kotak
         "sep": "#45475a",
         "brand": "#cba6f7 bold",
         "model": "#89b4fa bold",
@@ -2864,32 +3190,8 @@ def main(resume: bool = False) -> None:
         "completion-menu.meta.completion": "bg:#181825 #7f849c",
         "completion-menu.meta.completion.current": "bg:#45475a #cdd6f4",
     })
-    session_pt: PromptSession = PromptSession(
-        key_bindings=kb,
-        style=_pt_style,
-        completer=SlashCompleter(),
-        complete_while_typing=True,  # sugesti muncul otomatis saat mengetik
-    )
-
-    # Kotak chat idle. Tepi ATAS + "│ ❯ " jadi prompt; tepi KANAN dipasang lewat
-    # rprompt (prompt_toolkit menaruhnya di ujung kanan baris input); tepi BAWAH
-    # jadi baris pertama bottom_toolbar. Itulah satu-satunya cara menutup kotak
-    # di sekeliling baris input yang tingginya bisa berubah saat teks membungkus.
-    def _pt_kotak_atas() -> str:
-        return "─" * (_lebar_kotak() - 2)
-
-    def prompt_kotak():
-        return HTML(
-            f'<garis>╭{_pt_kotak_atas()}╮</garis>\n'
-            '<garis>│</garis> <style fg="#cba6f7"><b>❯</b></style> ')
-
-    def prompt_lanjutan(width, line_number, is_soft_wrap):
-        # Baris kedua dst (teks membungkus / multi-baris): tepi kirinya harus
-        # ikut turun, kalau tidak kotaknya bolong di tengah.
-        return HTML('<garis>│</garis>   ')
-
     # Status bar token PERMANEN di paling bawah (selalu terlihat & rapi).
-    def bottom_toolbar():
+    def status_bar():
         s = agent.tokens_session
         total = grand["base"] + s.total
         spec = agent.model_spec
@@ -2898,7 +3200,6 @@ def main(resume: bool = False) -> None:
         eff = ""
         sep = " <sep>│</sep> "
         return HTML(
-            f'<tutup>╰{_pt_kotak_atas()}╯</tutup>\n'
             " <brand>⬢ bagas-ai</brand>"
             + sep
             + f"{kind} <model>{spec.label}</model>{eff}"
@@ -2910,33 +3211,36 @@ def main(resume: bool = False) -> None:
             + "<cmd>/menu</cmd> <muted>·</muted> <exit>/exit</exit> "
         )
 
+    kotak_chat = KotakChat(status=status_bar, key_bindings=kb, style=_pt_style,
+                           completer=SlashCompleter())
+
     while True:
         # ANTREAN DULU: prompt yang diketik+Enter selama giliran sebelumnya
-        # dikerjakan berurutan — digemakan dulu agar riwayat terlihat persis
-        # seperti diketik di prompt biasa. Perintah slash pun ikut jalur ini.
+        # dikerjakan berurutan. TANPA gema lagi di sini — pesannya sudah
+        # tergema saat diketik (lihat _ketik), jadi menggemakannya sekali lagi
+        # membuat satu pesan tampak dikirim dua kali.
         if prompt_queue:
             raw = prompt_queue.pop(0)
-            console.print(f"[bold #cba6f7]❯[/] [#cba6f7]{_esc(raw)}[/]  "
-                          f"[dim](dari antrean)[/]")
         else:
             try:
                 # patch_stdout: aktivitas bot Telegram (dari thread latar)
-                # tercetak RAPI di atas prompt, tak merusak baris input.
+                # tercetak RAPI di atas kotak, tak merusak baris ketikan.
                 # `default` = sisa ketikan yang belum di-Enter saat giliran
                 # tadi selesai — tak ada ketikan yang hilang, tinggal lanjut.
                 prefill = typing_state["buf"]
                 typing_state["buf"] = ""
                 with patch_stdout(raw=True):
-                    raw = session_pt.prompt(
-                        prompt_kotak,
-                        rprompt=HTML("<garis>│</garis>"),
-                        prompt_continuation=prompt_lanjutan,
-                        bottom_toolbar=bottom_toolbar,
-                        default=prefill)
+                    raw = kotak_chat.tanya(prefill)
             except KeyboardInterrupt:
                 continue
             except EOFError:
                 break
+            # Kotaknya menghilang begitu Enter ditekan (erase_when_done), jadi
+            # yang mengabadikan pesan ke riwayat adalah gema ini — bentuknya
+            # sama persis dengan gema pesan yang diantrekan.
+            if raw.strip():
+                console.print(f"  [bold #cba6f7]❯[/] "
+                              f"[#cba6f7]{_esc(raw.strip())}[/]")
         text = raw.strip()
         if not text:
             continue
@@ -2989,23 +3293,10 @@ def main(resume: bool = False) -> None:
                 if tui_mode["on"]:
                     console.print("  [#a6e3a1]✓ tampilan mengalir AKTIF[/] "
                                   "[dim]— langkah/diff/jawaban mengalir ke "
-                                  "scrollback + footer status hidup di bawah; "
-                                  "buka hasil penuh lewat /expand N.[/]\n")
+                                  "scrollback + footer status hidup di bawah.[/]\n")
                 else:
                     console.print("  [#f9e2af]○ tampilan interaktif MATI[/] "
-                                  "[dim]— pakai tampilan mengalir biasa; buka hasil "
-                                  "lewat /expand N.[/]\n")
-            elif cmd == "expand" or cmd.startswith("expand "):
-                parts = text.split(maxsplit=1)
-                arg = parts[1].strip().lstrip("#") if len(parts) == 2 else ""
-                if not arg:
-                    # Tanpa nomor -> cetak ulang semua hasil giliran terakhir.
-                    open_step_viewer()
-                elif arg.isdigit():
-                    show_expand(int(arg))
-                else:
-                    console.print("  [yellow]Pakai: /expand (semua) "
-                                  "atau /expand <nomor>[/yellow]\n")
+                                  "[dim]— pakai tampilan mengalir biasa.[/]\n")
             else:
                 if do_action(cmd):
                     break
