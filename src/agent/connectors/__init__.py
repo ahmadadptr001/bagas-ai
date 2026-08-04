@@ -1,5 +1,6 @@
 """Connector web-AI: hubungkan bagas-ai ke antarmuka chat berbasis browser
-(kimi.com, chat.qwen.ai, dst) lewat otomasi browser (Playwright).
+(kimi.com, chat.qwen.ai, gemini.google.com, dst) lewat otomasi browser
+(Playwright).
 
 Dipakai sebagai "model": lihat models.py (pseudo-model dengan field `connector`)
 dan core.Agent._run_connector. Instance connector di-CACHE per-service supaya

@@ -51,7 +51,7 @@ MODELS: dict[str, ModelSpec] = {
         id="web/gemini",
         label="Gemini (web)",
         connector="gemini",
-        note="Via browser gemini.google.com/app — multibahasa & cepat",
+        note="Via browser gemini.google.com — varian Flash & Pro, multimodal",
     ),
     "qwen-web": ModelSpec(
         id="web/qwen",

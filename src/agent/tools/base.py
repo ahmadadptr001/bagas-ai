@@ -2,6 +2,7 @@
 dari type hints + docstring, plus registry global."""
 from __future__ import annotations
 
+import contextvars
 import inspect
 import re
 from dataclasses import dataclass, field
@@ -202,6 +203,21 @@ def _tolak_tulis_file(name: str, arguments: dict[str, Any]) -> str | None:
     return _PESAN_TOLAK.format(tool=name)
 
 
+# Nama tool yang SEDANG dijalankan. Dipakai lapisan yang jauh di bawah dan tak
+# menerima nama itu lewat argumen — khususnya permintaan izin akses folder luar
+# (permissions.py), yang perlu menyebut "MENULIS" vs "membaca" agar pengguna
+# tahu apa yang sebenarnya hendak terjadi. ContextVar, bukan variabel global,
+# supaya giliran CLI dan giliran Telegram yang berjalan bersamaan tak saling
+# menimpa nama tool satu sama lain.
+_tool_aktif: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "bagasai_tool_aktif", default="")
+
+
+def tool_aktif() -> str:
+    """Nama tool yang sedang dieksekusi ("" bila di luar eksekusi tool)."""
+    return _tool_aktif.get()
+
+
 def execute(name: str, arguments: dict[str, Any]) -> str:
     """Jalankan tool berdasarkan nama; selalu kembalikan string untuk LLM."""
     tool_obj = REGISTRY.get(name)
@@ -210,8 +226,11 @@ def execute(name: str, arguments: dict[str, Any]) -> str:
     tolak = _tolak_tulis_file(name, arguments)
     if tolak:
         return tolak
+    token = _tool_aktif.set(name)
     try:
         result = tool_obj.run(**arguments)
         return result if isinstance(result, str) else str(result)
     except Exception as exc:  # noqa: BLE001 - laporkan error apa pun ke LLM
         return f"[error] gagal menjalankan '{name}': {exc}"
+    finally:
+        _tool_aktif.reset(token)

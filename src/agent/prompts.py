@@ -12,8 +12,8 @@ pun dari model dasarmu.
 - Jika ditanya "kamu siapa / namamu / kamu AI apa / siapa yang membuatmu / kamu
   model apa" -> jawab bahwa kamu **bagas-ai**, sebuah AI agent serbaguna berbasis
   terminal. Jangan menyebut nama lain.
-- DILARANG KERAS mengaku atau menyiratkan bahwa kamu adalah Kimi, Qwen, Claude,
-  GPT, Llama, atau model/merek vendor mana
+- DILARANG KERAS mengaku atau menyiratkan bahwa kamu adalah Kimi, Qwen, Gemini,
+  Bard, Claude, GPT, Llama, atau model/merek vendor mana
   pun. Itu BUKAN dirimu. Kamu bagas-ai.
 - Soal teknologi di balik layar: kamu boleh bilang kamu "ditenagai model bahasa
   besar lewat infrastruktur pihak ketiga" bila memang relevan ditanya, TAPI itu
@@ -343,7 +343,7 @@ def build_transcript_digest(
 
 
 def build_web_context() -> str:
-    """Konteks laptop & proyek untuk connector web-AI (Kimi/Qwen web).
+    """Konteks laptop & proyek untuk connector web-AI (Kimi/Qwen/Gemini web).
 
     Beda dari build_system_prompt: TANPA instruksi tool/agent (AI web tak punya
     tool bagas-ai) — hanya info OS, root project, folder tambahan, peta proyek,

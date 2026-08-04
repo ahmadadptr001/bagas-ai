@@ -173,8 +173,45 @@ folder TEMP.
 ## 🔒 Keamanan
 
 - Tool file & shell **dibatasi ke folder kerja** (mitigasi path traversal).
+- Berkas **di luar** folder kerja butuh **izinmu** — lihat bagian di bawah.
 - Eksekusi kode punya **timeout** dan bisa **dimatikan** (`ALLOW_CODE_EXEC=false`).
 - File `.env` (berisi key) sudah masuk `.gitignore` — **jangan pernah di-commit**.
+
+### 🛡️ Izin akses folder luar
+
+bagas-ai hanya menyentuh **folder proyek** (folder terminal saat dipanggil) dan
+folder konteks yang kamu tambahkan lewat `add-dir`. Begitu ia butuh berkas di
+luar itu, kamu ditanya lebih dulu:
+
+```
+╭──────────────────────────────────────────────────
+│
+│  Izinkan bagas-ai MENULIS di luar folder proyek?
+│  C:\Users\kamu\Downloads\aset\logo.png
+│
+│  ❯ 1. Izinkan sekali ini saja
+│    2. Izinkan folder ini selama sesi
+│    3. Izinkan permanen (jadikan folder konteks)
+│    4. Tolak
+╰──────────────────────────────────────────────────
+```
+
+Pertanyaannya menyebut **tindakannya** (membaca / MENULIS / MENGHAPUS) dan
+jawabannya diingat **per folder**, jadi kamu tak ditanya berulang untuk folder
+yang sama. Penolakan juga diingat — agent tak bisa menghujanimu dengan
+pertanyaan yang sama. Kalau tak ada yang bisa ditanya (mode `api`), jawabannya
+otomatis **tolak**, bukan izinkan.
+
+Mau tanpa gangguan?
+
+```bash
+bagas-ai --skip-permissions      # semua folder boleh, tanpa konfirmasi
+```
+
+> Flag ini membuang lapisan pengaman: satu langkah keliru bisa menulis atau
+> menghapus di mana saja di laptopmu. Selama aktif, statusnya tampil merah di
+> banner sesi. Untuk permanen (termasuk mode `telegram`/`api`), set
+> `BAGASAI_SKIP_PERMISSIONS=true` di `~/.bagasai/.env`.
 
 ---
 

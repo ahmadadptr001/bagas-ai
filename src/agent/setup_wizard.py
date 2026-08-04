@@ -84,13 +84,13 @@ def validate_telegram(token: str) -> tuple[bool, str]:
 
 
 def _prompt_secret(console: Console, message: str) -> str:
-    """Minta input rahasia (tersembunyi). Pakai InquirerPy bila ada.
+    """Minta input rahasia (tersembunyi) lewat prompt bagas-ai (ui/menu.py).
 
     Melempar EOFError bila stdin habis (mis. dijalankan non-interaktif) supaya
     pemanggil bisa berhenti dan tidak loop tak berujung.
     """
     try:
-        from InquirerPy import inquirer  # type: ignore
+        from .ui.menu import inquirer
 
         val = inquirer.secret(message=message, qmark="🔑", amark="🔑").execute()
         return (val or "").strip()
@@ -126,7 +126,7 @@ def run(console: Console | None = None) -> bool:
     # --- Telegram (opsional) ---
     want_tg = False
     try:
-        from InquirerPy import inquirer  # type: ignore
+        from .ui.menu import inquirer
 
         want_tg = inquirer.confirm(
             message="Hubungkan bot Telegram sekarang? (opsional)", default=False
@@ -154,7 +154,7 @@ def run(console: Console | None = None) -> bool:
                 break
             console.print(f"  [red]✗ Token gagal:[/red] {info}\n")
             try:
-                from InquirerPy import inquirer  # type: ignore
+                from .ui.menu import inquirer
 
                 if not inquirer.confirm(
                     message="Coba token lain?", default=True

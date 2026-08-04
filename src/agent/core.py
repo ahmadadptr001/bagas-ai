@@ -52,7 +52,11 @@ _IMAGE_MARK_RE = re.compile(r"^\[GAMBAR\][ \t]+(.+?)[ \t]*$", re.MULTILINE)
 _WEB_REMINDER = (
     "[Pengingat: kalau permintaan ini perlu MENGUBAH file atau menjalankan "
     "sesuatu, keluarkan blok [[TOOL]] — jangan menampilkan kode untuk kusalin "
-    "sendiri. Aku yang mengeksekusi dan mengirim balik hasilnya. "
+    "sendiri. Aku yang mengeksekusi dan mengirim balik hasilnya. SATU blok "
+    "[[TOOL]] per pesan, jangan menumpuk dua atau lebih: tunggu [[HASIL]] dulu "
+    "baru tentukan langkah berikutnya. Buka tiap pesan bertool dengan SATU "
+    "kalimat pendek yang memberi tahu apa yang sedang kamu lakukan (mis. "
+    "'Aku baca dulu main.py-nya.') — kalimat itu yang dilihat pengguna. "
     "Untuk MENGUBAH file yang sudah ada: baca dulu (read_file) lalu keluarkan "
     "edit_file berisi HANYA potongan yang berubah (old_text/new_text) — jangan "
     "write_file seluruh file, dan jangan menulis file lewat run_python/"
@@ -170,7 +174,14 @@ def _web_tool_protocol() -> str:
         "Aturan praktis:\n"
         "1. JSON harus valid (escape newline sebagai \\n, kutip sebagai \\\") dan "
         "SELALU dibungkus ```json ... ``` di dalam penanda [[TOOL]].\n"
-        "2. Boleh beberapa blok sekaligus bila langkahnya independen.\n"
+        "2. SATU blok [[TOOL]] per pesan — TIDAK PERNAH dua atau lebih "
+        "sekaligus, walau langkahnya terasa independen. Usulkan satu langkah, "
+        "berhenti, tunggu [[HASIL]]-nya, baru putuskan langkah berikutnya. "
+        "Alasannya: langkah kedua dalam satu pesan pasti kamu susun SEBELUM "
+        "melihat hasil langkah pertama, jadi ia cuma tebakan — dan kalau yang "
+        "pertama gagal atau isinya tak seperti dugaanmu, sisanya tetap "
+        "kujalankan lalu merusak. Pesan bertumpuk juga lebih panjang, dan "
+        "pesan panjang DIPOTONG situs ini.\n"
         "3. Setelah kukirim balik hasilnya (ditandai [[HASIL <nama_tool>]]), "
         "lanjutkan berdasarkan hasil itu.\n"
         "4. Kalau tugas sudah selesai, balas biasa TANPA blok [[TOOL]] — itu "
@@ -225,20 +236,43 @@ def _web_tool_protocol() -> str:
         "6. Path file relatif terhadap folder proyek yang disebut di konteks, "
         "dan pakai garis miring biasa (src/app/main.py) — JANGAN backslash, "
         "supaya tidak rusak saat dikirim.\n"
+        "6b. Berkas DI LUAR folder proyek (mis. di Downloads atau folder proyek "
+        "lain) boleh kamu minta, tapi aku akan MENANYAKAN IZIN ke pengguna "
+        "lebih dulu — jadi pakai seperlunya dan sebutkan alasannya di kalimat "
+        "pembukamu. Kalau hasilnya '[DITOLAK]', itu keputusan pengguna: JANGAN "
+        "mencoba path itu lagi dengan bentuk lain, lanjutkan dengan berkas di "
+        "dalam proyek atau tanyakan apa yang ia inginkan.\n"
         "7. JANGAN memakai tool bawaanmu sendiri (pencarian web, analysis/REPL, "
         "artifact) di percakapan ini — semuanya lewat [[TOOL]] saja. Kalau "
         "sebuah langkah gagal, cukup usulkan langkah berikutnya; tak perlu "
         "minta maaf atau menjelaskan panjang lebar.\n"
         "8. Untuk membaca file, pakai read_file (bukan perintah shell seperti "
         "Get-Content/cat) supaya hasilnya rapi & utuh.\n\n"
-        "LANGSUNG KE INTI — gaya kerja yang WAJIB:\n"
-        "- TANPA basa-basi: jangan membuka dengan 'Baik, saya akan…', jangan "
-        "mengulang permintaan dengan kata-katamu sendiri, jangan minta izin "
-        "untuk langkah yang jelas perlu — LANGSUNG kerjakan. Bila informasinya "
-        "sudah cukup, balasan PERTAMA-mu sudah memuat blok [[TOOL]] pertama, "
-        "bukan rencana panjang.\n"
-        "- Narasi antar-langkah maksimal 1-2 kalimat, hanya bila menambah "
-        "pemahaman. Tanpa rangkuman ulang di tiap langkah.\n"
+        "CARA BICARA — kamu berbicara LANGSUNG ke pengguna, bukan menulis "
+        "laporan:\n"
+        "- WAJIB: setiap pesan yang berisi blok [[TOOL]] DIBUKA dengan SATU "
+        "kalimat pendek bergaya orang pertama yang memberi tahu apa yang "
+        "sedang kamu lakukan sekarang — sebutkan berkas/folder/perintah yang "
+        "kamu sentuh. Kalimat itu kutampilkan APA ADANYA di layar pengguna "
+        "(dia tak melihat blok [[TOOL]]-nya), jadi tanpa kalimat itu layarnya "
+        "sunyi dan ia tak tahu kamu sedang apa.\n"
+        "  Contoh persis gayanya:\n"
+        "    'Oke, aku cek dulu ada file apa saja di folder ini.'\n"
+        "    'Sekarang aku baca main.py biar tahu alur programnya.'\n"
+        "    'Ketemu — error-nya di baris 42, aku perbaiki sekarang.'\n"
+        "    'Aku jalankan tesnya dulu buat memastikan tak ada yang rusak.'\n"
+        "  Pakai bahasa yang dipakai pengguna. SATU kalimat saja, langsung "
+        "diikuti blok [[TOOL]]-nya — bukan paragraf, bukan daftar rencana.\n"
+        "- Kalimat itu bukan basa-basi, jadi tetap DILARANG: sapaan/pembuka "
+        "kosong ('Baik, dengan senang hati saya akan membantu Anda'), "
+        "mengulang permintaan dengan kata-katamu sendiri, minta izin untuk "
+        "langkah yang jelas perlu, dan rencana bernomor sebelum mulai. "
+        "Sebut TINDAKANNYA, lalu kerjakan. Ini berlaku begitu PERMINTAAN "
+        "datang — bukan untuk pesan konteks ini, yang cukup dibalas `SIAP`.\n"
+        "- Sesudah menerima [[HASIL]], kalau kamu lanjut memakai tool lagi, "
+        "buka lagi dengan satu kalimat begitu — boleh menyebut temuan "
+        "singkatnya dulu ('File-nya ada 3, yang relevan cuma app.py — aku "
+        "buka itu.'). Tanpa rangkuman ulang panjang di tiap langkah.\n"
         "- Jawaban akhir: HASIL dulu di kalimat pertama, detail seperlunya — "
         "bukan esai. Jangan mengulang daftar semua yang kamu lakukan bila "
         "langkah-langkahnya sudah terlihat.\n\n"
@@ -251,8 +285,11 @@ def _web_tool_protocol() -> str:
         "menjelajah folder satu per satu untuk hal yang sudah terlihat di peta.\n"
         "- JANGAN memverifikasi ulang langkah yang hasilnya sudah kukirim dan "
         "jelas berhasil (mis. membaca ulang file yang baru saja kamu tulis).\n"
-        "- Gabungkan langkah-langkah yang saling bebas dalam SATU balasan "
-        "(beberapa blok [[TOOL]] sekaligus), jangan satu per satu bergiliran.\n"
+        "- Hemat langkah BUKAN berarti menumpuk blok: tetap SATU blok [[TOOL]] "
+        "per pesan (aturan 2). Menghematnya dengan memilih langkah yang paling "
+        "banyak menjawab sekaligus — mis. satu search_text yang tepat "
+        "menggantikan tiga list_dir, satu edit_file menggantikan baca-tulis "
+        "berulang.\n"
         "- Begitu informasinya cukup, langsung beri jawaban akhir. Jangan "
         "menambah langkah yang tak mengubah kesimpulan.\n"
         "- Ada tool take_screenshot untuk melihat layar pengguna saat debug "
@@ -319,8 +356,9 @@ def _web_tool_protocol() -> str:
         "line_numbers=true) supaya kamu MELIHAT persis isi baris N, lalu "
         "keluarkan edit_file dengan old_text dari baris itu TANPA awalan "
         "'N| '.\n"
-        "  Butuh mengubah beberapa tempat berjauhan di satu berkas? Keluarkan "
-        "BEBERAPA blok edit_file sekaligus, satu per tempat — JANGAN "
+        "  Butuh mengubah beberapa tempat berjauhan di satu berkas? Kirim "
+        "edit_file satu per tempat, SATU BLOK PER PESAN, berurutan (aturan 2) "
+        "— JANGAN menumpuknya dalam satu pesan, dan JANGAN pula "
         "menggabungkannya jadi satu write_file seluruh berkas.\n"
         "  write_file hanya bila berkas BENAR-BENAR baru, atau kamu memang "
         "sengaja menulis ulang total DAN mengirim isi lengkapnya (bukan cuma "
@@ -581,6 +619,16 @@ def _strip_web_markers(text: str) -> str:
     Tanpa ini, penanda seperti `[[/TOOL]]` bisa bocor ke layar saat blok tool
     rusak/tak berpasangan — pengguna melihat penanda alih-alih jawaban."""
     out = _WEB_TOOL_RE.sub("", text or "")
+    # Blok yang TAK PERNAH DITUTUP: situs memotong pesan yang kepanjangan
+    # ("Output stopped"), dan potongannya sering jatuh TEPAT di tengah usulan
+    # tool. Yang tersisa adalah pembuka + JSON separuh jadi; membuang
+    # penandanya saja justru menyisakan JSON telanjang lalu ia tercetak ke
+    # layar sebagai "jawaban". Semua yang berada di belakang pembuka yatim itu
+    # adalah muatan mesin yang belum selesai, jadi dipotong sekalian.
+    sisa = [m for m in (re.search(_OPEN_MARK, out, re.IGNORECASE),
+                        re.search(_ALT_OPEN, out, re.IGNORECASE)) if m]
+    if sisa:
+        out = out[:min(m.start() for m in sisa)]
     out = _WEB_MARKER_RE.sub("", out)
     # Sisa pagar kode kosong akibat blok yang dibuang.
     out = re.sub(r"^\s*```[a-zA-Z0-9_+-]*\s*$", "", out, flags=re.MULTILINE)
@@ -963,7 +1011,59 @@ class Agent:
                     "Lanjutkan dari sini — jangan mengulang yang sudah dibahas:\n"
                     + digest
                 )
-            first_msg = preamble + "\n\n==========\nPERMINTAAN SAYA:\n" + user_text
+            # KONTEKS DIKIRIM SEBAGAI PESAN TERSENDIRI, lalu permintaannya
+            # menyusul di pesan berikutnya. Dulu keduanya digabung dalam satu
+            # pesan raksasa, dan itu merugikan di tiga sisi sekaligus:
+            #
+            #   - AI membaca protokol, peta proyek, DAN tugasnya sekaligus, lalu
+            #     langsung menjawab — protokolnya kerap cuma terbaca sekilas
+            #     (gejala paling khas: balasan pertama menampilkan kode untuk
+            #     disalin manual, bukan blok [[TOOL]]);
+            #   - pesan gabungan itu yang PALING panjang di seluruh sesi,
+            #     sehingga paling rawan dipotong situs ("Output stopped") —
+            #     dan yang terpotong justru aturan mainnya;
+            #   - saat terpotong, tak ada cara tahu bagian mana yang hilang.
+            #
+            # Dipisah: pesan pertama HANYA konteks dan diminta dijawab satu
+            # kata, jadi AI menyelesaikan pemahamannya dulu; pesan kedua berisi
+            # tugas yang sebenarnya.
+            # KEPALA PESAN — ditaruh PALING DEPAN, bukan cuma di ekor.
+            # TERUKUR: dengan instruksinya hanya di bagian bawah pesan ~41 rb
+            # karakter, Gemini mengabaikannya dan langsung mengusulkan langkah
+            # ("Sekarang aku baca pyproject.toml…") alih-alih membalas SIAP.
+            # Yang dibaca paling awal punya bobot jauh lebih besar, jadi dua
+            # hal yang paling sering menggagalkan giliran dinyatakan di sini
+            # sebelum protokol panjangnya dimulai.
+            kepala = (
+                "PESAN 1 DARI 2 — INI KONTEKS, BUKAN TUGAS.\n"
+                "Jangan mengerjakan apa pun sekarang. Baca dulu seluruh aturan "
+                "main di bawah, lalu balas SATU BARIS saja: `SIAP`. Tugas yang "
+                "sebenarnya kukirim di pesan BERIKUTNYA.\n\n"
+                "Dua hal yang paling sering membuat kerjamu hangus — camkan "
+                "sejak sekarang:\n"
+                "1. SATU blok [[TOOL]] per pesan. Jangan pernah menumpuk dua "
+                "atau lebih; tunggu hasilnya dulu.\n"
+                "2. JANGAN menulis kode panjang sekaligus. Situs ini MEMOTONG "
+                "pesan yang kepanjangan, dan blok yang terpotong TAK BISA "
+                "kueksekusi sama sekali — seluruh isinya hangus, bukan cuma "
+                "ekornya. Tulis SEPARUH-SEPARUH: kirim bagian AWAL dulu "
+                "(maksimal ±100 baris / ±4.000 karakter), tunggu [[HASIL]], "
+                "baru lanjutkan bagian berikutnya lewat append_file (atau "
+                "edit_file untuk berkas yang sudah ada) sampai lengkap. Yang "
+                "penting berkasnya ADA lalu diteruskan bertahap — bukan utuh "
+                "dalam satu tembakan lalu terpotong dan hilang semua.\n\n"
+                "==========\n\n"
+            )
+            konteks_msg = kepala + preamble + (
+                "\n\n==========\n"
+                "Ini BARU KONTEKS — belum ada yang perlu dikerjakan.\n"
+                "JANGAN mengeluarkan blok [[TOOL]] apa pun sekarang, jangan "
+                "menebak-nebak apa tugasku, dan jangan membuat rencana. Cukup "
+                "balas SATU BARIS: `SIAP` (atau `SIAP — <satu hal yang ingin "
+                "kupastikan>` bila memang ada yang janggal di konteks di atas).\n"
+                "Permintaanku yang sebenarnya kukirim di pesan BERIKUTNYA."
+            )
+            first_msg = user_text
         else:
             # Percakapan panjang membuat AI web LUPA protokol dan kembali ke mode
             # mengobrol: menampilkan kode di jawaban alih-alih menuliskannya.
@@ -1119,10 +1219,28 @@ class Agent:
             #  - sudah punya kaitan chat (sesi lanjutan / --resume) -> BUKA chat itu
             #  - belum punya -> mulai chat BARU lalu catat kaitannya
             first_of_session = not self._web_ctx_sent or bool(self._web_chat_id)
+            if include_ctx:
+                # Pesan 1: KONTEKS saja, di percakapan yang baru dibuat.
+                # Balasannya sengaja TIDAK diurai sebagai usulan tool — ia cuma
+                # tanda terima. Kalaupun AI melanggar dan mengeluarkan blok,
+                # tak ada yang dieksekusi dari sini.
+                _status(f"mengirim konteks proyek ke {self.model_spec.label}…")
+                _send(konteks_msg, new_chat=True, open_chat_id="")
+                # Chat-nya sudah ada sekarang -> pesan berikutnya WAJIB masuk ke
+                # chat yang sama, kalau tidak konteks yang barusan dikirim
+                # tertinggal di percakapan lain.
+                dibuat = getattr(conn, "last_chat_id", "") or ""
+                if dibuat:
+                    self._link_web_chat(dibuat)
+                self._web_ctx_sent = True
+                _status(f"mengirim permintaanmu ke {self.model_spec.label}…")
+            # Pesan 2 (atau satu-satunya, bila konteks sudah pernah dikirim):
+            # permintaan pengguna.
             reply = _send(
                 first_msg,
-                new_chat=include_ctx,
-                open_chat_id=self._web_chat_id if first_of_session else "",
+                new_chat=False,
+                open_chat_id=self._web_chat_id if (first_of_session or include_ctx)
+                else "",
                 # Gambar dari pengguna (mis. foto yang dikirim ke bot Telegram)
                 # DILAMPIRKAN ke percakapan web. Dulu gambar ditangani model VLM
                 # terpisah lewat API; sekarang situs AI web sendiri yang
@@ -1131,8 +1249,6 @@ class Agent:
                 attachments=[p for p in (attachments or [])
                              if conn.supports_attachments()],
             )
-            if include_ctx:
-                self._web_ctx_sent = True
             if first_of_session:
                 # Catat kaitan sesi<->chat + rapikan chat lama buatan bagas-ai
                 # supaya tak menumpuk di akun (chat pribadi tak tersentuh).
@@ -1164,6 +1280,17 @@ class Agent:
             fail_streak = 0
             force_final = False
             nudges = 0    # teguran "kode ditampilkan tapi tak ditulis ke file"
+            # Berapa kali AI web menumpuk >1 blok [[TOOL]] dalam satu pesan.
+            # Protokolnya SATU langkah per pesan (lihat aturan 2 di
+            # _web_tool_protocol) justru karena langkah ke-2 dst pasti disusun
+            # SEBELUM hasil langkah ke-1 terlihat — jadi ia tebakan, dan tetap
+            # dijalankan walau yang pertama gagal atau isinya tak seperti dugaan.
+            #
+            # Penegakannya BERTAHAP, bukan langsung memangkas: tumpukan PERTAMA
+            # tetap dijalankan seluruhnya (pekerjaan yang sudah terlanjur
+            # dihasilkan tak dibuang percuma) sambil ditegur; kalau masih
+            # menumpuk juga, barulah yang dijalankan cuma blok pertama.
+            batch_hits = 0
             # Validasi otomatis sebelum jawaban akhir: `mutasi_kode` menyala bila
             # ada tool yang benar-benar MENGUBAH berkas kode; `validasi_jalan`
             # mencegah paksaan validasi berulang tanpa henti bila hasilnya tetap
@@ -1279,6 +1406,19 @@ class Agent:
                 if narration and on_message:
                     on_message(narration)
 
+                # SATU langkah per pesan (lihat batch_hits di atas).
+                n_diusulkan = len(calls)
+                ditahan = 0
+                if n_diusulkan > 1:
+                    batch_hits += 1
+                    if batch_hits > 1:
+                        ditahan = n_diusulkan - 1
+                        calls = calls[:1]
+                        if on_notice:
+                            on_notice(
+                                f"{n_diusulkan} blok tool sekaligus — hanya yang "
+                                "pertama dijalankan")
+
                 # Eksekusi tiap tool & kumpulkan hasil untuk dikirim balik.
                 result_blocks = []
                 images: list[str] = []
@@ -1352,9 +1492,28 @@ class Agent:
                 follow = (
                     "\n\n".join(result_blocks)
                     + "\n\nLanjutkan tugas berdasarkan hasil di atas. Kalau perlu "
-                    "tool lagi, keluarkan blok [[TOOL]] berikutnya; kalau sudah "
-                    "SELESAI, beri jawaban akhir biasa (tanpa blok tool)."
+                    "tool lagi, keluarkan SATU blok [[TOOL]] berikutnya (satu "
+                    "saja, lalu tunggu hasilnya) dan dahului dengan satu "
+                    "kalimat pendek yang memberi tahu apa yang sedang kamu "
+                    "lakukan; kalau sudah SELESAI, beri jawaban akhir biasa "
+                    "(tanpa blok tool)."
                 )
+                if ditahan:
+                    follow += (
+                        f"\n\n[SISTEM] Pesanmu memuat {n_diusulkan} blok [[TOOL]] "
+                        "sekaligus. Yang kujalankan HANYA yang pertama (hasilnya "
+                        f"di atas); {ditahan} sisanya kubuang tanpa dijalankan, "
+                        "sebab langkah itu kamu susun sebelum melihat hasil ini. "
+                        "Kirim langkah berikutnya SATU blok saja."
+                    )
+                elif n_diusulkan > 1:
+                    follow += (
+                        f"\n\n[SISTEM] Tadi ada {n_diusulkan} blok [[TOOL]] dalam "
+                        "satu pesan. Kali ini semuanya kujalankan, tapi mulai "
+                        "sekarang kirim SATU blok per pesan lalu tunggu "
+                        "[[HASIL]]-nya — kalau menumpuk lagi, yang kujalankan "
+                        "cuma blok pertama."
+                    )
                 if dup_hits >= config.MAX_DUPLICATE_TOOL_CALLS:
                     # Terjebak mengulang langkah yang sama: matikan tool dan
                     # paksa menyimpulkan, daripada memutar sampai batas langkah.
@@ -1395,7 +1554,7 @@ class Agent:
                 f"> {exc}\n\n"
                 "Sudah kucoba ulang beberapa kali dengan jeda, tapi masih penuh. "
                 "Kirim ulang sebentar lagi, atau ketik `/model` untuk pindah ke "
-                "layanan web lain (Kimi/Qwen) supaya bisa lanjut sekarang."
+                "layanan web lain (Kimi/Qwen/Gemini) supaya bisa lanjut sekarang."
             )
         except connectors.WebLimitError as exc:
             # Kuota situs habis — sampaikan apa adanya (termasuk kapan pulih)
@@ -1404,7 +1563,7 @@ class Agent:
                 f"⛔ **{self.model_spec.label} sedang kena batas pemakaian.**\n\n"
                 f"> {exc}\n\n"
                 "Tunggu sampai waktu itu, atau ketik `/model` untuk pindah ke "
-                "layanan web lain (Kimi/Qwen) supaya bisa lanjut kerja "
+                "layanan web lain (Kimi/Qwen/Gemini) supaya bisa lanjut kerja "
                 "sekarang."
             )
         except connectors.BrowserError as exc:

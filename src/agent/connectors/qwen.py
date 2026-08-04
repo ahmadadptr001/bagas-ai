@@ -3,11 +3,21 @@
 Seluruh selektor di bawah DIVERIFIKASI LANGSUNG ke situs pada sesi yang sudah
 login (2026-07-20): pesan uji dikirim, lalu DOM-nya dipetakan.
 
-Catatan penting soal KONTROL: Qwen menaruh kontrolnya di DUA tempat berbeda —
-pemilih MODEL di bar ATAS, dan pemilih MODE tepat di dekat kotak input. Keduanya
-juga bukan elemen <button> melainkan [role="button"], sehingga selector bergaya
-`button[aria-label=...]` TIDAK akan cocok. Tiap aksi /effort di bawah karena itu
-membawa selector tombol pembukanya sendiri.
+Catatan penting soal KONTROL: Qwen menaruh kontrolnya di TIGA tempat berbeda,
+dan ketiganya bukan <button> melainkan div ber-aria-label, sehingga selector
+bergaya `button[aria-label=...]` TIDAK akan cocok. Tiap aksi /effort karena itu
+membawa selector tombol pembukanya sendiri:
+
+  [aria-label="Select Model"]  bar ATAS   -> Qwen3.8-Max / Qwen3.7-Plus / …
+  [aria-label="Thinking"]      komposer   -> Auto / Thinking / Fast
+  [aria-label="Select Mode"]   komposer   -> Upload attachment, Deep Research,
+                                             Create Image/Video, Web Dev, Slides
+
+Dipetakan ulang 2026-08-04 pada sesi login nyata, dan pemetaan itu memperbaiki
+satu salah sasaran: seluruh aksi "mode berpikir" dulu diarahkan ke
+`[aria-label="Select Mode"]` — padahal itu menu UPLOAD & ALAT. Sakelar berpikir
+yang sesungguhnya ada di kontrol terpisah `[aria-label="Thinking"]`, dan
+sebelum ini tak pernah bisa disentuh dari /effort sama sekali.
 """
 from __future__ import annotations
 
@@ -16,9 +26,10 @@ from typing import Any
 from .base import WebConnector
 from .browser import BrowserError
 
-# Tombol pembuka menu (keduanya [role="button"], bukan <button>).
-_BTN_MODEL = '[aria-label="Select Model"]'   # bar ATAS
-_BTN_MODE = '[aria-label="Select Mode"]'     # dekat kotak input
+# Tombol pembuka menu (semuanya div ber-aria-label, bukan <button>).
+_BTN_MODEL = '[aria-label="Select Model"]'   # bar ATAS: varian model
+_BTN_THINK = '[aria-label="Thinking"]'       # komposer: Auto / Thinking / Fast
+_BTN_MODE = '[aria-label="Select Mode"]'     # komposer: menu upload & alat
 
 
 class QwenConnector(WebConnector):
@@ -90,19 +101,46 @@ class QwenConnector(WebConnector):
     # ada lampiran non-gambar.
     attach_item_selector = '[class*="fileitem-file-name-text"]'
 
-    # --- /effort: kontrol ATAS (model) & BAWAH (mode) ---
+    # Kandidat ITEM MENU. WAJIB ditimpa & WAJIB ber-`:visible`, karena tiga menu
+    # Qwen dibangun dari komponen yang berbeda-beda:
+    #   .ant-select-item-option        -> dropdown Thinking (Auto/Thinking/Fast)
+    #   [class*="model-item-name"]     -> daftar model di bar atas
+    #   li.ant-dropdown-menu-item      -> menu Upload & alat
+    # Tak satu pun memakai role=menuitemradio, jadi daftar ARIA bawaan base
+    # tak cukup. `:visible` bukan hiasan: dropdown Ant Design TETAP TERTINGGAL
+    # di DOM sesudah ditutup (TERUKUR: [role="option"] tetap terhitung 3 saat
+    # menu Thinking sudah tertutup), sehingga tanpa penyaring itu base bisa
+    # menyimpulkan menu "sudah terbuka" lalu mengeklik sisa menu LAIN yang
+    # tak terlihat.
+    menu_item_selector = (
+        ".ant-select-item-option:visible",
+        '[class*="model-item-name"]:visible',
+        "li.ant-dropdown-menu-item:visible",
+        '[class*="mode-select-dropdown-item"]:visible',
+    )
+
+    # --- /effort: model (bar atas), berpikir (komposer), mode (menu alat) ---
     web_model_button = _BTN_MODEL
+    # Urutan menentukan tampilan di /effort. Sakelar BERPIKIR ditaruh paling
+    # atas karena itulah arti /effort yang sebenarnya; varian model dan mode
+    # alat menyusul.
     web_actions = (
+        ("Berpikir: Auto", ("Auto",),
+         "situs yang memutuskan perlu berpikir atau tidak", _BTN_THINK),
+        ("Berpikir: Thinking", ("Thinking",),
+         "paksa mode berpikir — jawaban lebih dalam, lebih lambat", _BTN_THINK),
+        ("Berpikir: Fast", ("Fast",),
+         "tanpa berpikir — balasan paling cepat", _BTN_THINK),
+        ("Qwen3.8-Max", ("Qwen3.8-Max",),
+         "model flagship terbaru (bar atas)", _BTN_MODEL),
         ("Qwen3.7-Plus", ("Qwen3.7-Plus",),
          "model cepat & seimbang (bar atas)", _BTN_MODEL),
         ("Qwen3.7-Max", ("Qwen3.7-Max",),
-         "model flagship, penalaran terkuat (bar atas)", _BTN_MODEL),
-        ("Qwen3.8-Max-Preview", ("Qwen3.8-Max-Preview",),
-         "pratinjau model generasi berikutnya (bar atas)", _BTN_MODEL),
+         "flagship generasi sebelumnya (bar atas)", _BTN_MODEL),
         ("Mode: Deep Research", ("Deep Research",),
-         "riset mendalam bertahap (tombol dekat input)", _BTN_MODE),
+         "riset mendalam bertahap (menu alat)", _BTN_MODE),
         ("Mode: Web Dev", ("Web Dev",),
-         "mode bantu ngoding web (tombol dekat input)", _BTN_MODE),
+         "mode bantu ngoding web (menu alat)", _BTN_MODE),
     )
 
     # Teks pemberitahuan limit Qwen belum pernah terlihat; dikosongkan agar tak

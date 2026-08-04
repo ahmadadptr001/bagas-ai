@@ -246,15 +246,7 @@ def shutdown(timeout: float = 8.0) -> None:
         _HUB = None
     if h is None or not h._started:
         return
-    closed = True
-    try:
-        h.submit(_shutdown_on_hub, timeout=timeout)
-    except Exception:  # noqa: BLE001 - keluar tetap harus mulus
-        closed = False
-    try:
-        h._q.put(None)  # akhiri loop thread hub
-    except Exception:  # noqa: BLE001
-        pass
+    closed = h.dispose(timeout=timeout, paksa=True)
     if not closed:
         # Penutupan rapi gagal. Chrome yang masih hidup TIDAK boleh ditinggalkan
         # dalam keadaan tersembunyi: tanpa jendela & tanpa entri taskbar,
@@ -310,13 +302,23 @@ def _kill_profile_browsers(service: str | None = None) -> None:
             _HIDDEN_WINDOWS.pop(service, None)
         else:
             _HIDDEN_WINDOWS.clear()
-        ps = _ps_profile_query(target) + (
-            " | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force "
-            "-ErrorAction Stop } catch {} }"
+        # MENUNGGU prosesnya benar-benar mati, bukan sekadar mengirim sinyal.
+        # Stop-Process kembali seketika, sementara Chrome baru melepas kunci
+        # profilnya beberapa ratus milidetik kemudian — dan peluncuran ulang
+        # yang datang di sela itu GAGAL karena profilnya masih terkunci. Itulah
+        # 'kadang lancar, kadang nyangkut' sesudah pembatalan. Menunggunya di
+        # dalam SATU panggilan PowerShell jauh lebih murah daripada polling
+        # dari Python (tiap spawn PowerShell ~0,7 detik).
+        ps = (
+            "$ids = @(" + _ps_profile_query(target) +
+            " | ForEach-Object { $_.ProcessId }); "
+            "if ($ids.Count) { "
+            "Stop-Process -Id $ids -Force -ErrorAction SilentlyContinue; "
+            "Wait-Process -Id $ids -Timeout 8 -ErrorAction SilentlyContinue }"
         )
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, timeout=25,
+            capture_output=True, timeout=30,
         )
         # Sisa file kunci Chrome bisa menghalangi peluncuran berikutnya.
         for name in ("lockfile", "SingletonLock", "SingletonCookie",
@@ -400,6 +402,11 @@ class BrowserHub:
         self.poisoned = False
         # True selama thread hub menjalankan sebuah job (lihat busy()).
         self._sedang_jalan = False
+        # True bila hub ini sudah DIBUANG (dispose): thread-nya diakhiri dan
+        # driver Playwright-nya dihentikan. Job baru harus ditolak SEKETIKA —
+        # kalau tidak, pemanggil menunggu hasil yang takkan pernah datang
+        # karena tak ada lagi yang mengambil job dari antrean.
+        self._mati = False
 
     # --- sisi pemanggil (thread mana pun) ---
     def _ensure_thread(self) -> None:
@@ -440,6 +447,9 @@ class BrowserHub:
         menggantung.
 
         `timeout` tetap berlaku untuk job yang SUDAH berjalan."""
+        if self._mati:
+            raise BrowserError(
+                "sesi browser sudah direset — kirim ulang permintaanmu.")
         self._ensure_thread()
         job = _Job(fn)
         self._q.put(job)
@@ -524,6 +534,27 @@ class BrowserHub:
             finally:
                 self._sedang_jalan = False
                 job.done.set()
+        # Thread berakhir: SISA ANTREAN wajib dilayani dengan galat yang jelas.
+        # Tanpa ini, job yang sempat masuk tepat sebelum hub dibuang tak pernah
+        # disentuh siapa pun — `done` tak pernah diset, dan pemanggilnya diam
+        # menunggu sampai batas waktu kirim (belasan menit) tanpa satu pun tanda.
+        self._mati = True
+        self._drain()
+
+    def _drain(self) -> None:
+        """Gagalkan seluruh job tersisa di antrean (dipanggil saat thread usai)."""
+        galat = BrowserError(
+            "sesi browser direset di tengah jalan — kirim ulang permintaanmu.")
+        while True:
+            try:
+                job = self._q.get_nowait()
+            except queue.Empty:
+                return
+            if job is None:
+                continue
+            job.started.set()
+            job.error = galat
+            job.done.set()
 
     def page_for(self, service: str, headless: bool) -> Any:
         """Kembalikan page persisten untuk sebuah service (buat bila belum ada).
@@ -555,6 +586,37 @@ class BrowserHub:
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         self._ctx[service] = (ctx, page)
         return page
+
+    def dispose(self, timeout: float = 6.0, paksa: bool = False) -> bool:
+        """Bubarkan hub ini SEUTUHNYA: context ditutup, driver Playwright
+        dihentikan, thread-nya diakhiri. True bila semuanya berhasil rapi.
+
+        WAJIB dipakai setiap kali sebuah hub ditinggalkan. Dulu hub yang direset
+        (mis. sesudah Ctrl+C) hanya dilepas acuannya — thread-nya tetap hidup
+        dan proses driver Playwright-nya TETAP BERJALAN. TERUKUR: tiga kali
+        reset meninggalkan tiga proses node.exe menganggur sekaligus tiga
+        thread; setelah beberapa pembatalan, seluruh aplikasi terasa berat.
+
+        Penghentian driver HARUS terjadi di thread hub (objek sinkron Playwright
+        terikat pada thread pembuatnya), jadi dikerjakan lewat submit. Bila job
+        yang sedang berjalan macet, submit-nya gagal — di situlah `paksa`
+        dipakai: thread tetap diakhiri (sentinel None) supaya ia berhenti begitu
+        panggilan yang menggantung itu lepas."""
+        if not self._started or self._mati:
+            self._mati = True
+            return True
+        rapi = True
+        try:
+            self.submit(_shutdown_on_hub, timeout=timeout, queue_timeout=timeout)
+        except Exception:  # noqa: BLE001 - job lain sedang macet
+            rapi = False
+        if rapi or paksa:
+            self._mati = True
+            try:
+                self._q.put(None)      # akhiri loop thread hub
+            except Exception:  # noqa: BLE001
+                pass
+        return rapi
 
     def drop(self, service: str) -> None:
         """Tutup & lupakan context sebuah service (HARUS di thread hub)."""
@@ -658,10 +720,39 @@ def hub() -> BrowserHub:
         return _HUB
 
 
-def reset_hub() -> None:
-    """Paksa hub dibuang & Chrome profil dibunuh (dipakai saat pemulihan error).
-    Hub baru dibuat otomatis pada pemakaian berikutnya lewat hub()."""
+def reset_hub(service: str | None = None) -> None:
+    """Buang hub saat ini; hub baru dibuat otomatis pada pemakaian berikutnya.
+
+    Dipakai saat pemulihan error — terutama sesudah pembatalan (Ctrl+C) yang
+    meninggalkan giliran browser menggantung.
+
+    Dua hal yang dulu keliru di sini, dan keduanya terasa langsung oleh
+    pengguna:
+
+      1. Hub lama cuma DILEPAS acuannya, sehingga proses driver Playwright-nya
+         menumpuk tiap kali reset (lihat dispose).
+      2. Chrome SELALU dibunuh — untuk SEMUA profil, bukan cuma yang dipakai.
+         Padahal sebagian besar "macet" sesudah Ctrl+C sebenarnya cuma
+         panggilan browser yang belum sempat lepas. Akibatnya jendela browser
+         lenyap pada pembatalan yang sehat, lalu pesan berikutnya harus
+         meluncurkan Chrome dari nol.
+
+    Sekarang: bubarkan hub dengan RAPI dulu (context ditutup, driver berhenti,
+    sesi login tetap utuh di profil). Chrome hanya dibunuh bila pembubaran rapi
+    GAGAL — pertanda job memang benar-benar macet di dalam browser, dan
+    mematikan browsernya justru satu-satunya cara melepaskannya.
+
+    `service` membatasi pembunuhan itu ke satu profil saja; None = semua.
+    """
     global _HUB
     with _HUB_LOCK:
-        _HUB = None
-    _kill_profile_browsers()
+        h, _HUB = _HUB, None
+    if h is None:
+        return
+    if h.dispose(timeout=6.0):
+        return
+    _kill_profile_browsers(service)
+    # Browsernya mati -> panggilan Playwright yang menggantung kini melempar,
+    # jadi thread hub bisa menyelesaikan job-nya. Beri satu kesempatan lagi
+    # untuk berhenti rapi; kalau tetap tidak bisa, akhiri paksa.
+    h.dispose(timeout=4.0, paksa=True)

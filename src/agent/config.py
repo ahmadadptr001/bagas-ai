@@ -129,6 +129,15 @@ CODE_EXEC_TIMEOUT: int = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))
 # (mis. install dependency / scaffolding). Perintah dijalankan NON-INTERAKTIF
 # (stdin ditutup) & seluruh pohon prosesnya dibunuh bila melewati batas ini.
 COMMAND_TIMEOUT: int = int(os.getenv("COMMAND_TIMEOUT", "300"))
+# Lewati seluruh permintaan izin saat agent menyentuh berkas DI LUAR root
+# project & folder konteks (lihat permissions.py). Setara dengan menjalankan
+# `bagas-ai --skip-permissions`, tapi berlaku untuk semua sesi — termasuk mode
+# telegram/api yang memang tak punya siapa pun untuk ditanyai di terminal.
+#
+# Sengaja default FALSE: dengan ini menyala, satu perintah keliru dari model
+# bisa menulis atau menghapus di mana saja di laptop tanpa satu pun konfirmasi.
+SKIP_PERMISSIONS: bool = _get_bool("BAGASAI_SKIP_PERMISSIONS", False)
+
 # Cek sintaks OTOMATIS tiap kali write_file menulis file kode (.py/.js/.json/dll).
 # Ringan (hanya parsing, tak menjalankan kode) & memastikan bagas-ai selalu
 # memverifikasi hasil ngoding-nya. Matikan dengan AUTO_SYNTAX_CHECK=false.

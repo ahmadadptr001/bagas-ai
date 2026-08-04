@@ -24,8 +24,6 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-from InquirerPy import inquirer  # noqa: E402
-from InquirerPy.base.control import Choice  # noqa: E402
 from prompt_toolkit import PromptSession  # noqa: E402
 from prompt_toolkit.completion import Completer, Completion  # noqa: E402
 from prompt_toolkit.filters import has_completions  # noqa: E402
@@ -50,10 +48,12 @@ try:
 except Exception:  # pragma: no cover
     Figlet = None  # type: ignore
 
-from .. import config, interaction, llm, longmem, models, osinfo, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
+from .. import config, interaction, llm, longmem, models, osinfo, permissions, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
+# Prompt interaktif MILIK SENDIRI (dulu InquirerPy) — lihat ui/menu.py.
+from ..ui.menu import Choice, inquirer  # noqa: E402
 
 # Tema Markdown selaras palet "catppuccin" agar jawaban AI (heading, list, kutipan,
 # kode, tautan) serasi dengan seluruh UI — bukan warna default rich yang kontras.
@@ -626,15 +626,21 @@ _TIPS = (
 class TurnView:
     """Tampilan SATU GILIRAN yang MENGALIR seperti terminal biasa.
 
-    SEMUA konten (narasi, langkah, diff, pratinjau jawaban) dicetak STATIS ke
-    scrollback begitu tersedia — tidak ada yang dirender di region tetap yang
+    SEMUA konten (narasi, langkah, diff, jawaban) dicetak STATIS ke scrollback
+    begitu tersedia — tidak ada yang dirender di region tetap yang
     menimpa/menutupi apa pun. Satu-satunya bagian yang hidup (rich.Live) adalah
     FOOTER kecil di baris paling bawah: spinner status + ketikan yang sedang
     berlangsung + antrean. Tingginya kecil & nyaris konstan (tiap baris
     _oneline anti-wrap), jadi ia tak pernah lebih tinggi dari layar dan tak
     pernah menutupi ketikan pengguna maupun diff — akar bug "kotak animasi
     menimpa input" pada desain lama yang menaruh langkah + pratinjau di region
-    live."""
+    live.
+
+    Yang DITAMPILKAN dijaga tetap sedikit dan pasti: fase yang sedang berjalan,
+    alat yang sedang dipakai, narasi AI, hasil tiap langkah, dan jawaban akhir.
+    Tak ada bar perkiraan waktu, dan tak ada pratinjau teks yang masih mengalir
+    — keduanya menampilkan hal yang belum jadi, dan yang kedua bahkan
+    membocorkan isi blok [[TOOL]] mentah ke layar."""
 
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -654,29 +660,19 @@ class TurnView:
         self.tool: str | None = None
         self.tool_label = ""           # label langkah berjalan (tampil di footer)
         self.disp = 0.0
-        self.phase_since = self.start   # kapan fase SEKARANG mulai (untuk ETA)
-        # ETA connector web belajar dari riwayat waktu turn pengguna sendiri —
-        # jujur: deskripsi masa lalu, bukan janji. None bila bukan connector web
-        # ATAU sampel riwayat belum cukup (lalu UI sengaja tak menampilkan ETA).
-        self._web_service = getattr(agent.model_spec, "connector", "") or ""
-        self._web_med = None
-        if self._web_service:
-            try:
-                from .. import web_timing
-                self._web_med = web_timing.medians(self._web_service)
-            except Exception:  # noqa: BLE001
-                self._web_med = None
-        # Jumlah karakter jawaban yang SUDAH mengalir di giliran ini. Inilah
-        # sinyal yang membuat ETA benar-benar hidup: bukan menebak durasi dari
-        # median, tapi mengukur kemajuan nyata terhadap perkiraan panjang akhir.
-        self._web_chars = 0
-        # Perkiraan PERTAMA yang ditampilkan (detik, total durasi menjawab) —
-        # dipakai menilai akurasi sesudah giliran selesai.
-        self._web_pred_first = 0.0
-        # Baris TERAKHIR (parsial) jawaban yang sedang ditulis. Baris yang sudah
-        # LENGKAP langsung dicetak ke scrollback oleh note_stream — yang
-        # disimpan di sini hanya ekor yang belum ketemu newline-nya.
-        self._stream = ""
+        self.phase_since = self.start   # kapan fase SEKARANG mulai
+        # BAR ETA & PRATINJAU ALIRAN JAWABAN DIHAPUS (permintaan pengguna).
+        #
+        # Keduanya menampilkan hal yang belum jadi: bar ETA menebak sisa waktu,
+        # dan pratinjau mengalirkan teks MENTAH dari situs — termasuk isi blok
+        # [[TOOL]] beserta JSON-nya, yaitu potongan yang justru tak boleh
+        # dilihat pengguna (itu percakapan mesin, bukan jawaban). Yang tampil
+        # sekarang hanya yang benar-benar sudah jadi: fase yang sedang berjalan,
+        # alat yang sedang dipakai, narasi AI, dan jawaban akhir — semuanya
+        # sudah bersih dari penanda tool sejak di core.
+        #
+        # Perekaman durasi di connector (web_timing.record) sengaja DIBIARKAN:
+        # ia tak menampilkan apa pun, cuma menabung statistik.
         # Ketikan pengguna SELAMA giliran berjalan (fitur antrean prompt):
         # `typing` = buffer yang sedang diketik (tampil di footer), `queue_n` =
         # berapa prompt yang sudah antre. Enter TIDAK membatalkan apa pun —
@@ -738,57 +734,8 @@ class TurnView:
         """Set fase status langsung (dipakai connector web: 'menjawab', dsb).
         Diabaikan saat ada tool berjalan supaya fase tool tak tertimpa."""
         if self.tool is None and text and text != self.phase:
-            # Giliran connector bisa berisi BEBERAPA fase 'menjawab' (jawaban
-            # awal, lalu balasan atas hasil tool). Tiap kali fase menjawab
-            # dimulai lagi, hitungan karakter & perkiraan pertama disetel ulang
-            # supaya ETA menghitung jawaban yang SEKARANG, bukan akumulasi.
-            if text == "menjawab":
-                self._web_chars = 0
-                self._web_pred_first = 0.0
-                self._stream = ""
             self.phase = text
-            self.phase_since = time.time()   # patok waktu fase baru (untuk ETA)
-
-    # Panjang maksimum ekor parsial yang disimpan (baris tunggal super panjang
-    # dari log/minified tak perlu disimpan utuh — tampilnya pun dipotong).
-    _PREVIEW_KEEP = 4000
-
-    def note_stream(self, delta: str) -> None:
-        """Potongan jawaban baru saja mengalir dari situs (dari on_token).
-
-        Dua gunanya: menghitung kemajuan untuk ETA, dan MENGALIRKAN teks ke
-        scrollback saat itu juga. Setiap baris yang sudah LENGKAP langsung
-        dicetak permanen (statis, bisa digulung, tak pernah ditimpa animasi);
-        hanya baris terakhir yang masih setengah diketik yang ditahan — ia
-        tampil sebagai satu baris ekor di footer. Aman di-commit permanen
-        karena aliran on_token append-only monotonik (base hanya mengirim
-        `cur[emitted:]` saat teks BERTAMBAH)."""
-        if not delta:
-            return
-        self._web_chars += len(delta)
-        # Dibersihkan SEBELUM masuk buffer: jawaban model bisa memuat log
-        # berwarna yang disalin apa adanya, dan byte ESC akan dieksekusi
-        # terminal (warna berubah sendiri, kursor melompat).
-        buf = self._stream + _bersih_kendali(delta)
-        if "\n" in buf:
-            lines = buf.split("\n")
-            buf = lines.pop()          # ekor parsial: belum boleh dicetak
-            if self.commit:
-                self.commit([
-                    _oneline(Text("  │ " + b.rstrip(), style="#7f849c"))
-                    for b in lines
-                ])
-        # Dipotong dari depan: yang ditampilkan cuma ekor terbaru.
-        self._stream = buf[-self._PREVIEW_KEEP:]
-
-    def _preview_row(self):
-        """Satu baris ekor jawaban yang masih setengah diketik (untuk footer).
-        None bila tak ada. SELALU maksimal satu baris (_oneline anti-wrap) —
-        tinggi footer tak berubah-ubah karenanya."""
-        teks = self._stream.strip()
-        if not teks:
-            return None
-        return _oneline(Text("  │ " + teks, style="#7f849c"))
+            self.phase_since = time.time()
 
     # --- render satu langkah (dipanggil SEKALI saat langkah selesai) ---
     def _render_step(self, rec: dict) -> list:
@@ -817,23 +764,15 @@ class TurnView:
         return out
 
     def __rich__(self):
-        """Region live = FOOTER SAJA (status + ketikan + antrean + ETA/tips).
+        """Region live = FOOTER SAJA (status + ketikan + antrean + tips).
 
         Semua baris _oneline anti-wrap -> tinggi kecil & stabil, selalu muat di
         layar, tak pernah menimpa konten yang sudah tercetak. Saat done, region
         dikosongkan: semuanya sudah berada di scrollback."""
         if self.done:
             return Text("")
-        rows = []
-        ekor = self._preview_row()
-        if ekor is not None:
-            rows.append(ekor)
         footer = self._footer()
-        if isinstance(footer, Group):
-            rows.extend(footer.renderables)
-        else:
-            rows.append(footer)
-        return Group(*rows)
+        return footer if isinstance(footer, Group) else Group(footer)
 
     def _footer(self):
         el = time.time() - self.start
@@ -882,10 +821,6 @@ class TurnView:
             rows.append(_oneline(Text(
                 f"  ⏳ {self.queue_n} prompt di antrean — dikerjakan setelah "
                 "giliran ini selesai", style="dim #f9e2af")))
-        # Baris ETA sadar-fase (hanya connector web dgn riwayat cukup).
-        eta = self._web_eta_line(now) if self._web_service else None
-        if eta is not None:
-            rows.append(eta)
         # Tips bergantian (tiap 10 dtk) — baru muncul setelah beberapa detik agar
         # giliran singkat tak sempat kedip-kedip tips.
         if el > 4:
@@ -893,144 +828,6 @@ class TurnView:
             rows.append(_oneline(Text(f"  ✦ tips: {tip}", style="dim italic")))
         return rows[0] if len(rows) == 1 else Group(*rows)
 
-    @staticmethod
-    def _bar(frac: float, width: int = 14) -> str:
-        """Pill TIPIS: dibangun dari glyph garis (U+2501/U+2500), bukan blok
-        penuh (U+2588/U+2591).
-
-        Blok penuh setinggi satu baris sel penuh sehingga terlihat seperti
-        batang tebal; glyph garis hanya menggambar satu goresan di tengah sel,
-        jadi bar-nya terbaca tipis & rendah seperti pill. Ujungnya diberi
-        setengah-garis (U+257A/U+2578 tebal, U+2576/U+2574 tipis) supaya kedua
-        sisi tampak membulat alih-alih terpotong siku.
-
-        Sengaja memakai box-drawing yang ADA di hampir semua font terminal —
-        glyph pill Powerline (U+E0B4/E0B6) bergantung Nerd Font dan akan jadi
-        kotak-tofu di font bawaan."""
-        frac = max(0.0, min(frac, 1.0))
-        isi = int(round(frac * width))
-        # Dirakit per-sel supaya lebarnya SELALU `width`. Versi sebelumnya
-        # menyusun ujung + tengah secara terpisah dan meleset satu karakter di
-        # 0%/100%, sehingga bar berkedut saat mendekati ujung.
-        def sel(i: int, terisi: bool) -> str:
-            if i == 0:
-                return "╺" if terisi else "╶"
-            if i == width - 1:
-                return "╸" if terisi else "╴"
-            return "━" if terisi else "─"
-
-        kiri = "".join(sel(i, True) for i in range(isi))
-        kanan = "".join(sel(i, False) for i in range(isi, width))
-        return f"[#a6e3a1]{kiri}[/][#45475a]{kanan}[/]"
-
-    def _web_eta_line(self, now: float):
-        """Baris ETA SADAR-FASE untuk connector web — dijaga JUJUR:
-
-        - fase 'berpikir' (tak terprediksi): cuma hint deskriptif dari median
-          riwayat ('biasanya mulai menjawab ~Xs'), TANPA hitung-mundur;
-        - fase 'menjawab' (ada sinyal token nyata): bar + '≈Xs lagi (perkiraan)',
-          bar dibatasi 95% supaya tak pernah klaim 100% sebelum benar-benar
-          selesai; begitu lewat perkiraan ia berganti 'lebih lama dari biasanya…'
-          alih-alih angka yang meleset.
-
-        None -> tak ada baris (fase lain, atau sampel riwayat belum cukup)."""
-        med = self._web_med
-        if not med:
-            return None
-        ph_el = now - self.phase_since
-        if self.phase == "berpikir":
-            s = med["start"]
-            # Sebagian situs (mis. kimi.com) membuat wadah balasan SEKETIKA
-            # setelah kirim, jadi fase 'berpikir' terukur ~0 detik dan seluruh
-            # penantian nyata jatuh ke fase 'menjawab'. Menampilkan "biasanya
-            # mulai menjawab ~0s" cuma kebisingan yang meremehkan lama tunggu —
-            # lebih baik diam dan biarkan bar fase berikutnya yang bicara.
-            if s < 1.0:
-                return None
-            if ph_el <= max(s * 1.5, s + 3):
-                txt = f"biasanya mulai menjawab ~{s:.0f}s"
-            else:
-                txt = f"biasanya ~{s:.0f}s — kali ini agak lama, ditunggu ya"
-            return _oneline(Text.from_markup(f"     [dim #6c7086]{txt}[/]"))
-        if self.phase == "menjawab":
-            frac, eta = self._web_progress(ph_el)
-            if eta is None:
-                return None
-            bar = self._bar(min(frac, 0.95))
-            if eta >= 1:
-                # "≤" bukan "≈": angkanya JANJI batas atas yang dikalibrasi,
-                # bukan tebakan titik. Hitung-mundur satu angka tak bisa dibuat
-                # akurat 80-90% (panjang jawaban belum ada saat ditanya);
-                # janji satu sisi bisa — lihat web_timing._TARGET.
-                tail = f"≤{eta:.0f}s lagi"
-            else:
-                tail = "hampir selesai…"
-            akur = med.get("akurasi")
-            # Angka DIUKUR dari giliran-giliran sebelumnya, bukan klaim: berapa
-            # persen janji yang benar-benar ditepati. Kalau kenyataannya 60%,
-            # yang tertulis 60% — dan kuantilnya menyetel diri naik.
-            jejak = f" · janji tepat {akur * 100:.0f}%" if akur is not None else ""
-            return _oneline(Text.from_markup(
-                f"     {bar}  [dim #6c7086]{tail}{jejak}[/]"))
-        return None
-
-    def _web_progress(self, ph_el: float) -> tuple[float, float | None]:
-        """(kemajuan 0-1, detik tersisa) untuk fase 'menjawab'.
-
-        Perkiraan dihitung dari KEMAJUAN NYATA, bukan median durasi:
-
-            sisa = (perkiraan panjang akhir - karakter yang sudah mengalir)
-                   / throughput
-
-        Median durasi ditinggalkan karena sebarannya sangat lebar (terukur
-        5.75s-28.12s pada layanan yang sama) — sebabnya panjang jawaban yang
-        berbeda-beda, bukan layanannya yang tak menentu. Throughput jauh lebih
-        stabil, dan panjang akhir diperkirakan lewat KUANTIL BERSYARAT
-        (web_timing.kuantil_panjang) yang menajam sendiri seiring makin banyak
-        teks yang terlihat — kuantil, bukan rata-rata, supaya hasilnya jadi
-        BATAS ATAS yang bisa dikalibrasi.
-
-        `chars` bersatuan teks POLOS (dari on_token), sesatuan dengan panjang
-        yang dicatat web_timing — jangan campur dengan panjang markdown.
-
-        Kembali (frac, None) bila belum layak menampilkan apa pun."""
-        med = self._web_med or {}
-        chars = self._web_chars
-        rate = med.get("rate")
-        lengths = med.get("lengths") or []
-
-        # Throughput dari riwayat belum ada? Pakai laju giliran INI, tapi tunggu
-        # beberapa detik dulu — laju di detik pertama masih sangat berisik.
-        if not rate:
-            if ph_el < 3 or chars <= 0:
-                return 0.0, None
-            rate = chars / ph_el
-
-        if chars <= 0 or not lengths:
-            # Belum ada teks / belum ada riwayat panjang: jatuh kembali ke median
-            # durasi supaya tetap ada gambaran kasar, dan katakan apa adanya.
-            a = med.get("answer") or 0.0
-            if a <= 0:
-                return 0.0, None
-            return min(ph_el / a, 0.95), max(a - ph_el, 0.0)
-
-        try:
-            from .. import web_timing
-            # Kuantil (bukan rata-rata) supaya angkanya jadi BATAS ATAS yang
-            # bisa dikalibrasi; nilainya menyetel diri tiap giliran.
-            total = web_timing.kuantil_panjang(
-                lengths, chars, med.get("kuantil", 0.80))
-        except Exception:  # noqa: BLE001
-            return 0.0, None
-
-        sisa_chars = max(total - chars, 0.0)
-        eta = sisa_chars / rate if rate > 0 else 0.0
-        frac = chars / total if total > 0 else 0.0
-
-        # Simpan janji PERTAMA (sebagai total durasi) untuk dinilai nanti.
-        if not self._web_pred_first and eta >= 1:
-            self._web_pred_first = ph_el + eta
-        return frac, eta
 
 
 # ---------------------------------------------------------------------------
@@ -1052,6 +849,12 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
     grid.add_row("Model", f"[bold #89b4fa]{spec.label}[/]   [dim]{kind}[/]{eff}")
     grid.add_row("Folder", f"[#a6e3a1]{config.PROJECT_ROOT}[/]")
     grid.add_row("Sesi", f"[#f9e2af]{agent.session.id}[/]   [dim]· {tag}[/]")
+    # Mode lewati-izin TIDAK boleh senyap: selama ini aktif, bagas-ai boleh
+    # menulis & menghapus di folder mana pun tanpa satu pun konfirmasi, jadi
+    # keadaannya harus terbaca sekali lihat.
+    if permissions.skip_aktif():
+        grid.add_row("Izin", "[bold #f38ba8]⚠ --skip-permissions[/]   "
+                             "[dim]akses ke SEMUA folder tanpa konfirmasi[/]")
 
     head = Text.assemble(
         ("● ", "bold #a6e3a1"), ("siap", "bold #a6e3a1"),
@@ -1242,26 +1045,30 @@ def main(resume: bool = False) -> None:
             _tg_flush()
 
     def choice_handler(question: str, options: list[str], multiple: bool) -> str:
+        """Pertanyaan dari dalam giliran: klarifikasi ask_user, dan permintaan
+        IZIN akses folder luar (permissions.py).
+
+        Pertanyaan & jawabannya tak dicetak terpisah lagi: menu bagas-ai sudah
+        menampilkan pertanyaannya di dalam kotak lalu meninggalkan satu baris
+        ringkasan "✓ pertanyaan · jawaban" sesudah kotaknya hilang."""
         input_paused["on"] = True
         live = live_holder.get("live")
         if live:
             live.stop()
-        console.print(f"\n[bold yellow]❔ {question}[/bold yellow]")
         try:
             if multiple:
                 res = inquirer.checkbox(
-                    message=question, choices=options, pointer="❯",
-                    instruction="(spasi pilih, enter konfirmasi)").execute()
+                    message=question, choices=options,
+                    instruction="spasi pilih, enter konfirmasi").execute()
                 answer = ", ".join(res) if res else "(tidak memilih)"
             else:
                 answer = inquirer.select(
-                    message=question, choices=options, pointer="❯").execute()
+                    message=question, choices=options).execute()
         except (KeyboardInterrupt, EOFError):
             answer = "(dibatalkan)"
         finally:
             input_paused["on"] = False
             _tg_flush()
-        console.print(f"[dim]-> {answer}[/dim]")
         if live:
             live.start()
         return answer
@@ -1375,20 +1182,41 @@ def main(resume: bool = False) -> None:
         for k in sorted(steps):
             show_expand(k)
 
+    # Berapa lama giliran web yang dibatalkan boleh "bernapas" sebelum sesi
+    # browsernya dianggap benar-benar macet. Sengaja jauh lebih longgar dari
+    # sebelumnya (2 detik): pembatalan diperiksa tiap ~300 ms DI ANTARA
+    # panggilan Playwright, jadi Ctrl+C yang jatuh di tengah panggilan panjang
+    # yang SEHAT — meluncurkan Chrome, memuat halaman — memang baru terasa
+    # belasan detik kemudian. Dengan tenggat 2 detik, pembatalan normal pun
+    # dihukum reset: jendela browser dimatikan, lalu pesan berikutnya harus
+    # menyalakan Chrome dari nol (dan itulah yang kadang nyangkut).
+    _TENGGAT_LEPAS = 20.0
+
     def _reset_web_hub_if_stuck(wt: threading.Thread) -> None:
-        """Pasca-Ctrl+C pada giliran web: beri worker jeda singkat untuk lepas;
-        bila masih menggantung (macet di dalam browser), RESET hub agar giliran
-        berikutnya tak ikut mengantre di belakang job macet (akar bug 'tiap
-        Ctrl+C lalu chat baru, sesi browser nyangkut tak selesai')."""
+        """Pasca-Ctrl+C pada giliran web: pastikan sesi browser tak tertinggal
+        macet — TANPA menahan antarmuka.
+
+        Dijalankan di thread sendiri. Pembersihannya memanggil PowerShell
+        (mencari & menunggu proses Chrome mati) yang TERUKUR ~0,8 detik sekali
+        jalan, dan dulu itu dikerjakan di thread yang sama dengan tampilan —
+        sehingga seluruh UI membeku persis di saat pengguna baru saja menekan
+        Ctrl+C dan paling ingin melihat responsnya."""
         if not wt.is_alive():
             return
-        wt.join(timeout=2.0)
-        if wt.is_alive():
+        svc = agent.model_spec.connector or None
+
+        def bereskan() -> None:
+            wt.join(timeout=_TENGGAT_LEPAS)
+            if not wt.is_alive():
+                return          # lepas sendiri — browser & sesi login dibiarkan
             try:
                 from ..connectors import browser as _br
-                _br.reset_hub()
+                _br.reset_hub(svc)
             except Exception:  # noqa: BLE001
                 pass
+
+        threading.Thread(target=bereskan, daemon=True,
+                         name="bagasai-reset-hub").start()
 
     def _connect_web(prev_model_id: str) -> None:
         """Alur CONNECT saat model web DIPILIH (bukan saat pesan pertama):
@@ -1660,14 +1488,16 @@ def main(resume: bool = False) -> None:
 
         def worker() -> None:
             try:
+                # `on_token` sengaja TIDAK dioper: aliran mentah dari situs
+                # memuat isi blok [[TOOL]] apa adanya, dan menampilkannya
+                # berarti membocorkan percakapan mesin ke layar pengguna. Yang
+                # dicetak hanya hasil yang sudah bersih — narasi (on_message)
+                # dan jawaban akhir.
                 result["answer"] = agent.run(
                     text, on_tool=_on_tool, on_message=_on_msg,
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status,
-                    # Aliran teks jawaban: dipakai untuk ETA sekaligus pratinjau
-                    # bergulir, supaya jawaban terlihat terbentuk saat itu juga.
-                    on_token=view.note_stream,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
@@ -1754,16 +1584,6 @@ def main(resume: bool = False) -> None:
                 # Jawaban TIDAK ditaruh di region live (bisa sangat panjang ->
                 # bikin kedip & scroll rusak); dicetak ke riwayat setelah Live tutup.
                 view.done = True
-                # Nilai perkiraan ETA terhadap kenyataan. Ditempel ke giliran
-                # yang barusan tercatat connector, supaya angka "tepat N%" di
-                # layar adalah hasil UKUR, bukan klaim.
-                if view._web_service and view._web_pred_first:
-                    try:
-                        from .. import web_timing
-                        web_timing.note_promise(view._web_service,
-                                                view._web_pred_first)
-                    except Exception:  # noqa: BLE001 - statistik tak boleh ganggu
-                        pass
                 live.refresh()
         except KeyboardInterrupt:
             interrupted = True
@@ -2032,13 +1852,9 @@ def main(resume: bool = False) -> None:
                         f"  [#cba6f7]{frame}[/] [dim]{_esc(state['msg'])}[/]")))
                     wt.join(timeout=0.1)
         except KeyboardInterrupt:
-            wt.join(timeout=2.0)
-            if wt.is_alive():
-                try:
-                    from ..connectors import browser as _br
-                    _br.reset_hub()
-                except Exception:  # noqa: BLE001
-                    pass
+            # Sama seperti pembatalan giliran: bereskan di latar, dan HANYA
+            # untuk profil layanan ini (lihat _reset_web_hub_if_stuck).
+            _reset_web_hub_if_stuck(wt)
             console.print("  [yellow]◼ dibatalkan[/yellow]\n")
             return
 

@@ -302,6 +302,25 @@ JS_TO_MARKDOWN = r"""
       const m = codeEl.className.match(/language-([\w+-]+)/);
       if (m) lang = m[1];
     }
+    // Sebagian situs tak menempelkan kelas `language-…` pada <code>, melainkan
+    // menulis nama bahasanya di BILAH JUDUL blok — TERUKUR di
+    // gemini.google.com: <div class="code-block-decoration"> berisi "Python".
+    // Tanpa ini pagar kodenya keluar polos (```) dan pewarnaan sintaks di
+    // terminal hilang, padahal informasinya ada di halaman.
+    if (!lang) {
+      let wrap = null;
+      try { wrap = pre.closest('code-block, [class*="code-block"]'); } catch (e) {}
+      const dec = wrap && wrap.querySelector(
+        '[class*="code-block-decoration"], [class*="code-header"], ' +
+        '[class*="code-lang"]');
+      const kata = dec ? ((dec.innerText || "").trim().split(/\s+/)[0] || "") : "";
+      // Bilah judul memuat tombol juga (Copy/Salin/Download) — kata seperti itu
+      // BUKAN nama bahasa, dan menuliskannya sebagai bahasa justru menyesatkan.
+      const BUKAN = /^(copy|salin|download|unduh|edit|run|jalankan|code|kode)$/i;
+      if (/^[A-Za-z][\w+#.-]{0,14}$/.test(kata) && !BUKAN.test(kata)) {
+        lang = kata.toLowerCase();
+      }
+    }
     // Buang gutter nomor baris; tanpa ini isi blok kode tampil sebagai
     // deretan angka saja.
     const GUTTER = /line-?number|linenos|gutter|code-?line-?no/i;
@@ -596,6 +615,22 @@ class WebConnector:
     #
     # Bisa dipaksa untuk SEMUA situs lewat CONNECTOR_SHOW=true di .env.
     show_window: bool = False
+
+    # Ukuran layout MINIMAL yang dijamin untuk situs ini (piksel CSS). 0 = tak
+    # dipedulikan, perilakunya persis seperti sebelum ini ada.
+    #
+    # Kenapa perlu: context diluncurkan dengan no_viewport=True, jadi layout
+    # situs mengikuti UKURAN JENDELA Chrome yang sesungguhnya — yang bergantung
+    # pada resolusi layar pengguna dan apakah jendelanya termaksimalkan. Situs
+    # chat modern responsif, dan pada lebar kecil sebagian kontrol tidak sekadar
+    # bergeser melainkan HILANG dari DOM. TERUKUR di gemini.google.com: pemilih
+    # model masih ada pada 600 px dan lenyap pada 430 px, sehingga /effort
+    # mustahil bekerja di layar sempit tanpa ada yang salah pada kodenya.
+    #
+    # Yang dipasang bukan viewport Playwright (tak berlaku pada no_viewport)
+    # melainkan penggantian metrik lewat CDP — lihat _normalize_layout.
+    min_layout_width: int = 0
+    min_layout_height: int = 0
 
     # Batas waktu (detik).
     login_timeout: float = 300.0     # tunggu pengguna menyelesaikan login
@@ -1696,6 +1731,9 @@ class WebConnector:
         # Opt-in: headless sejati (mungkin diblok anti-bot di sebagian situs).
         if config.CONNECTOR_HEADLESS:
             page = h.page_for(self.service, headless=True)
+            # Di headless jendelanya tak pernah dimaksimalkan (bawaan 800x600),
+            # jadi justru di sinilah layout sempit paling mungkin terjadi.
+            self._normalize_layout(page)
             if self._chat_ready(page, 1500, check_cancel):
                 return page, False
             self._goto(page)
@@ -1733,6 +1771,7 @@ class WebConnector:
                         and self._click_new_chat(page, check_cancel)):
                     self._goto(page)      # buka chat baru (chat_url)
                     self._chat_ready(page, self._NAV_READY_MS, check_cancel)
+            self._normalize_layout(page)
             self._background(page)
             return page, False
 
@@ -1748,6 +1787,9 @@ class WebConnector:
             self._wait_login(page, check_cancel)
             status("login berhasil ✓ — browser lanjut di latar, kerja di terminal")
             did_login = True
+        # Sesudah login, BUKAN sebelumnya: selama pengguna sign-in, jendelanya
+        # tampil dan biarlah ia memakai ukuran aslinya yang natural.
+        self._normalize_layout(page)
         self._background(page)
         return page, did_login
 
@@ -1884,6 +1926,44 @@ class WebConnector:
                 page.wait_for_timeout(250)
             except Exception:  # noqa: BLE001
                 return False
+
+    def _normalize_layout(self, page: Any) -> None:
+        """Pastikan situs dirender pada layout minimal yang didukung connector.
+
+        Hanya bekerja bila jendelanya memang lebih sempit dari min_layout_*;
+        pada jendela normal (apalagi termaksimalkan) tak ada yang diubah sama
+        sekali, sehingga ukuran asli tetap dipakai seperti sebelumnya.
+
+        Penggantian metrik CDP dipilih karena `viewport` Playwright tidak
+        berlaku pada context ber-no_viewport. Efeknya halaman dirender pada
+        ukuran yang diminta lalu diskalakan ke dalam jendela — koordinat CSS
+        tetap konsisten, jadi klik & hit-test tetap benar.
+
+        Tak perlu penjaga "sudah pernah dipasang": sesudah berhasil,
+        window.innerWidth ikut melaporkan ukuran baru sehingga pemanggilan
+        berikutnya berhenti di pemeriksaan pertama. Sengaja senyap — ini
+        penyesuaian kenyamanan, bukan syarat kerja."""
+        if not (self.min_layout_width or self.min_layout_height):
+            return
+        try:
+            w = int(page.evaluate("() => window.innerWidth") or 0)
+            h = int(page.evaluate("() => window.innerHeight") or 0)
+        except Exception:  # noqa: BLE001 - halaman belum siap; coba lagi nanti
+            return
+        if w >= self.min_layout_width and h >= self.min_layout_height:
+            return
+        try:
+            cdp = page.context.new_cdp_session(page)
+            cdp.send("Emulation.setDeviceMetricsOverride", {
+                "width": max(w, self.min_layout_width),
+                "height": max(h, self.min_layout_height),
+                "deviceScaleFactor": 1,
+                # WAJIB False: mode "mobile" memicu layout ponsel situs, persis
+                # keadaan yang justru ingin dihindari di sini.
+                "mobile": False,
+            })
+        except Exception:  # noqa: BLE001
+            pass
 
     def _tampilkan_saja(self) -> bool:
         """Jendela situs ini sengaja DIBIARKAN TERLIHAT?"""

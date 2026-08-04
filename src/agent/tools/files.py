@@ -10,8 +10,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .. import config, workspace
-from .base import tool
+from .. import config, permissions, workspace
+from .base import tool, tool_aktif
 from .checkpoint import snapshot as _snapshot
 
 ROOT = config.PROJECT_ROOT
@@ -161,11 +161,19 @@ def _tolak_penimpaan_merusak(target: Path, baru: str) -> str | None:
 
 
 def _safe_path(path: str) -> Path:
-    """Resolusikan `path` & pastikan berada di dalam salah satu root yang diizinkan.
+    """Resolusikan `path` & pastikan boleh diakses.
 
     Root yang diizinkan = root project + semua folder yang ditambahkan lewat
     add-dir. Path relatif diresolusi terhadap root project; path ABSOLUT dipakai
     apa adanya (untuk mengakses folder konteks). Mencegah path traversal keluar.
+
+    Path di LUAR itu tidak langsung ditolak lagi: pengguna DITANYA lebih dulu
+    (lihat permissions.py), dan jawabannya diingat per folder. Dijalankan
+    dengan `--skip-permissions`, seluruh pemeriksaan ini dilewati.
+
+    Ini satu-satunya gerbang path untuk SEMUA tool berkas — files.py, extras.py,
+    dan media.py semuanya lewat sini — jadi izinnya cukup ditegakkan di satu
+    tempat.
     """
     p = Path(path).expanduser()
     target = p.resolve() if p.is_absolute() else (ROOT / p).resolve()
@@ -173,10 +181,9 @@ def _safe_path(path: str) -> Path:
         r = root.resolve()
         if target == r or r in target.parents:
             return target
-    raise ValueError(
-        f"Akses ditolak: '{path}' di luar folder yang diizinkan "
-        f"(root project + folder add-dir). Untuk folder konteks, pakai path absolut."
-    )
+    if permissions.minta_izin(target, tool_aktif()):
+        return target
+    raise ValueError(permissions.alasan_ditolak(path))
 
 
 def _display(target: Path) -> str:
@@ -189,7 +196,7 @@ def _display(target: Path) -> str:
     return str(target)
 
 
-_READ_CAP = 20000   # batas karakter per pembacaan (hemat konteks percakapan)
+_READ_CAP = 40000   # batas karakter per pembacaan (hemat konteks percakapan)
 
 
 @tool

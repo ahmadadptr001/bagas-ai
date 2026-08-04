@@ -1,6 +1,5 @@
 openai>=1.30.0
 rich>=13.0.0
-InquirerPy>=0.3.4
 pyfiglet>=1.0.0
 ddgs>=6.0.0
 python-telegram-bot>=21.0

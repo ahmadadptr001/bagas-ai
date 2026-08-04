@@ -53,6 +53,15 @@ Penggunaan:
   bagas-ai version      Tampilkan versi
   bagas-ai help         Tampilkan bantuan ini
 
+Izin akses:
+  bagas-ai hanya menyentuh berkas di dalam folder proyek + folder konteks
+  (`add-dir`). Kalau ia perlu berkas DI LUAR itu, kamu ditanya dulu — sekali
+  per folder, dengan pilihan: sekali saja / selama sesi / permanen / tolak.
+
+  --skip-permissions    Jangan tanya apa pun; semua folder boleh disentuh.
+                        Berlaku juga untuk mode telegram & api. Hati-hati:
+                        satu langkah keliru bisa menulis di mana saja.
+
 Catatan: `pip uninstall bagasai` HANYA menghapus paketnya — data di
 {config.CONFIG_HOME} tetap tertinggal (pip tak punya hook uninstall).
 Pakai `bagas-ai uninstall` bila ingin keduanya hilang sekaligus.
@@ -312,7 +321,7 @@ def _preload_with_bar() -> None:
         ("live view", "rich.live"),
         ("markdown", "rich.markdown"),
         ("input terminal", "prompt_toolkit"),
-        ("menu interaktif", "InquirerPy"),
+        ("menu interaktif", f"{pkg}.ui.menu"),
         ("logo", "pyfiglet"),
         ("pencarian web", "ddgs"),
         ("inti agent", f"{pkg}.core"),
@@ -347,6 +356,15 @@ def main() -> None:
     positional = [a for a in args if not a.startswith("-")]
     mode = positional[0].lower() if positional else "chat"
     resume = "--resume" in flags or "-r" in flags
+
+    # Lewati konfirmasi akses folder LUAR (lihat permissions.py). Dipasang
+    # SEBELUM perintah apa pun dijalankan supaya berlaku juga untuk mode
+    # telegram & api. Ejaan panjang ala Claude Code ikut diterima agar
+    # kebiasaan dari sana tak menghasilkan galat "perintah tak dikenal".
+    if flags & {"--skip-permissions", "--dangerously-skip-permissions"}:
+        from . import permissions
+
+        permissions.set_skip(True)
 
     if mode in ("help",) or flags & {"-h", "--help"}:
         print(HELP)
