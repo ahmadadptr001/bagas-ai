@@ -21,3 +21,8 @@ env/
 # pip ikut membungkusnya dan update tak pernah benar-benar terpasang.
 build/
 dist/
+
+# Keluaran tool yang memang dibuat SAAT DIPAKAI, bukan bagian dari kode:
+# web_preview & take_screenshot menulis PNG ke sini tiap kali dipanggil.
+# Sempat ikut ter-commit dari uji end-to-end — repo bukan tempat menyimpannya.
+screenshots/
