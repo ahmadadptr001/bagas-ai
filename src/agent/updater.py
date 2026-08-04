@@ -79,15 +79,55 @@ def find_repo() -> Path | None:
     return None
 
 
+def _bukti_editable() -> bool:
+    """True bila ADA jejak instalasi editable bagasai di site-packages.
+
+    Jejaknya: `__editable__.bagasai-*.pth` (pip modern) atau `bagasai.egg-link`
+    (setuptools lama)."""
+    calon: list[Path] = []
+    for f in (site.getsitepackages, site.getusersitepackages):
+        try:
+            hasil = f()
+        except Exception:  # noqa: BLE001
+            continue
+        calon.extend(Path(p) for p in
+                     ([hasil] if isinstance(hasil, str) else hasil))
+    pkg = _pkg_path()
+    if pkg:
+        calon.append(pkg.parent.parent)
+    for d in calon:
+        try:
+            if not d.is_dir():
+                continue
+            if any(d.glob("__editable__*bagasai*")) or (d / "bagasai.egg-link").exists():
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _is_editable(repo: Path) -> bool:
-    """True bila paket terpasang mode editable (agent.__file__ ada di repo/src)."""
+    """True bila paket terpasang BENAR-BENAR mode editable.
+
+    Dua syarat, dan yang kedua tidak boleh dihilangkan: kode aktif memang berada
+    di repo/src, DAN ada jejak instalasi editable yang sungguhan.
+
+    Kenapa syarat kedua perlu — TERAMATI, bukan hipotetis: menjalankan updater
+    dari checkout sumber (mis. `python -m agent update` dengan src/ di sys.path)
+    membuat agent.__file__ menunjuk ke repo, sehingga syarat pertama saja sudah
+    terpenuhi. Dulu itu cukup untuk memasang dengan `pip install -e`, dan
+    instalasi SALINAN milik pengguna diam-diam berubah jadi editable yang
+    menunjuk ke working tree — termasuk suntingan yang belum di-commit. Update
+    tak boleh mengubah CARA paket terpasang; ia cuma boleh memperbarui isinya.
+    """
     pkg = _pkg_path()
     if not pkg:
         return False
     try:
-        return str((repo / "src").resolve()) in str(pkg)
-    except Exception:
+        di_repo = str((repo / "src").resolve()) in str(pkg)
+    except Exception:  # noqa: BLE001
         return False
+    return di_repo and _bukti_editable()
 
 
 def _is_user_install() -> bool:
