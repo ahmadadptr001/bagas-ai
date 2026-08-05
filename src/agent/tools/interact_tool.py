@@ -11,11 +11,21 @@ from .base import tool
 
 @tool
 def ask_user(question: str, options: list[str], multiple: bool = False) -> str:
-    """Tanyakan klarifikasi ke pengguna dengan menu pilihan interaktif saat instruksi ambigu atau kurang detail, DARIPADA menebak. Kembalikan pilihan pengguna.
+    """Tanyakan klarifikasi ke pengguna lewat menu pilihan interaktif saat instruksi ambigu atau ada beberapa pendekatan yang sama-sama masuk akal, DARIPADA menebak. Kembalikan jawaban pengguna. Pengguna SELALU bisa mengetik jawabannya sendiri di menu itu, jadi opsimu tak perlu mencakup segala kemungkinan.
 
-    question: pertanyaan yang jelas.
-    options: daftar 2-6 pilihan.
-    multiple: set true bila pengguna boleh memilih lebih dari satu.
+    question: pertanyaan yang jelas & spesifik.
+    options: 2-6 pilihan konkret yang bisa dibandingkan. Sebutkan
+        konsekuensinya dalam beberapa kata, mis. "Halaman sendiri
+        /karya/[id] (URL bisa dibagikan)".
+    multiple: bentuk menunya, dan ini HARUS dipilih sadar — salah pilih
+        membuat pengguna terjebak.
+        false (bawaan) = SATU jawaban. Untuk pilihan yang saling MENIADAKAN:
+            "modal ATAU halaman sendiri", "hapus ATAU biarkan", "mana yang
+            dikerjakan lebih dulu".
+        true = BOLEH BANYAK. Untuk pilihan yang bisa berdampingan: "fitur mana
+            saja yang dipasang", "berkas mana saja yang diubah", "bagian mana
+            saja yang perlu diperbaiki".
+        Uji cepatnya: kalau memilih dua sekaligus MASUK AKAL, pakai true.
     """
     if not options:
         return "[error] ask_user butuh minimal satu opsi."

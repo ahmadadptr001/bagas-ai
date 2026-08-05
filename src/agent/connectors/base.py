@@ -530,6 +530,10 @@ class WebConnector:
     #
     # Kosong = connector tak berpendapat, perilakunya sama seperti sebelumnya.
     logged_in_selector: str = ""
+    # Tombol penutup banner/dialog yang bisa MENGHALANGI komposer
+    # (persetujuan cookie, tur fitur, promo). Kosong = situs ini tak punya,
+    # dan pemeriksaannya dilewati sepenuhnya. Lihat _tutup_penghalang.
+    dismiss_selectors: tuple[str, ...] = ()
     # Selector penanda "sedang mengetik/streaming" (bila situs punya).
     streaming_selector: str = ""
     # Pola teks pemberitahuan LIMIT pemakaian di situs. Sering baru MUNCUL
@@ -1275,6 +1279,36 @@ class WebConnector:
             "perlu dimuat ulang."
         )
 
+    def _tutup_penghalang(self, page: Any) -> int:
+        """Klik tombol penutup banner/dialog yang MENGHALANGI komposer.
+
+        Yang dimaksud: persetujuan cookie, tur fitur, promo — hal yang muncul
+        sekali lalu menutupi setengah halaman. Selama ia terbuka, kotak input
+        memang ADA di DOM tapi tak bisa difokuskan, dan kegagalannya muncul ke
+        pengguna sebagai "kotak input tak bisa difokuskan" — pesan yang benar
+        tapi menyesatkan, karena yang salah bukan kotak inputnya.
+
+        Dipanggil hanya SESUDAH fokus gagal, bukan sebelum tiap pesan: banner
+        begini muncul sekali seumur profil, jadi memeriksanya tiap kali cuma
+        menambah kerja pada jalur yang paling sering dilalui.
+
+        Return jumlah yang berhasil ditutup."""
+        n = 0
+        for sel in self.dismiss_selectors:
+            try:
+                loc = page.locator(sel)
+                if loc.count() == 0:
+                    continue
+                el = loc.first
+                if not el.is_visible():
+                    continue
+                self._click_element(el)
+                n += 1
+                page.wait_for_timeout(300)
+            except Exception:  # noqa: BLE001 - gagal menutup != gagal mengirim
+                continue
+        return n
+
     def _focus_input(self, inp: Any) -> None:
         """Fokuskan kotak input dan PASTIKAN benar-benar fokus.
 
@@ -1297,12 +1331,29 @@ class WebConnector:
                 return
             if percobaan == 0:
                 self._click_element(inp)
-        if not self._is_focused(inp):
-            raise BrowserError(
-                f"kotak input {self.label} tak bisa difokuskan — pesan tak akan "
-                "sampai. Coba kirim ulang; bila terus terjadi, buka jendela "
-                "browsernya (CONNECTOR_HEADLESS=false) untuk melihat keadaannya."
-            )
+        if self._is_focused(inp):
+            return
+        # Belum juga fokus. Penyebab yang paling sering DAN paling mudah
+        # dibereskan: ada banner yang menutupi komposer. Tutup lalu coba sekali
+        # lagi sebelum menyerah — jauh lebih baik daripada menyuruh pengguna
+        # membuka jendela browser untuk mengklik "OK" sendiri.
+        if self.dismiss_selectors:
+            try:
+                page = inp.page
+            except Exception:  # noqa: BLE001
+                page = None
+            if page is not None and self._tutup_penghalang(page):
+                try:
+                    inp.focus(timeout=4000)
+                except Exception:  # noqa: BLE001
+                    self._click_element(inp)
+                if self._is_focused(inp):
+                    return
+        raise BrowserError(
+            f"kotak input {self.label} tak bisa difokuskan — pesan tak akan "
+            "sampai. Coba kirim ulang; bila terus terjadi, buka jendela "
+            "browsernya (CONNECTOR_HEADLESS=false) untuk melihat keadaannya."
+        )
 
     @staticmethod
     def _is_focused(inp: Any) -> bool:

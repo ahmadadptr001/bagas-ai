@@ -49,6 +49,30 @@ class DolaConnector(WebConnector):
 
     show_window = False
 
+    # --- lebar minimum layout (DIUKUR di 9 lebar, 430-1600 px) ---
+    #
+    # Komposer Dola responsif dan tombolnya TIDAK sekadar bergeser — ia melipat
+    # diri ke tombol "More" lalu hilang dari DOM. Hasil pengukuran:
+    #
+    #     lebar   Create Image   Create Video   More
+    #      430        tidak          tidak       ada
+    #      600         ada           tidak       ada
+    #      900         ada           tidak       ada
+    #      990         ada            ada        ada
+    #     1280         ada            ada       tidak   <- semua muat
+    #
+    # Jadi di jendela sempit "Create Video" memang LENYAP, bukan salah selektor
+    # — persis dugaan pengguna. 1280 dipilih, bukan 990: di 990 tombolnya ada
+    # tapi masih berbagi tempat dengan "More", dan barisnya baru benar-benar
+    # utuh pada 1280.
+    #
+    # CATATAN yang mencegah salah kaprah: lebar TIDAK memengaruhi kotak ketik
+    # maupun tombol kirim — keduanya terlihat di SEMUA lebar yang diukur,
+    # termasuk 430 px. Jadi galat "kotak input tak bisa difokuskan" bukan soal
+    # ukuran jendela; penyebabnya banner yang menutupi (lihat dismiss_selectors).
+    min_layout_width = 1280
+    min_layout_height = 800
+
     # --- input (TERVERIFIKASI sebagai tamu) ---
     # Halaman memakai Semi Design (design system ByteDance): kotak ketiknya
     # <textarea class="semi-input-textarea semi-input-textarea-autosize">,
@@ -79,6 +103,29 @@ class DolaConnector(WebConnector):
         '[class*="sidebar_nav_item"]:has-text("New Chat")',
         'div[class*="cursor-pointer"]:has-text("New Chat")',
         '[class*="new-chat"]',
+    )
+
+    # --- banner yang menghalangi komposer (TERVERIFIKASI dari DOM) ---
+    #
+    # Gejalanya di terminal: "kotak input Dola (web) tak bisa difokuskan —
+    # pesan tak akan sampai". Pesannya benar tapi menyesatkan: kotak inputnya
+    # baik-baik saja, yang salah adalah kartu persetujuan cookie yang menutupi
+    # halaman ("Dola uses cookies … Learn more about Cookies Policy" + OK).
+    #
+    # Sensus DOM menunjukkan tombolnya bersarang di
+    #   div.cookie-banner-GvGlIh > div.cookie-footer-wkijyk > button "OK"
+    # Akhiran hash-nya berganti tiap build, jadi yang dipakai awalannya saja.
+    # Kandidat kedua & ketiga menutup ragam kata yang lazim dipakai situs lain
+    # bila banner-nya suatu saat diganti.
+    # URUTANNYA PENTING: sebagai tamu ada DUA lapis penghalang, dan modal
+    # login duduk DI ATAS banner cookie — TERUKUR, klik ke tombol OK ditolak
+    # dengan "semi-modal-wrap intercepts pointer events". Yang paling atas
+    # harus ditutup lebih dulu.
+    dismiss_selectors = (
+        '[class*="semi-modal"] button[aria-label="close"]',
+        '[class*="cookie-banner"] button',
+        '[class*="cookie-footer"] button',
+        'button:has-text("Accept all")',
     )
 
     # --- deteksi belum-login (TERVERIFIKASI sebagai tamu) ---

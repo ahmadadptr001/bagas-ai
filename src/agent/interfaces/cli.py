@@ -517,6 +517,67 @@ def _lebar_kotak() -> int:
 _KOSONG = Text("")
 
 
+# --- menu pilihan untuk ask_user -------------------------------------------
+#
+# Dua hal yang dulu tak ada dan membuat menunya terasa buntu:
+#
+#   1. TAK ADA JALAN KELUAR. Pilihan yang disodorkan AI tak selalu memuat yang
+#      sebenarnya diinginkan pengguna, dan satu-satunya cara menyimpang adalah
+#      Esc — yang terbaca sebagai "dibatalkan", bukan sebagai jawaban. Kini tiap
+#      menu selalu punya entri isian bebas.
+#   2. PADA MODE BANYAK-PILIHAN, tak jelas kapan jawabannya terkirim. Enter
+#      memang mengirim, tapi tak ada apa pun di layar yang mengatakannya. Kini
+#      footernya menyebut "⏎ KIRIM JAWABAN" dengan tegas.
+_OPSI_TULIS = "✎ Tulis jawaban sendiri…"
+
+
+def _tanya_pilihan(question: str, options: list[str], multiple: bool) -> str:
+    """Tampilkan menu pilihan dari ask_user & kembalikan jawabannya sebagai teks.
+
+    `multiple` menentukan bentuk menunya: satu jawaban (pilih lalu Enter) atau
+    banyak jawaban (spasi menandai, Enter mengirim). Keduanya sama-sama diberi
+    entri isian bebas di urutan terakhir."""
+    pilihan = list(options) + [_OPSI_TULIS]
+
+    def _tulis_sendiri(judul: str) -> str:
+        jawab = (inquirer.text(message=judul).execute() or "").strip()
+        return jawab
+
+    if not multiple:
+        dipilih = inquirer.select(message=question, choices=pilihan).execute()
+        if dipilih != _OPSI_TULIS:
+            return dipilih
+        # Isian kosong bukan jawaban — kembalikan ke menunya daripada
+        # menyerahkan string kosong yang tak berarti apa-apa ke AI.
+        while True:
+            jawab = _tulis_sendiri("Jawabanmu")
+            if jawab:
+                return jawab
+            dipilih = inquirer.select(
+                message=question + "  (isian kosong — pilih lagi)",
+                choices=pilihan).execute()
+            if dipilih != _OPSI_TULIS:
+                return dipilih
+
+    hasil = inquirer.checkbox(
+        message=question, choices=pilihan,
+        instruction="spasi tandai  ·  a semua  ·  ⏎ KIRIM JAWABAN  ·  esc batal",
+    ).execute()
+    hasil = list(hasil or [])
+    if _OPSI_TULIS in hasil:
+        hasil.remove(_OPSI_TULIS)
+        tambahan = _tulis_sendiri("Jawaban tambahanmu")
+        if tambahan:
+            hasil.append(tambahan)
+    if not hasil:
+        return "(tidak memilih apa pun)"
+    # Dinomori supaya AI tak salah membaca jawaban majemuk sebagai satu kalimat
+    # panjang — terutama bila salah satunya isian bebas yang memuat koma.
+    if len(hasil) == 1:
+        return hasil[0]
+    return "; ".join(f"({i}) {j}" for i, j in enumerate(hasil, 1))
+
+
 def _kotak_chat(isi: str = "", pos: int | None = None) -> list:
     """Tiga baris kotak chat selebar terminal: tepi atas, baris isi, tepi bawah.
 
@@ -1644,14 +1705,7 @@ def main(resume: bool = False) -> None:
         if live:
             live.stop()
         try:
-            if multiple:
-                res = inquirer.checkbox(
-                    message=question, choices=options,
-                    instruction="spasi pilih, enter konfirmasi").execute()
-                answer = ", ".join(res) if res else "(tidak memilih)"
-            else:
-                answer = inquirer.select(
-                    message=question, choices=options).execute()
+            answer = _tanya_pilihan(question, list(options), bool(multiple))
         except (KeyboardInterrupt, EOFError):
             answer = "(dibatalkan)"
         finally:
