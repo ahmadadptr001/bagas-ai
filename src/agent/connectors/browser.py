@@ -56,6 +56,11 @@ class _PlaywrightNoiseFilter(logging.Filter):
 
 logging.getLogger("asyncio").addFilter(_PlaywrightNoiseFilter())
 
+# Logger modul. Dipakai untuk peristiwa yang perlu bisa ditelusuri belakangan
+# tapi TIDAK layak mengganggu layar pengguna — mis. "terminal ini menumpang
+# Chrome milik terminal lain", yang normal terjadi dan bukan masalah.
+log = logging.getLogger(__name__)
+
 
 def profile_dir(service: str) -> "Path":
     """Folder profil login persisten milik sebuah service."""
@@ -284,6 +289,13 @@ def forget_profile(service: str) -> bool:
     return not prof.exists()
 
 
+# Service yang browsernya BUKAN milik proses ini — kita cuma menumpang di
+# Chrome yang diluncurkan terminal lain. Disimpan di tingkat modul (bukan di
+# dalam hub) karena penjaganya dibutuhkan justru saat hub sudah dibubarkan:
+# jalur penutupan darurat di shutdown() berjalan sesudah itu.
+_MENUMPANG: set[str] = set()
+
+
 def _kill_profile_browsers(service: str | None = None) -> None:
     """Bunuh proses Chrome/Chromium yang memakai folder profil connector.
 
@@ -291,8 +303,26 @@ def _kill_profile_browsers(service: str | None = None) -> None:
     sedang dipakai proses lain), sehingga peluncuran ulang IKUT MENGGANTUNG —
     inilah 'pembukaan sesi browser nyangkut' setelah Ctrl+C/crash. Dengan
     `service`, hanya Chrome untuk profil itu yang dibunuh (sesi lain aman);
-    tanpa `service`, seluruh profil connector. Best-effort; hanya Windows."""
+    tanpa `service`, seluruh profil connector. Best-effort; hanya Windows.
+
+    TIDAK PERNAH membunuh browser yang cuma kita TUMPANGI. Jendelanya milik
+    terminal lain yang mungkin sedang menunggu jawaban; membunuhnya berarti
+    menghancurkan sesi orang lain demi membereskan sesi kita sendiri. Penjaga
+    ini penting justru di jalur penutupan darurat: kalau penutupan rapi gagal,
+    dulu proses ini menyapu SEMUA Chrome profil connector — termasuk yang bukan
+    miliknya."""
     if sys.platform != "win32":
+        return
+    if service and service in _MENUMPANG:
+        log.info("lewati pembunuhan Chrome %s — jendelanya milik terminal lain",
+                 service)
+        return
+    if service is None and _MENUMPANG:
+        # Penyapuan menyeluruh tak bisa memilah per profil, jadi ia dibatalkan
+        # seluruhnya bila ada satu saja yang ditumpangi. Kerugiannya cuma
+        # kunci profil yang telat lepas; kerugian sebaliknya jauh lebih besar.
+        log.info("lewati pembunuhan menyeluruh — masih menumpang: %s",
+                 ", ".join(sorted(_MENUMPANG)))
         return
     try:
         target = _PROFILE_ROOT / service if service else _PROFILE_ROOT
@@ -396,6 +426,11 @@ class BrowserHub:
         self._pw: Any = None
         # service -> (context, page)
         self._ctx: dict[str, tuple[Any, Any]] = {}
+        # Service yang context-nya BUKAN milik kita — kita cuma menumpang di
+        # Chrome yang sudah diluncurkan terminal LAIN (lihat _sambung_cdp).
+        # Bedanya penting saat menutup: yang menumpang hanya boleh menutup TAB
+        # miliknya sendiri, tak boleh menutup jendela milik terminal sebelah.
+        self._dipinjam: set[str] = set()
         # True bila sebuah job MACET melewati timeout -> hub ini tak bisa
         # dipercaya lagi (thread-nya mungkin menggantung); hub() akan
         # menggantinya dengan hub baru + membunuh Chrome profil yang tersisa.
@@ -568,22 +603,44 @@ class BrowserHub:
             # page/context mati (mis. jendela ditutup / crash). Buang, lalu
             # PASTIKAN tak ada Chrome sisa yang masih mengunci profil ini —
             # kalau ada, launch berikutnya akan menggantung.
+            #
+            # KECUALI kalau kita cuma menumpang: yang mati berarti TAB kita,
+            # sementara jendelanya milik terminal lain yang mungkin sedang
+            # bekerja. Membunuhnya di sini sama saja merusak sesi tetangga.
+            menumpang = service in self._dipinjam
             self.drop(service)
-            _kill_profile_browsers(service)
+            if not menumpang:
+                _kill_profile_browsers(service)
 
         prof = _PROFILE_ROOT / service
         prof.mkdir(parents=True, exist_ok=True)
-        # Sisa Chrome dari proses sebelumnya masih MENGUNCI profil -> peluncuran
-        # pertama gagal lalu diulang (lambat + memunculkan galat Playwright yang
-        # membingungkan). Adanya file kunci = pertanda; bereskan lebih dulu.
+        # Profil sedang DIPEGANG proses lain. Dua kemungkinan yang dulu tak
+        # dibedakan sama sekali:
+        #   a. terminal LAIN sedang memakai model ini — harus ditumpangi;
+        #   b. bangkai Chrome sesi sebelumnya — harus dibereskan.
+        # Cara membedakannya: coba sambung dulu. Yang hidup akan menjawab.
         if any((prof / n).exists()
                for n in ("lockfile", "SingletonLock", "SingletonSocket")):
+            ctx = self._sambung_cdp(service)
+            if ctx is not None:
+                self._dipinjam.add(service)
+                _MENUMPANG.add(service)
+                # TAB BARU, bukan tab yang sudah ada: tab pertama milik
+                # terminal sebelah dan mungkin sedang menunggu jawaban.
+                page = ctx.new_page()
+                self._ctx[service] = (ctx, page)
+                return page
             _kill_profile_browsers(service)
         # Bersihkan penanda crash sisa sesi sebelumnya sebelum meluncurkan,
         # supaya Chrome tak menampilkan tawaran "Restore pages?".
         _mark_profile_clean(service)
         ctx = self._launch(str(prof), headless, service)
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        if service in self._dipinjam:
+            # _launch gagal meluncur lalu berhasil menumpang (lomba dua terminal
+            # yang start berbarengan) -> tetap wajib tab sendiri.
+            page = ctx.new_page()
+        else:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
         self._ctx[service] = (ctx, page)
         return page
 
@@ -624,12 +681,33 @@ class BrowserHub:
         # menipu set_windows_visible pada peluncuran berikutnya.
         _HIDDEN_WINDOWS.pop(service, None)
         entry = self._ctx.pop(service, None)
-        if entry is not None:
-            ctx, _ = entry
+        if entry is None:
+            return
+        ctx, page = entry
+        if service in self._dipinjam:
+            # MENUMPANG: jendelanya milik terminal lain yang mungkin sedang
+            # bekerja. Yang boleh kita tutup cuma TAB kita sendiri; menutup
+            # context berarti menutup seluruh tab tetangga sekaligus.
+            self._dipinjam.discard(service)
+            _MENUMPANG.discard(service)
             try:
-                ctx.close()
+                page.close()
             except Exception:  # noqa: BLE001
                 pass
+            # Putuskan sambungan CDP-nya saja. Pada browser yang DISAMBUNGI
+            # (bukan diluncurkan), close() memutus koneksi tanpa mematikan
+            # prosesnya — itulah yang kita mau.
+            try:
+                br = ctx.browser
+                if br is not None:
+                    br.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def close_all(self) -> None:
         """Tutup RAPI semua context (HARUS di thread hub). Dipakai saat keluar
@@ -647,6 +725,72 @@ class BrowserHub:
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    # --- berbagi satu Chrome antar-terminal ---------------------------------
+    #
+    # Masalah yang diperbaiki: menjalankan bagas-ai di terminal KEDUA dengan
+    # model yang sama, sementara terminal pertama masih memakainya. Satu folder
+    # profil Chrome hanya boleh dipegang satu proses, jadi peluncuran kedua
+    # gagal — dan penanganan lamanya MEMBUNUH Chrome milik terminal pertama
+    # lalu meluncurkan ulang. Terminal pertama kehilangan sesi & percakapan
+    # yang sedang berjalan, tanpa penjelasan apa pun di layarnya.
+    #
+    # Sekarang: yang datang belakangan MENUMPANG. Peluncur pertama membuka
+    # porta remote-debugging dan mencatat nomornya di dalam folder profil;
+    # proses berikutnya membaca catatan itu, menyambung lewat CDP, lalu membuka
+    # TAB BARU di jendela yang sudah ada. Tak ada yang dibunuh, tak ada profil
+    # yang diperebutkan.
+    #
+    # Portanya DIPILIH ACAK (bukan angka tetap seperti 9222) supaya tak pernah
+    # bentrok dengan Chrome lain milik pengguna yang kebetulan juga membuka
+    # porta debug — dan karena nomornya dicatat di dalam folder profil, tak ada
+    # yang perlu ditebak.
+    @staticmethod
+    def _berkas_porta(service: str) -> Path:
+        return _PROFILE_ROOT / service / ".bagasai-cdp-port"
+
+    @staticmethod
+    def _porta_bebas() -> int:
+        """Nomor porta yang sedang bebas di localhost."""
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return int(s.getsockname()[1])
+
+    def _sambung_cdp(self, service: str) -> Any:
+        """Sambung ke Chrome yang SUDAH jalan untuk service ini, atau None.
+
+        None berarti "tak ada yang bisa ditumpangi" — entah memang belum ada
+        yang jalan, entah catatannya basi karena prosesnya sudah mati."""
+        f = self._berkas_porta(service)
+        try:
+            porta = int(f.read_text(encoding="utf-8").strip())
+        except Exception:  # noqa: BLE001 - belum ada / rusak: anggap tak ada
+            return None
+        try:
+            # Timeout pendek: kalau tak ada yang mendengarkan, jangan menahan
+            # peluncuran normal berlama-lama.
+            browser = self._pw.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{porta}", timeout=4000)
+        except Exception:  # noqa: BLE001 - catatan basi / porta sudah mati
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            return None
+        try:
+            ctx = browser.contexts[0] if browser.contexts else None
+        except Exception:  # noqa: BLE001
+            ctx = None
+        if ctx is None:
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        log.info("menumpang Chrome yang sudah jalan untuk %s (porta %s)",
+                 service, porta)
+        return ctx
 
     def _launch(self, user_data_dir: str, headless: bool,
                service: str | None = None) -> Any:
@@ -678,6 +822,12 @@ class BrowserHub:
                 "--disable-renderer-backgrounding",
             ],
         )
+        # Porta remote-debugging: inilah yang membuat terminal BERIKUTNYA bisa
+        # menumpang alih-alih membunuh jendela ini. Diumumkan selalu, bukan
+        # hanya saat dibutuhkan — pemakainya datang belakangan dan tak bisa
+        # meminta jendela yang sudah terlanjur jalan untuk membukanya.
+        porta = self._porta_bebas()
+        opts["args"].append(f"--remote-debugging-port={porta}")
         channel = config.CONNECTOR_BROWSER_CHANNEL
 
         def _try() -> Any:
@@ -690,13 +840,33 @@ class BrowserHub:
                     pass
             return self._pw.chromium.launch_persistent_context(**opts)
 
+        def _catat_porta(ctx: Any) -> Any:
+            if service:
+                try:
+                    f = self._berkas_porta(service)
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_text(str(porta), encoding="utf-8")
+                except OSError:
+                    pass          # gagal mencatat = cuma kehilangan berbagi
+            return ctx
+
         try:
-            return _try()
-        except Exception:  # noqa: BLE001 - profil terkunci Chrome sisa?
+            return _catat_porta(_try())
+        except Exception:  # noqa: BLE001 - profil dipegang proses lain?
+            # SEBELUM membunuh apa pun: mungkin yang memegang profil ini adalah
+            # terminal LAIN yang sedang bekerja, bukan bangkai sesi lama. Coba
+            # tumpangi dulu. Dulu langkah ini tak ada, sehingga terminal kedua
+            # selalu mengeksekusi pembunuhan dan menghancurkan sesi tetangganya.
+            if service:
+                ctx = self._sambung_cdp(service)
+                if ctx is not None:
+                    self._dipinjam.add(service)
+                    _MENUMPANG.add(service)
+                    return ctx
             _kill_profile_browsers(service)
             import time as _t
             _t.sleep(1.0)  # beri OS waktu melepas kunci profil
-            return _try()
+            return _catat_porta(_try())
 
 
 _HUB: BrowserHub | None = None
