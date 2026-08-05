@@ -59,6 +59,14 @@ MODELS: dict[str, ModelSpec] = {
         connector="qwen",
         note="Via browser chat.qwen.ai — multibahasa & cepat",
     ),
+    "dola-web": ModelSpec(
+        id="web/dola",
+        label="Dola (web)",
+        connector="dola",
+        note=("Via browser dola.com (dulu Cici) — BISA BIKIN GAMBAR & VIDEO; "
+              "pilih ini untuk kerja visual, bukan untuk ngoding. Kuota "
+              "gratisnya terbatas, jadi pakai seperlunya"),
+    ),
 }
 
 _ORDER = list(MODELS.keys())
@@ -67,9 +75,16 @@ _ORDER = list(MODELS.keys())
 DEFAULT_ID = MODELS[_ORDER[0]].id
 
 
+# Nama LAMA yang masih melekat di ingatan pengguna. Diterima diam-diam supaya
+# mengetik nama yang dulu benar tak berujung "model tak dikenal" — kegagalan
+# yang menyesatkan, sebab situsnya sendiri masih mengalihkan cici.com ke Dola.
+_ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web"}
+
+
 def resolve(name: str) -> ModelSpec:
     """Cari ModelSpec dari alias, nomor (1..N), ID penuh, atau label."""
     key = name.strip().lower()
+    key = _ALIAS_LAMA.get(key, key)
 
     if key in MODELS:
         return MODELS[key]

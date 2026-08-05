@@ -62,6 +62,12 @@ _WEB_REMINDER = (
     "Bentuk 'sekarang saya akan …' dan rangkaian rencana beberapa langkah ke "
     "depan JANGAN dipakai: bloknya sudah ada di pesan yang sama, jadi kamu "
     "bukan akan mengerjakan — kamu sedang mengerjakan. "
+    "JANGAN memakai tool bawaanmu sendiri (Execute Python code, Run code, "
+    "Code Interpreter, sandbox Python, pencarian web bawaan, artifact, "
+    "canvas): semuanya berjalan di server layananmu dan TIDAK menyentuh "
+    "berkas di laptopku, jadi hasilnya fiksi dan tak ada yang berubah. "
+    "Untuk membaca berkas pakai read_file, untuk menjalankan Python di "
+    "laptopku pakai run_python — keduanya lewat [[TOOL]]. "
     "Untuk MENGUBAH file yang sudah ada: baca dulu (read_file) lalu keluarkan "
     "edit_file berisi HANYA potongan yang berubah (old_text/new_text) — jangan "
     "write_file seluruh file, dan jangan menulis file lewat run_python/"
@@ -1116,7 +1122,6 @@ class Agent:
         # Pesan PERTAMA sesi web memuat: protokol tool + konteks laptop/proyek
         # (keduanya SEKALI saja — AI web mengingatnya sepanjang chat).
         include_ctx = not self._web_ctx_sent
-        first_msg = user_text
         if include_ctx:
             preamble = _web_tool_protocol()
             try:
@@ -1200,13 +1205,20 @@ class Agent:
                 "kupastikan>` bila memang ada yang janggal di konteks di atas).\n"
                 "Permintaanku yang sebenarnya kukirim di pesan BERIKUTNYA."
             )
-            first_msg = user_text
-        else:
-            # Percakapan panjang membuat AI web LUPA protokol dan kembali ke mode
-            # mengobrol: menampilkan kode di jawaban alih-alih menuliskannya.
-            # Pengingat singkat tiap giliran jauh lebih murah daripada mengirim
-            # ulang seluruh protokol.
-            first_msg = user_text + "\n\n" + _WEB_REMINDER
+        # Pengingat DITEMPELKAN ke pesan tugas, TERMASUK yang pertama sesi.
+        #
+        # Dulu cabang "pesan pertama" mengirim permintaan POLOS tanpa pengingat,
+        # dengan anggapan protokol yang baru saja dibaca masih segar. TERBUKTI
+        # keliru justru di situ: Kimi membalas pesan pertama dengan memakai tool
+        # BAWAANNYA ("Execute Python code") alih-alih blok [[TOOL]] — sandbox
+        # yang tak punya satu pun berkas pengguna, jadi hasilnya fiksi.
+        #
+        # Masuk akal kalau dipikir ulang: pesan pertama adalah satu-satunya yang
+        # datang tepat setelah dinding teks protokol, dan di situ perhatian
+        # model paling terbagi. Pengingat pendek yang menempel pada tugasnya
+        # jauh lebih dekat ke titik keputusan daripada aturan nomor sekian yang
+        # terkubur di atas.
+        first_msg = user_text + "\n\n" + _WEB_REMINDER
 
         conn = connectors.get_connector(self.model_spec.connector)
         prompt_chars = 0
