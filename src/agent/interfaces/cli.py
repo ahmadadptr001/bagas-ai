@@ -192,7 +192,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("model", "pilih model + saran"),
     ("effort", "mode berpikir"),
     ("mode", "mode kerja situs: buat gambar/video, dll"),
-    ("tim", "23 spesialis yang meninjau pekerjaan secara pasif"),
+    ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("add-dir", "tambah folder konteks"),
     ("dirs", "folder konteks aktif"),
     ("rm-dir", "hapus folder konteks"),
@@ -2763,7 +2763,7 @@ def main(resume: bool = False) -> None:
             console.print(f"  [#9fc93c]✓ {_esc(str(result['ok']))}[/]\n")
 
     def show_tim(arg: str = "") -> None:
-        """/tim — lihat 23 spesialis yang bekerja pasif; /tim off|on mematikan.
+        """/tim — lihat 24 spesialis yang bekerja pasif; /tim off|on mematikan.
 
         Fitur pasif WAJIB punya sakelar yang terlihat: kalau ia mengubah hasil
         tanpa bisa dilihat maupun dimatikan, setiap keanehan jadi mustahil

@@ -1,4 +1,4 @@
-"""Tim 23 spesialis yang bekerja PASIF di belakang satu model.
+"""Tim 24 spesialis yang bekerja PASIF di belakang satu model.
 
 Sebelum ini bagas-ai bekerja seperti satu orang serba bisa: ia menulis kode,
 lalu menilai kodenya sendiri dengan sudut pandang yang sama persis. Yang luput
@@ -16,8 +16,8 @@ Tiga hal yang SENGAJA dibatasi, karena tanpanya fitur ini justru merusak:
   1. Satu anggota bicara SEKALI saja per giliran. Nasihat yang sama diulang
      lima langkah berturut-turut berubah jadi latar belakang yang diabaikan
      model — dan mendesak keluar konteks yang benar-benar penting.
-  2. Paling banyak dua anggota bangun per langkah. Duapuluh tiga daftar periksa
-     sekaligus bukan bantuan, melainkan kebisingan.
+  2. Paling banyak dua anggota bangun per langkah. Duapuluh empat daftar
+     periksa sekaligus bukan bantuan, melainkan kebisingan.
   3. Hanya tool yang MENGUBAH sesuatu yang membangunkan tim. Membaca berkas tak
      menghasilkan apa pun yang perlu ditinjau.
 
@@ -60,7 +60,7 @@ class Anggota:
         return teks[:_MAKS_CATATAN]
 
 
-# --- 23 anggota -------------------------------------------------------------
+# --- 24 anggota -------------------------------------------------------------
 # Prioritas mengikuti seberapa mahal kesalahannya kalau lolos: kebocoran
 # kredensial jauh lebih mahal daripada judul halaman yang kurang enak dibaca.
 ANGGOTA: tuple[Anggota, ...] = (
@@ -92,6 +92,43 @@ ANGGOTA: tuple[Anggota, ...] = (
             "berkas rahasia masuk .gitignore sebelum sempat ter-commit",
             "contoh konfigurasi memakai nilai palsu yang jelas-jelas contoh",
         ), prioritas=1),
+    Anggota(
+        # Satu-satunya anggota yang menyuruh KELUAR mencari, bukan menimbang
+        # apa yang sudah ada di layar. Model bekerja dari ingatan yang punya
+        # tanggal kedaluwarsa: nomor versi, nama API, batas kuota, harga, dan
+        # cara pasang berubah tanpa memberi tahu siapa pun. Ingatan yang basi
+        # tak terasa seperti tebakan — ia terasa persis seperti pengetahuan,
+        # dan itulah yang membuatnya mahal.
+        "Pemeriksa Fakta", "keakuratan info, dicek ke internet",
+        jalur=("readme", "docs", "package.json", "requirements", "pyproject",
+               "go.mod", "cargo.toml", "changelog"),
+        isi=(
+            # Nomor versi & penyemat versi. Sengaja TIDAK memakai pola longgar
+            # `\d+\.\d+`: itu ikut cocok dengan angka desimal biasa, dan
+            # TERBUKTI membangunkannya pada `wait_for_timeout(0.3)`,
+            # `skor > 4.5`, bahkan koordinat — persis kebisingan yang membuat
+            # nasihat tim berhenti dibaca. Yang dicari: awalan v, semver tiga
+            # bagian, penyemat versi, atau kata "versi/version" di dekatnya.
+            r"\bv\d+\.\d+", r"\b\d+\.\d+\.\d+\b",
+            r"[\^~]\s*\d+\.\d+", r"[><=]=\s*\d+\.\d+",
+            r"(?i)\b(versi|version)\b\s*[:=]?\s*v?\d",
+            # klaim yang bersandar pada dunia luar
+            r"(?i)\b(menurut|berdasarkan|dokumentasi|documentation|official)\b",
+            r"(?i)\b(terbaru|latest|deprecated|sudah tidak|no longer|"
+            r"kuota|quota|harga|pricing|gratis|free tier)\b",
+            r"(?i)\b(pip install|npm install|apt install|brew install)\b",
+            r"https?://",
+        ),
+        tool=("web_search", "fetch_url"),
+        periksa=(
+            "klaim yang bisa basi (versi, nama API, cara pasang, harga, batas "
+            "kuota, tanggal) DIPERIKSA dulu lewat [[TOOL]] web_search — "
+            "ingatan yang kedaluwarsa terasa persis seperti pengetahuan",
+            "ambil dari sumbernya sendiri (fetch_url ke dokumentasi resmi atau "
+            "repo-nya), bukan dari ringkasan pihak ketiga yang ikut basi",
+            "yang tak berhasil diverifikasi ditulis apa adanya sebagai belum "
+            "pasti — jangan dinaikkan pangkat jadi fakta",
+        ), prioritas=12),
     Anggota(
         "Basis Data", "skema, kueri, migrasi",
         ekstensi=(".sql", ".prisma"),
@@ -310,7 +347,7 @@ ANGGOTA: tuple[Anggota, ...] = (
         ), prioritas=45),
 )
 
-assert len(ANGGOTA) == 23, f"tim harus 23 orang, sekarang {len(ANGGOTA)}"
+assert len(ANGGOTA) == 24, f"tim harus 24 orang, sekarang {len(ANGGOTA)}"
 
 # Regex dikompilasi SEKALI di impor. Pemicu diperiksa tiap langkah tool, dan
 # mengompilasi ulang ~60 pola tiap kali adalah biaya yang tak perlu dibayar.

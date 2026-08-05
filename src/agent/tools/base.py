@@ -318,6 +318,19 @@ def _terapkan_alias(nama: str, arguments: dict[str, Any],
     """Ganti nama argumen yang keliru-tapi-jelas-maksudnya ke nama resminya."""
     peta = {**_ALIAS_UMUM, **_ALIAS_TOOL.get(nama, {})}
     out = dict(arguments)
+    # `queries` -> `query`, TAPI hanya bila isinya memang satu pencarian.
+    # Sengaja tak lewat tabel alias biasa: di sana daftar berisi beberapa
+    # pencarian akan digabung jadi satu string bertumpuk baris, dan hasilnya
+    # query ngawur yang tak menemukan apa pun — gagal senyap, jenis yang paling
+    # mahal. Daftar yang benar-benar berisi banyak pencarian dibiarkan ditolak,
+    # supaya modelnya mengirim satu per satu.
+    if "queries" in out and "query" in props and "query" not in out:
+        nilai = out["queries"]
+        if isinstance(nilai, str):
+            out["query"] = out.pop("queries")
+        elif isinstance(nilai, (list, tuple)) and len(nilai) == 1 \
+                and isinstance(nilai[0], str):
+            out["query"] = out.pop("queries")[0]
     for salah, benar in peta.items():
         if salah in out and benar in props and benar not in out:
             out[benar] = out.pop(salah)
