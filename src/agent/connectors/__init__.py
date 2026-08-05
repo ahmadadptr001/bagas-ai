@@ -9,8 +9,20 @@ sesi browser tetap hidup lintas giliran (tak login/buka ulang tiap pesan).
 from __future__ import annotations
 
 from .base import WebConnector
+# SELURUH kelas galat browser wajib ikut diekspor di sini, tanpa kecuali.
+#
+# Bukan sekadar kerapian: core.py menangkapnya sebagai `connectors.XxxError`,
+# dan Python menilai tiap klausa `except` SATU PER SATU saat galat terjadi.
+# Satu nama yang tak ada di sini berubah jadi AttributeError DI TENGAH
+# penanganan galat — ia menggantikan galat aslinya dan lolos dari seluruh
+# klausa di bawahnya. TERJADI SUNGGUHAN: WebChatRusakError tak pernah
+# diekspor, sehingga SETIAP kegagalan browser yang bukan WebBusyError muncul
+# ke pengguna sebagai "module 'agent.connectors' has no attribute
+# 'WebChatRusakError'" — dan penanganan kuota habis, pemulihan chat rusak,
+# serta pesan galat yang ramah tak pernah sekali pun berjalan.
 from .browser import (
-    BrowserError, WebBusyError, WebLimitError, playwright_available,
+    BrowserError, WebBusyError, WebChatRusakError, WebLimitError,
+    playwright_available,
 )
 from .dola import DolaConnector
 from .kimi import KimiConnector
@@ -44,6 +56,9 @@ def get_connector(service: str) -> WebConnector:
 __all__ = [
     "WebConnector",
     "BrowserError",
+    "WebBusyError",
+    "WebChatRusakError",
+    "WebLimitError",
     "playwright_available",
     "get_connector",
 ]
