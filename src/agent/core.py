@@ -115,6 +115,10 @@ _MAX_LANJUT = 3
 # desakan itu dengan blok langkah LAGI; tanpa batas ini giliran bisa berputar
 # di antara "simpulkan" dan blok tool sampai kuota habis.
 _MAKS_TUTUP = 2
+# Berapa kali konteks boleh dipadatkan otomatis dalam SATU giliran. Lebih dari
+# ini berarti meringkas pun tak menolong, dan memutar terus cuma menghabiskan
+# kuota situs tanpa memajukan pekerjaan.
+_MAKS_PADAT = 2
 
 # Tool yang benar-benar MENGUBAH berkas kode. Dipakai untuk memutuskan apakah
 # perlu validasi otomatis sebelum jawaban akhir (kalau tak ada kode yang berubah,
@@ -1079,6 +1083,175 @@ class Agent:
             except AttributeError:  # sesi lama tanpa atribut ini
                 self.session.web_chats = {svc: chat_id}
 
+    def _lupakan_chat_web(self) -> None:
+        """Lepaskan kaitan ke percakapan web sesi ini.
+
+        Sesudah ini, kirim berikutnya membuat percakapan BARU di situs dan
+        mengirim ulang konteks pembukanya. Dipakai oleh dua pemulihan yang
+        sama-sama butuh chat bersih: chat yang rusak, dan chat yang sudah
+        kepanjangan.
+
+        Ada sebagai satu tempat karena sebelumnya keduanya memanggil
+        `conn.new_chat()` — method yang TIDAK PERNAH ADA di connector mana pun.
+        Panggilan itu melempar AttributeError yang langsung tertelan `except`
+        di sekitarnya, sehingga pemulihan chat rusak selalu berakhir "tak bisa
+        dipulihkan" tanpa sekali pun benar-benar mencoba."""
+        self._web_chat_id = ""
+        self._web_ctx_sent = False
+        svc = self.model_spec.connector
+        if self.session is not None and svc:
+            try:
+                self.session.web_chats.pop(svc, None)
+            except AttributeError:      # sesi lama tanpa atribut ini
+                pass
+
+    # Permintaan SERAH-TERIMA ke chat yang sedang penuh. Ditulis rinci dengan
+    # sengaja: isinya satu-satunya hal yang menyeberang ke sesi berikutnya, dan
+    # ringkasan yang terlalu umum ("beberapa berkas diperbarui") membuat sesi
+    # baru harus menemukan ulang segalanya dari nol — termasuk berkas yang
+    # sedang setengah ditulis, yang paling mahal kalau salah ditebak.
+    # KATA-KATANYA DIPILIH SUPAYA TAK MENCOCOKI DETEKTORNYA SENDIRI. Pesan ini
+    # ikut tampil di halaman situs, dan pemindai "percakapan kepanjangan"
+    # membaca seluruh halaman — kalau kalimat di bawah memakai frasa yang sama
+    # dengan pemberitahuan situs, bagas-ai akan mendeteksi tulisannya sendiri
+    # lalu memadatkan konteks berulang tanpa sebab. Karena itu frasa seperti
+    # "percakapan ... terlalu panjang" dan "mulai sesi baru" sengaja dihindari
+    # di sini; lihat pula context_full_patterns di connectors/kimi.py.
+    _MINTA_RINGKAS = (
+        "[SISTEM] Ruang percakapan di situs ini sudah hampir habis, jadi "
+        "pekerjaanmu akan kupindahkan ke tempat yang lega. Sebelum itu, tulis "
+        "SERAH-TERIMA selengkap-lengkapnya.\n"
+        "PENTING: ini satu-satunya hal yang ikut ke sesi berikutnya. Apa pun "
+        "yang tak kamu tulis di sini HILANG dan harus dicari ulang dari nol.\n\n"
+        "Jawab dengan teks biasa, TANPA blok [[TOOL]], memakai judul berikut "
+        "persis:\n"
+        "1. TUJUAN — apa yang diminta pengguna, dengan kata-katanya sendiri.\n"
+        "2. SUDAH SELESAI — daftar konkret; sebut nama berkas dan apa yang "
+        "berubah di masing-masing.\n"
+        "3. BERKAS YANG SEDANG DIKERJAKAN — bagian TERPENTING. Untuk TIAP "
+        "berkas sebutkan: path lengkapnya, sudah sampai mana (fungsi/bagian "
+        "mana yang sudah ditulis dan mana yang belum), dan apakah isinya "
+        "sekarang UTUH atau SETENGAH JADI. Kalau ada berkas yang ditulis "
+        "bertahap dan belum tuntas, katakan terus terang sampai baris/bagian "
+        "mana yang sudah masuk.\n"
+        "4. KEPUTUSAN & ATURAN — pilihan teknis yang sudah disepakati, gaya "
+        "penulisan, larangan dari pengguna, DAN hal-hal yang sudah dicoba lalu "
+        "GAGAL beserta sebabnya (supaya sesi baru tak mengulanginya).\n"
+        "5. LANGKAH BERIKUTNYA — satu langkah paling konkret yang harus "
+        "dikerjakan lebih dulu.\n\n"
+        "Sebutkan path, nama fungsi, dan angka apa adanya. Jangan meringkas "
+        "jadi kalimat umum, dan jangan menyingkat daftar dengan 'dan "
+        "lain-lain'."
+    )
+
+    def _padatkan_web(self, conn: Any, kirim: Any,
+                      on_status: Any = None, on_notice: Any = None) -> str:
+        """Ringkas percakapan yang sudah penuh, lalu pindah ke chat BARU.
+
+        Urutannya penting dan tak boleh dibalik: ringkasan diminta SELAGI chat
+        lamanya masih terbuka (di situlah seluruh konteks berada), baru chat
+        barunya dibuka. Ringkasan dari model digabung dengan ringkasan lokal
+        dari memory bagas-ai sendiri — yang pertama tahu detail pekerjaan yang
+        sedang berjalan, yang kedua selalu ada bahkan bila chat lamanya sudah
+        terlalu rusak/penuh untuk menjawab apa pun.
+
+        Kembalikan teks ringkasannya (untuk ditampilkan ke pengguna)."""
+        if on_notice:
+            on_notice("percakapan di situs sudah penuh — meringkas konteks lalu "
+                      "pindah ke chat baru")
+        if on_status:
+            on_status("meringkas konteks percakapan…")
+
+        ringkas = ""
+        try:
+            # Blok tool dibuang: model kadang tetap mengusulkan langkah walau
+            # diminta teks biasa, dan usulan itu tak boleh ikut terbawa sebagai
+            # bagian ringkasan ke sesi baru.
+            ringkas = _strip_tool_json(
+                _strip_web_markers(kirim(self._MINTA_RINGKAS) or ""))
+        except Exception:  # noqa: BLE001 - chat lamanya mungkin sudah menolak
+            log.debug("gagal meminta ringkasan dari chat lama", exc_info=True)
+
+        # Ringkasan LOKAL selalu dibuat. Ia bukan cadangan yang mubazir: ia
+        # memuat permintaan pengguna apa adanya dan hasil tiap langkah tool yang
+        # BENAR-BENAR dijalankan di laptop ini — fakta yang tak bergantung pada
+        # ingatan model, dan justru itu yang paling sering keliru diingat.
+        lokal = ""
+        try:
+            lokal = prompts.build_transcript_digest(self.memory.messages)
+        except Exception:  # noqa: BLE001
+            lokal = ""
+
+        if on_status:
+            on_status("membuka percakapan baru & memasang konteksnya…")
+        self._lupakan_chat_web()
+
+        bagian = [_web_tool_protocol()]
+        try:
+            ctx = prompts.build_web_context()
+        except Exception:  # noqa: BLE001
+            ctx = ""
+        if ctx:
+            bagian.append(ctx)
+        bagian.append(
+            # Kata-katanya juga dijaga agar tak mencocoki detektor (lihat
+            # catatan di _MINTA_RINGKAS): pesan ini pun tampil di halaman.
+            "# LANJUTAN PEKERJAAN — bukan tugas baru\n"
+            "Ruang percakapan kita sebelumnya sudah habis di situs ini, "
+            "jadi ini lanjutannya. Kamu TIDAK memulai dari nol: di bawah "
+            "ini serah-terima dari sesi sebelumnya. Baca, lalu lanjutkan tepat "
+            "dari langkah berikutnya — jangan mengulang yang sudah selesai, dan "
+            "jangan menanyakan ulang hal yang sudah diputuskan.\n"
+            "Kalau ada berkas yang disebut SETENGAH JADI, periksa isinya dulu "
+            "dengan read_file sebelum menyentuhnya."
+        )
+        if ringkas:
+            bagian.append("## Serah-terima dari sesi sebelumnya\n" + ringkas)
+        if lokal:
+            bagian.append("## Catatan percakapan dari sisi bagas-ai\n" + lokal)
+        bagian.append(
+            "Balas dengan SATU kata: SIAP. Jangan mengeluarkan blok [[TOOL]] "
+            "apa pun sekarang — tugasnya menyusul di pesan berikutnya."
+        )
+
+        kirim("\n\n".join(bagian), new_chat=True, open_chat_id="")
+        dibuat = getattr(conn, "last_chat_id", "") or ""
+        if dibuat:
+            self._link_web_chat(dibuat)
+        self._web_ctx_sent = True
+        try:
+            conn.konteks_penuh = False
+        except Exception:  # noqa: BLE001
+            pass
+        if on_notice:
+            on_notice("konteks dipadatkan — lanjut di percakapan baru")
+        return ringkas
+
+    def padatkan_sekarang(self, on_status: Any = None,
+                          on_notice: Any = None) -> str:
+        """/compact manual: padatkan konteks web tanpa menunggu situs mengeluh.
+
+        Berguna sebelum memulai bagian pekerjaan yang berat, atau saat jawaban
+        mulai terasa lupa konteks — pengguna tak harus menunggu peringatan
+        situs yang datangnya belakangan."""
+        from . import connectors
+        if not self.model_spec.is_web:
+            return "Perintah ini hanya untuk model web."
+        conn = connectors.get_connector(self.model_spec.connector)
+        if not self._web_chat_id and not self._web_ctx_sent:
+            return "Belum ada percakapan web yang perlu dipadatkan."
+
+        def kirim(msg: str, new_chat: bool = False,
+                  open_chat_id: str | None = None) -> str:
+            return conn.send(
+                msg, on_status=on_status, new_chat=new_chat,
+                open_chat_id=(self._web_chat_id if open_chat_id is None
+                              else open_chat_id))
+
+        ringkas = self._padatkan_web(conn, kirim, on_status, on_notice)
+        self._persist()
+        return ringkas or "Konteks dipadatkan; percakapan baru sudah siap."
+
     def refresh_system_prompt(self) -> None:
         """Bangun ulang system prompt (mis. setelah add-dir) & pasang ke memory."""
         self.memory.set_system(prompts.build_system_prompt())
@@ -1172,12 +1345,14 @@ class Agent:
             on_notice(f"chat di {self.model_spec.label} rusak — "
                       "membuka chat baru lalu mengirim ulang")
         try:
-            conn = connectors.get_connector(self.model_spec.connector)
-            conn.new_chat()
-            # Konteks pembuka WAJIB dikirim ulang: chat barunya kosong, dan
-            # tanpa protokol tool di dalamnya model tak tahu cara memakai tool
-            # sama sekali.
-            self._web_ctx_sent = False
+            connectors.get_connector(self.model_spec.connector)
+            # Kaitan ke chat yang rusak DILEPAS, dan konteks pembuka ditandai
+            # perlu dikirim ulang — keduanya sekaligus. Dulu di sini ada
+            # `conn.new_chat()`, method yang tak pernah ada di connector mana
+            # pun: AttributeError-nya tertelan `except` di bawah, jadi
+            # pemulihan ini SELALU berakhir "tak bisa dipulihkan" tanpa pernah
+            # benar-benar mencoba.
+            self._lupakan_chat_web()
             jawab = self._run_connector(
                 user_text, on_status=on_status, on_notice=on_notice)
         except Exception as exc2:  # noqa: BLE001
@@ -1450,6 +1625,9 @@ class Agent:
             if on_status is not None:
                 on_status(msg)
 
+        # Berapa kali konteks sudah dipadatkan di giliran ini (lihat _send).
+        padat = 0
+
         def _send_raw(msg: str, new_chat: bool = False,
                       open_chat_id: str | None = None,
                       attachments: list[str] | None = None) -> str:
@@ -1544,7 +1722,31 @@ class Agent:
             dianggap selesai: kode putus di tengah, dan blok [[TOOL]] yang belum
             tertutup tak pernah dieksekusi. Di sini potongannya diminta
             DILANJUTKAN (maks _MAX_LANJUT kali) lalu digabung."""
-            out = _send_raw(msg, new_chat, open_chat_id, attachments)
+            # PERCAKAPAN PENUH, DUA BENTUK.
+            #
+            # (a) Situs menolak melanjutkan -> WebKonteksPenuhError, tak ada
+            #     balasan sama sekali. Dipadatkan lalu pesan yang sama DIKIRIM
+            #     ULANG ke chat baru; kalau tidak, permintaan pengguna hilang.
+            # (b) Situs baru MEMPERINGATKAN tapi tetap menjawab -> ditandai
+            #     conn.konteks_penuh. Balasannya dipakai apa adanya (pekerjaan
+            #     yang barusan selesai tak boleh dibuang), pemadatan dikerjakan
+            #     SESUDAHNYA supaya pesan berikutnya sudah di chat yang lega.
+            #
+            # Keduanya dibatasi _MAKS_PADAT kali per giliran: kalau meringkas
+            # pun tak menolong, memutar terus cuma menghabiskan kuota.
+            try:
+                out = _send_raw(msg, new_chat, open_chat_id, attachments)
+            except connectors.WebKonteksPenuhError:
+                nonlocal padat
+                if padat >= _MAKS_PADAT:
+                    raise
+                padat += 1
+                self._padatkan_web(conn, _send_raw, on_status, on_notice)
+                out = _send_raw(msg, False, self._web_chat_id, attachments)
+            else:
+                if getattr(conn, "konteks_penuh", False) and padat < _MAKS_PADAT:
+                    padat += 1
+                    self._padatkan_web(conn, _send_raw, on_status, on_notice)
             lanjut = 0
             while _OUTPUT_STOP_RE.search(out or "") and lanjut < _MAX_LANJUT:
                 lanjut += 1

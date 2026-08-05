@@ -21,8 +21,8 @@ from .base import WebConnector
 # 'WebChatRusakError'" — dan penanganan kuota habis, pemulihan chat rusak,
 # serta pesan galat yang ramah tak pernah sekali pun berjalan.
 from .browser import (
-    BrowserError, WebBusyError, WebChatRusakError, WebLimitError,
-    playwright_available,
+    BrowserError, WebBusyError, WebChatRusakError, WebKonteksPenuhError,
+    WebLimitError, playwright_available,
 )
 from .dola import DolaConnector
 from .kimi import KimiConnector
@@ -58,6 +58,7 @@ __all__ = [
     "BrowserError",
     "WebBusyError",
     "WebChatRusakError",
+    "WebKonteksPenuhError",
     "WebLimitError",
     "playwright_available",
     "get_connector",

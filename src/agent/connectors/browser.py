@@ -457,6 +457,22 @@ class WebChatRusakError(BrowserError):
     kirim ulang — dan itu bisa dikerjakan sendiri tanpa merepotkan pengguna."""
 
 
+class WebKonteksPenuhError(BrowserError):
+    """Percakapan di situsnya sudah KEPANJANGAN untuk dilanjutkan.
+
+    Terlihat di kimi.com sebagai:
+        "Your conversation with Kimi is getting too long.
+         Try starting a new session."
+
+    BEDA TEGAS dari WebLimitError maupun WebChatRusakError: kuota kita aman dan
+    chat-nya tidak rusak — ia cuma sudah terlalu panjang. Jalan keluarnya juga
+    berbeda: bukan menunggu, bukan sekadar membuka chat kosong, melainkan
+    MERINGKAS dulu apa yang sudah dikerjakan lalu membawa ringkasan itu ke chat
+    baru. Chat baru tanpa ringkasan berarti pekerjaan yang sedang berjalan
+    (berkas yang setengah diedit, keputusan yang sudah diambil) hilang seluruhnya
+    dan harus ditemukan ulang dari nol."""
+
+
 class WebBusyError(BrowserError):
     """Layanan sedang KEWALAHAN sesaat ("System is currently busy…").
 

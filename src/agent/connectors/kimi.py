@@ -217,6 +217,38 @@ class KimiConnector(WebConnector):
         r"\bplease\s+wait\s+or\s+upgrade\b",
     )
 
+    # PERCAKAPAN SUDAH KEPANJANGAN. Teks aslinya, terlihat berulang kali di
+    # sesi panjang:
+    #   "Your conversation with Kimi is getting too long.
+    #    Try starting a new session."
+    #
+    # Polanya dijangkar pada rangkaian kata yang KHAS pemberitahuan situs, bukan
+    # pada kata umum seperti "too long" saja — jawaban model sendiri sering
+    # membahas "file terlalu panjang" atau "konteks terlalu panjang", dan salah
+    # tangkap di sini berakibat mahal: satu chat sehat dibuang lalu seluruh
+    # konteks diringkas ulang tanpa perlu.
+    #
+    # Nama modelnya dibuat lentur ([\w\s.-]{0,20}) karena situs menuliskannya
+    # mengikuti model yang sedang dipakai (Kimi / Kimi K2 / K3), dan pemisah
+    # kalimatnya juga — sebagian tampilan memakai baris baru, bukan titik.
+    # BAHAYA YANG DIJAGA DI SINI: pemindaian membaca SELURUH halaman, dan
+    # halaman itu memuat pesan yang BAGAS-AI SENDIRI ketik. Permintaan
+    # serah-terima (core._MINTA_RINGKAS) jelas membahas "percakapan terlalu
+    # panjang" — kalau polanya longgar, ia mencocoki tulisannya sendiri lalu
+    # memadatkan konteks berulang-ulang tanpa sebab. Karena itu:
+    #   - tiap pola WAJIB memuat kata-kata yang khas milik SITUS, dan
+    #   - teks yang bagas-ai kirim sengaja ditulis agar tak mungkin cocok
+    #     (lihat catatan di core._MINTA_RINGKAS).
+    # Pola "try starting a new session" yang berdiri sendiri sengaja TIDAK
+    # dipakai: kalimat itu terlalu lumrah, dan model sendiri gampang
+    # menuliskannya sebagai saran.
+    context_full_patterns = (
+        r"(?i)conversation\s+with\s+[\w\s.-]{0,20}?is\s+getting\s+too\s+long",
+        r"(?i)too\s+long[\s\S]{0,60}?\bstart(ing)?\s+a\s+new\s+"
+        r"(session|conversation|chat)",
+        r"(?i)percakapan\s+\S+\s+dengan\s+[\w\s.-]{0,20}?terlalu\s+panjang",
+    )
+
     # --- /effort: pemilih model + usaha berpikir ---
     # DIPETAKAN LANGSUNG pada sesi login. Berbeda dari Qwen yang kontrolnya
     # tersebar di dua tempat, Kimi menaruh SEMUANYA di balik satu pembuka

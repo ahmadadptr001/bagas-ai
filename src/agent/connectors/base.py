@@ -24,8 +24,8 @@ from typing import Any, Callable
 
 from .. import config
 from .browser import (
-    BrowserError, WebBusyError, WebChatRusakError, WebLimitError, hub,
-    profile_dir, set_windows_visible,
+    BrowserError, WebBusyError, WebChatRusakError, WebKonteksPenuhError,
+    WebLimitError, hub, profile_dir, set_windows_visible,
 )
 
 # Cari teks pendek di halaman yang cocok salah satu pola (dipakai mendeteksi
@@ -545,6 +545,12 @@ class WebConnector:
     # koneksi ke model gagal, percakapan rusak. Hanya dibaca di jalur "balasan
     # tak pernah muncul" — lihat _raise_if_error.
     error_patterns: tuple[str, ...] = ()
+    # Pola teks "percakapan ini sudah KEPANJANGAN, mulai sesi baru". Beda dari
+    # ketiganya di atas: kuota aman, chat tidak rusak, situs juga tidak menolak —
+    # ia cuma memberi tahu bahwa konteksnya sudah mentok. Ditangani dengan
+    # MERINGKAS lalu pindah ke chat baru (lihat Agent._padatkan_web); karena itu
+    # ia perlu jenisnya sendiri, bukan digabung ke error_patterns.
+    context_full_patterns: tuple[str, ...] = ()
     # Bagian halaman yang TIDAK boleh ikut dipindai saat mencari pemberitahuan
     # limit — biasanya wadah pesan percakapan, karena jawaban AI sendiri bisa
     # membahas "rate limit" dan itu bukan tanda kuota habis.
@@ -691,6 +697,11 @@ class WebConnector:
     last_chat_id: str = ""
     # Isi mentah blok kode balasan terakhir (diisi tiap kali send selesai).
     last_code_blocks: list[str] = []
+    # True bila situs MEMPERINGATKAN percakapan ini sudah kepanjangan pada kirim
+    # terakhir. Sengaja bendera, bukan galat: peringatannya datang bersama
+    # balasan yang berhasil, jadi melemparnya akan membuang pekerjaan yang
+    # barusan selesai (lihat _padatkan_web di core.py).
+    konteks_penuh: bool = False
 
     def chat_url_for(self, chat_id: str) -> str:
         """URL percakapan lama. "" bila situs ini tak mendukung."""
@@ -1035,6 +1046,11 @@ class WebConnector:
             page.wait_for_timeout(300)
         if not started and not self._read_last_message(page):
             self._raise_if_limited(page)   # penyebab paling umum
+            # Percakapan sudah kepanjangan: situs menolak melanjutkan sampai
+            # sesi baru dibuka. Diperiksa SEBELUM spanduk galat umum supaya
+            # sebabnya yang spesifik yang dilaporkan — hanya sebab inilah yang
+            # punya jalan keluar otomatis (ringkas lalu pindah chat).
+            self._raise_if_context_full(page)
             # Spanduk galat situs. Diperiksa SESUDAH limit karena limit lebih
             # sering, tapi SEBELUM kesimpulan "selector usang" — tuduhan itu
             # menyesatkan bila yang terjadi sebenarnya situsnya menolak.
@@ -1149,6 +1165,15 @@ class WebConnector:
         # otomatis di core tak tahu chat mana yang sudah terlanjur dibuat.
         self.last_chat_id = self.current_chat_id(page)
         self.last_code_blocks = self._read_code_blocks(page)
+
+        # PERCAKAPAN SUDAH KEPANJANGAN. Di sini balasannya BERHASIL didapat,
+        # jadi ia tak boleh dilempar sebagai galat — pekerjaan yang barusan
+        # selesai akan hilang percuma. Cukup ditandai; pemanggil menyerahkan
+        # jawabannya dulu, baru meringkas & pindah chat untuk pesan berikutnya.
+        # Peringatan ini memang muncul lebih dulu sebagai spanduk, beberapa
+        # pesan sebelum situs benar-benar menolak melanjutkan — dan justru
+        # itulah jendela yang dipakai supaya perpindahannya tak terasa.
+        self.konteks_penuh = bool(self.detect_context_full(page))
 
         # Pemberitahuan "server sedang sibuk" muncul DI TEMPAT balasan, jadi tanpa
         # pemeriksaan ini ia diteruskan sebagai jawaban model.
@@ -1883,6 +1908,27 @@ class WebConnector:
         msg = self.detect_limit(page)
         if msg:
             raise WebLimitError(msg)
+
+    def detect_context_full(self, page: Any) -> str:
+        """Teks "percakapan sudah kepanjangan" bila sedang tampil, else "".
+
+        Area percakapan DIKECUALIKAN dengan alasan yang sama seperti limit:
+        jawaban model sendiri bisa membahas "konteks terlalu panjang", dan itu
+        bukan pemberitahuan situs."""
+        if not self.context_full_patterns:
+            return ""
+        try:
+            return page.evaluate(JS_FIND_TEXT, {
+                "patterns": list(self.context_full_patterns),
+                "exclude": list(self.limit_exclude_selectors),
+            }) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _raise_if_context_full(self, page: Any) -> None:
+        pesan = self.detect_context_full(page)
+        if pesan:
+            raise WebKonteksPenuhError(" ".join(pesan.split())[:240])
 
     def detect_error(self, page: Any) -> str:
         """Teks SPANDUK GALAT situs bila sedang tampil, else "".

@@ -196,6 +196,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("mode", "mode kerja situs: buat gambar/video, dll"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
+    ("compact", "ringkas konteks lalu lanjut di percakapan situs yang baru"),
     ("add-dir", "tambah folder konteks"),
     ("dirs", "folder konteks aktif"),
     ("rm-dir", "hapus folder konteks"),
@@ -2831,6 +2832,56 @@ def main(resume: bool = False) -> None:
         "espeak": ("espeak (luring)", "spd-say / espeak-ng"),
     }
 
+    def do_compact() -> None:
+        """/compact — ringkas konteks lalu lanjut di percakapan situs yang baru.
+
+        Situs AI web punya batas panjang percakapan (kimi.com mengumumkannya:
+        "Your conversation with Kimi is getting too long"). Begitu batas itu
+        tersentuh, melanjutkan berarti kehilangan seluruh konteks — termasuk
+        berkas yang sedang setengah diedit. Pemadatan ini juga berjalan SENDIRI
+        saat peringatan itu terdeteksi; perintah ini untuk melakukannya lebih
+        awal, atas kemauan sendiri."""
+        if not agent.model_spec.is_web:
+            console.print("  [yellow]/compact hanya untuk model web "
+                          "(Kimi/Qwen/Gemini/Dola).[/yellow]\n")
+            return
+        state = {"pesan": "meringkas konteks percakapan…"}
+
+        def render():
+            return Text.from_markup(
+                f"  [#ffb861]◐[/] [dim]{_esc(state['pesan'])}[/]")
+
+        hasil = {"teks": "", "galat": None}
+
+        def kerja() -> None:
+            try:
+                hasil["teks"] = agent.padatkan_sekarang(
+                    on_status=lambda m: state.__setitem__("pesan", m),
+                    on_notice=lambda m: state.__setitem__("pesan", m))
+            except BaseException as exc:  # noqa: BLE001
+                hasil["galat"] = exc
+
+        wt = threading.Thread(target=kerja, daemon=True)
+        try:
+            with Live(render(), console=console, refresh_per_second=8,
+                      transient=True) as live:
+                wt.start()
+                while wt.is_alive():
+                    live.update(render())
+                    wt.join(timeout=0.1)
+        except KeyboardInterrupt:
+            console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
+            return
+        if hasil["galat"] is not None:
+            console.print(f"\n  [red]✖ gagal memadatkan:[/red] "
+                          f"{hasil['galat']}\n")
+            return
+        console.print("  [#9fc93c]✓ konteks dipadatkan[/] [dim]— percakapan "
+                      "baru di situs sudah memuat serah-terimanya.[/]\n")
+        teks = (hasil["teks"] or "").strip()
+        if teks:
+            console.print(Padding(_md(teks), (0, 3, 1, 3)))
+
     def _kabar_suara() -> None:
         """Umumkan SEKALI kalau suaranya bermasalah / berpindah mesin.
 
@@ -4034,6 +4085,8 @@ def main(resume: bool = False) -> None:
                 show_tim(text[4:].strip())
             elif cmd == "mic" or cmd.startswith("mic "):
                 show_mic(text[4:].strip())
+            elif cmd == "compact":
+                do_compact()
             elif cmd == "live":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:
