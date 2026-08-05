@@ -130,19 +130,37 @@ class GlmConnector(WebConnector):
     # `.chip-scroll`. Ini yang dihitung sebagai bukti "file sudah menempel".
     attach_item_selector = ".messageInputContainer .chip-scroll button"
 
-    # Kandidat ITEM MENU — ketiga menunya dibangun dari komponen yang berbeda,
-    # jadi daftar ARIA bawaan base tak cukup:
-    #   [aria-label="model-item"]  -> daftar model (GLM-5.2, GLM-5-Turbo, …)
-    #   button[data-selected]      -> tingkat effort (High / Max)
-    #   [role="button"]            -> sakelar "Deep Think" di panel effort
-    #   div.font-medium            -> item mode (Search / Advanced Search);
-    #                                 divnya polos, tanpa role apa pun
-    menu_item_selector = (
-        '[aria-label="model-item"]',
-        "button[data-selected]",
-        '.messageInputContainer [role="button"]',
-        "div.font-medium",
-    )
+    # Kandidat ITEM MENU untuk jalur BAWAAN base — dipakai HANYA oleh daftar
+    # model, karena panel effort & mode ditangani sendiri di bawah.
+    #
+    # Sengaja cuma satu, dan itu penting: base memakai daftar ini juga untuk
+    # menjawab "menunya sudah terbuka belum?". Kandidat yang selalu ada di
+    # halaman (mis. `[role="button"]` — di situs ini pembungkus tombol lampiran
+    # memakainya) membuat jawabannya SELALU "sudah", sehingga menu yang
+    # sebenarnya belum terbuka tak pernah diklik ulang dan kegagalannya muncul
+    # belakangan sebagai "item tak ditemukan".
+    menu_item_selector = ('[aria-label="model-item"]',)
+
+    # Kontrol DI DALAM panel — semuanya diverifikasi dari HTML aslinya.
+    # Tingkat berpikir: <button data-selected="true|false"><span
+    # class="font-medium">Max</span> …>. `:text-is()` (bukan :has-text) supaya
+    # "High" tak ikut cocok pada teks lain yang memuatnya.
+    _ITEM_EFFORT = 'button[data-selected]:has(span:text-is("{teks}"))'
+    # Deep Think & Advanced Search BUKAN item menu melainkan SAKELAR sungguhan:
+    #   <button role="switch" aria-checked="true" data-switch-root …>
+    # Inilah sebab keluhan "mode search aktif tapi Advanced Search tak ikut
+    # menyala": mengeklik BARIS/teksnya tak mengubah sakelar sama sekali.
+    _SW_DEEP = ('div[role="button"]:has(span:text-is("Deep Think")) '
+                'button[role="switch"]')
+    _SW_ADV = ('div:has(> span:text-is("Advanced Search")) '
+               'button[role="switch"]')
+
+    # Situs MENYEMBUNYIKAN chip effort pada jendela sempit — terukur: ada di
+    # 1600/1280/1024/900 px, hilang di 760 px. Jendela connector sendiri jalan
+    # ~614 px, jadi tanpa penyeragaman ini /effort gagal dengan "menu tak mau
+    # terbuka" padahal tombolnya memang tak dirender.
+    min_layout_width = 1280
+    min_layout_height = 800
 
     # --- /effort: tingkat berpikir (chip komposer) + varian model (bar atas) ---
     # TERCACAH dari menu yang dibuka sungguhan. Panel chip berisi dua tingkat
@@ -154,8 +172,13 @@ class GlmConnector(WebConnector):
          "penalaran paling dalam (bawaan situs)", _BTN_EFFORT),
         ("Berpikir: High", ("High",),
          "penalaran lebih ringan — balasan lebih cepat", _BTN_EFFORT),
-        ("Deep Think on/off", ("Deep Think",),
-         "sakelar penalaran; menekan ulang mematikannya", _BTN_EFFORT),
+        # DIPISAH jadi dua aksi bertujuan, bukan satu "on/off". Sakelar yang
+        # dibalik buta bikin hasilnya bergantung keadaan sebelumnya — pengguna
+        # menekan "Deep Think" untuk MENYALAKAN lalu justru mematikannya.
+        ("Deep Think: nyala", ("Deep Think", "on"),
+         "nyalakan penalaran (jawaban lebih dalam, lebih lambat)", _BTN_EFFORT),
+        ("Deep Think: mati", ("Deep Think", "off"),
+         "matikan penalaran — balasan paling cepat", _BTN_EFFORT),
         ("GLM-5.2", ("GLM-5.2",),
          "flagship: paling kuat untuk koding & tugas panjang", _BTN_MODEL),
         ("GLM-5-Turbo", ("GLM-5-Turbo",),
@@ -180,10 +203,17 @@ class GlmConnector(WebConnector):
     # data-active=false, alias "mode terpilih" yang sebenarnya mati. Karena itu
     # _set_action_on_hub di bawah menangani mode search sendiri dan MEMASTIKAN
     # sakelarnya benar-benar menyala di akhir.
+    #
+    # Di dalam panel, "Advanced Search" punya SAKELAR sendiri (role="switch")
+    # yang berdiri terpisah dari sakelar Search. Menyalakan Search saja
+    # meninggalkannya `aria-checked="false"` — persis yang dikeluhkan: "search
+    # aktif tapi advanced-nya tak ikut nyala". Karena itu tiap mode di bawah
+    # menyebutkan keadaan yang diinginkan secara eksplisit, lalu diverifikasi.
     web_modes = (
-        ("Search", ("Advanced Search",),
-         "cari di web (riset multi-putaran / Advanced Search)", _BTN_MODE),
-        ("Search sederhana", ("Search",),
+        ("Search", ("Advanced Search", "on"),
+         "cari di web + Advanced Search menyala (riset multi-putaran)",
+         _BTN_MODE),
+        ("Search sederhana", ("Advanced Search", "off"),
          "cari di web sekali jalan saja — lebih cepat", _BTN_MODE),
     )
     # Mematikan mode = mengeklik sakelar yang SEDANG menyala. Penyaring
@@ -192,7 +222,7 @@ class GlmConnector(WebConnector):
     web_mode_off_selector = (
         '.messageInputContainer button.rounded-md[data-active="true"]')
 
-    # --- penanganan khusus sakelar search ---
+    # --- penanganan khusus: panel effort & sakelar search ---
     def _mode_menyala(self, page: Any) -> bool:
         """Sakelar pencarian web sedang menyala?"""
         try:
@@ -201,58 +231,117 @@ class GlmConnector(WebConnector):
         except Exception:  # noqa: BLE001 - DOM sedang digambar ulang
             return False
 
-    def _pilih_varian(self, page: Any, teks: str) -> bool:
-        """Klik "Search"/"Advanced Search" di panel bila panelnya terbuka."""
+    def _sakelar(self, page: Any, sel: str, nyala: bool) -> bool:
+        """Setel sebuah role=switch ke keadaan yang DIMINTA, lalu buktikan.
+
+        Bukan sekadar "klik": sakelar yang dibalik buta membuat hasil akhirnya
+        bergantung pada keadaan sebelumnya, dan itulah bedanya "menyalakan"
+        dengan "menekan tombol". Kembalikan True hanya bila keadaan akhirnya
+        benar-benar sesuai."""
         try:
-            loc = page.locator(
-                f'div.font-medium:has-text("{teks}")').locator(
-                "visible=true").first
+            loc = page.locator(sel).locator("visible=true").first
             if not loc.count():
                 return False
+            if ((loc.get_attribute("aria-checked") or "") == "true") == nyala:
+                return True
             self._click_element(loc, timeout=6000)
             page.wait_for_timeout(700)
-            return True
+            return ((loc.get_attribute("aria-checked") or "") == "true") == nyala
         except Exception:  # noqa: BLE001 - panel keburu tertutup
             return False
 
+    def _buka_panel_effort(self, page: Any) -> bool:
+        """Buka chip "Deep Think · Max" dan pastikan isinya benar-benar ada."""
+        for _ in range(2):
+            chip = page.locator(_BTN_EFFORT).locator("visible=true").first
+            if not chip.count():
+                return False
+            if (chip.get_attribute("aria-expanded") or "") != "true":
+                self._click_element(chip, timeout=8000)
+                page.wait_for_timeout(900)
+            if page.locator("button[data-selected]").count():
+                return True
+        return False
+
+    def _atur_effort(self, page: Any, path: tuple[str, ...], label: str) -> str:
+        if not self._buka_panel_effort(page):
+            raise BrowserError(
+                f"panel berpikir {self.label} tak mau terbuka. Chip "
+                "'Deep Think' memang DISEMBUNYIKAN situs pada jendela sempit "
+                "(hilang di bawah ±800 px) — periksa min_layout_width di "
+                "connectors/glm.py bila ini terus terjadi.")
+        try:
+            if path[0] == "Deep Think":
+                nyala = path[1] == "on"
+                ok = self._sakelar(page, self._SW_DEEP, nyala)
+                hasil = (f"Deep Think {'menyala' if nyala else 'mati'} "
+                         f"di {self.label}")
+            else:
+                item = page.locator(
+                    self._ITEM_EFFORT.format(teks=path[0])).first
+                if not item.count():
+                    raise BrowserError(f"tingkat '{path[0]}' tak ada di panel")
+                self._click_element(item, timeout=6000)
+                page.wait_for_timeout(600)
+                ok = (item.get_attribute("data-selected") or "") == "true"
+                hasil = f"'{label}' dipilih di {self.label}"
+        finally:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:  # noqa: BLE001
+                pass
+        if not ok:
+            raise BrowserError(
+                f"'{label}' diklik tapi keadaannya tak berubah di "
+                f"{self.label} — kontrolnya mungkin berpindah")
+        return hasil
+
+    def _atur_mode(self, page: Any, path: tuple[str, ...], label: str) -> str:
+        """Nyalakan pencarian web, lalu setel sakelar Advanced Search-nya.
+
+        Panel varian hanya muncul SESAAT sesudah sakelar utama dinyalakan;
+        kalau sudah tertutup, satu-satunya jalan membukanya lagi adalah
+        mematikan lalu menyalakan ulang."""
+        adv = path[1] == "on"
+        for _ in range(3):
+            if not self._mode_menyala(page):
+                self._click_element(page.locator(_BTN_MODE).first, timeout=8000)
+                page.wait_for_timeout(1100)
+            if self._sakelar(page, self._SW_ADV, adv):
+                if self._mode_menyala(page):
+                    return (f"pencarian web {self.label} menyala; "
+                            f"Advanced Search {'menyala' if adv else 'mati'}")
+            elif self._mode_menyala(page):
+                # Menyala tapi panelnya tertutup -> matikan, putaran berikutnya
+                # menyalakan ulang berikut panelnya.
+                self._click_element(page.locator(_BTN_MODE).first, timeout=8000)
+                page.wait_for_timeout(900)
+        if self._mode_menyala(page):
+            raise BrowserError(
+                f"pencarian web {self.label} menyala, tetapi sakelar "
+                "'Advanced Search' tak bisa disetel — panelnya tak mau "
+                "terbuka. Coba /mode sekali lagi.")
+        raise BrowserError(
+            f"sakelar pencarian web {self.label} tak mau menyala — "
+            "layout komposernya mungkin berubah (lihat _BTN_MODE di "
+            "connectors/glm.py)")
+
     def _set_action_on_hub(self, h: Any, label: str, path: tuple[str, ...],
                            opener: str = "") -> str:
-        """Aksi model/effort dilayani base; mode search ditangani di sini.
+        """Daftar model dilayani base; panel effort & mode ditangani sendiri.
 
-        Alasannya ada di komentar web_modes: pembuka menu di situs ini merangkap
-        sakelar, jadi "klik pembuka sekali lagi" — cara base menghadapi menu
-        yang belum terbuka — punya efek samping mematikan fiturnya."""
-        if opener != _BTN_MODE:
+        Keduanya bukan menu biasa melainkan panel berisi SAKELAR, dan jalur
+        umum base (klik teks item, klik pembuka lagi bila menu belum terbuka)
+        justru merusak keadaannya — lihat komentar di web_modes."""
+        if opener not in (_BTN_EFFORT, _BTN_MODE):
             return super()._set_action_on_hub(h, label, path, opener)
 
         page, _ = self._acquire_ready_page(h, lambda m: None, lambda: None)
         self._tutup_penghalang(page)
         self._normalize_layout(page)
-        varian = path[0]
-        for _ in range(3):
-            if not self._mode_menyala(page):
-                # Menyalakan sekaligus membuka panel variannya.
-                self._click_element(page.locator(_BTN_MODE).first, timeout=8000)
-                page.wait_for_timeout(1100)
-            # Panel hanya terbuka sesaat setelah dinyalakan. Kalau sudah
-            # tertutup, varian tak bisa dipindah tanpa mematikan-menyalakan
-            # ulang — dan itu ditempuh HANYA bila memang perlu.
-            if self._pilih_varian(page, varian):
-                if self._mode_menyala(page):
-                    return (f"'{label}' menyala di {self.label} "
-                            f"(varian: {varian})")
-            elif self._mode_menyala(page):
-                # Sudah menyala tapi panelnya tak terlihat: matikan supaya
-                # putaran berikutnya menyalakan ulang berikut panelnya.
-                self._click_element(page.locator(_BTN_MODE).first, timeout=8000)
-                page.wait_for_timeout(900)
-        if self._mode_menyala(page):
-            return (f"'{label}' menyala di {self.label}, tetapi varian "
-                    f"'{varian}' tak bisa dipastikan — panelnya tak terbuka")
-        raise BrowserError(
-            f"sakelar pencarian web {self.label} tak mau menyala — "
-            "layout komposernya mungkin berubah (lihat _BTN_MODE di "
-            "connectors/glm.py)")
+        if opener == _BTN_EFFORT:
+            return self._atur_effort(page, path, label)
+        return self._atur_mode(page, path, label)
 
     # Pemberitahuan limit/galat/percakapan-penuh khas z.ai BELUM PERNAH terlihat
     # langsung. Sengaja DIKOSONGKAN daripada ditebak: pola longgar di sini
