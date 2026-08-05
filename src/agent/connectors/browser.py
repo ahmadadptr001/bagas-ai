@@ -630,6 +630,14 @@ class BrowserHub:
                 page = ctx.new_page()
                 self._ctx[service] = (ctx, page)
                 return page
+            # Ada kunci profil, tapi TAK ADA yang menjawab: itu bangkai, bukan
+            # tetangga. Kalau service ini masih bertanda "ditumpangi", tandanya
+            # sudah BASI — jendela yang dulu ditumpangi sudah mati. Tanda basi
+            # itu berbahaya, sebab _kill_profile_browsers menghormatinya dan
+            # melewati pembunuhan; bangkainya tetap memegang kunci profil, lalu
+            # peluncuran di bawah menggantung. Persis 'nyangkut saat membuka
+            # jendela baru' sesudah sesi sebelumnya dihentikan paksa.
+            self._lupakan_tumpangan(service)
             _kill_profile_browsers(service)
         # Bersihkan penanda crash sisa sesi sebelumnya sebelum meluncurkan,
         # supaya Chrome tak menampilkan tawaran "Restore pages?".
@@ -675,6 +683,16 @@ class BrowserHub:
                 pass
         return rapi
 
+    def _lupakan_tumpangan(self, service: str) -> None:
+        """Hapus tanda 'menumpang' untuk sebuah service.
+
+        Tanda itu melindungi jendela milik terminal lain dari pembunuhan. Begitu
+        jendelanya terbukti sudah mati, tandanya justru berbalik jadi masalah:
+        ia melindungi BANGKAI yang memegang kunci profil. Karena itu ia harus
+        bisa dicabut, bukan cuma dipasang."""
+        self._dipinjam.discard(service)
+        _MENUMPANG.discard(service)
+
     def drop(self, service: str) -> None:
         """Tutup & lupakan context sebuah service (HARUS di thread hub)."""
         # Jendela context ini akan lenyap -> jangan simpan handle basi yang bisa
@@ -688,8 +706,7 @@ class BrowserHub:
             # MENUMPANG: jendelanya milik terminal lain yang mungkin sedang
             # bekerja. Yang boleh kita tutup cuma TAB kita sendiri; menutup
             # context berarti menutup seluruh tab tetangga sekaligus.
-            self._dipinjam.discard(service)
-            _MENUMPANG.discard(service)
+            self._lupakan_tumpangan(service)
             try:
                 page.close()
             except Exception:  # noqa: BLE001
@@ -871,6 +888,22 @@ class BrowserHub:
 
 _HUB: BrowserHub | None = None
 _HUB_LOCK = threading.Lock()
+# Kunci PEMBERSIHAN. Beda tugas dengan _HUB_LOCK yang cuma menjaga penggantian
+# acuan singleton: yang ini menjaga agar hub baru TIDAK lahir selagi hub lama
+# masih dibereskan.
+#
+# Tanpa ini ada lubang yang gejalanya persis "sesudah Ctrl+C dua kali, membuka
+# jendela berikutnya sering nyangkut": reset_hub melepas acuan hub lebih dulu
+# lalu mengerjakan bagian lambatnya (dispose, membunuh Chrome, dispose paksa) di
+# luar kunci. Pesan berikutnya yang datang di sela itu melihat _HUB kosong,
+# meluncurkan Chrome baru — lalu pembersihan yang MASIH BERJALAN membunuh Chrome
+# profil itu, termasuk browser yang baru saja lahir. Terbukti lewat reproduksi:
+# "hub BARU dibuat" muncul sebelum "BUNUH chrome profil".
+#
+# Re-entrant karena pembersihan bisa memanggil jalur yang mengambil kunci ini
+# lagi. Urutannya WAJIB tetap: _BERSIH_LOCK dulu, baru _HUB_LOCK — jangan pernah
+# dibalik, atau dua thread bisa saling menunggu selamanya.
+_BERSIH_LOCK = threading.RLock()
 
 
 def hub() -> BrowserHub:
@@ -879,15 +912,21 @@ def hub() -> BrowserHub:
     Bila hub sebelumnya POISONED (ada job yang macet melewati timeout — mis.
     setelah Ctrl+C di tengah pembukaan sesi), buat hub BARU dan bunuh Chrome
     profil yang mungkin tertinggal & mengunci profil. Ini menyembuhkan gejala
-    'tiap Ctrl+C lalu chat baru, pembukaan sesi browser nyangkut tak selesai'."""
+    'tiap Ctrl+C lalu chat baru, pembukaan sesi browser nyangkut tak selesai'.
+
+    MENUNGGU pembersihan yang mungkin sedang berjalan (lihat _BERSIH_LOCK).
+    Menunggu di sini justru yang membuat pembukaan cepat: browser yang lahir di
+    tengah pembersihan akan ikut terbunuh, lalu percobaan berikutnya terhalang
+    profil yang masih terkunci — persis 'nyangkut' yang mau dihindari."""
     global _HUB
-    with _HUB_LOCK:
-        if _HUB is not None and _HUB.poisoned:
-            _kill_profile_browsers()  # lepaskan kunci profil sebelum hub baru
-            _HUB = None
-        if _HUB is None:
-            _HUB = BrowserHub()
-        return _HUB
+    with _BERSIH_LOCK:
+        with _HUB_LOCK:
+            if _HUB is not None and _HUB.poisoned:
+                _kill_profile_browsers()  # lepaskan kunci profil sebelum hub baru
+                _HUB = None
+            if _HUB is None:
+                _HUB = BrowserHub()
+            return _HUB
 
 
 def reset_hub(service: str | None = None) -> None:
@@ -913,16 +952,21 @@ def reset_hub(service: str | None = None) -> None:
     mematikan browsernya justru satu-satunya cara melepaskannya.
 
     `service` membatasi pembunuhan itu ke satu profil saja; None = semua.
+
+    SELURUH pembersihan berada di dalam _BERSIH_LOCK, bukan cuma penggantian
+    acuan hubnya. Dulu hanya baris pertama yang terkunci, sehingga hub baru bisa
+    lahir di tengah jalan lalu ikut terbunuh oleh pembersihan ini sendiri.
     """
     global _HUB
-    with _HUB_LOCK:
-        h, _HUB = _HUB, None
-    if h is None:
-        return
-    if h.dispose(timeout=6.0):
-        return
-    _kill_profile_browsers(service)
-    # Browsernya mati -> panggilan Playwright yang menggantung kini melempar,
-    # jadi thread hub bisa menyelesaikan job-nya. Beri satu kesempatan lagi
-    # untuk berhenti rapi; kalau tetap tidak bisa, akhiri paksa.
-    h.dispose(timeout=4.0, paksa=True)
+    with _BERSIH_LOCK:
+        with _HUB_LOCK:
+            h, _HUB = _HUB, None
+        if h is None:
+            return
+        if h.dispose(timeout=6.0):
+            return
+        _kill_profile_browsers(service)
+        # Browsernya mati -> panggilan Playwright yang menggantung kini melempar,
+        # jadi thread hub bisa menyelesaikan job-nya. Beri satu kesempatan lagi
+        # untuk berhenti rapi; kalau tetap tidak bisa, akhiri paksa.
+        h.dispose(timeout=4.0, paksa=True)
