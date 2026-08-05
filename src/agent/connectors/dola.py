@@ -13,17 +13,21 @@ TERVERIFIKASI ada di halaman). Itulah alasan tunggal memilihnya — untuk kerja
 kode & agentic, connector lain lebih tepat.
 
 STATUS PEMETAAN SELEKTOR — dibaca apa adanya, jangan dianggap lebih:
-  * TERVERIFIKASI sebagai TAMU (tanpa login, tanpa mengirim pesan sama sekali,
-    karena kuota gratisnya terbatas): kotak input, tombol Log In, tombol kirim,
-    tombol New Chat, dan ketiadaan input[type=file] di halaman tamu.
-  * BELUM TERVERIFIKASI: wadah jawaban, penanda streaming, penanda sudah-login,
-    pola URL percakapan, dan pemberitahuan kuota habis. Semuanya butuh SATU
-    sesi login sungguhan untuk dipetakan. Yang tertulis di bawah adalah
-    kandidat berlapis dengan cadangan longgar, BUKAN hasil pengukuran.
+  * TERVERIFIKASI sebagai TAMU: kotak input, tombol kirim, penanda Log In,
+    item sidebar New Chat, dan ketiadaan input[type=file].
+  * TERVERIFIKASI SESUDAH LOGIN, dengan SATU pesan terpendek ("hi") — kuota
+    gratisnya terbatas, jadi seluruh pemetaan di bawah dipanen dari satu
+    putaran itu saja: wadah pesan, penanda sedang-menulis, pola URL
+    percakapan, dan penanda sudah-login. Caranya sensus kelas SEBELUM vs
+    SELAMA vs SESUDAH jawaban, lalu membandingkan selisihnya — bukan menebak
+    dari nama kelas.
+  * BELUM TERVERIFIKASI: pemberitahuan kuota habis (butuh kuota yang
+    benar-benar habis) dan jalur melampirkan berkas.
 
-Selektor bertanda hash (mis. `login-btn-header-CTKsn1`) sengaja TIDAK dipakai
-sendirian: akhiran acak begitu berasal dari CSS-module dan berubah tiap build
-situs, jadi ia cuma dipakai sebagai kandidat terakhir.
+Selektor bertanda hash (mis. `loading-container-AGJEWI`, `login-btn-header-
+CTKsn1`) TIDAK pernah dipakai utuh: akhiran acak itu berasal dari CSS-module
+dan berganti tiap build situs, jadi yang dipakai hanya awalannya lewat
+[class*=…].
 """
 from __future__ import annotations
 
@@ -36,11 +40,12 @@ class DolaConnector(WebConnector):
     # Alamat resminya langsung, bukan cici.com yang cuma mengalihkan:
     # satu lompatan pengalihan lebih sedikit di tiap peluncuran.
     chat_url = "https://www.dola.com/chat/"
-    # BELUM TERVERIFIKASI: bentuk URL percakapan hanya terlihat setelah ada chat
-    # sungguhan. Pola bawaan base.py dipakai sampai terbukti lain; kalau ternyata
-    # beda, yang gagal cuma "lanjutkan percakapan lama" — bukan chat barunya.
+    # DIVERIFIKASI dari percakapan sungguhan: URL-nya
+    #   https://www.dola.com/chat/38416165758749201
+    # — id ANGKA, bukan uuid. Pola dibatasi ke digit supaya tak salah menangkap
+    # potongan path lain.
     chat_url_template = "https://www.dola.com/chat/{id}"
-    chat_id_pattern = r"/chat/([A-Za-z0-9_-]{8,})"
+    chat_id_pattern = r"/chat/(\d{8,})"
 
     show_window = False
 
@@ -85,40 +90,52 @@ class DolaConnector(WebConnector):
         'button:has-text("Log In"), button:has-text("Log in"), '
         'button:has-text("Sign in"), button:has-text("Continue with Google")'
     )
-    # BELUM TERVERIFIKASI. Dikosongkan dengan sengaja: bukti-positif yang salah
-    # tebak lebih berbahaya daripada tidak ada — ia bisa membuat sesi tamu
-    # dikira sudah login, lalu pesan dikirim ke halaman yang tak memprosesnya.
-    # base.py menangani kekosongan ini dengan bersandar pada logged_out_selector.
-    logged_in_selector = ""
+    # DIVERIFIKASI dengan MEMBANDINGKAN halaman tamu vs halaman sesudah login:
+    # "Chat History" di sidebar hanya ada sesudah login (halaman tamu memuat
+    # Dola / New Chat / AI Creation / Log In, tanpa riwayat). Inilah yang
+    # menutup jendela rawan saat kotak input sudah terlihat tapi sesinya masih
+    # tamu.
+    #
+    # Nama akun & tombol profil sengaja TIDAK dipakai walau ikut terlihat:
+    # id-nya `radix-:r3a:` — dibangkitkan Radix UI dan berubah tiap render.
+    logged_in_selector = '[class*="text-dbx-text-secondary"]:has-text("Chat History")'
 
-    # --- jawaban (BELUM TERVERIFIKASI) ---
-    # Kandidat disusun dari yang paling spesifik ke paling longgar. Yang paling
-    # longgar sengaja tetap ada supaya giliran pertama punya peluang terbaca
-    # walau namanya berbeda; begitu sesi login pertama dipetakan, daftar ini
-    # HARUS dipersempit — kandidat longgar rawan menangkap bilah tombol di
-    # bawah jawaban (pelajaran terukur dari connector Kimi).
+    # --- jawaban (DIVERIFIKASI dari satu percakapan sungguhan) ---
+    #
+    # PERINGATAN yang menentukan cara membacanya: wadah pesan Dola TIDAK
+    # membedakan penanya dan penjawab. Diukur pada percakapan "hi" ->
+    # "Hi there! 😊 How can I help you today?", ketiga kandidat di bawah cocok
+    # ke DUA elemen — pesan pengguna DAN jawabannya — dengan kelas yang sama
+    # persis (`container-qX9Csx md-box-root`, `v_list_row`, `inner-item-…`).
+    # Tak ada satu pun kelas khusus asisten di DOM-nya.
+    #
+    # Karena itu yang membedakan adalah URUTAN: base.py mengambil kecocokan
+    # TERAKHIR yang ada isinya, dan jawaban selalu datang sesudah pertanyaan.
+    # Konsekuensinya stop_selectors di bawah WAJIB benar — kalau penantiannya
+    # berhenti terlalu dini, yang terbaca sebagai "jawaban" adalah pesan
+    # pengguna sendiri.
     message_selector = (
-        '[class*="message-content"]',
-        '[class*="answer-content"]',
-        '[class*="markdown"]',
-        '[data-testid*="message"]',
-        '[class*="assistant"]',
+        '[class*="md-box-root"]',
+        ".v_list_row",
+        '[class*="inner-item"]',
     )
     read_as_markdown = True
-    # BELUM TERVERIFIKASI: tombol berhenti biasanya muncul selama menulis.
+    # DIVERIFIKASI dengan sensus kelas SEBELUM vs SELAMA vs SESUDAH menulis:
+    # lima token kelas hanya hadir selama Dola menyusun jawaban, lalu hilang —
+    # loading-container-AGJEWI, dot-flashing-mIsXoz, dot-BU8RO9, loading-i3Fu5w,
+    # loading-border-AcFju9.
+    #
+    # Akhiran acaknya (AGJEWI, mIsXoz, …) berasal dari CSS-module dan berganti
+    # tiap build situs, jadi yang dipakai AWALANNYA saja lewat [class*=…].
     stop_selectors = (
-        '[class*="stop-btn"]',
-        '[class*="stop-button"]',
-        'button[aria-label*="Stop" i]',
+        '[class*="loading-container"]',
+        '[class*="dot-flashing"]',
+        '[class*="loading-border"]',
     )
-    # Bagian yang ada di dalam wadah jawaban tapi bukan jawaban. Ditebak dari
-    # pola yang lazim; ditandai jelas supaya tak dikira hasil pengukuran.
-    strip_selectors = (
-        '[class*="thinking"]',
-        '[class*="reasoning"]',
-        '[class*="action-bar"]',
-        '[class*="msg-action"]',
-    )
+    # Belum ada bagian bukan-jawaban yang teramati di dalam wadahnya (balasan
+    # ujinya pendek & tanpa blok berpikir). Dibiarkan kosong daripada diisi
+    # tebakan: strip_selectors yang salah membuang isi jawaban yang sah.
+    strip_selectors = ()
 
     # --- kuota gratis habis (BELUM TERVERIFIKASI) ---
     # Dola membagi kuota gratis harian, dan pemberitahuannya baru muncul SESUDAH
@@ -147,9 +164,13 @@ class DolaConnector(WebConnector):
         '[class*="chat-list"]',
     )
 
-    # --- lampiran (BELUM TERVERIFIKASI) ---
-    # Halaman TAMU tak punya satu pun input[type=file] (terverifikasi), jadi
-    # unggahan kemungkinan baru dipasang setelah login atau dibuat lewat menu.
-    # Dikosongkan sampai terbukti: file_input_selector yang salah membuat
-    # lampiran "berhasil" tanpa file yang benar-benar terkirim.
+    # --- lampiran (DIVERIFIKASI tak ada input langsung) ---
+    # Diperiksa pada halaman tamu MAUPUN sesudah login, termasuk di dalam
+    # percakapan yang sudah berjalan: `input[type=file]` berjumlah NOL di
+    # ketiganya. Jadi unggahan Dola pasti dibuat saat menu/tombolnya diklik
+    # (pola yang sama dengan Qwen), bukan lewat input tersembunyi.
+    #
+    # Dibiarkan kosong sampai jalur kliknya dipetakan: file_input_selector yang
+    # salah membuat lampiran "berhasil" tanpa berkas yang benar-benar terkirim
+    # — kegagalan senyap, jenis yang paling mahal.
     file_input_selector = ""
