@@ -231,6 +231,73 @@ class GlmConnector(WebConnector):
         except Exception:  # noqa: BLE001 - DOM sedang digambar ulang
             return False
 
+    def _klik_kuat(self, page: Any, loc: Any) -> None:
+        """Klik yang juga menembus komponen yang menunggu POINTER, bukan click.
+
+        Jendela connector berjalan tersembunyi, jadi klik mouse sungguhan gagal
+        hit-test dan base jatuh ke dispatch 'click'. Sebagian komponen situs
+        ini (bits-ui) membuka panelnya pada pointerdown — dispatch 'click' saja
+        MENGUBAH keadaan sakelarnya tapi panelnya tak pernah muncul, dan itulah
+        bentuk kegagalan yang menyesatkan: sakelar bergerak, panel tidak."""
+        self._click_element(loc, timeout=8000)
+        try:
+            loc.dispatch_event("pointerdown")
+            loc.dispatch_event("pointerup")
+        except Exception:  # noqa: BLE001 - elemen lepas; hasilnya dinilai pemanggil
+            pass
+        page.wait_for_timeout(200)
+
+    def _tutup_panel(self, page: Any) -> None:
+        """Tutup panel/dropdown yang masih menggantung di atas komposer.
+
+        Escape saja tak selalu cukup: jendela connector tersembunyi sehingga
+        fokus papan ketik bisa tak berada di dalam panelnya. Karena itu chip
+        effort juga diperiksa lewat aria-expanded dan ditutup dengan mengeklik
+        pembukanya lagi."""
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            chip = page.locator(_BTN_EFFORT).first
+            if chip.count() and \
+                    (chip.get_attribute("aria-expanded") or "") == "true":
+                self._klik_kuat(page, chip)
+                page.wait_for_timeout(500)
+        except Exception:  # noqa: BLE001 - chip tak ada -> memang tak perlu
+            pass
+
+    def _pastikan_mode_nyala(self, page: Any) -> None:
+        """Nyalakan sakelar pencarian web, dan BUKTIKAN ia menyala.
+
+        Kegagalan dilaporkan dengan keadaan yang terbaca (nonaktif? lebar
+        jendela?) — bukan tebakan "layout berubah" yang tak bisa
+        ditindaklanjuti siapa pun."""
+        for _ in range(3):
+            if self._mode_menyala(page):
+                return
+            loc = page.locator(_BTN_MODE).first
+            if not loc.count():
+                break
+            if loc.is_disabled():
+                raise BrowserError(
+                    f"tombol pencarian web {self.label} sedang NONAKTIF — "
+                    "biasanya karena situs masih menyiapkan komposer atau "
+                    "jawaban sebelumnya belum selesai. Coba /mode lagi "
+                    "beberapa detik lagi.")
+            self._klik_kuat(page, loc)
+            page.wait_for_timeout(1100)
+        if self._mode_menyala(page):
+            return
+        ada = page.locator(_BTN_MODE).count()
+        lebar = page.evaluate("() => window.innerWidth")
+        raise BrowserError(
+            f"sakelar pencarian web {self.label} tak mau menyala "
+            f"(tombol ditemukan: {ada}, lebar halaman: {lebar}px). Bila "
+            "tombolnya 0, komposer situs berubah — perbarui _BTN_MODE di "
+            "connectors/glm.py.")
+
     def _sakelar(self, page: Any, sel: str, nyala: bool) -> bool:
         """Setel sebuah role=switch ke keadaan yang DIMINTA, lalu buktikan.
 
@@ -257,7 +324,7 @@ class GlmConnector(WebConnector):
             if not chip.count():
                 return False
             if (chip.get_attribute("aria-expanded") or "") != "true":
-                self._click_element(chip, timeout=8000)
+                self._klik_kuat(page, chip)      # bits-ui buka di pointerdown
                 page.wait_for_timeout(900)
             if page.locator("button[data-selected]").count():
                 return True
@@ -303,28 +370,37 @@ class GlmConnector(WebConnector):
         kalau sudah tertutup, satu-satunya jalan membukanya lagi adalah
         mematikan lalu menyalakan ulang."""
         adv = path[1] == "on"
-        for _ in range(3):
-            if not self._mode_menyala(page):
-                self._click_element(page.locator(_BTN_MODE).first, timeout=8000)
-                page.wait_for_timeout(1100)
+        # Panel LAIN yang masih terbuka (mis. chip effort yang barusan dipakai)
+        # menutupi komposer, dan selama itu panel varian search tak pernah
+        # muncul — TERUKUR: dari keadaan "search menyala + panel effort
+        # terbuka", sakelar Advanced tak pernah bisa disetel. Karena itu
+        # halaman dibersihkan dulu.
+        self._tutup_panel(page)
+        self._pastikan_mode_nyala(page)
+        for putaran in range(3):
             if self._sakelar(page, self._SW_ADV, adv):
-                if self._mode_menyala(page):
-                    return (f"pencarian web {self.label} menyala; "
-                            f"Advanced Search {'menyala' if adv else 'mati'}")
-            elif self._mode_menyala(page):
-                # Menyala tapi panelnya tertutup -> matikan, putaran berikutnya
-                # menyalakan ulang berikut panelnya.
-                self._click_element(page.locator(_BTN_MODE).first, timeout=8000)
-                page.wait_for_timeout(900)
-        if self._mode_menyala(page):
-            raise BrowserError(
-                f"pencarian web {self.label} menyala, tetapi sakelar "
-                "'Advanced Search' tak bisa disetel — panelnya tak mau "
-                "terbuka. Coba /mode sekali lagi.")
-        raise BrowserError(
-            f"sakelar pencarian web {self.label} tak mau menyala — "
-            "layout komposernya mungkin berubah (lihat _BTN_MODE di "
-            "connectors/glm.py)")
+                # Sakelar Advanced ada DI DALAM panel, dan menutup panel tak
+                # membatalkannya — tapi keadaan sakelar utama tetap diperiksa
+                # ulang, sebab klik yang meleset bisa mengenai sakelar utama.
+                self._pastikan_mode_nyala(page)
+                return (f"pencarian web {self.label} menyala; "
+                        f"Advanced Search {'menyala' if adv else 'mati'}")
+            if putaran == 2:
+                break
+            # Panelnya tertutup. Satu-satunya cara membukanya lagi adalah
+            # mematikan lalu menyalakan ulang sakelar utama.
+            self._klik_kuat(page, page.locator(_BTN_MODE).first)
+            page.wait_for_timeout(900)
+            self._pastikan_mode_nyala(page)
+        # Menyerah pada varian — TAPI pencarian web JANGAN ditinggal mati.
+        # Versi sebelumnya keluar lewat jalur "matikan lalu coba lagi" dan bila
+        # panelnya tak pernah terbuka, pengguna menerima galat SEKALIGUS mode
+        # yang padam; padahal bagian yang penting (pencarian menyala) berhasil.
+        self._pastikan_mode_nyala(page)
+        return (f"pencarian web {self.label} MENYALA, tetapi sakelar "
+                f"'Advanced Search' tak bisa disetel ke "
+                f"{'nyala' if adv else 'mati'} — panel variannya tak mau "
+                "terbuka. Jalankan /mode sekali lagi bila perlu.")
 
     def _set_action_on_hub(self, h: Any, label: str, path: tuple[str, ...],
                            opener: str = "") -> str:

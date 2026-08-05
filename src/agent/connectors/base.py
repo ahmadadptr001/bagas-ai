@@ -1771,6 +1771,13 @@ class WebConnector:
         sudah kosong = terkirim; kalau masih berisi, tombol kirim diklik sebagai
         cadangan. Tanpa tombol kirim yang dikenal, perilakunya sama seperti
         dulu — tekan Enter lalu biarkan penantian jawaban yang menilai."""
+        # Potret SEBELUM mengirim. Isi kotak input bukan satu-satunya bukti
+        # (lihat _sudah_terkirim), dan pembandingnya harus diambil sekarang.
+        counts0 = self._msg_counts(page)
+        try:
+            url0 = page.url or ""
+        except Exception:  # noqa: BLE001
+            url0 = ""
         if self._editor_kaya(inp):
             # Editor kaya memperbarui keadaan internalnya lewat event; menekan
             # Enter pada tik yang sama bisa mengirim keadaan yang belum sinkron.
@@ -1783,7 +1790,7 @@ class WebConnector:
         # tiap pengiriman. Dulu urutannya terbalik dan setiap giliran membayar
         # 500 ms percuma — pada satu sesi agent 24 langkah itu 12 detik.
         for _ in range(6):          # ~3 detik
-            if self._kotak_kosong(page, inp):
+            if self._sudah_terkirim(page, inp, counts0, url0):
                 return              # kotak kosong -> pesan sudah berangkat
             page.wait_for_timeout(500)
         # Enter tak mempan. Coba tombol kirim — dan VERIFIKASI hasilnya, jangan
@@ -1801,12 +1808,12 @@ class WebConnector:
             except Exception:  # noqa: BLE001 - dinilai lewat isi kotak di bawah
                 pass
             for _ in range(6):      # ~3 detik per putaran
-                if self._kotak_kosong(page, inp):
+                if self._sudah_terkirim(page, inp, counts0, url0):
                     return
                 page.wait_for_timeout(500)
             page.keyboard.press(self.submit_key)   # coba Enter sekali lagi
             page.wait_for_timeout(400)
-            if self._kotak_kosong(page, inp):
+            if self._sudah_terkirim(page, inp, counts0, url0):
                 return
         # Menyerah. Teks yang gagal berangkat WAJIB disapu dulu: percobaan
         # berikutnya mengetik dengan insert_text di posisi caret, jadi sisa
@@ -1832,6 +1839,39 @@ class WebConnector:
             f"pesan tak mau terkirim di {self.label} — komposer menolak Enter "
             "maupun tombol kirim (mungkin sedang terkunci situs). Kotak input "
             "sudah dikosongkan lagi; coba kirim ulang.")
+
+    def _sudah_terkirim(self, page: Any, inp: Any, counts0: dict[str, int],
+                        url0: str) -> bool:
+        """Pesannya sudah berangkat? Tiga bukti, cukup salah satu.
+
+        Dulu hanya SATU yang dipakai — "kotak input sudah kosong" — dan itu
+        TERBUKTI keliru pada situs yang berpindah halaman saat pesan pertama
+        dikirim: chat.z.ai memindahkan URL dari / ke /c/<id>, DOM lama dibuang,
+        dan pembacaan isi kotak gagal di tengah navigasi. `_input_text` menjawab
+        None ("tak terbaca"), yang sengaja BUKAN "kosong" — sehingga pengiriman
+        yang sebenarnya BERHASIL dilaporkan gagal: pengguna melihat "komposer
+        menolak Enter maupun tombol kirim" padahal pesannya sudah nangkring di
+        percakapan dan modelnya sedang menjawab. Lebih buruk lagi, jalur
+        cadangan lalu menekan Enter & tombol kirim berkali-kali di halaman baru.
+
+        Dua bukti tambahan menutup lubang itu:
+          * jumlah elemen pesan BERTAMBAH — gelembung pesan kita sendiri;
+          * URL berubah menjadi URL percakapan (/c/<id>, /chat/<id>), yang di
+            situs-situs ini hanya terjadi karena pesan pertama terkirim.
+        """
+        if self._kotak_kosong(page, inp):    # bukti terkuat & termurah
+            return True
+        try:
+            sekarang = self._msg_counts(page)
+            if any(sekarang.get(s, 0) > n for s, n in counts0.items()):
+                return True
+            url = page.url or ""
+            if url != url0 and self.chat_id_pattern \
+                    and re.search(self.chat_id_pattern, url):
+                return True
+        except Exception:  # noqa: BLE001 - DOM sedang transisi -> belum tentu
+            pass
+        return False
 
     def _kosongkan_kotak(self, page: Any, inp: Any) -> None:
         """Sapu isi komposer, sebisanya (kegagalan di sini tak fatal).
