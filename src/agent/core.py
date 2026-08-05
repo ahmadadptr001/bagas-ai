@@ -726,7 +726,14 @@ _SELESAI_RE = re.compile(
 _TOOL_BAWAAN_RE = re.compile(
     r"\b(?:execute\s+python\s+code|run\s+python\s+code|code\s+interpreter|"
     r"python\s+sandbox|analysis\s+tool|menjalankan\s+kode\s+python\s+di\s+"
-    r"sandbox)\b", re.I)
+    r"sandbox"
+    # Label KARTU yang terlihat di layar saat situs menjalankan tool-nya
+    # sendiri. Ditambahkan dari tangkapan layar pengguna: Dola membalas "Aku
+    # baca dulu README.md proyekmu" lalu menjalankan Execute Python code, dua
+    # kali Search, dan Fetching URLs — tak satu pun menyentuh berkas di laptop,
+    # jadi seluruh hasilnya fiksi terhadap proyek yang sebenarnya.
+    r"|fetching\s+urls?|searching\s+the\s+web|browsing\s+the\s+web"
+    r")\b", re.I)
 
 
 def _pakai_tool_bawaan(text: str) -> bool:
@@ -1518,6 +1525,28 @@ class Agent:
                         and (_looks_like_promise(reply)
                              or _pakai_tool_bawaan(reply))):
                     janji += 1
+                    if janji >= 2 and _pakai_tool_bawaan(reply):
+                        # Teguran PERTAMA sudah menjelaskan alasannya dan tetap
+                        # dilanggar. Yang kedua berhenti menjelaskan — ia
+                        # menyatakan AKIBAT, karena penjelasan terbukti kalah
+                        # oleh kebiasaan bawaan model. Diminta pula membalas
+                        # TANPA kalimat pembuka: kalimat itulah yang selama ini
+                        # memicu loop tool bawaannya menyala lagi.
+                        reply = _send(
+                            "[SISTEM] STOP. Kamu memakai tool bawaanmu lagi. "
+                            "Hasilnya SUDAH KUBUANG dan tak pernah sampai ke "
+                            "pengguna — sandbox itu tak punya satu pun berkas "
+                            "proyeknya, jadi apa pun yang kamu 'baca' di sana "
+                            "salah.\n"
+                            "Balas pesan ini HANYA dengan satu blok, tanpa "
+                            "kalimat pembuka, tanpa penjelasan:\n"
+                            "[[TOOL]]\n```json\n"
+                            '{"tool": "read_file", "args": {"path": "..."}}\n'
+                            "```\n[[/TOOL]]\n"
+                            "Ganti nama tool & argumennya sesuai yang memang "
+                            "kamu butuhkan. Kalau kamu membalas tanpa blok "
+                            "lagi, giliran ini berakhir tanpa hasil apa pun.")
+                        continue
                     reply = _send(
                         "[SISTEM] Pesanmu barusan tak memuat blok [[TOOL]], "
                         "jadi TIDAK ADA yang dijalankan di laptopku — dan "
