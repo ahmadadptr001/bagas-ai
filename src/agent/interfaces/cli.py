@@ -67,6 +67,7 @@ except Exception:  # pragma: no cover
 
 from .. import config, interaction, llm, longmem, models, osinfo, permissions, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
 from .. import session as session_mod  # noqa: E402
+from .. import suara as _suara  # noqa: E402
 from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
 # Prompt interaktif MILIK SENDIRI (dulu InquirerPy) — lihat ui/menu.py.
@@ -193,6 +194,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("effort", "mode berpikir"),
     ("mode", "mode kerja situs: buat gambar/video, dll"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
+    ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
     ("add-dir", "tambah folder konteks"),
     ("dirs", "folder konteks aktif"),
     ("rm-dir", "hapus folder konteks"),
@@ -2179,6 +2181,11 @@ def main(resume: bool = False) -> None:
         def _on_msg(content: str) -> None:
             if cbs_alive["on"]:
                 view.add_narasi(content)
+                # Kabar yang sama juga DIBACAKAN, supaya terdengar walau
+                # jendela terminalnya sedang tertutup jendela lain — keadaan
+                # yang justru paling sering terjadi selagi menunggu AI bekerja.
+                if prefs.load().get("suara", True):
+                    _suara.ucap(content)
 
         def _on_retry(attempt: int, wait: float, exc: Exception) -> None:
             if cbs_alive["on"]:
@@ -2487,6 +2494,11 @@ def main(resume: bool = False) -> None:
         finally:
             cbs_alive["on"] = False   # worker yatim tak boleh mencetak lagi
             live_holder["live"] = None
+        # Suara ikut berhenti begitu gilirannya berhenti — apa pun sebabnya.
+        # Kabar yang masih mengantre saat itu sudah BASI: mendengar rencana
+        # langkah yang tak pernah jadi dikerjakan lebih membingungkan daripada
+        # diam, dan pada pembatalan ia terdengar seperti Ctrl+C yang diabaikan.
+        _suara.diam()
         # Giliran web yang dibatalkan: pastikan sesi browser tak tertinggal macet.
         if interrupted and agent.model_spec.is_web:
             _reset_web_hub_if_stuck(worker_thread)
@@ -2761,6 +2773,73 @@ def main(resume: bool = False) -> None:
             console.print(f"  [yellow]⚠ {_esc(str(result['error']))}[/yellow]\n")
         else:
             console.print(f"  [#9fc93c]✓ {_esc(str(result['ok']))}[/]\n")
+
+    _MESIN_JELAS = {
+        "edge": ("suara Indonesia natural (daring)",
+                 "Ardi/Gadis — suara neural, pelafalan Indonesia"),
+        "sapi": ("suara bawaan Windows (luring)",
+                 "System.Speech — selalu ada, tak butuh internet"),
+        "say": ("suara bawaan macOS (luring)", "perintah `say`"),
+        "espeak": ("espeak (luring)", "spd-say / espeak-ng"),
+    }
+
+    def show_mic(arg: str = "") -> None:
+        """/mic — kabar AI dibacakan pengeras suara; on/off/tes.
+
+        Suara bisa mengganggu, jadi sakelarnya wajib gampang ditemukan. Dan
+        kalau ia tak berbunyi, alasannya harus DIKATAKAN — kesunyian yang tak
+        dijelaskan mustahil dibedakan dari fitur yang rusak."""
+        pilihan = arg.strip().lower()
+        if pilihan in ("off", "mati", "on", "hidup"):
+            nyala = pilihan in ("on", "hidup")
+            prefs.save(suara=nyala)
+            if not nyala:
+                _suara.diam()
+            warna = "#9fc93c" if nyala else "#f7d488"
+            console.print(f"  [{warna}]✓ suara kabar {'AKTIF' if nyala else 'MATI'}"
+                          f"[/]\n")
+            return
+
+        aktif = bool(prefs.load().get("suara", True))
+        if pilihan in ("tes", "test", "coba"):
+            if not aktif:
+                console.print("  [#f7d488]suara sedang MATI[/] "
+                              "[dim]— nyalakan dulu: /mic on[/dim]\n")
+                return
+            _suara.ucap("Halo, ini suara bagas a i. Kabar dari model akan "
+                        "dibacakan seperti ini.")
+            console.print("  [dim]♪ mengucapkan contoh…[/dim]\n")
+            return
+
+        mesin = _suara.mesin_tersedia()
+        console.print()
+        console.print("  [bold #fcc048]♪ Suara kabar[/] "
+                      "[dim]— tiap kabar dari model dibacakan pengeras suara, "
+                      "terdengar di jendela mana pun[/]")
+        console.print(
+            f"  [dim]status: [/]"
+            f"[{'#9fc93c' if aktif else '#f7d488'}]{'aktif' if aktif else 'mati'}[/]"
+            f"  [dim]· /mic off · /mic tes[/dim]\n")
+        if not mesin:
+            console.print("  [yellow]⚠ tak ada mesin suara di sistem ini — "
+                          "tak akan ada bunyi.[/yellow]\n")
+            return
+        # Urutannya PENTING ditampilkan: yang teratas dipakai, sisanya cadangan
+        # kalau yang di atas gagal (mis. laptop sedang luring).
+        for i, m in enumerate(mesin):
+            judul, ket = _MESIN_JELAS.get(m, (m, ""))
+            tanda = "[#9fc93c]▸[/]" if i == 0 else "[dim]·[/]"
+            label = "dipakai" if i == 0 else "cadangan"
+            console.print(f"    {tanda} [#fc9018]{judul}[/] "
+                          f"[dim]({label}) — {_esc(ket)}[/dim]")
+        if "edge" not in mesin:
+            # Tanpa ini, satu-satunya yang tersedia adalah suara Inggris yang
+            # melafalkan teks Indonesia — bisa didengar, tapi jauh dari enak.
+            # Pengguna berhak tahu bahwa memperbaikinya cuma satu baris.
+            console.print("\n  [dim]Untuk suara Indonesia yang natural: "
+                          "[/][bold]pip install edge-tts[/]"
+                          "[dim] (butuh internet saat dipakai).[/dim]")
+        console.print()
 
     def show_tim(arg: str = "") -> None:
         """/tim — lihat 24 spesialis yang bekerja pasif; /tim off|on mematikan.
@@ -3832,6 +3911,8 @@ def main(resume: bool = False) -> None:
                 pick_web_mode()
             elif cmd == "tim" or cmd.startswith("tim "):
                 show_tim(text[4:].strip())
+            elif cmd == "mic" or cmd.startswith("mic "):
+                show_mic(text[4:].strip())
             elif cmd == "live":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:
@@ -3859,6 +3940,12 @@ def main(resume: bool = False) -> None:
             tg_service["svc"].stop()
         except Exception:  # noqa: BLE001
             pass
+    # Hentikan pengucap: proses PowerShell-nya harus ikut mati, kalau tidak ia
+    # menyelesaikan kalimat terakhir setelah terminalnya sudah ditutup.
+    try:
+        _suara.tutup()
+    except Exception:  # noqa: BLE001
+        pass
     # Tutup browser connector dengan RAPI supaya Chrome tak mengira dirinya
     # crash & menawarkan "Restore pages?" saat dipakai lagi.
     try:
