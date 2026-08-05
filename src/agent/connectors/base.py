@@ -1722,6 +1722,15 @@ class WebConnector:
             page.wait_for_timeout(150)
             if self._input_text(inp):
                 return
+            # Kotak yang tak terbaca karena JENDELANYA SUDAH TAK ADA jangan
+            # dilaporkan sebagai "editor menolak pengetikan" — sebabnya beda,
+            # dan yang ini bisa dipulihkan sendiri dengan membuka sesi lagi.
+            if not self._halaman_hidup(page):
+                galat = BrowserError(
+                    f"jendela/tab {self.label} tertutup saat pesan sedang "
+                    "diketik, jadi pesannya tak pernah berangkat.")
+                galat.target_mati = True
+                raise galat
         raise BrowserError(
             f"teks tak mau masuk ke kotak input {self.label} — editornya "
             "mungkin menolak pengetikan terprogram. Coba kirim ulang; bila "
@@ -1749,7 +1758,7 @@ class WebConnector:
         # tiap pengiriman. Dulu urutannya terbalik dan setiap giliran membayar
         # 500 ms percuma — pada satu sesi agent 24 langkah itu 12 detik.
         for _ in range(6):          # ~3 detik
-            if not self._input_text(inp):
+            if self._kotak_kosong(page, inp):
                 return              # kotak kosong -> pesan sudah berangkat
             page.wait_for_timeout(500)
         # Enter tak mempan. Coba tombol kirim — dan VERIFIKASI hasilnya, jangan
@@ -1767,12 +1776,12 @@ class WebConnector:
             except Exception:  # noqa: BLE001 - dinilai lewat isi kotak di bawah
                 pass
             for _ in range(6):      # ~3 detik per putaran
-                if not self._input_text(inp):
+                if self._kotak_kosong(page, inp):
                     return
                 page.wait_for_timeout(500)
             page.keyboard.press(self.submit_key)   # coba Enter sekali lagi
             page.wait_for_timeout(400)
-            if not self._input_text(inp):
+            if self._kotak_kosong(page, inp):
                 return
         raise BrowserError(
             f"pesan tak mau terkirim di {self.label} — komposer menolak Enter "
@@ -1780,14 +1789,62 @@ class WebConnector:
             "tertinggal di kotak input; coba kirim ulang.")
 
     @staticmethod
-    def _input_text(inp: Any) -> str:
-        """Isi kotak input saat ini (textarea maupun contenteditable)."""
+    def _input_text(inp: Any, timeout: float = 2500) -> str | None:
+        """Isi kotak input saat ini, atau None bila TAK BISA DIBACA.
+
+        Perbedaan None vs "" itu inti perbaikan sebuah bug, bukan kerapian:
+        dulu keduanya dilaporkan sebagai "" — sehingga kotak yang tak bisa
+        dibaca (tab tertutup, halaman berpindah, selektor tak lagi cocok) tak
+        bisa dibedakan dari kotak yang memang sudah kosong. Bagi _submit,
+        kotak kosong berarti "pesan sudah berangkat", jadi jendela yang
+        tertutup tepat saat mengirim justru DILAPORKAN SEBAGAI SUKSES: giliran
+        lalu menunggu jawaban yang tak akan pernah datang, dan pengguna
+        melihat 'pesan tidak terkirim' tanpa sebab yang terlihat.
+
+        `timeout` juga sengaja pendek. Playwright menunggu 30 detik sebelum
+        menyerah pada selektor yang tak cocok, dan _submit membaca kotak ini
+        berkali-kali — cukup untuk membuat satu pengiriman gagal menggantung
+        bermenit-menit."""
         try:
             return (inp.evaluate(
-                "el => (el.value !== undefined ? el.value : el.innerText) || ''"
+                "el => (el.value !== undefined ? el.value : el.innerText) || ''",
+                timeout=timeout,
             ) or "").strip()
+        except Exception:  # noqa: BLE001 - tak terbaca != kosong
+            return None
+
+    @staticmethod
+    def _halaman_hidup(page: Any) -> bool:
+        """Halaman/tab-nya masih ada?"""
+        try:
+            if page.is_closed():
+                return False
+            _ = page.url
+            return True
         except Exception:  # noqa: BLE001
-            return ""
+            return False
+
+    def _kotak_kosong(self, page: Any, inp: Any) -> bool:
+        """True HANYA bila kotak input terbaca DAN isinya memang kosong.
+
+        Kotak yang tak terbaca bukan bukti apa pun. Kalau halamannya ternyata
+        sudah tak ada, itu bukan 'terkirim' melainkan jendela yang tertutup —
+        dan itu dikatakan apa adanya supaya bisa dipulihkan (send() membuka
+        ulang sesi lalu mengirim sekali lagi), bukan diam-diam dianggap
+        berhasil."""
+        isi = self._input_text(inp)
+        if isi is not None:
+            return not isi
+        if not self._halaman_hidup(page):
+            galat = BrowserError(
+                f"jendela/tab {self.label} tertutup saat pesan sedang dikirim, "
+                "jadi pesannya tak pernah berangkat.")
+            # Ditandai supaya _is_dead_target mengenalinya dan send() memulihkan
+            # sendiri — tanpa penanda ini, pesannya cuma cocok lewat teks bahasa
+            # Inggris milik Playwright.
+            galat.target_mati = True
+            raise galat
+        return False
 
     def _upload(self, page: Any, paths: list[str]) -> None:
         """Serahkan file ke situs. Default: isi langsung input file-nya.
@@ -1911,6 +1968,11 @@ class WebConnector:
                     "browser has been closed", "connection closed")
 
     def _is_dead_target(self, exc: BaseException) -> bool:
+        # Penanda eksplisit lebih dulu: galat yang KITA lempar sendiri tahu
+        # persis bahwa targetnya mati, dan tak perlu ditebak lewat teks bahasa
+        # Inggris milik Playwright (lihat _kotak_kosong).
+        if getattr(exc, "target_mati", False):
+            return True
         text = str(exc).lower()
         return any(m in text for m in self._DEAD_TARGET)
 

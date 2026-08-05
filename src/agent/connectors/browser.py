@@ -130,8 +130,20 @@ def _user32() -> Any:
         u.GetWindowThreadProcessId.argtypes = [
             wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
         u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        # Dipakai untuk MEMUNCULKAN kembali jendela yang tak kita sembunyikan
+        # sendiri (lihat set_windows_visible). Kelas jendela jadi penyaringnya:
+        # proses Chrome juga punya jendela bantu BERJUDUL ("MSCTFIME UI",
+        # "Default IME") yang kalau ikut ditampilkan muncul sebagai kotak
+        # kosong aneh di layar pengguna.
+        u.IsIconic.argtypes = [wintypes.HWND]
+        u.IsIconic.restype = wintypes.BOOL
+        u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u.GetClassNameW.restype = ctypes.c_int
+        u.SetForegroundWindow.argtypes = [wintypes.HWND]
+        u.SetForegroundWindow.restype = wintypes.BOOL
         _U32.update(dll=u, proc=proc, hwnd=wintypes.HWND,
-                    dword=wintypes.DWORD, byref=ctypes.byref)
+                    dword=wintypes.DWORD, byref=ctypes.byref,
+                    buf=ctypes.create_unicode_buffer)
         return u
     except Exception:  # noqa: BLE001
         _U32["dll"] = None
@@ -142,6 +154,20 @@ def _user32() -> Any:
 # lagi (mis. perlu login) hanya jendela itu yang kembali — bukan jendela bantu
 # internal Chrome yang memang seharusnya tak terlihat.
 _HIDDEN_WINDOWS: dict[str, list[int]] = {}
+
+
+def _kelas_jendela(u: Any, hwnd: Any) -> str:
+    """Nama kelas Win32 sebuah jendela ("" bila gagal dibaca).
+
+    Jendela utama Chrome selalu berkelas `Chrome_WidgetWin_*`; jendela bantu
+    yang ikut dimiliki prosesnya ("MSCTFIME UI", "Default IME") tidak. Judul
+    saja tak cukup memilah — jendela bantu itu PUNYA judul."""
+    try:
+        buf = _U32["buf"](64)
+        n = u.GetClassNameW(hwnd, buf, 64)
+        return buf.value if n else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def set_windows_visible(service: str, visible: bool) -> int:
@@ -156,7 +182,7 @@ def set_windows_visible(service: str, visible: bool) -> int:
     if u is None:
         return 0
     HWND, DWORD, byref = _U32["hwnd"], _U32["dword"], _U32["byref"]
-    SW_HIDE, SW_SHOWNOACTIVATE = 0, 4
+    SW_HIDE, SW_SHOWNOACTIVATE, SW_RESTORE = 0, 4, 9
     try:
         if visible:
             # Kembalikan HANYA jendela yang tadi kita sembunyikan, dan HANYA
@@ -170,6 +196,45 @@ def set_windows_visible(service: str, visible: bool) -> int:
                 if u.IsWindow(hw):
                     u.ShowWindow(hw, SW_SHOWNOACTIVATE)
                     shown += 1
+            if shown:
+                return shown
+            # TAK ADA CATATAN, tapi belum tentu tak ada yang perlu dimunculkan.
+            #
+            # Catatan itu hidup di MEMORI PROSES INI saja, sedangkan jendela yang
+            # tersembunyi/terminimalkan sering kali warisan proses SEBELUMNYA:
+            # sesi yang ditutup mendadak meninggalkan Chrome-nya hidup, lalu
+            # proses berikutnya MENUMPANG di jendela itu (lihat _sambung_cdp) dan
+            # cuma menambah tab. Karena catatannya kosong, dulu fungsi ini
+            # menjawab 0 dan pemanggil jatuh ke cadangan CDP — padahal
+            # Browser.setWindowBounds TIDAK bisa membatalkan ShowWindow(SW_HIDE)
+            # milik proses lain. Hasilnya jendelanya tak pernah muncul lagi, dan
+            # makin sering terjadi seiring menumpuknya sesi yang tak tertutup
+            # rapi.
+            pids = _chrome_pids(service)
+            if not pids:
+                return 0
+
+            def _munculkan(hwnd, _lparam):
+                nonlocal shown
+                pid = DWORD()
+                u.GetWindowThreadProcessId(hwnd, byref(pid))
+                if pid.value not in pids or u.GetWindowTextLengthW(hwnd) <= 0:
+                    return True
+                if not _kelas_jendela(u, hwnd).startswith("Chrome_WidgetWin"):
+                    return True
+                # HANYA yang memang sedang tak terlihat. Jendela yang sudah
+                # tampil sengaja tak disentuh: _foreground dipanggil di SETIAP
+                # pengambilan halaman saat CONNECTOR_SHOW aktif, dan mengangkat
+                # jendela tiap kali pesan dikirim berarti merebut fokus dari
+                # terminal yang sedang diketik pengguna.
+                if u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd):
+                    return True
+                u.ShowWindow(hwnd, SW_RESTORE)
+                u.SetForegroundWindow(hwnd)
+                shown += 1
+                return True
+
+            u.EnumWindows(_U32["proc"](_munculkan), 0)
             return shown
 
         # Sudah tersembunyi dari panggilan sebelumnya & jendelanya masih itu-itu
