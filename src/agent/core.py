@@ -19,6 +19,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 from . import config, llm, models, prefs, prompts
+from . import tim as _tim
 from .memory import Memory
 from .session import Session
 from .tools import base as tools
@@ -1105,6 +1106,7 @@ class Agent:
         # Diambil di tiap batas langkah; mengembalikan pesan pengguna
         # yang mengantre supaya bisa DISISIPKAN ke giliran berjalan.
         ambil_sisipan: Callable[[], list[str]] | None = None,
+        on_tim: Callable[[list[str]], None] | None = None,
     ) -> str:
         """Proses satu giliran. Kembalikan teks jawaban final.
 
@@ -1140,7 +1142,7 @@ class Agent:
             on_tool=on_tool, on_message=on_message,
             on_tool_result=on_tool_result, on_notice=on_notice,
             on_retry=on_retry, attachments=attachments,
-            ambil_sisipan=ambil_sisipan,
+            ambil_sisipan=ambil_sisipan, on_tim=on_tim,
         )
 
     def _run_connector(
@@ -1159,6 +1161,9 @@ class Agent:
         # Diambil di tiap batas langkah; mengembalikan pesan pengguna
         # yang mengantre supaya bisa DISISIPKAN ke giliran berjalan.
         ambil_sisipan: Callable[[], list[str]] | None = None,
+        # Dipanggil dengan daftar nama rekan tim yang ikut meninjau satu
+        # langkah — supaya terminal bisa menampilkan siapa yang bekerja.
+        on_tim: Callable[[list[str]], None] | None = None,
     ) -> str:
         """Jalankan giliran lewat AI web (browser) sebagai AGENT penuh.
 
@@ -1291,7 +1296,15 @@ class Agent:
         # model paling terbagi. Pengingat pendek yang menempel pada tugasnya
         # jauh lebih dekat ke titik keputusan daripada aturan nomor sekian yang
         # terkubur di atas.
-        first_msg = user_text + "\n\n" + _WEB_REMINDER
+        # Tim spesialis pasif untuk giliran INI. Dibuat per giliran, bukan per
+        # sesi: aturan "satu anggota bicara sekali" harus disetel ulang tiap
+        # permintaan baru — kalau tidak, permintaan kedua dan seterusnya tak
+        # pernah lagi mendapat sudut pandang siapa pun.
+        tim_sesi = _tim.Tim(aktif=bool(prefs.load().get("tim", True)))
+        # Perencana ditempel ke pesan TUGAS, bukan menunggu langkah pertama:
+        # begitu langkah pertama terjadi, keputusan yang mau ia bantu sudah
+        # telanjur diambil.
+        first_msg = user_text + "\n\n" + _WEB_REMINDER + tim_sesi.awal()
 
         conn = connectors.get_connector(self.model_spec.connector)
         prompt_chars = 0
@@ -1762,6 +1775,7 @@ class Agent:
                 # Eksekusi tiap tool & kumpulkan hasil untuk dikirim balik.
                 result_blocks = []
                 images: list[str] = []
+                tim_bangun: list = []      # rekan yang bangun di LANGKAH ini
                 for c in calls:
                     if cancel_event is not None and cancel_event.is_set():
                         raise llm.Cancelled()
@@ -1802,6 +1816,15 @@ class Agent:
                             seen_tools[kunci] = result
                         if on_tool_result:
                             on_tool_result(name, result)
+                        # Rekan satu tim yang punya urusan dengan langkah ini
+                        # (lihat tim.py). Dikumpulkan di sini — bukan sesudah
+                        # gelung — supaya yang dinilai memang langkah yang baru
+                        # saja BERHASIL, bukan gabungan semua langkah.
+                        bangun = tim_sesi.tinjau(name, args, sukses)
+                        if bangun:
+                            tim_bangun.extend(bangun)
+                            if on_tim:
+                                on_tim([a.nama for a in bangun])
                         # Tandai bila kode BERUBAH (untuk validasi otomatis di
                         # akhir), dan catat bila validasi memang sudah dijalankan.
                         if name == "validate_project":
@@ -1845,6 +1868,16 @@ class Agent:
                     "lakukan; kalau sudah SELESAI, beri jawaban akhir biasa "
                     "(tanpa blok tool)."
                 )
+                # Sudut pandang rekan satu tim ditempel SESUDAH instruksi
+                # lanjutan, bukan sebelumnya: yang terakhir dibaca yang paling
+                # kuat menempel, dan inilah bagian yang paling mudah terlewat
+                # kalau tenggelam di tengah hasil tool.
+                follow += tim_sesi.blok(tim_bangun)
+                # Tuntutan memperbarui AGENTS.md muncul di langkah tempat bentuk
+                # proyek benar-benar berubah — bukan di akhir giliran, saat model
+                # sudah menganggap pekerjaannya tuntas dan enggan membuka berkas
+                # lagi.
+                follow += tim_sesi.perlu_agents_md()
                 if ditahan:
                     follow += (
                         f"\n\n[SISTEM] Pesanmu memuat {n_diusulkan} blok [[TOOL]] "

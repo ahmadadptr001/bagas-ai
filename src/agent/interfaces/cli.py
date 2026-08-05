@@ -191,6 +191,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("model", "pilih model + saran"),
     ("effort", "mode berpikir"),
     ("mode", "mode kerja situs: buat gambar/video, dll"),
+    ("tim", "23 spesialis yang meninjau pekerjaan secara pasif"),
     ("add-dir", "tambah folder konteks"),
     ("dirs", "folder konteks aktif"),
     ("rm-dir", "hapus folder konteks"),
@@ -2103,6 +2104,18 @@ def main(resume: bool = False) -> None:
             if cbs_alive["on"]:
                 view.note_phase(_web_phase(msg))
 
+        def _on_tim(nama: list[str]) -> None:
+            """Rekan satu tim yang ikut meninjau langkah barusan (lihat tim.py).
+
+            Ditampilkan sebagai satu baris redup, bukan panel: ini peristiwa
+            latar yang menemani langkah — bukan hasil yang perlu direnungkan.
+            Tanpa baris ini, sudut pandang tambahan itu bekerja tanpa jejak dan
+            pengguna tak punya cara tahu siapa yang sedang menemani."""
+            if not cbs_alive["on"] or not nama:
+                return
+            _commit([_oneline(Text.from_markup(
+                f"  [dim]‧ ikut meninjau: {_esc(', '.join(nama))}[/dim]"))])
+
         def _on_notice(msg: str) -> None:
             """Kabar dari mesin giliran: pesan susulan disisipkan, naik kelas,
             atau tindakan anti-macet.
@@ -2160,6 +2173,7 @@ def main(resume: bool = False) -> None:
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status, ambil_sisipan=_ambil_sisipan,
+                    on_tim=_on_tim,
                     # on_token SENGAJA tak diteruskan: pratinjau kalimat yang
                     # sedang ditulis sudah dihapus dari layar, jadi tak ada lagi
                     # yang memakainya. Efek sampingnya justru menguntungkan —
@@ -2662,6 +2676,42 @@ def main(resume: bool = False) -> None:
             console.print(f"  [yellow]⚠ {_esc(str(result['error']))}[/yellow]\n")
         else:
             console.print(f"  [#9fc93c]✓ {_esc(str(result['ok']))}[/]\n")
+
+    def show_tim(arg: str = "") -> None:
+        """/tim — lihat 23 spesialis yang bekerja pasif; /tim off|on mematikan.
+
+        Fitur pasif WAJIB punya sakelar yang terlihat: kalau ia mengubah hasil
+        tanpa bisa dilihat maupun dimatikan, setiap keanehan jadi mustahil
+        dilacak — pengguna tak punya cara memisahkan 'model yang begitu' dari
+        'tim yang menyarankan begitu'."""
+        from .. import prefs as _prefs
+        from .. import tim as _tim
+
+        pilihan = arg.strip().lower()
+        if pilihan in ("off", "mati", "on", "hidup"):
+            nyala = pilihan in ("on", "hidup")
+            _prefs.save(tim=nyala)
+            kata = "AKTIF" if nyala else "MATI"
+            warna = "#9fc93c" if nyala else "#f7d488"
+            console.print(f"  [{warna}]✓ tim spesialis {kata}[/]\n")
+            return
+
+        aktif = bool(_prefs.load().get("tim", True))
+        console.print()
+        console.print(
+            f"  [bold #fcc048]Tim {len(_tim.ANGGOTA)} spesialis[/] "
+            f"[dim]— bekerja pasif, dibangunkan oleh isi pekerjaan[/]")
+        console.print(
+            f"  [dim]status: [/]"
+            f"[{'#9fc93c' if aktif else '#f7d488'}]{'aktif' if aktif else 'mati'}[/]"
+            f"  [dim]· /tim off untuk mematikan · maksimal "
+            f"{_tim._MAKS_PER_LANGKAH} orang per langkah, tiap orang bicara "
+            f"sekali per giliran[/]\n")
+        lebar = max(len(a.nama) for a in _tim.ANGGOTA)
+        for a in sorted(_tim.ANGGOTA, key=lambda x: x.prioritas):
+            console.print(f"    [#fc9018]{a.nama:<{lebar}}[/]  "
+                          f"[dim]{_esc(a.bidang)}[/]")
+        console.print()
 
     def pick_web_mode() -> None:
         """/mode — pilih MODE KERJA situs (buat gambar, buat video, dsb) lalu
@@ -3660,6 +3710,8 @@ def main(resume: bool = False) -> None:
                     console.print("  [yellow]Pakai: /rm-dir <path folder>[/yellow]\n")
             elif cmd == "mode":
                 pick_web_mode()
+            elif cmd == "tim" or cmd.startswith("tim "):
+                show_tim(text[4:].strip())
             elif cmd == "live":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:
