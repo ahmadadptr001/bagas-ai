@@ -1145,7 +1145,8 @@ class Agent:
     )
 
     def _padatkan_web(self, conn: Any, kirim: Any,
-                      on_status: Any = None, on_notice: Any = None) -> str:
+                      on_status: Any = None, on_notice: Any = None,
+                      alasan: str = "") -> str:
         """Ringkas percakapan yang sudah penuh, lalu pindah ke chat BARU.
 
         Urutannya penting dan tak boleh dibalik: ringkasan diminta SELAGI chat
@@ -1157,8 +1158,12 @@ class Agent:
 
         Kembalikan teks ringkasannya (untuk ditampilkan ke pengguna)."""
         if on_notice:
-            on_notice("percakapan di situs sudah penuh — meringkas konteks lalu "
-                      "pindah ke chat baru")
+            # Sebabnya disebut apa adanya: pemadatan otomatis (situs mengeluh)
+            # dan pemadatan atas kemauan sendiri (/compact) terasa sangat
+            # berbeda bagi pengguna, dan menyamakan kabarnya membuat yang kedua
+            # tampak seperti ada masalah.
+            on_notice((alasan or "percakapan di situs sudah penuh")
+                      + " — meringkas konteks lalu pindah ke percakapan baru")
         if on_status:
             on_status("meringkas konteks percakapan…")
 
@@ -1248,7 +1253,8 @@ class Agent:
                 open_chat_id=(self._web_chat_id if open_chat_id is None
                               else open_chat_id))
 
-        ringkas = self._padatkan_web(conn, kirim, on_status, on_notice)
+        ringkas = self._padatkan_web(conn, kirim, on_status, on_notice,
+                                     alasan="/compact diminta")
         self._persist()
         return ringkas or "Konteks dipadatkan; percakapan baru sudah siap."
 
@@ -1741,12 +1747,16 @@ class Agent:
                 if padat >= _MAKS_PADAT:
                     raise
                 padat += 1
-                self._padatkan_web(conn, _send_raw, on_status, on_notice)
+                self._padatkan_web(
+                    conn, _send_raw, on_status, on_notice,
+                    alasan="situs menolak melanjutkan percakapan ini")
                 out = _send_raw(msg, False, self._web_chat_id, attachments)
             else:
                 if getattr(conn, "konteks_penuh", False) and padat < _MAKS_PADAT:
                     padat += 1
-                    self._padatkan_web(conn, _send_raw, on_status, on_notice)
+                    self._padatkan_web(
+                        conn, _send_raw, on_status, on_notice,
+                        alasan="situs memperingatkan percakapan sudah penuh")
             lanjut = 0
             while _OUTPUT_STOP_RE.search(out or "") and lanjut < _MAX_LANJUT:
                 lanjut += 1
