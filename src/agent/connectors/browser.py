@@ -377,6 +377,21 @@ class WebLimitError(BrowserError):
     yang memang tak akan datang."""
 
 
+class WebChatRusakError(BrowserError):
+    """Percakapan di situsnya RUSAK — chat-nya tak bisa dilanjutkan lagi.
+
+    Terlihat di chat.qwen.ai sebagai spanduk merah:
+        "Oops! There was an issue connecting to Qwen3.8-Max.
+         Invalid input chat parent_id … is not exist."
+    Artinya rangkaian pesan yang dipegang situs tak lagi utuh (chat-nya terhapus
+    atau ditulis ulang di sisi server), jadi tiap pesan berikutnya ke chat yang
+    sama akan gagal dengan cara yang sama.
+
+    BEDA TEGAS dari WebLimitError: kuota kita baik-baik saja. Karena itu
+    jawabannya bukan menunggu maupun ganti model, melainkan MULAI CHAT BARU lalu
+    kirim ulang — dan itu bisa dikerjakan sendiri tanpa merepotkan pengguna."""
+
+
 class WebBusyError(BrowserError):
     """Layanan sedang KEWALAHAN sesaat ("System is currently busy…").
 

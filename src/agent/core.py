@@ -1145,6 +1145,112 @@ class Agent:
             ambil_sisipan=ambil_sisipan, on_tim=on_tim,
         )
 
+    # --- pemulihan saat situsnya bermasalah -------------------------------
+    def _pulihkan_chat_rusak(self, exc, user_text, on_status, on_notice) -> str:
+        """Chat di situs rusak -> buka chat BARU lalu kirim ulang sekali.
+
+        Tak menanyakan apa pun ke pengguna: kuotanya baik-baik saja dan
+        satu-satunya jalan keluar memang ini, jadi bertanya cuma menunda hal
+        yang jawabannya sudah pasti."""
+        from . import connectors
+        if on_notice:
+            on_notice(f"chat di {self.model_spec.label} rusak — "
+                      "membuka chat baru lalu mengirim ulang")
+        try:
+            conn = connectors.get_connector(self.model_spec.connector)
+            conn.new_chat()
+            # Konteks pembuka WAJIB dikirim ulang: chat barunya kosong, dan
+            # tanpa protokol tool di dalamnya model tak tahu cara memakai tool
+            # sama sekali.
+            self._web_ctx_sent = False
+            jawab = self._run_connector(
+                user_text, on_status=on_status, on_notice=on_notice)
+        except Exception as exc2:  # noqa: BLE001
+            return (
+                f"⚠ **Chat di {self.model_spec.label} rusak dan tak bisa "
+                f"dipulihkan.**\n\n> {exc}\n\n"
+                f"Percobaan chat baru juga gagal: {exc2}\n\n"
+                "Coba `/new` untuk memulai percakapan bersih, atau `/model` "
+                "untuk pindah layanan."
+            )
+        return jawab
+
+    def _tangani_limit(self, exc, user_text, on_status, on_notice) -> str:
+        """Kuota habis -> TANYAKAN mau menunggu atau ganti model.
+
+        Dua jalan keluarnya berbeda jauh akibatnya: menunggu menjaga seluruh
+        konteks percakapan tetap utuh tapi bisa lama; ganti model bisa lanjut
+        sekarang tapi mulai dari chat kosong di situs lain. Hanya pengguna yang
+        tahu mana yang cocok, jadi ia yang memilih — bukan ditebak."""
+        from . import connectors, interaction, models
+
+        lain = [k for _, k, s in models.catalog()
+                if s.is_web and k != self.model_id]
+        TUNGGU = "⏳ Tunggu di sini sampai kuotanya pulih, lalu lanjut otomatis"
+        GANTI = "🔀 Ganti model sekarang (konteks chat mulai dari kosong)"
+        BERHENTI = "✋ Hentikan giliran ini dulu"
+        opsi = [TUNGGU, BERHENTI] if not lain else [TUNGGU, GANTI, BERHENTI]
+        try:
+            pilih = interaction.ask_choice(
+                f"{self.model_spec.label} kena batas pemakaian:\n{exc}\n\n"
+                "Mau diapakan?", opsi, False)
+        except Exception:  # noqa: BLE001 - antarmuka tak interaktif
+            pilih = ""
+
+        if pilih.startswith("⏳"):
+            return self._tunggu_limit(exc, user_text, on_status, on_notice)
+        if pilih.startswith("🔀") and lain:
+            baru = lain[0] if len(lain) == 1 else interaction.ask_choice(
+                "Pindah ke model mana?",
+                [models.spec_for_id(k).label for k in lain], False)
+            tujuan = next(
+                (k for k in lain if models.spec_for_id(k).label == baru),
+                lain[0])
+            lama = self.model_spec.label
+            self.set_model(tujuan)
+            if on_notice:
+                on_notice(f"pindah dari {lama} ke {self.model_spec.label}")
+            self._web_ctx_sent = False   # situs baru: konteks harus dikirim lagi
+            try:
+                return self._run_connector(
+                    user_text, on_status=on_status, on_notice=on_notice)
+            except Exception as exc2:  # noqa: BLE001
+                return (f"⚠ Sudah pindah ke {self.model_spec.label}, tapi "
+                        f"gilirannya tetap gagal: {exc2}")
+        return (
+            f"⛔ **{self.model_spec.label} sedang kena batas pemakaian.**\n\n"
+            f"> {exc}\n\n"
+            "Kirim ulang nanti, atau ketik `/model` untuk pindah layanan."
+        )
+
+    # Jeda antar-percobaan saat menunggu kuota pulih. Menaik, lalu mentok di
+    # 5 menit: batas pemakaian lazimnya dihitung per jam/hari, jadi memeriksa
+    # tiap beberapa detik cuma membebani situs tanpa mempercepat apa pun.
+    _JEDA_LIMIT = (60, 120, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300)
+
+    def _tunggu_limit(self, exc, user_text, on_status, on_notice) -> str:
+        """Tunggu kuota pulih sambil mencoba ulang berkala."""
+        from . import connectors
+        for i, jeda in enumerate(self._JEDA_LIMIT, 1):
+            if on_status:
+                on_status(f"kuota {self.model_spec.label} habis — mencoba lagi "
+                          f"{jeda // 60 or 1} menit lagi (percobaan ke-{i})")
+            time.sleep(jeda)
+            try:
+                return self._run_connector(
+                    user_text, on_status=on_status, on_notice=on_notice)
+            except connectors.WebLimitError:
+                continue          # masih kena; tunggu jeda berikutnya
+            except Exception as exc2:  # noqa: BLE001
+                return (f"⚠ Kuotanya sudah pulih tapi gilirannya gagal: {exc2}")
+        total = sum(self._JEDA_LIMIT) // 60
+        return (
+            f"⛔ **{self.model_spec.label} masih kena batas pemakaian** setelah "
+            f"ditunggu ±{total} menit.\n\n> {exc}\n\n"
+            "Batasnya mungkin harian. Ketik `/model` untuk pindah layanan, atau "
+            "kirim ulang nanti."
+        )
+
     def _run_connector(
         self,
         user_input: Any,
@@ -1985,16 +2091,20 @@ class Agent:
                 "Kirim ulang sebentar lagi, atau ketik `/model` untuk pindah ke "
                 "layanan web lain (Kimi/Qwen/Gemini) supaya bisa lanjut sekarang."
             )
+        except connectors.WebChatRusakError as exc:
+            # Percakapan di situsnya tak bisa dilanjutkan (mis. Qwen: "Invalid
+            # input chat parent_id … is not exist"). Kuota kita baik-baik saja,
+            # jadi ini TAK PERLU merepotkan pengguna: buka chat baru lalu kirim
+            # ulang. Sekali saja — kalau chat yang baru pun rusak, sebabnya
+            # bukan chat-nya, dan mencoba terus cuma memutar.
+            answer = self._pulihkan_chat_rusak(
+                exc, user_text, on_status, on_notice)
         except connectors.WebLimitError as exc:
-            # Kuota situs habis — sampaikan apa adanya (termasuk kapan pulih)
-            # dan tawarkan jalan keluar, jangan sekadar "gagal".
-            answer = (
-                f"⛔ **{self.model_spec.label} sedang kena batas pemakaian.**\n\n"
-                f"> {exc}\n\n"
-                "Tunggu sampai waktu itu, atau ketik `/model` untuk pindah ke "
-                "layanan web lain (Kimi/Qwen/Gemini) supaya bisa lanjut kerja "
-                "sekarang."
-            )
+            # Kuota situs habis. Pengguna DITANYA mau apa, bukan cuma diberi
+            # tahu: dua jalan keluarnya (menunggu vs pindah model) punya
+            # konsekuensi yang sangat berbeda, dan hanya dia yang tahu mana yang
+            # cocok dengan pekerjaannya saat itu.
+            answer = self._tangani_limit(exc, user_text, on_status, on_notice)
         except connectors.BrowserError as exc:
             answer = f"[Connector {self.model_spec.label}] {exc}"
         except Exception as exc:  # noqa: BLE001 - laporkan apa adanya, jangan crash REPL

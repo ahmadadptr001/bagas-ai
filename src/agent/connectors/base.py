@@ -24,7 +24,8 @@ from typing import Any, Callable
 
 from .. import config
 from .browser import (
-    BrowserError, WebBusyError, WebLimitError, hub, profile_dir, set_windows_visible,
+    BrowserError, WebBusyError, WebChatRusakError, WebLimitError, hub,
+    profile_dir, set_windows_visible,
 )
 
 # Cari teks pendek di halaman yang cocok salah satu pola (dipakai mendeteksi
@@ -540,6 +541,10 @@ class WebConnector:
     # setelah prompt dikirim — tanpa deteksi ini bagas-ai menunggu jawaban yang
     # memang tak akan datang, lalu gagal dengan pesan yang membingungkan.
     limit_patterns: tuple[str, ...] = ()
+    # Pola teks SPANDUK GALAT situs (bukan soal kuota): permintaan ditolak,
+    # koneksi ke model gagal, percakapan rusak. Hanya dibaca di jalur "balasan
+    # tak pernah muncul" — lihat _raise_if_error.
+    error_patterns: tuple[str, ...] = ()
     # Bagian halaman yang TIDAK boleh ikut dipindai saat mencari pemberitahuan
     # limit — biasanya wadah pesan percakapan, karena jawaban AI sendiri bisa
     # membahas "rate limit" dan itu bukan tanda kuota habis.
@@ -1030,6 +1035,10 @@ class WebConnector:
             page.wait_for_timeout(300)
         if not started and not self._read_last_message(page):
             self._raise_if_limited(page)   # penyebab paling umum
+            # Spanduk galat situs. Diperiksa SESUDAH limit karena limit lebih
+            # sering, tapi SEBELUM kesimpulan "selector usang" — tuduhan itu
+            # menyesatkan bila yang terjadi sebenarnya situsnya menolak.
+            self._raise_if_error(page)
             raise BrowserError(
                 f"balasan tak terdeteksi dari {self.label} — kemungkinan selector "
                 "pesan usang untuk layout situs sekarang. Laporkan/perbarui "
@@ -1817,6 +1826,41 @@ class WebConnector:
         msg = self.detect_limit(page)
         if msg:
             raise WebLimitError(msg)
+
+    def detect_error(self, page: Any) -> str:
+        """Teks SPANDUK GALAT situs bila sedang tampil, else "".
+
+        Dipisah dari detect_limit karena maksudnya berbeda: yang ini menangkap
+        pemberitahuan bahwa permintaannya GAGAL (koneksi, chat rusak), bukan
+        bahwa kuota habis."""
+        if not self.error_patterns:
+            return ""
+        try:
+            return page.evaluate(JS_FIND_TEXT, {
+                "patterns": list(self.error_patterns),
+                "exclude": list(self.limit_exclude_selectors),
+            }) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _raise_if_error(self, page: Any) -> None:
+        """Ubah spanduk galat situs jadi kegagalan yang BERNAMA.
+
+        Dipanggil hanya di jalur "balasan tak pernah muncul". Di situ giliran
+        memang sudah gagal apa pun yang terjadi, jadi salah tangkap tak
+        merugikan apa-apa — sementara tangkapan yang benar mengubah pesan
+        "balasan tak terdeteksi, selector mungkin usang" (menuduh hal yang
+        salah, dan tak bisa ditindaklanjuti) menjadi sebab yang sebenarnya."""
+        pesan = self.detect_error(page)
+        if not pesan:
+            return
+        bersih = " ".join(pesan.split())[:240]
+        # Chat yang rusak bisa dipulihkan sendiri; sisanya tidak. Membedakannya
+        # di sini menentukan apakah pengguna perlu diganggu atau tidak.
+        if re.search(r"parent[_ ]?id|is not exist|conversation not found|"
+                     r"chat not found", bersih, re.I):
+            raise WebChatRusakError(bersih)
+        raise BrowserError(f"{self.label} menolak permintaan: {bersih}")
 
     def _raise_if_busy(self, text: str) -> None:
         """Balasan ternyata cuma pemberitahuan "server sibuk"? -> WebBusyError,

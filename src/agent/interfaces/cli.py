@@ -2537,8 +2537,13 @@ def main(resume: bool = False) -> None:
                 # Tak dibacakan bila gilirannya DIBATALKAN: Ctrl+C berarti
                 # "berhenti", dan laptop yang tetap membacakan jawabannya
                 # sesudah itu terdengar seperti pembatalan yang diabaikan.
+                # penuh=True: jawaban akhir dibacakan UTUH. Batas pendek yang
+                # dipakai narasi ada supaya suara tak tertinggal saat langkah
+                # datang beruntun — di sini tak ada langkah berikutnya yang
+                # perlu dikejar, jadi memotongnya cuma membuat pesannya
+                # terdengar separuh.
                 if not interrupted and prefs.load().get("suara", True):
-                    _suara.ucap(ans)
+                    _suara.ucap(ans, penuh=True)
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
             if stps:

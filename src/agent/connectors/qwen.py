@@ -168,9 +168,29 @@ class QwenConnector(WebConnector):
     # chat biasa tanpa memuat ulang halaman (TERBACA dari markup chip-nya).
     web_mode_off_selector = ".mode-select-current-mode-close"
 
-    # Teks pemberitahuan limit Qwen belum pernah terlihat; dikosongkan agar tak
-    # ada pola longgar yang salah menangkap jawaban biasa.
-    limit_patterns = ()
+    # Teks pemberitahuan limit Qwen belum pernah terlihat LANGSUNG, jadi
+    # polanya dijaga tetap sempit: hanya kalimat yang memang khas pemberitahuan
+    # kuota, bukan kata "limit" yang berdiri sendiri (jawaban model sendiri
+    # kerap membahas rate limit, dan pola longgar akan mengunci chat selamanya —
+    # pelajaran yang sudah dibayar mahal di connector lain).
+    limit_patterns = (
+        r"(?i)\byou (?:have )?(?:reached|exceeded) (?:the |your )?"
+        r"(?:daily |usage |message )?limit\b",
+        r"(?i)\b(?:daily|hourly) (?:usage|message|request) limit\b",
+        r"(?i)\bout of (?:free )?(?:messages|credits|quota)\b",
+        r"(?i)\bkuota\b.{0,20}\bhabis\b",
+    )
+    # SPANDUK GALAT — TERLIHAT LANGSUNG di layar pengguna:
+    #   "Oops! There was an issue connecting to Qwen3.8-Max.
+    #    Invalid input chat parent_id e659efd2-… is not exist."
+    # Tanpa deteksi ini, giliran menunggu jawaban yang memang tak akan pernah
+    # datang lalu gagal dengan tuduhan yang salah ("message_selector usang"),
+    # sementara sebab sebenarnya tertulis jelas di halaman.
+    error_patterns = (
+        r"(?i)there was an issue connecting to",
+        r"(?i)invalid input chat parent_?id",
+        r"(?i)\bparent_?id\b.{0,80}\bis not exist\b",
+    )
 
     # Item menu yang membuka pemilih file (dipetakan dari klik manual).
     _ITEM_UPLOAD = '[class*="mode-select-dropdown-item"]:has-text("Upload attachment")'

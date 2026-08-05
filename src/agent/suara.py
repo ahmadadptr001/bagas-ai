@@ -56,6 +56,12 @@ log = logging.getLogger(__name__)
 # TERUKUR ~64 ms per huruf, jadi 160 huruf ≈ 10 detik — batas atas yang masih
 # masuk akal untuk satu kabar antar-langkah.
 _MAKS_UCAP = 160
+# Batas untuk JAWABAN AKHIR — jauh lebih longgar, dan sengaja. Batas 160 huruf
+# di atas ada supaya suara tak tertinggal saat langkah datang beruntun; pada
+# jawaban akhir tak ada langkah berikutnya yang perlu dikejar, jadi memotongnya
+# cuma membuat pesannya terdengar separuh. Tetap ada batasnya supaya jawaban
+# sepanjang halaman tak dibacakan bermenit-menit.
+_MAKS_UCAP_AKHIR = 900
 # Antrean lebih panjang dari ini berarti suaranya tertinggal terlalu jauh untuk
 # masih berguna; yang paling lama menunggu dibuang lebih dulu.
 _MAKS_ANTRE = 3
@@ -166,7 +172,7 @@ def _ganti_jalur(m: re.Match) -> str:
     return f" {_nama_saja(m.group(0))} "
 
 
-def bersihkan(teks: str) -> str:
+def bersihkan(teks: str, maks: int = _MAKS_UCAP) -> str:
     """Sisakan yang PANTAS didengar dari sepotong kabar.
 
     Yang dibuang bukan sekadar hiasan: blok kode, path berkas, dan tautan kalau
@@ -188,13 +194,13 @@ def bersihkan(teks: str) -> str:
     t = _EMOJI.sub(" ", t)
     t = _HIAS.sub(" ", t)
     t = _SPASI.sub(" ", t).strip()
-    if len(t) <= _MAKS_UCAP:
+    if len(t) <= maks:
         return t
     # Dipotong di batas KALIMAT bila ada, supaya tak berhenti di tengah kata.
-    potong = t[:_MAKS_UCAP]
+    potong = t[:maks]
     for tanda in (". ", "! ", "? ", "; ", ", "):
         i = potong.rfind(tanda)
-        if i > _MAKS_UCAP // 2:
+        if i > maks // 2:
             return potong[:i + 1].strip()
     return potong.rsplit(" ", 1)[0].strip()
 
@@ -239,11 +245,14 @@ class Pengucap:
         self.galat: str = ""         # alasan kalau tak berbunyi
 
     # ---- pemakaian ----
-    def ucap(self, teks: str) -> None:
-        """Antrekan satu kabar. Tak pernah melempar, tak pernah menahan."""
+    def ucap(self, teks: str, penuh: bool = False) -> None:
+        """Antrekan satu kabar. Tak pernah melempar, tak pernah menahan.
+
+        `penuh=True` untuk JAWABAN AKHIR: dibacakan jauh lebih panjang, sebab
+        tak ada langkah berikutnya yang perlu dikejar."""
         if self._mati:
             return
-        bersih = bersihkan(teks)
+        bersih = bersihkan(teks, _MAKS_UCAP_AKHIR if penuh else _MAKS_UCAP)
         if not bersih:
             return
         # Antrean menumpuk = suara tertinggal jauh di belakang layar. Yang
@@ -456,10 +465,10 @@ def pengucap() -> Pengucap:
         return _PENGUCAP
 
 
-def ucap(teks: str) -> None:
+def ucap(teks: str, penuh: bool = False) -> None:
     """Bacakan satu kabar (tak menahan pemanggil, tak pernah melempar)."""
     try:
-        pengucap().ucap(teks)
+        pengucap().ucap(teks, penuh)
     except Exception:  # noqa: BLE001 - notifikasi tak boleh menjatuhkan giliran
         log.debug("gagal mengucap", exc_info=True)
 
