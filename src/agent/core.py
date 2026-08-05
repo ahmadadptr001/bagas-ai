@@ -995,6 +995,11 @@ class Agent:
         # sesi). Bila ada, giliran pertama membuka chat itu — bukan chat baru —
         # sehingga konteks proyek yang sudah ada di sana tak perlu dikirim ulang.
         self._web_chat_id = ""
+        # Lampiran DIMATIKAN sementara untuk percakapan web ini karena situsnya
+        # sudah mentok jumlah berkas (chat.z.ai: 10 per percakapan). Sengaja
+        # per-percakapan, bukan permanen: chat baru berarti jatah berkasnya
+        # kembali penuh, jadi _lupakan_chat_web menyalakannya lagi.
+        self._lampiran_mati = False
         if session is not None:
             saved = (getattr(session, "web_chats", None) or {}).get(
                 self.model_spec.connector or "")
@@ -1098,12 +1103,36 @@ class Agent:
         dipulihkan" tanpa sekali pun benar-benar mencoba."""
         self._web_chat_id = ""
         self._web_ctx_sent = False
+        # Jatah berkas dihitung PER PERCAKAPAN, jadi chat baru = lampiran boleh
+        # dipakai lagi. Tanpa baris ini, sekali kena batas, seluruh sisa sesi
+        # berjalan buta walau sudah pindah ke chat yang kosong.
+        self._lampiran_mati = False
         svc = self.model_spec.connector
         if self.session is not None and svc:
             try:
                 self.session.web_chats.pop(svc, None)
             except AttributeError:      # sesi lama tanpa atribut ini
                 pass
+
+    # Ditempel ke pesan yang gagal terkirim BERSAMA gambarnya, lalu dikirim
+    # ulang tanpa lampiran. Isinya sengaja bukan sekadar permintaan maaf: AI
+    # web yang kehilangan gambar cenderung MENUNGGU atau minta dikirim ulang,
+    # dan giliran berhenti di situ. Yang dibutuhkan adalah jalan kerja
+    # pengganti yang konkret — makanya tool penggantinya disebut namanya.
+    _TANPA_GAMBAR = (
+        "\n\n[SISTEM] Screenshot untuk pesan ini TIDAK bisa dilampirkan: "
+        "situsnya membatasi jumlah berkas per percakapan ({sebab}). Ini bukan "
+        "kesalahanmu dan tak perlu diulang.\n"
+        "Lanjutkan TANPA melihat gambarnya, pakai jalan lain:\n"
+        "- butuh isi halaman? panggil web_extractor pada URL yang sama untuk "
+        "membaca teks & strukturnya;\n"
+        "- butuh memastikan kode? baca berkasnya (read_file/search_text) — "
+        "sumbernya jauh lebih tepat daripada tangkapan layar;\n"
+        "- butuh galat runtime? minta aku menjalankan perintahnya (run) dan "
+        "baca keluarannya.\n"
+        "JANGAN meminta gambar dikirim ulang dan jangan berhenti menunggu: "
+        "kerjakan langkah berikutnya sekarang."
+    )
 
     # Permintaan SERAH-TERIMA ke chat yang sedang penuh. Ditulis rinci dengan
     # sengaja: isinya satu-satunya hal yang menyeberang ke sesi berikutnya, dan
@@ -1751,6 +1780,26 @@ class Agent:
             # pun tak menolong, memutar terus cuma menghabiskan kuota.
             try:
                 out = _send_raw(msg, new_chat, open_chat_id, attachments)
+            except connectors.WebLampiranPenuhError as exc:
+                # BATAS BERKAS SITUS, bukan kegagalan giliran. chat.z.ai:
+                # "You can only chat with a maximum of 10 file(s) at a time."
+                # Tiap langkah web_preview menambah satu screenshot, jadi di
+                # sesi panjang batas ini pasti kena — dan dulu gejalanya adalah
+                # kirim yang gagal tanpa sebab yang jelas.
+                #
+                # Pratinjaunya TIDAK dimatikan sebagai fitur: yang dimatikan
+                # cuma PELAMPIRAN untuk percakapan ini, lalu pesan yang sama
+                # dikirim ulang tanpa gambar berikut petunjuk cara kerja
+                # pengganti. Chat baru menyalakannya lagi (_lupakan_chat_web).
+                self._lampiran_mati = True
+                if on_notice:
+                    on_notice("situs menolak lampiran baru (batas berkas) — "
+                              "pratinjau dilanjutkan tanpa gambar")
+                _status(f"{self.model_spec.label}: batas lampiran tercapai — "
+                        "melanjutkan tanpa gambar")
+                out = _send_raw(msg + self._TANPA_GAMBAR.format(
+                    sebab=" ".join(str(exc).split())[:120]),
+                    False, self._web_chat_id, None)
             except connectors.WebKonteksPenuhError:
                 if padat >= _MAKS_PADAT:
                     raise
@@ -1823,7 +1872,8 @@ class Agent:
                 # membacanya — hasilnya juga lebih baik karena gambar masuk ke
                 # percakapan yang sama, bukan panggilan sekali-pakai tanpa konteks.
                 attachments=[p for p in (attachments or [])
-                             if conn.supports_attachments()],
+                             if conn.supports_attachments()
+                             and not self._lampiran_mati],
             )
             if first_of_session:
                 # Catat kaitan sesi<->chat + rapikan chat lama buatan bagas-ai
@@ -2244,10 +2294,21 @@ class Agent:
                     # dilampirkan ke pesan berikutnya supaya AI web melihatnya
                     # sendiri, bukan cuma diberi tahu path-nya.
                     text_result, imgs = _take_image_marks(result)
-                    if imgs and conn.supports_attachments():
+                    if imgs and conn.supports_attachments() \
+                            and not self._lampiran_mati:
                         images.extend(imgs)
                         text_result += ("\n(gambar terlampir pada pesan ini — "
                                         "lihat langsung, jangan minta dikirim ulang)")
+                    elif imgs:
+                        # Tool-nya TETAP dijalankan dan hasilnya tetap dipakai —
+                        # yang hilang cuma gambarnya. Dikatakan apa adanya,
+                        # lengkap dengan jalan gantinya, supaya AI tak menunggu
+                        # gambar yang tak akan datang.
+                        text_result += (
+                            "\n(gambar TIDAK bisa dilampirkan: situs sudah "
+                            "mentok jumlah berkas per percakapan. Jangan minta "
+                            "dikirim ulang — pakai web_extractor / baca "
+                            "berkasnya / jalankan perintahnya untuk memastikan)")
                     clipped = text_result if len(text_result) <= _WEB_RESULT_CAP \
                         else (text_result[:_WEB_RESULT_CAP] + "\n…[hasil dipotong]")
                     result_blocks.append(

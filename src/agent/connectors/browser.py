@@ -473,6 +473,24 @@ class WebKonteksPenuhError(BrowserError):
     dan harus ditemukan ulang dari nol."""
 
 
+class WebLampiranPenuhError(BrowserError):
+    """Percakapan sudah memuat lampiran SEBANYAK BATAS situs.
+
+    Terlihat di chat.z.ai sebagai toast:
+        "You can only chat with a maximum of 10 file(s) at a time."
+
+    Ini yang menjelaskan kegagalan kirim yang membingungkan di sesi panjang:
+    tiap langkah web_preview menambah satu screenshot, dan begitu batasnya
+    kena, berkas berikutnya DITOLAK diam-diam — pratinjaunya tak pernah muncul,
+    penantian unggahan habis waktu, lalu gagalnya dilaporkan seolah komposer
+    yang rusak.
+
+    BUKAN kegagalan giliran: pesannya sendiri masih bisa dikirim, hanya tanpa
+    gambar. Karena itu jenisnya sendiri — penanganannya mematikan lampiran
+    untuk percakapan ini lalu mengirim ulang teksnya berikut petunjuk cara
+    kerja pengganti (lihat Agent._TANPA_GAMBAR)."""
+
+
 class WebBusyError(BrowserError):
     """Layanan sedang KEWALAHAN sesaat ("System is currently busy…").
 

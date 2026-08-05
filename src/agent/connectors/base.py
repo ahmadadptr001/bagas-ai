@@ -25,7 +25,8 @@ from typing import Any, Callable
 from .. import config
 from .browser import (
     BrowserError, WebBusyError, WebChatRusakError, WebKonteksPenuhError,
-    WebLimitError, hub, profile_dir, set_windows_visible,
+    WebLampiranPenuhError, WebLimitError, hub, profile_dir,
+    set_windows_visible,
 )
 
 # Cari teks pendek di halaman yang cocok salah satu pola (dipakai mendeteksi
@@ -39,7 +40,21 @@ from .browser import (
 #    markup bersarang. Yang diambil adalah kecocokan TERPENDEK (paling spesifik).
 JS_FIND_TEXT = r"""
 (args) => {
-  const pats = (args.patterns || []).map(p => new RegExp(p, 'i'));
+  // Pola ditulis untuk Python (lihat *_patterns di tiap connector), dan di
+  // sana `(?i)` di depan itu lazim. JavaScript TIDAK mengenalnya: new RegExp
+  // melempar "Invalid group", dan karena dulu seluruh daftar dibangun dalam
+  // satu .map(), SATU pola begitu mematikan SEMUA deteksi di halaman ini —
+  // senyap, karena pemanggilnya menangkap Exception lalu menjawab "tak ada".
+  // TERUKUR: toast batas berkas chat.z.ai tampil 3,6 detik penuh di DOM dan
+  // tetap terbaca "tak ada"; pola limit Qwen & pemicu /compact Kimi pun ikut
+  // mati diam-diam karena sama-sama diawali (?i).
+  // Flag 'i' memang sudah dipasang di bawah, jadi membuang penandanya aman.
+  const pats = [];
+  for (const p of (args.patterns || [])) {
+    try {
+      pats.push(new RegExp(String(p).replace(/^\(\?[a-zA-Z]+\)/, ''), 'i'));
+    } catch (e) { /* pola tak sah di JS -> lewati, jangan matikan sisanya */ }
+  }
   if (!pats.length) return "";
   // Jalur cepat: sekali baca teks halaman. Kalau tak ada pola yang cocok sama
   // sekali, tak perlu memeriksa elemen satu per satu (ini kasus normal).
@@ -581,6 +596,12 @@ class WebConnector:
     attach_item_selector: str = ""
     # Batas waktu menunggu unggahan selesai (detik).
     attach_timeout: float = 90.0
+    # Pola teks "jumlah berkas per percakapan sudah mentok" (mis. chat.z.ai:
+    # "You can only chat with a maximum of 10 file(s) at a time."). Beda dari
+    # limit_patterns: kuota pemakaian aman, yang penuh cuma daftar lampiran —
+    # dan pesannya masih bisa dikirim tanpa gambar. Kosong = situs ini belum
+    # pernah terlihat membatasi.
+    attach_limit_patterns: tuple[str, ...] = ()
     # Teks yang BUKAN jawaban (chrome UI situs), mis. indikator berpikir
     # "Thought for 2s". Bila SELURUH teks yang terbaca hanya ini, artinya jawaban
     # BELUM muncul — jangan dianggap sebagai balasan (akar bug: giliran berhenti
@@ -1671,10 +1692,36 @@ class WebConnector:
             if self._attach_count(page) >= before + len(exist):
                 page.wait_for_timeout(400)   # beri jeda agar unggahan tuntas
                 return
+            # Situs punya BATAS jumlah berkas per percakapan (chat.z.ai: 10).
+            # Begitu kena, berkas berikutnya ditolak DIAM-DIAM: pratinjaunya tak
+            # pernah muncul, jadi tanpa pemeriksaan ini penantian di bawah habis
+            # 90 detik lalu gagal dengan alasan yang salah ("unggahan tak
+            # selesai") — padahal pesannya masih bisa dikirim, cuma tanpa
+            # gambar.
+            self._raise_if_attach_limit(page)
             page.wait_for_timeout(400)
+        # Sebelum menyerah, sekali lagi: toast-nya bisa muncul terlambat.
+        self._raise_if_attach_limit(page)
         raise BrowserError(
             f"unggahan lampiran ke {self.label} tak selesai dalam "
             f"{self.attach_timeout:.0f} detik.")
+
+    def detect_attach_limit(self, page: Any) -> str:
+        """Teks pemberitahuan "batas jumlah berkas" bila sedang tampil."""
+        if not self.attach_limit_patterns:
+            return ""
+        try:
+            return page.evaluate(JS_FIND_TEXT, {
+                "patterns": list(self.attach_limit_patterns),
+                "exclude": list(self.limit_exclude_selectors),
+            }) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _raise_if_attach_limit(self, page: Any) -> None:
+        pesan = self.detect_attach_limit(page)
+        if pesan:
+            raise WebLampiranPenuhError(" ".join(pesan.split())[:160])
 
     # Taruh CARET di dalam elemen contenteditable, di akhir isinya.
     #

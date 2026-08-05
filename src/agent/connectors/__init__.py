@@ -22,7 +22,7 @@ from .base import WebConnector
 # serta pesan galat yang ramah tak pernah sekali pun berjalan.
 from .browser import (
     BrowserError, WebBusyError, WebChatRusakError, WebKonteksPenuhError,
-    WebLimitError, playwright_available,
+    WebLampiranPenuhError, WebLimitError, playwright_available,
 )
 from .dola import DolaConnector
 from .glm import GlmConnector
@@ -61,6 +61,7 @@ __all__ = [
     "WebBusyError",
     "WebChatRusakError",
     "WebKonteksPenuhError",
+    "WebLampiranPenuhError",
     "WebLimitError",
     "playwright_available",
     "get_connector",

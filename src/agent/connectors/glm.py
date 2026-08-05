@@ -125,6 +125,18 @@ class GlmConnector(WebConnector):
     # meniru klik menu seperti di Qwen/Kimi. Input-nya tanpa id/kelas, maka
     # selektornya sesempit mungkin lewat wadah komposer.
     file_input_selector = ".messageInputContainer input[type='file']"
+    # BATAS JUMLAH BERKAS per percakapan. Teks aslinya, terlihat langsung
+    # sebagai toast di layar:
+    #   "You can only chat with a maximum of 10 file(s) at a time."
+    # Inilah penyebab kegagalan kirim yang membingungkan di sesi panjang: tiap
+    # langkah web_preview menambah satu screenshot, dan sesudah berkas ke-10
+    # unggahan berikutnya ditolak tanpa pratinjau. Angkanya dibuat lentur
+    # (\d+) karena situs bisa mengubahnya kapan saja.
+    attach_limit_patterns = (
+        r"(?i)maximum of \d+ file",
+        r"(?i)\bmaksimal \d+ (?:berkas|file)\b",
+    )
+
     # Kartu pratinjau di komposer: <button class="relative group flex items-center
     # gap-2.5 …"> berisi nama berkas + "PNG · 358.5 KB", tersusun di dalam
     # `.chip-scroll`. Ini yang dihitung sebagai bukti "file sudah menempel".
