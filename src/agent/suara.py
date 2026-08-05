@@ -119,6 +119,16 @@ while ($null -ne ($baris = [Console]::In.ReadLine())) {
 # --- pembersihan teks -------------------------------------------------------
 _BLOK_KODE = re.compile(r"```.*?```", re.S)
 _KODE_SEBARIS = re.compile(r"`[^`]*`")
+# BLOK protokol beserta ISINYA — bukan cuma penandanya. Membuang penanda saja
+# menyisakan JSON perintah tool dan seluruh keluaran tool, lalu laptop
+# membacakan '{"name": "write_file", "arguments"…' sebagai kalau itu kabar dari
+# model. Yang pantas didengar hanya kalimat yang ditulis modelnya sendiri.
+_BLOK_PROTOKOL = re.compile(
+    r"\[\[\s*(TOOL|HASIL)[^\]]*\]\].*?\[\[\s*/\s*\1[^\]]*\]\]",
+    re.IGNORECASE | re.S)
+# Blok yang TAK PERNAH DITUTUP (pesan terpotong situs): semua yang mengekor di
+# belakang pembuka yatim adalah muatan mesin yang belum selesai.
+_BUKA_YATIM = re.compile(r"\[\[\s*(TOOL|HASIL)[^\]]*\]\]", re.IGNORECASE)
 _PENANDA = re.compile(r"\[\[\s*/?\s*(TOOL|HASIL|SISTEM|TIM)[^\]]*\]\]",
                       re.IGNORECASE)
 _TAUTAN = re.compile(r"https?://\S+")
@@ -162,7 +172,15 @@ def bersihkan(teks: str) -> str:
     Yang dibuang bukan sekadar hiasan: blok kode, path berkas, dan tautan kalau
     dibacakan berubah jadi deretan simbol panjang yang menutupi kalimat
     intinya — dan justru kalimat itu satu-satunya alasan fitur ini ada."""
-    t = _BLOK_KODE.sub(" ", teks or "")
+    # Urutannya penting: blok protokol dibuang BESERTA isinya lebih dulu,
+    # sebelum apa pun yang lain. Kalau penandanya dibuang duluan, isinya
+    # (JSON perintah tool & keluaran tool) berubah jadi teks biasa yang tak
+    # bisa dibedakan lagi dari kalimat model.
+    t = _BLOK_PROTOKOL.sub(" ", teks or "")
+    yatim = _BUKA_YATIM.search(t)
+    if yatim:
+        t = t[:yatim.start()]
+    t = _BLOK_KODE.sub(" ", t)
     t = _KODE_SEBARIS.sub(_ganti_kode, t)
     t = _PENANDA.sub(" ", t)
     t = _TAUTAN.sub(" tautan ", t)

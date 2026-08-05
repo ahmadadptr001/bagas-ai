@@ -2529,6 +2529,16 @@ def main(resume: bool = False) -> None:
                     console.print("  [bold #fc9018]🤖 bagas-ai[/]")
                 console.print(Padding(_md(ans),
                                       (0 if ada_header else 1, 3, 0, 3)))
+                # JAWABAN AKHIR ikut dibacakan. Dulu cuma narasi antar-langkah
+                # yang bersuara, dan itu membuat fiturnya tampak rusak pada
+                # giliran yang paling lazim: pertanyaan yang dijawab LANGSUNG
+                # tanpa satu langkah tool pun tak pernah melewati jalur narasi,
+                # jadi layar penuh jawaban tapi laptop diam sama sekali.
+                # Tak dibacakan bila gilirannya DIBATALKAN: Ctrl+C berarti
+                # "berhenti", dan laptop yang tetap membacakan jawabannya
+                # sesudah itu terdengar seperti pembatalan yang diabaikan.
+                if not interrupted and prefs.load().get("suara", True):
+                    _suara.ucap(ans)
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
             if stps:
@@ -2577,6 +2587,11 @@ def main(resume: bool = False) -> None:
                 header["shown"] = True
             console.print(Padding(_md(content.strip()),
                                   (0 if baru_bicara else 1, 3, 0, 3)))
+            # Mode klasik punya jalur cetaknya sendiri, jadi ia harus
+            # menyuarakan sendiri juga — kalau tidak, suara cuma bekerja di
+            # satu mode tampilan dan pengguna mode lain mengira fiturnya rusak.
+            if prefs.load().get("suara", True):
+                _suara.ucap(content)
 
         def on_retry(attempt: int, wait: float, exc: Exception) -> None:
             """Dipertahankan demi kecocokan; jalur web tak memakai on_retry —
