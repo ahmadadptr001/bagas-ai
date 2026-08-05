@@ -75,6 +75,11 @@ _SUARA_EDGE = ("id-ID-ArdiNeural", "id-ID-GadisNeural")
 # Batas menyiapkan suara lewat jaringan. Lebih lama dari ini, kabarnya sudah
 # basi duluan — lebih baik turun ke mesin luring.
 _TIMEOUT_EDGE = 12.0
+# Berapa kali BERTURUT-TURUT sebuah mesin harus gagal sebelum ditinggalkan.
+# Bukan 1: gangguan sesaat (jaringan tersendat sedetik, berkas masih terpegang
+# pemutar) akan menukar suara untuk seluruh sesi, dan bagi pengguna itu tampak
+# seperti suaranya berubah sendiri tanpa sebab.
+_BATAS_GAGAL = 3
 
 # Proses pembantu Windows: SAPI + pemutar berkas suara dalam SATU proses.
 # Protokolnya satu baris per perintah, "S"/"P" lalu muatan Base64 (Base64 supaya
@@ -241,6 +246,19 @@ class Pengucap:
         self._kunci = threading.Lock()
         self._mati = False
         self._loop = None            # loop asyncio khusus edge-tts
+        # Nomor giliran ucapan. Naik tiap kali ucapan yang sedang berjalan
+        # DIPOTONG. Tanpa penanda ini, pemotongan yang disengaja tak bisa
+        # dibedakan dari mesin suara yang benar-benar gagal — dan pengucap akan
+        # menganggap mesinnya rusak lalu turun lapis permanen, jadi satu kabar
+        # baru saja cukup untuk menjatuhkan suara Indonesia natural ke suara
+        # bawaan Windows selamanya.
+        self._gen = 0
+        self._urut = 0               # penomor berkas suara (nama selalu baru)
+        # Kegagalan BERUNTUN mesin teratas. Satu kegagalan sesaat (jaringan
+        # tersendat, berkas masih terkunci) tak boleh menukar suara untuk
+        # seluruh sesi — perubahan suara yang tak jelas sebabnya jauh lebih
+        # mengganggu daripada satu kabar yang telat sedetik.
+        self._gagal_beruntun = 0
         self.mesin: str = ""         # yang sedang dipakai (diisi saat jalan)
         self.galat: str = ""         # alasan kalau tak berbunyi
 
@@ -255,16 +273,34 @@ class Pengucap:
         bersih = bersihkan(teks, _MAKS_UCAP_AKHIR if penuh else _MAKS_UCAP)
         if not bersih:
             return
-        # Antrean menumpuk = suara tertinggal jauh di belakang layar. Yang
-        # paling lama menunggu dibuang, BUKAN yang terbaru: kabar terbarulah
-        # yang masih menggambarkan apa yang sedang terjadi.
-        while self._antre.qsize() >= _MAKS_ANTRE:
+        # KABAR TERBARU MENANG: yang sedang diucapkan dipotong, yang mengantre
+        # dibuang. Suara itu berurutan sementara pekerjaan berjalan terus, jadi
+        # membiarkan yang lama selesai dulu berarti pengguna mendengar langkah
+        # yang SUDAH LEWAT sementara di layar sudah langkah berikutnya —
+        # makin lama makin tertinggal, dan yang didengar makin tak berguna.
+        self._potong()
+        self._antre.put(bersih)
+        self._pastikan_jalan()
+
+    def _potong(self) -> None:
+        """Hentikan ucapan yang sedang jalan & buang antreannya.
+
+        Nomor gilirannya dinaikkan supaya thread pengucap tahu kegagalan yang
+        sebentar lagi ia lihat adalah pemotongan yang DISENGAJA, bukan mesin
+        suara yang rusak."""
+        while True:
             try:
                 self._antre.get_nowait()
             except queue.Empty:
                 break
-        self._antre.put(bersih)
-        self._pastikan_jalan()
+        with self._kunci:
+            self._gen += 1
+            p, self._proc = self._proc, None
+        if p is not None:
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
 
     def diam(self) -> None:
         """Hentikan yang sedang diucapkan & buang antreannya.
@@ -272,18 +308,7 @@ class Pengucap:
         Prosesnya DIMATIKAN, bukan diminta berhenti: selagi Speak/Play berjalan
         ia tak membaca stdin sama sekali, jadi tak ada perintah yang bisa
         sampai. Proses baru dinyalakan lagi saat ada kabar berikutnya."""
-        while True:
-            try:
-                self._antre.get_nowait()
-            except queue.Empty:
-                break
-        with self._kunci:
-            p, self._proc = self._proc, None
-        if p is not None:
-            try:
-                p.kill()
-            except Exception:  # noqa: BLE001
-                pass
+        self._potong()
 
     def tutup(self) -> None:
         """Matikan pengucap seterusnya (dipanggil saat bagas-ai keluar)."""
@@ -313,23 +338,51 @@ class Pengucap:
                 # hidup sepanjang sesi hanya untuk berjaga-jaga itu boros.
                 self.diam()
                 return
-            if not self._ucapkan(teks, urutan):
+            with self._kunci:
+                gen = self._gen
+            if not self._ucapkan(teks, urutan, gen):
                 continue
 
-    def _ucapkan(self, teks: str, urutan: list[str]) -> bool:
-        """Ucapkan satu kabar; turun lapis bila mesin teratas gagal."""
+    def _dipotong(self, gen: int | None) -> bool:
+        """Giliran ucapan ini sudah didahului kabar yang lebih baru?
+
+        `gen=None` berarti pemanggil tak melacak giliran sama sekali, dan
+        jawabannya HARUS "tidak". Bawaannya dulu -1 — angka yang tak pernah
+        sama dengan nomor giliran mana pun, sehingga tiap kegagalan dikira
+        pemotongan dan mesin yang benar-benar rusak tak pernah diganti."""
+        if gen is None:
+            return False
+        with self._kunci:
+            return gen != self._gen
+
+    def _ucapkan(self, teks: str, urutan: list[str],
+                 gen: int | None = None) -> bool:
+        """Ucapkan satu kabar; turun lapis bila mesin teratas gagal.
+
+        `gen` = nomor giliran saat kabar ini diambil. Kalau nomornya sudah
+        berubah, kegagalan yang terlihat di sini BUKAN mesin yang rusak
+        melainkan pemotongan yang disengaja — dan menurunkan lapis karenanya
+        akan mematikan mesin terbaik hanya karena pengguna mendapat kabar
+        baru."""
         while urutan:
             mesin = urutan[0]
             self.mesin = mesin
             try:
                 if mesin == "edge":
                     berkas = self._edge_buat(teks)
+                    # Menyiapkan suara lewat jaringan makan beberapa detik;
+                    # kabar bisa keburu basi sebelum satu kata pun terdengar.
+                    if self._dipotong(gen):
+                        self._buang(berkas)
+                        return True
                     if berkas and self._windows_kirim("P", berkas):
                         self._buang(berkas)
+                        self._gagal_beruntun = 0
                         return True
                     self._buang(berkas)
                 elif mesin == "sapi":
                     if self._windows_kirim("S", teks):
+                        self._gagal_beruntun = 0
                         return True
                 elif mesin == "say":
                     subprocess.run(["say", teks], timeout=90)
@@ -344,13 +397,32 @@ class Pengucap:
                         return True
             except Exception:  # noqa: BLE001 - mesin ini gagal; coba yang bawah
                 log.debug("mesin suara %s gagal", mesin, exc_info=True)
-            # Turun lapis PERMANEN untuk sesi ini: mencoba mesin daring lagi
-            # pada tiap kabar berarti menambah beberapa detik hening ke setiap
-            # langkah, dan penyebabnya (luring) hampir tak pernah berubah di
-            # tengah sesi.
+            # DIPOTONG, bukan gagal: kabar yang lebih baru sudah masuk dan
+            # mematikan prosesnya. Berhenti di sini tanpa menyalahkan mesinnya —
+            # kalau tidak, tiap kali pengguna dapat kabar baru, mesin terbaik
+            # dicoret satu per satu sampai habis.
+            if self._dipotong(gen):
+                self._gagal_beruntun = 0
+                return True
+            # Gagal SEKALI belum tentu mesinnya rusak: jaringan bisa tersendat
+            # sebentar, berkas bisa masih terpegang pemutar yang baru dimatikan.
+            # Menukar suara karena itu membuat suaranya berubah tanpa sebab yang
+            # bisa dilihat pengguna. Kabar ini dilewatkan saja; mesinnya baru
+            # diganti kalau memang gagal berkali-kali berturut-turut.
+            self._gagal_beruntun += 1
+            if self._gagal_beruntun < _BATAS_GAGAL:
+                self.galat = (f"{mesin} gagal sekali "
+                              f"({self._gagal_beruntun}/{_BATAS_GAGAL}) — "
+                              "suara tak diganti")
+                return False
+            # Sudah gagal berkali-kali: ini bukan gangguan sesaat. Turun lapis
+            # PERMANEN untuk sesi ini — mencoba mesin daring lagi pada tiap
+            # kabar berarti menambah beberapa detik hening ke setiap langkah,
+            # dan penyebabnya (luring) hampir tak pernah berubah di tengah sesi.
+            self._gagal_beruntun = 0
             urutan.pop(0)
             if urutan:
-                self.galat = f"{mesin} gagal, memakai {urutan[0]}"
+                self.galat = f"{mesin} gagal {_BATAS_GAGAL}x, memakai {urutan[0]}"
         self.galat = "semua mesin suara gagal"
         return False
 
@@ -363,8 +435,17 @@ class Pengucap:
 
         if self._loop is None:
             self._loop = asyncio.new_event_loop()
+        # Nama berkas HARUS baru tiap ucapan. Dulu namanya tetap, dan itu
+        # TERBUKTI merusak: pemutar Windows memegang berkas yang sedang
+        # dibunyikan, jadi begitu ucapan dipotong, ucapan berikutnya gagal
+        # menulis ke nama yang sama — kegagalan itu lalu dikira "mesinnya
+        # rusak" dan suaranya turun ke suara bawaan Windows, padahal tak ada
+        # yang rusak sama sekali. Gejalanya persis: "kok tiba-tiba berubah
+        # suara padahal tak ada error".
+        self._urut += 1
         berkas = os.path.join(
-            tempfile.gettempdir(), f"bagasai-suara-{os.getpid()}.mp3")
+            tempfile.gettempdir(),
+            f"bagasai-suara-{os.getpid()}-{self._urut}.mp3")
 
         async def buat() -> None:
             galat: Exception | None = None
