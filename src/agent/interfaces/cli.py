@@ -68,6 +68,7 @@ except Exception:  # pragma: no cover
 from .. import config, interaction, llm, longmem, models, osinfo, permissions, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from .. import suara as _suara  # noqa: E402
+from .. import tempelan as _tempelan  # noqa: E402
 from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
 # Prompt interaktif MILIK SENDIRI (dulu InquirerPy) — lihat ui/menu.py.
@@ -2256,7 +2257,11 @@ def main(resume: bool = False) -> None:
                 diambil = [t for t in prompt_queue if not _perintah(t)]
                 if diambil:
                     prompt_queue[:] = [t for t in prompt_queue if _perintah(t)]
-                return diambil
+                # Pesan sisipan tak lewat gelung utama, jadi penanda tempelannya
+                # harus dikembangkan di sini juga — kalau tidak, AI menerima
+                # tulisan "[tempelan #1 · 312 baris · 14,2 KB]" alih-alih log
+                # yang sebenarnya ingin ditunjukkan pengguna.
+                return [_tempelan.simpanan().kembangkan(t) for t in diambil]
 
         def worker() -> None:
             try:
@@ -2543,6 +2548,13 @@ def main(resume: bool = False) -> None:
                 # perlu dikejar, jadi memotongnya cuma membuat pesannya
                 # terdengar separuh.
                 if not interrupted and prefs.load().get("suara", True):
+                    # GETARAN dulu, baru dibacakan. Kabar antar-langkah dan
+                    # jawaban akhir sama-sama keluar sebagai kalimat, jadi dari
+                    # jendela lain keduanya terdengar serupa dan pengguna tak
+                    # tahu gilirannya sudah selesai tanpa menengok layar. Dua
+                    # dengung pendek ini yang membedakannya — satu ketukan yang
+                    # artinya cuma satu hal: sudah sampai kesimpulan.
+                    _suara.getar()
                     _suara.ucap(ans, penuh=True)
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
@@ -2666,6 +2678,12 @@ def main(resume: bool = False) -> None:
         elif err is not None:
             console.print(f"\n  [red]✖ error:[/red] {err}\n")
         else:
+            # Mode klasik punya jalur penutupnya sendiri; getarannya dipasang di
+            # sini juga supaya penanda "sudah sampai kesimpulan" tak cuma ada di
+            # satu mode tampilan.
+            if (result["answer"] or "").strip() \
+                    and prefs.load().get("suara", True):
+                _suara.getar()
             say(result["answer"])
             _turn_footer(turn_start)
         _reindex_if_edited()
@@ -2839,7 +2857,9 @@ def main(resume: bool = False) -> None:
         console.print(
             f"  [dim]status: [/]"
             f"[{'#9fc93c' if aktif else '#f7d488'}]{'aktif' if aktif else 'mati'}[/]"
-            f"  [dim]· /mic off · /mic tes[/dim]\n")
+            f"  [dim]· /mic off · /mic tes[/dim]")
+        console.print("  [dim]giliran yang sampai kesimpulan ditandai dua "
+                      "dengung pendek — 'getaran' penanda selesai[/dim]\n")
         if not mesin:
             console.print("  [yellow]⚠ tak ada mesin suara di sistem ini — "
                           "tak akan ada bunyi.[/yellow]\n")
@@ -2852,6 +2872,13 @@ def main(resume: bool = False) -> None:
             label = "dipakai" if i == 0 else "cadangan"
             console.print(f"    {tanda} [#fc9018]{judul}[/] "
                           f"[dim]({label}) — {_esc(ket)}[/dim]")
+        # Kalau mesinnya sempat berganti (mis. laptop luring, atau menyiapkan
+        # suara natural terlalu lambat di mesin pelan), SEBUTKAN sebabnya di
+        # sini. Tanpa ini pengguna cuma mendengar suaranya berubah sendiri dan
+        # tak punya satu pun cara untuk tahu kenapa.
+        catatan = _suara.catatan()
+        if catatan:
+            console.print(f"\n  [dim]catatan terakhir: {_esc(catatan)}[/dim]")
         if "edge" not in mesin:
             # Tanpa ini, satu-satunya yang tersedia adalah suara Inggris yang
             # melafalkan teks Indonesia — bisa didengar, tapi jauh dari enak.
@@ -3748,6 +3775,32 @@ def main(resume: bool = False) -> None:
     def _batal_ketik(event):
         event.app.exit(exception=KeyboardInterrupt, style="class:exiting")
 
+    # TEMPELAN PANJANG diringkas jadi satu baris penanda (lihat tempelan.py).
+    # Tanpa ini, menempelkan log 300 baris membuat kotak ketik membengkak
+    # menutupi layar dan mendorong hilang riwayat percakapan yang justru sedang
+    # dibaca. Isinya tetap utuh: penanda ditukar kembali dengan teks aslinya
+    # tepat sebelum pesannya dikirim.
+    #
+    # prompt_toolkit mengenali tempelan di kedua jenis terminal: lewat urutan
+    # bracketed-paste di terminal VT, dan lewat pengenal-tempelan bawaan
+    # ConsoleInputReader di Windows. Binding ini didaftarkan SESUDAH binding
+    # bawaannya, jadi ia yang menang (prompt_toolkit memilih yang terakhir
+    # cocok) — yang bawaan cuma menyisipkan teksnya apa adanya.
+    @kb.add(Keys.BracketedPaste)
+    def _tempel(event):
+        data = (event.data or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not data:
+            return
+        simpanan = _tempelan.simpanan()
+        if simpanan.perlu_diringkas(data):
+            event.current_buffer.insert_text(simpanan.simpan(data))
+            return
+        # Tempelan pendek disisipkan apa adanya. Baris-barunya diganti spasi:
+        # kotak ini satu baris (multiline=False), jadi baris-baru di dalamnya
+        # tak pernah terlihat sebagai baris baru — ia cuma jadi celah aneh di
+        # tengah kalimat.
+        event.current_buffer.insert_text(" ".join(data.split("\n")))
+
     @kb.add("c-d")
     def _eof_ketik(event):
         buf = event.current_buffer
@@ -3947,7 +4000,13 @@ def main(resume: bool = False) -> None:
                     break
             continue
         try:
-            process(text)
+            # Penanda tempelan ditukar kembali dengan isi aslinya DI SINI —
+            # satu-satunya gerbang yang dilewati semua pesan, baik yang diketik
+            # di kotak idle maupun yang mengantre dari ketikan saat giliran
+            # sebelumnya berjalan. Yang tergema ke riwayat tetap bentuk
+            # ringkasnya (lihat gema di atas): itu memang yang membuat
+            # riwayatnya tetap bisa dibaca.
+            process(_tempelan.simpanan().kembangkan(text))
         except KeyboardInterrupt:
             # Jaring pengaman terakhir: Ctrl+C tak boleh menjatuhkan REPL.
             console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")

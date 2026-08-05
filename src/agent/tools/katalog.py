@@ -50,7 +50,8 @@ INTI: tuple[str, ...] = (
 # yang sedang berpikir "aku butuh mengunduh gambar", bukan "aku butuh modul
 # extras".
 LAIN: dict[str, tuple[str, ...]] = {
-    "aset": ("download_file", "http_request", "attach_file", "analyze_image"),
+    "aset": ("web_search_image", "web_extractor", "download_file",
+             "http_request", "attach_file", "analyze_image"),
     "media": ("media_info", "media_convert", "media_compress", "media_trim",
               "media_merge", "media_extract_audio", "media_thumbnail"),
     "arsip": ("zip_create", "zip_extract"),
@@ -83,7 +84,13 @@ _PANDUAN: dict[str, str] = {
         "4. MAKSIMAL 2x web_search per berkas. Gagal? ubah SATU kata paling "
         "menentukan, jangan menyusun kombinasi acak baru.\n"
         "5. fetch_url hanya untuk MENEMUKAN URL berkas aslinya (berujung "
-        ".mp3/.png/.zip/.ttf). Minta login/berbayar? tinggalkan, pindah sumber.\n"
+        ".mp3/.png/.zip/.ttf). Minta login/berbayar? tinggalkan, pindah sumber. "
+        "Untuk membongkar satu halaman jadi daftar gambar/tautan/heading yang "
+        "siap pakai, web_extractor lebih tepat daripada fetch_url.\n"
+        "5b. GAMBAR/FOTO: pakai web_search_image — URL-nya sudah diperiksa "
+        "hidup lebih dulu. JANGAN menyusun alamat unsplash/pexels dari "
+        "ingatan: alamat tebakan hampir selalu 404, dan memperbaikinya satu "
+        "per satu menghabiskan giliran tanpa hasil.\n"
         "6. download_file ke folder proyek, pastikan ukurannya > 0, lalu "
         "BERHENTI mencari. Berkas pertama yang layak sudah cukup.\n"
         "JANGAN memberi daftar tautan agar pengguna mengunduh sendiri: aset "

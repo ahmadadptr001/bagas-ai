@@ -110,6 +110,11 @@ _OUTPUT_STOP_RE = re.compile(
     re.IGNORECASE)
 # Berapa kali maksimal meminta lanjutan output yang terpotong dalam SATU kirim.
 _MAX_LANJUT = 3
+# Berapa kali AI web boleh didesak MENUTUP dengan teks biasa sesudah tool-nya
+# dimatikan (dup_hits/fail_streak). Model yang sedang macet cenderung membalas
+# desakan itu dengan blok langkah LAGI; tanpa batas ini giliran bisa berputar
+# di antara "simpulkan" dan blok tool sampai kuota habis.
+_MAKS_TUTUP = 2
 
 # Tool yang benar-benar MENGUBAH berkas kode. Dipakai untuk memutuskan apakah
 # perlu validasi otomatis sebelum jawaban akhir (kalau tak ada kode yang berubah,
@@ -594,6 +599,16 @@ _WEB_MARKER_RE = re.compile(
     _OPEN_MARK + r"|" + _CLOSE_MARK + r"|" + _ALT_OPEN + r"|" + _ALT_CLOSE
     + r"|\[\[\s*/?\s*HASIL[^\]]*\]\]",
     re.IGNORECASE)
+
+
+def _sisa_prosa(text: str) -> bool:
+    """Masih ada KALIMAT tersisa sesudah blok tool & penandanya dibuang?
+
+    Dipakai untuk membedakan dua keadaan yang di layar kelihatan sama —
+    balasan yang benar-benar tak terbaca, dan balasan yang terbaca sempurna
+    tapi seluruhnya berupa usulan langkah. Yang kedua bukan kerusakan format,
+    melainkan model yang menolak berhenti; keduanya butuh penanganan berbeda."""
+    return bool(_strip_tool_json(_strip_web_markers(text)))
 
 
 def _strip_web_markers(text: str) -> str:
@@ -1606,6 +1621,7 @@ class Agent:
 
             steps = 0
             repairs = 0   # berapa kali minta AI web mengirim ulang blok rusak
+            tutup = 0     # berapa kali didesak menutup dengan teks biasa
             # Jaring anti-ulang: hasil langkah
             # di-cache per (nama+argumen). Tanpa ini AI web bisa mengulang
             # langkah yang PERSIS SAMA berpuluh kali sampai batas langkah habis
@@ -1658,10 +1674,43 @@ class Agent:
                 calls = [] if force_final else _parse_web_tool_calls(
                     reply, getattr(conn, "last_code_blocks", ()))
 
+                # SUDAH DIMINTA MENYIMPULKAN, TAPI MASIH MENGIRIM BLOK LANGKAH.
+                #
+                # Ini kejadian nyata, bukan kemungkinan teoretis: sesudah
+                # anti-macet menyala, model membalas dengan blok [[TOOL]] lagi.
+                # Blok itu SAH — cuma tak boleh dijalankan lagi — sehingga
+                # seluruh isi pesannya dibuang dan yang tersisa nol kalimat.
+                # Dulu keadaan itu jatuh ke jalur "JSON-mu rusak" di bawah lalu
+                # ke pesan "formatnya rusak saat dirender": dua kali bolak-balik
+                # percuma, ditutup dengan diagnosis yang SALAH — tak ada yang
+                # rusak, model cuma menolak berhenti. Ditangani di sini dengan
+                # desakan yang menyebut sebabnya, dan bloknya tetap tak
+                # dijalankan.
+                if force_final and not _sisa_prosa(reply) and tutup < _MAKS_TUTUP:
+                    tutup += 1
+                    if on_notice:
+                        on_notice("masih mengirim langkah — diminta menutup "
+                                  "dengan teks biasa")
+                    reply = _send(
+                        "[SISTEM] Blokmu kuterima tapi TIDAK kujalankan: "
+                        "giliran ini sudah ditutup untuk tool. Mengirim blok "
+                        "lagi tak akan mengubah apa pun.\n"
+                        "Balas HANYA teks biasa — tanpa [[TOOL]], tanpa blok "
+                        "kode JSON, tanpa usulan langkah. Sebutkan: apa yang "
+                        "sudah berhasil, apa yang gagal dan kenapa, lalu apa "
+                        "yang tersisa.")
+                    continue
+
                 # Ada penanda [[TOOL]] tapi isinya tak terbaca (rusak saat
                 # dirender web). Jangan tampilkan penanda mentah ke pengguna —
                 # minta AI web mengirim ulang usulannya dengan format benar.
-                if not calls and "[[TOOL]]" in (reply or "") and repairs < 2:
+                #
+                # TIDAK berlaku saat force_final: di sana `calls` memang sengaja
+                # dikosongkan, jadi "tak terbaca" cuma tampak begitu — menyuruh
+                # mengirim ulang blok yang sebenarnya baik-baik saja bertabrakan
+                # dengan perintah berhenti yang baru saja kita kirim.
+                if (not calls and not force_final
+                        and "[[TOOL]]" in (reply or "") and repairs < 2):
                     repairs += 1
                     reply = _send(
                         "[SISTEM] Blok usulan tool-mu tidak terbaca (JSON-nya "
@@ -1838,13 +1887,32 @@ class Agent:
                         mentah = " ".join((reply or "").split())[:300]
                         mentah = (mentah.replace("`", "'")
                                         .replace("[[", "⟦").replace("]]", "⟧"))
-                        answer = (
-                            "Balasan dari AI web tak bisa kubaca sebagai langkah "
-                            "yang sah (formatnya rusak saat dirender). Coba "
-                            "kirim ulang permintaanmu, atau perjelas langkah "
-                            "yang kamu mau.\n\n"
-                            f"Yang terbaca dari layar:\n```\n{mentah or '(kosong)'}\n```"
-                        )
+                        # Sebabnya dibedakan. Menyebut "formatnya rusak" pada
+                        # balasan yang formatnya justru sempurna membuat
+                        # pengguna memburu bug yang tak ada — yang terjadi
+                        # sebenarnya: tool sudah dimatikan, tapi model tetap
+                        # mengirim langkah alih-alih menyimpulkan.
+                        if _parse_web_tool_calls(
+                                reply, getattr(conn, "last_code_blocks", ())):
+                            answer = (
+                                "Giliran ini kuhentikan tanpa jawaban akhir. "
+                                "Sesudah beberapa langkah gagal beruntun, "
+                                f"{conn.label} terus mengirim langkah baru "
+                                "padahal sudah kuminta berhenti dan "
+                                "menyimpulkan.\n\n"
+                                "Pekerjaan yang sempat berhasil tetap tersimpan "
+                                "— ketik 'lanjutkan' untuk meneruskan, atau "
+                                "ganti model lewat /model."
+                            )
+                        else:
+                            answer = (
+                                "Balasan dari AI web tak bisa kubaca sebagai "
+                                "langkah yang sah (formatnya rusak saat "
+                                "dirender). Coba kirim ulang permintaanmu, atau "
+                                "perjelas langkah yang kamu mau.\n\n"
+                                "Yang terbaca dari layar:\n"
+                                f"```\n{mentah or '(kosong)'}\n```"
+                            )
                     if steps >= _WEB_MAX_STEPS and calls:
                         answer += (
                             f"\n\n_(Batas {_WEB_MAX_STEPS} langkah tool "

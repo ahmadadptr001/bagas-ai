@@ -49,6 +49,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +81,30 @@ _TIMEOUT_EDGE = 12.0
 # pemutar) akan menukar suara untuk seluruh sesi, dan bagi pengguna itu tampak
 # seperti suaranya berubah sendiri tanpa sebab.
 _BATAS_GAGAL = 3
+# Berapa lama sebuah kabar harus SEMPAT TERDENGAR sebelum boleh dipotong kabar
+# yang lebih baru.
+#
+# Inilah pembatas yang membuat fitur ini tetap berbunyi di laptop pelan. Aturan
+# "kabar terbaru menang" tanpa syarat masuk akal di mesin cepat, tapi di laptop
+# 4 GB menyiapkan+membunyikan satu kabar makan beberapa detik sementara langkah
+# berikutnya sudah datang — jadi setiap kabar dipotong SEBELUM satu kata pun
+# keluar, dan yang terdengar cuma kabar pertama. Persis gejala yang dilaporkan:
+# "awal-awalnya ada, setelah itu hilang tanpa sebab".
+#
+# Dengan pembatas ini, kabar yang belum sempat berbunyi dibiarkan selesai dulu;
+# yang terbaru menunggu di antrean (isinya cuma satu, jadi tak pernah
+# tertinggal lebih dari satu kabar) dan langsung menyusul sesudahnya.
+_MIN_DENGAR = 2.0
+# Menyiapkan suara natural lebih lama dari ini = terlalu lambat untuk berguna.
+# Berbeda dari _TIMEOUT_EDGE yang menjaring kegagalan, ini menjaring KEBERHASILAN
+# yang datangnya kelewat telat — di laptop lemot itu yang jauh lebih sering.
+_EDGE_LAMBAT = 6.0
+# Berapa kali berturut-turut boleh selambat itu sebelum pindah ke mesin luring.
+_BATAS_LAMBAT = 2
+# Menganggur selama ini -> proses pembantu dilepas (hemat memori di laptop kecil).
+# Jangan terlalu pendek: menyalakannya lagi memakan waktu, dan di laptop pelan
+# waktu itu jatuh tepat di kabar PERTAMA giliran berikutnya.
+_JEDA_NGANGGUR = 90.0
 
 # Proses pembantu Windows: SAPI + pemutar berkas suara dalam SATU proses.
 # Protokolnya satu baris per perintah, "S"/"P" lalu muatan Base64 (Base64 supaya
@@ -259,6 +284,19 @@ class Pengucap:
         # seluruh sesi — perubahan suara yang tak jelas sebabnya jauh lebih
         # mengganggu daripada satu kabar yang telat sedetik.
         self._gagal_beruntun = 0
+        # Sejak kapan kabar yang sekarang BENAR-BENAR terdengar (None = tak ada
+        # yang sedang berbunyi; masih disiapkan juga dihitung None). Dipakai
+        # _dahului untuk memutuskan boleh-tidaknya memotong.
+        self._mulai_bunyi: float | None = None
+        # Berapa kali berturut-turut mesin daring menyiapkan suara kelewat lama.
+        self._lambat_beruntun = 0
+        # Urutan mesin MILIK SESI, bukan milik thread. Dulu daftarnya dibuat
+        # ulang tiap kali thread pengucap menyala, sehingga turun-lapis yang
+        # sudah diputuskan hilang begitu pengucap sempat menganggur — di laptop
+        # yang luring, tiap giliran baru membayar lagi 3 x 12 detik hening
+        # sebelum menyerah ke suara Windows. Itu sendiri sudah cukup membuat
+        # suaranya terasa "hilang".
+        self._urutan: list[str] | None = None
         self.mesin: str = ""         # yang sedang dipakai (diisi saat jalan)
         self.galat: str = ""         # alasan kalau tak berbunyi
 
@@ -273,34 +311,73 @@ class Pengucap:
         bersih = bersihkan(teks, _MAKS_UCAP_AKHIR if penuh else _MAKS_UCAP)
         if not bersih:
             return
-        # KABAR TERBARU MENANG: yang sedang diucapkan dipotong, yang mengantre
-        # dibuang. Suara itu berurutan sementara pekerjaan berjalan terus, jadi
-        # membiarkan yang lama selesai dulu berarti pengguna mendengar langkah
-        # yang SUDAH LEWAT sementara di layar sudah langkah berikutnya —
-        # makin lama makin tertinggal, dan yang didengar makin tak berguna.
-        self._potong()
+        # KABAR TERBARU MENANG: yang mengantre dibuang, dan yang sedang
+        # diucapkan dipotong BILA sudah sempat terdengar. Suara itu berurutan
+        # sementara pekerjaan berjalan terus, jadi membiarkan yang lama selesai
+        # semuanya berarti pengguna mendengar langkah yang SUDAH LEWAT — makin
+        # lama makin tertinggal. Syarat "sudah sempat terdengar" itulah yang
+        # menjaga agar aturan ini tak berbalik jadi kesunyian di laptop pelan
+        # (lihat _MIN_DENGAR).
+        self._dahului()
         self._antre.put(bersih)
         self._pastikan_jalan()
 
-    def _potong(self) -> None:
-        """Hentikan ucapan yang sedang jalan & buang antreannya.
-
-        Nomor gilirannya dinaikkan supaya thread pengucap tahu kegagalan yang
-        sebentar lagi ia lihat adalah pemotongan yang DISENGAJA, bukan mesin
-        suara yang rusak."""
+    def _buang_antre(self) -> None:
+        """Kosongkan antrean. Antreannya memang cuma menyimpan yang TERBARU."""
         while True:
             try:
                 self._antre.get_nowait()
             except queue.Empty:
-                break
+                return
+
+    def _hentikan(self) -> None:
+        """Matikan ucapan yang sedang berbunyi SEKARANG juga.
+
+        Nomor gilirannya dinaikkan supaya thread pengucap tahu kegagalan yang
+        sebentar lagi ia lihat adalah pemotongan yang DISENGAJA, bukan mesin
+        suara yang rusak."""
         with self._kunci:
             self._gen += 1
+            self._mulai_bunyi = None
             p, self._proc = self._proc, None
         if p is not None:
             try:
                 p.kill()
             except Exception:  # noqa: BLE001
                 pass
+
+    def _potong(self) -> None:
+        """Berhenti TOTAL: antrean dibuang & yang sedang berbunyi dimatikan.
+
+        Dipakai saat giliran dibatalkan/selesai — di sana memang tak ada lagi
+        yang pantas didengar, jadi tak ada syarat apa pun."""
+        self._buang_antre()
+        self._hentikan()
+
+    def _dahului(self) -> None:
+        """Beri jalan untuk kabar baru — TANPA membuat semuanya bisu.
+
+        Bedanya dengan _potong: yang sedang berbunyi hanya dipotong kalau sudah
+        sempat terdengar _MIN_DENGAR detik. Kalau belum, ia dibiarkan selesai
+        dan kabar barunya menunggu sebentar di antrean.
+
+        Aturan ini lahir dari laptop pelan (i3, RAM kecil): di sana menyiapkan
+        satu kabar makan beberapa detik, sementara kabar berikutnya datang
+        lebih cepat dari itu. Memotong tanpa syarat berarti TAK SATU PUN kabar
+        pernah selesai — pengeras suara diam total sesudah kabar pertama.
+        Membiarkannya selesai memang membuat suara tertinggal sedikit, tapi
+        tertinggal sedikit masih jauh lebih berguna daripada senyap."""
+        self._buang_antre()
+        with self._kunci:
+            mulai = self._mulai_bunyi
+        if mulai is None:
+            # Belum ada bunyi yang keluar (masih disiapkan, atau memang tak ada
+            # yang jalan). Membunuh proses pembantu di sini cuma menambah
+            # ongkos menyalakannya lagi — yang di laptop pelan justru mahal.
+            return
+        if (time.monotonic() - mulai) < _MIN_DENGAR:
+            return
+        self._hentikan()
 
     def diam(self) -> None:
         """Hentikan yang sedang diucapkan & buang antreannya.
@@ -325,23 +402,41 @@ class Pengucap:
             self._thread.start()
 
     def _kerja(self) -> None:
-        urutan = mesin_tersedia()
+        if self._urutan is None:
+            self._urutan = mesin_tersedia()
+        urutan = self._urutan
         if not urutan:
             self.galat = "tak ada mesin suara di sistem ini"
             return
         self.mesin = urutan[0]
         while not self._mati:
             try:
-                teks = self._antre.get(timeout=20.0)
+                teks = self._antre.get(timeout=_JEDA_NGANGGUR)
             except queue.Empty:
                 # Lama menganggur -> lepaskan prosesnya. Menahan PowerShell
-                # hidup sepanjang sesi hanya untuk berjaga-jaga itu boros.
-                self.diam()
+                # hidup sepanjang sesi hanya untuk berjaga-jaga itu boros —
+                # dan di laptop RAM kecil itu bukan penghematan sepele.
+                #
+                # Penandanya dilepas DI DALAM kunci yang sama dengan pemeriksaan
+                # antrean: tanpa itu ada celah sempit di mana ucap() melihat
+                # thread ini "masih hidup" lalu tak menyalakan penggantinya,
+                # padahal sedetik kemudian ia pergi — dan kabar yang barusan
+                # diantrekan tak pernah dibacakan siapa pun.
+                with self._kunci:
+                    if not self._antre.empty():
+                        continue
+                    self._thread = None
+                self._potong()
                 return
             with self._kunci:
                 gen = self._gen
-            if not self._ucapkan(teks, urutan, gen):
-                continue
+            try:
+                self._ucapkan(teks, urutan, gen)
+            except Exception:  # noqa: BLE001 - thread ini TAK BOLEH mati diam-diam
+                # Kalau thread pengucap berhenti karena galat tak terduga,
+                # fiturnya tampak "hilang tanpa sebab": layar terus jalan,
+                # pengeras suara diam selamanya, dan tak ada satu pun tanda.
+                log.debug("kabar gagal diucapkan", exc_info=True)
 
     def _dipotong(self, gen: int | None) -> bool:
         """Giliran ucapan ini sudah didahului kabar yang lebih baru?
@@ -364,6 +459,20 @@ class Pengucap:
         melainkan pemotongan yang disengaja — dan menurunkan lapis karenanya
         akan mematikan mesin terbaik hanya karena pengguna mendapat kabar
         baru."""
+        # MESIN YANG BERHASIL TAPI KELEWAT LAMBAT sama tak bergunanya dengan
+        # mesin yang gagal: kabarnya baru berbunyi saat langkah di layar sudah
+        # berganti dua kali. Ini keadaan khas laptop pelan — di sana suara
+        # Windows yang berbunyi SEKARANG mengalahkan suara natural yang
+        # berbunyi tujuh detik lagi. Sebabnya dicatat di `galat` supaya
+        # pergantian suaranya bisa dijelaskan (lihat /mic), bukan tampak
+        # berubah sendiri.
+        if (self._lambat_beruntun >= _BATAS_LAMBAT
+                and len(urutan) > 1 and urutan[0] == "edge"):
+            self._lambat_beruntun = 0
+            urutan.pop(0)
+            self.galat = (f"suara natural terlalu lambat disiapkan di laptop "
+                          f"ini (≥{_EDGE_LAMBAT:.0f} detik/kabar) — memakai "
+                          f"{urutan[0]}")
         while urutan:
             mesin = urutan[0]
             self.mesin = mesin
@@ -458,16 +567,31 @@ class Pengucap:
             if galat is not None:
                 raise galat
 
+        mulai = time.monotonic()
         try:
             self._loop.run_until_complete(
                 asyncio.wait_for(buat(), timeout=_TIMEOUT_EDGE))
         except Exception:  # noqa: BLE001
+            self._catat_lama(time.monotonic() - mulai)
             self._buang(berkas)
             return None
+        self._catat_lama(time.monotonic() - mulai)
         if os.path.exists(berkas) and os.path.getsize(berkas) > 1024:
             return berkas
         self._buang(berkas)
         return None
+
+    def _catat_lama(self, detik: float) -> None:
+        """Catat lamanya menyiapkan suara natural — berhasil maupun tidak.
+
+        Yang dihitung KEBERUNTUNAN lambat, bukan rata-rata: satu kabar yang
+        kebetulan lama (jaringan tersendat) tak boleh menukar suara, sedangkan
+        laptop yang memang selalu selambat itu harus segera pindah ke mesin
+        luring alih-alih membuat tiap langkah diawali beberapa detik hening."""
+        if detik >= _EDGE_LAMBAT:
+            self._lambat_beruntun += 1
+        else:
+            self._lambat_beruntun = 0
 
     @staticmethod
     def _buang(berkas: str | None) -> None:
@@ -494,12 +618,30 @@ class Pengucap:
         try:
             p.stdin.write(pesan + "\n")
             p.stdin.flush()
+        except Exception:  # noqa: BLE001 - proses dibunuh oleh diam()
+            with self._kunci:
+                if self._proc is p:
+                    self._proc = None
+            return False
+        # Perintahnya sudah sampai: SEJAK DETIK INI bunyinya keluar dari
+        # pengeras suara. Penandanya sengaja dipasang di sini, bukan sebelum
+        # proses pembantunya dinyalakan — waktu menyalakan PowerShell (yang di
+        # laptop pelan bisa beberapa detik) bukan waktu yang terdengar, dan
+        # menghitungnya sebagai "sudah terdengar" akan membuat kabar dipotong
+        # tepat sebelum bunyinya keluar.
+        with self._kunci:
+            self._mulai_bunyi = time.monotonic()
+        try:
             return p.stdout.readline().strip() == "OK"
         except Exception:  # noqa: BLE001 - proses dibunuh oleh diam()
             with self._kunci:
                 if self._proc is p:
                     self._proc = None
             return False
+        finally:
+            with self._kunci:
+                if self._proc is p or self._proc is None:
+                    self._mulai_bunyi = None
 
     def _nyalakan(self) -> subprocess.Popen | None:
         """Nyalakan proses pembantu. None bila tak bisa — dan itu bukan galat
@@ -531,6 +673,55 @@ class Pengucap:
             return None
         self.galat = ""
         return p
+
+
+# --- getaran penanda kesimpulan ---------------------------------------------
+# Laptop tak punya motor getar, jadi "getaran" di sini ditiru dengan cara yang
+# paling mendekati rasanya: dua dengung PENDEK berfrekuensi rendah. Rendah dan
+# pendek itu disengaja — nadanya jatuh di bawah rentang suara orang bicara,
+# sehingga tak bisa tertukar dengan kabar yang sedang dibacakan, dan telinga
+# menangkapnya sebagai "tuk-tuk" alih-alih bunyi bip alarm.
+#
+# (frekuensi Hz, lama ms); frekuensi 0 = jeda hening.
+_GETAR = ((110, 80), (0, 55), (110, 120))
+
+
+def _getar_sekarang() -> None:
+    """Bunyikan dengungnya. Dipanggil di thread sendiri — winsound menahan."""
+    if sys.platform == "win32":
+        try:
+            import winsound
+            for hz, ms in _GETAR:
+                if hz:
+                    winsound.Beep(hz, ms)
+                else:
+                    time.sleep(ms / 1000.0)
+            return
+        except Exception:  # noqa: BLE001 - jatuh ke bel terminal di bawah
+            log.debug("winsound gagal", exc_info=True)
+    # Mesin lain (dan Windows tanpa pengeras suara internal): bel terminal.
+    # Tak semirip dengung, tapi tetap terdengar dari jendela mana pun.
+    try:
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def getar() -> None:
+    """Tanda bahwa giliran sudah sampai di KESIMPULAN.
+
+    Gunanya persis sama dengan fitur suara: memberitahu tanpa perlu melihat
+    layar. Bedanya, ini menandai satu momen — bukan membacakan isi — jadi ia
+    berguna justru saat pengguna sedang mengerjakan hal lain di jendela lain
+    dan hanya perlu tahu "sudah selesai".
+
+    Tak pernah menahan pemanggil dan tak pernah melempar."""
+    try:
+        threading.Thread(target=_getar_sekarang, daemon=True,
+                         name="bagasai-getar").start()
+    except Exception:  # noqa: BLE001 - notifikasi tak boleh menjatuhkan giliran
+        log.debug("gagal menggetarkan", exc_info=True)
 
 
 # --- satu pengucap untuk seluruh program ------------------------------------
@@ -569,6 +760,15 @@ def tutup() -> None:
             _PENGUCAP.tutup()
     except Exception:  # noqa: BLE001
         pass
+
+
+def catatan() -> str:
+    """Alasan terakhir suara tak berbunyi atau berganti mesin ("" bila tak ada).
+
+    Ada supaya perubahan suara SELALU bisa dijelaskan. Suara yang berganti
+    sendiri tanpa keterangan mustahil dibedakan dari fitur yang rusak — dan
+    itu keluhan nyata, bukan dugaan."""
+    return getattr(_PENGUCAP, "galat", "") or ""
 
 
 def suara_tersedia() -> list[str]:

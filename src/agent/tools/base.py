@@ -348,11 +348,31 @@ def _selaraskan(tool_obj: "Tool", arguments: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _tool_tak_ada(name: str) -> str:
+    """Pesan untuk nama tool yang tak terdaftar — dengan JALAN KELUARNYA.
+
+    Menolak begitu saja ("tool X tidak ditemukan") membuat model mengarang
+    nama lain lalu gagal lagi, dan satu giliran habis untuk tebak-tebakan.
+    TERAMATI di layar pengguna: 'web_search_image' dipanggil, ditolak, lalu
+    giliran itu berakhir tanpa hasil. Nama yang MIRIP dengan tool sungguhan
+    hampir selalu maksud yang benar dengan ejaan yang salah, jadi disebutkan;
+    kalau tak ada yang mirip, model diarahkan ke list_tools alih-alih dibiarkan
+    menebak."""
+    import difflib
+
+    mirip = difflib.get_close_matches(name or "", list(REGISTRY), n=3, cutoff=0.6)
+    pesan = f"[error] tool '{name}' tidak ditemukan."
+    if mirip:
+        return pesan + " Maksudmu: " + ", ".join(mirip) + "?"
+    return (pesan + " Panggil list_tools('<kategori>') untuk melihat tool yang "
+            "BENAR-BENAR ada sebelum mencoba nama lain — jangan menebak nama.")
+
+
 def execute(name: str, arguments: dict[str, Any]) -> str:
     """Jalankan tool berdasarkan nama; selalu kembalikan string untuk LLM."""
     tool_obj = REGISTRY.get(name)
     if tool_obj is None:
-        return f"[error] tool '{name}' tidak ditemukan."
+        return _tool_tak_ada(name)
     if not isinstance(arguments, dict):
         return (f"[error] args untuk '{name}' harus objek JSON "
                 f"(mis. {{\"path\": \"...\"}}), bukan {type(arguments).__name__}.")
