@@ -17,6 +17,7 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 
 try:  # keyboard non-blocking (Windows): ketikan-selama-giliran & Ctrl+C
     import msvcrt as _msvcrt
@@ -514,6 +515,24 @@ def _row(lineno: str, sign: str, text, style: str) -> Text:
 _GARIS_KOTAK = "#7a5c3a"
 
 
+_TAG_HTML_RE = re.compile(r"<[^>]+>")
+
+
+def _panjang_tampak(html: str) -> int:
+    """Berapa KOLOM yang benar-benar dipakai sepotong markup HTML prompt_toolkit.
+
+    Tag gaya (`<brand>…</brand>`) tak memakan ruang di layar, jadi len() atas
+    teks mentahnya jauh melebihi lebar sesungguhnya — dan perataan yang
+    dihitung darinya meleset puluhan kolom. Emoji dihitung dua kolom karena
+    memang selebar itu di terminal."""
+    tampak = _TAG_HTML_RE.sub("", html)
+    tampak = tampak.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    lebar = 0
+    for ch in tampak:
+        lebar += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return lebar
+
+
 def _lebar_kotak() -> int:
     """Lebar kotak chat = LEBAR PENUH terminal.
 
@@ -743,32 +762,87 @@ def _ke_dasar_layar() -> None:
 # sama persis supaya perpindahan antar keduanya tak terlihat.
 _BG_BAR = "#1a120b"
 
+# Urutan PENGORBANAN saat terminal menyempit, dari isi yang paling bisa
+# dilepas. Bar status dipatok di dasar layar, jadi ia tak boleh terlipat: satu
+# baris yang meluber merusak seluruh susunan kotak chat di atasnya.
+#
+# Daftar ini dipakai BERSAMA oleh kedua bar — versi prompt_toolkit (saat idle)
+# dan versi rich (saat giliran berjalan). Keduanya tampil bergantian di tempat
+# yang sama persis, jadi aturan yang berbeda akan terlihat sebagai layar yang
+# melompat tiap kali giliran mulai atau selesai.
+_TINGKAT_BAR: tuple[tuple[str, ...], ...] = (
+    ("merek", "model", "sesi", "perintah", "ctrlc"),
+    ("merek", "model", "sesi", "perintah"),
+    ("merek", "model", "perintah"),
+    ("model", "perintah"),
+    ("model", "exit"),
+)
+
+
+def _bagian_bar(lebar: int, ukur) -> tuple[str, ...]:
+    """Bagian mana yang muat di lebar ini. `ukur(nama)` -> jumlah kolomnya.
+
+    Sisa dua kolom disediakan sebagai jarak minimal kiri-kanan: menempel rapat
+    membuat keterangan dan perintah terbaca sebagai satu deretan, padahal
+    justru pemisahannya yang jadi maksud susunan ini."""
+    for tingkat in _TINGKAT_BAR:
+        if sum(ukur(b) for b in tingkat) + 2 <= lebar:
+            return tingkat
+    return _TINGKAT_BAR[-1]
+
 
 def _bar_status(agent: Agent, total: int) -> Text:
-    """Satu baris: ⬢ bagas-ai · model · token sesi · token total · perintah."""
+    """Satu baris: ⬢ bagas-ai · model · token sesi ……… /menu · /exit.
+
+    `total` tetap diterima meski tak lagi ditampilkan: penghitungannya jalan
+    terus dan pemanggilnya tak perlu ikut berubah — yang dibuang cuma
+    tampilannya (lihat status_bar di main untuk alasan yang sama).
+    """
     s = agent.tokens_session
     spec = agent.model_spec
+    SEP = "  │  "
+    teks = {
+        "merek": " ⬢ bagas-ai",
+        "model": f"{SEP}{'🌐' if spec.is_web else '🤖'} {spec.label}",
+        "sesi": f"{SEP}⚡ {_fmt(s.total)} sesi",
+        "perintah": "/menu · /exit",
+        "ctrlc": " atau ctrl+c",
+        "exit": "/exit",
+    }
+    ada = _bagian_bar(console.width, lambda b: Text(teks[b]).cell_len + 1)
+
     bar = Text(style=f"on {_BG_BAR}")
-    bar.append(" ⬢ bagas-ai", style="bold #fcc048")
-    sep = ("  │  ", "#4a3826")
-    bar.append(*sep)
-    bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
-    bar.append(spec.label, style="bold #fc9018")
-    bar.append(*sep)
-    bar.append(f"⚡ {_fmt(s.total)}", style="#f7d488")
-    bar.append(" sesi", style="#a89078")
-    bar.append(*sep)
-    bar.append(f"🔋 {_fmt(total)}", style="#9fc93c")
-    bar.append(" total", style="#a89078")
-    bar.append(*sep)
-    bar.append("/menu", style="#ffb861")
-    bar.append(" · ", style="#a89078")
-    bar.append("/exit", style="#f0603c")
-    # Diratakan sampai ujung terminal supaya latarnya jadi PITA penuh, bukan
-    # potongan pendek yang menggantung di tengah baris.
-    pad = console.width - bar.cell_len
-    if pad > 0:
-        bar.append(" " * pad)
+    if "merek" in ada:
+        bar.append(" ⬢ bagas-ai", style="bold #fcc048")
+    if "model" in ada:
+        if "merek" in ada:
+            bar.append(SEP, style="#4a3826")
+        else:
+            bar.append(" ")
+        bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
+        bar.append(spec.label, style="bold #fc9018")
+    if "sesi" in ada:
+        bar.append(SEP, style="#4a3826")
+        bar.append(f"⚡ {_fmt(s.total)}", style="#f7d488")
+        bar.append(" sesi", style="#a89078")
+
+    # Perintah didorong ke tepi KANAN, bukan disambung dengan pemisah:
+    # perintah bukan bagian dari deretan keterangan di kiri — ia hal lain, dan
+    # memisahkannya secara ruang membuat keduanya terbaca sekali lihat.
+    kanan = Text(style=f"on {_BG_BAR}")
+    if "perintah" in ada:
+        kanan.append("/menu", style="#ffb861")
+        kanan.append(" · ", style="#a89078")
+    kanan.append("/exit", style="#f0603c")
+    if "ctrlc" in ada:
+        kanan.append(" atau ctrl+c", style="#a89078")
+    kanan.append(" ")
+
+    # Sisanya diisi spasi supaya latarnya jadi PITA penuh, bukan potongan
+    # pendek yang menggantung di tengah baris.
+    antara = console.width - bar.cell_len - kanan.cell_len
+    bar.append(" " * max(1, antara))
+    bar.append_text(kanan)
     return _oneline(bar)
 
 
@@ -901,6 +975,17 @@ class KotakChat:
         kursor = n if posisi is None else max(0, min(int(posisi), n))
         self.buffer.reset(Document(default, kursor))
         return self.app.run()
+
+    def sisa(self) -> str:
+        """Teks yang masih ada di kotak — dibaca SESUDAH tanya() terputus.
+
+        Dipakai untuk memutuskan arti Ctrl+C: kotak kosong berarti tak ada yang
+        hilang kalau program ditutup, kotak berisi berarti ketukan itu hampir
+        pasti dimaksudkan untuk membuang ketikan."""
+        try:
+            return self.buffer.text
+        except Exception:  # noqa: BLE001 - aplikasi sudah dibongkar
+            return ""
 
     def _terima(self, buf: Buffer) -> bool:
         self.app.exit(result=buf.text)
@@ -3593,26 +3678,46 @@ def main(resume: bool = False) -> None:
         "completion-menu.meta.completion": "bg:#1a120b #a89078",
         "completion-menu.meta.completion.current": "bg:#4a3826 #f2e3cc",
     })
-    # Status bar token PERMANEN di paling bawah (selalu terlihat & rapi).
+    # Status bar PERMANEN di paling bawah (selalu terlihat & rapi).
     def status_bar():
         s = agent.tokens_session
-        total = grand["base"] + s.total
         spec = agent.model_spec
         # Seluruh model berbasis browser -> penanda selalu sama.
         kind = "🌐" if spec.is_web else "🤖"
         eff = ""
         sep = " <sep>│</sep> "
-        return HTML(
-            " <brand>⬢ bagas-ai</brand>"
-            + sep
-            + f"{kind} <model>{spec.label}</model>{eff}"
-            + sep
-            + f"<sesi>⚡ {_fmt(s.total)}</sesi> <muted>sesi</muted>"
-            + sep
-            + f"<total>🔋 {_fmt(total)}</total> <muted>total</muted>"
-            + sep
-            + "<cmd>/menu</cmd> <muted>·</muted> <exit>/exit</exit> "
-        )
+        # PEMAKAIAN TOKEN TOTAL sengaja tak ditampilkan lagi. Penghitungan &
+        # penyimpanannya TIDAK dihentikan (lihat grand/_save_total) — yang
+        # dibuang hanya tampilannya, karena angka seumur-hidup itu tak pernah
+        # menjadi dasar keputusan apa pun saat mengetik. Pemakaian sesi tetap
+        # ada: itu yang berubah selama bekerja.
+        bagian = {
+            "merek": " <brand>⬢ bagas-ai</brand>",
+            "model": f"{sep}{kind} <model>{spec.label}</model>{eff}",
+            "sesi": f"{sep}<sesi>⚡ {_fmt(s.total)}</sesi> <muted>sesi</muted>",
+            "perintah": "<cmd>/menu</cmd> <muted>·</muted> ",
+            "ctrlc": " <muted>atau ctrl+c</muted>",
+            "exit": "<exit>/exit</exit>",
+        }
+        lebar = _lebar_kotak()
+        # Aturan penyusutan dipakai BERSAMA dengan bar versi rich (_bar_status),
+        # supaya bentuknya tak berubah saat giliran mulai/selesai.
+        ada = _bagian_bar(lebar, lambda b: _panjang_tampak(bagian[b]) + 1)
+
+        kiri = "".join(bagian[b] for b in ("merek", "model", "sesi") if b in ada)
+        if not kiri.startswith(" "):     # tanpa merek, pemisah di depan dibuang
+            kiri = " " + kiri.lstrip().removeprefix("<sep>│</sep>").lstrip()
+        kanan = (bagian["perintah"] if "perintah" in ada else "") \
+            + bagian["exit"] \
+            + (bagian["ctrlc"] if "ctrlc" in ada else "") + " "
+
+        # Didorong ke tepi KANAN, bukan disambung dengan pemisah: perintah
+        # bukan bagian dari deretan keterangan di kiri — ia hal lain, dan
+        # memisahkannya secara ruang membuat keduanya terbaca sekali lihat.
+        # Lebar dihitung dari teks TAMPAK (tanpa tag), kalau tidak paddingnya
+        # jauh terlalu besar dan barisnya justru terlipat.
+        antara = lebar - _panjang_tampak(kiri) - _panjang_tampak(kanan)
+        return HTML(kiri + " " * max(1, antara) + kanan)
 
     kotak_chat = KotakChat(status=status_bar, key_bindings=kb, style=_pt_style,
                            completer=SlashCompleter())
@@ -3641,7 +3746,22 @@ def main(resume: bool = False) -> None:
                 with patch_stdout(raw=True):
                     raw = kotak_chat.tanya(prefill, prefill_pos)
             except KeyboardInterrupt:
-                continue
+                # Ctrl+C di kotak yang sedang MENUNGGU = keluar, sepadan dengan
+                # /exit (lewat break yang sama, jadi sesi tersimpan & Chrome
+                # ditutup rapi). Dulu ketukan ini cuma diabaikan, dan itu bikin
+                # bagas-ai terasa tak mau ditutup dengan cara yang dipakai
+                # hampir semua program terminal.
+                #
+                # KECUALI kotaknya masih berisi ketikan: di situ Ctrl+C hampir
+                # pasti dimaksudkan membuang kalimat, bukan menutup program.
+                # Ketukan pertama membuangnya, ketukan kedua (kotak sudah
+                # kosong) baru keluar — supaya satu ketukan salah tak
+                # menghapus kalimat panjang DAN menutup program sekaligus.
+                if kotak_chat.sisa().strip():
+                    console.print("  [dim]ketikan dibuang — Ctrl+C sekali "
+                                  "lagi untuk keluar[/dim]")
+                    continue
+                break
             except EOFError:
                 break
             # Kotaknya menghilang begitu Enter ditekan (erase_when_done), jadi
