@@ -16,6 +16,7 @@ import json
 import re
 import time
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlsplit
 
 from . import config, llm, models, prefs, prompts
 from .memory import Memory
@@ -618,7 +619,64 @@ def _strip_web_markers(text: str) -> str:
     # blok kodenya jatuh jadi paragraf biasa. Persis keluhan "```-nya jadi
     # baris kosong". Pembersihan pagar yatim kini dilakukan di _rapikan_pagar,
     # yang hanya menyentuh pagar yang benar-benar TAK BERPASANGAN.
+    #
+    # Bungkus pengalih dibuka DI SINI karena inilah satu-satunya gerbang yang
+    # dilewati setiap teks jawaban sebelum sampai ke layar — jadi tak ada jalur
+    # yang tertinggal, dari situs mana pun.
+    out = _buka_bungkus_tautan(out)
     return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+# URL apa pun di dalam teks jawaban (dipakai untuk membuka bungkus pengalih).
+_URL_RE = re.compile(r"https?://[^\s\)\]\}<>\"'`]+")
+# Nama parameter yang MEMUAT alamat aslinya pada laman pengalih. Diurut dari
+# yang paling khas supaya `url=` tak keburu menang di alamat yang punya dua-duanya.
+_PARAM_TUJUAN = ("target", "redirect_url", "redirect", "url", "u", "q")
+
+
+def _buka_bungkus_tautan(text: str) -> str:
+    """Kembalikan URL yang DIBUNGKUS laman pengalih ke alamat aslinya.
+
+    Situs chat menulis ulang setiap tautan di jawabannya supaya kliknya lewat
+    laman pencatat mereka dulu. Dola paling kentara: `http://localhost:3000`
+    berubah jadi
+    `https://sg-link.byteoversea.com/?target=http%3A%2F%2Flocalhost%3A3000&…`.
+    Di terminal itu bukan cuma jelek — Ctrl+klik jadi membuka laman pengalihnya,
+    dan untuk alamat lokal seperti localhost hasilnya mustahil dibuka sama
+    sekali, karena servernya ada di mesin ini, bukan di internet.
+
+    Syaratnya sengaja ketat supaya tautan sah tak ikut dirombak:
+      - nilai parameternya harus URL absolut http/https yang ter-encode, dan
+      - inangnya harus BEDA dengan inang tujuan (kalau sama, itu tautan biasa
+        yang kebetulan punya parameter bernama `url`, mis. hasil pencarian).
+    """
+    def ganti(m: re.Match) -> str:
+        asal = m.group(0)
+        # Tanda baca penutup kalimat bukan bagian alamat; dilepas dulu lalu
+        # ditempel lagi supaya titik di akhir kalimat tak ikut terbawa.
+        ekor = ""
+        while asal and asal[-1] in ".,;:!?":
+            ekor = asal[-1] + ekor
+            asal = asal[:-1]
+        try:
+            pecah = urlsplit(asal)
+            kueri = parse_qs(pecah.query)
+        except ValueError:                     # URL cacat -> biarkan apa adanya
+            return m.group(0)
+        for nama in _PARAM_TUJUAN:
+            for nilai in kueri.get(nama, []):
+                if not nilai.lower().startswith(("http://", "https://")):
+                    continue
+                try:
+                    tujuan = urlsplit(nilai)
+                except ValueError:
+                    continue
+                if not tujuan.netloc or tujuan.netloc == pecah.netloc:
+                    continue
+                return nilai + ekor
+        return m.group(0)
+
+    return _URL_RE.sub(ganti, text or "")
 
 
 _PAGAR_BARIS_RE = re.compile(r"^[ \t]*```[a-zA-Z0-9_+-]*[ \t]*$", re.MULTILINE)

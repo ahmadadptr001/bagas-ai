@@ -255,6 +255,16 @@ class SlashCompleter(Completer):
                 )
 
 
+def _perintah(teks: str) -> bool:
+    """Teks ini PERINTAH bagas-ai, bukan pesan untuk AI?
+
+    Aturannya sengaja dibuat sama persis dengan gelung utama (diawali "/"),
+    supaya satu baris tak pernah dinilai berbeda oleh dua bagian program: yang
+    dianggap perintah saat diketik selagi AI menjawab harus juga dianggap
+    perintah saat dikerjakan sesudahnya."""
+    return teks.strip().startswith("/")
+
+
 def pout(renderable, *, bottom: int = 1) -> None:
     """Cetak renderable dengan padding kiri/kanan (+bawah) yang konsisten."""
     console.print(Padding(renderable, (0, _LPAD, bottom, _LPAD)))
@@ -1636,6 +1646,12 @@ def main(resume: bool = False) -> None:
     # menyimpan ketikan yang belum di-Enter; sisa ketikan saat giliran selesai
     # dibawa ke prompt berikutnya sebagai isi awal (tak ada ketikan yang hilang).
     prompt_queue: list[str] = []
+    # Kunci antrean: `_ketik` mengisi dari thread utama sementara `_ambil_sisipan`
+    # mengambil dari thread worker. Dulu tak perlu karena keduanya cuma memakai
+    # operasi list atomik; sekarang pengambilnya MENYARING (perintah / dibiarkan
+    # di antrean), dan penyaringan bukan operasi tunggal — tanpa kunci, pesan
+    # yang datang di tengahnya bisa terhapus tanpa pernah dikerjakan.
+    antre_lock = threading.Lock()
     # `pos` = letak kursor di dalam `buf`. Tanpa ini ketikan cuma bisa
     # tumbuh & disusut dari ujung — salah ketik di tengah kalimat panjang
     # berarti menghapus semuanya dulu.
@@ -2116,20 +2132,26 @@ def main(resume: bool = False) -> None:
         result: dict = {"answer": None, "error": None}
 
         def _ambil_sisipan() -> list[str]:
-            """Ambil-dan-kosongkan pesan yang diketik selagi giliran berjalan.
+            """Ambil pesan yang diketik selagi giliran berjalan — TANPA perintah.
 
-            Dipanggil dari THREAD WORKER, sementara `_ketik` mengisinya dari
-            thread utama. Aman tanpa kunci karena keduanya cuma memakai operasi
-            list yang atomik di CPython (append & slice-assignment), dan
-            polanya ambil-semua-lalu-kosongkan: pesan yang datang persis di
-            sela dua baris ini tidak hilang — ia tinggal di antrean dan ikut
-            pada penyisipan berikutnya, atau jadi giliran sendiri bila giliran
-            ini sudah keburu selesai."""
-            if not prompt_queue:
-                return []
-            diambil = prompt_queue[:]
-            del prompt_queue[:len(diambil)]
-            return diambil
+            Perintah bagas-ai (/model, /mode, …) sengaja DITINGGAL di antrean.
+            Perintah itu ditujukan ke programnya, bukan ke AI: menyisipkannya ke
+            giliran berarti AI membaca "/model" sebagai kalimat pengguna, lalu
+            menanggapinya sebagai permintaan — dan perintahnya sendiri tak pernah
+            dijalankan. Yang tertinggal dikerjakan gelung utama begitu giliran
+            ini benar-benar selesai.
+
+            Dipanggil dari THREAD WORKER sementara `_ketik` mengisi dari thread
+            utama, karena itu di bawah kunci: penyaringan menyentuh antrean dua
+            kali (baca lalu buang), dan tanpa kunci pesan yang datang di antara
+            keduanya ikut terbuang tanpa pernah dikerjakan."""
+            with antre_lock:
+                if not prompt_queue:
+                    return []
+                diambil = [t for t in prompt_queue if not _perintah(t)]
+                if diambil:
+                    prompt_queue[:] = [t for t in prompt_queue if _perintah(t)]
+                return diambil
 
         def worker() -> None:
             try:
@@ -2251,8 +2273,13 @@ def main(resume: bool = False) -> None:
             satu-satunya jalan membatalkan). Pesan itu DISISIPKAN ke giliran
             yang sedang berjalan pada batas langkah berikutnya, dan AI sendiri
             yang memutuskan mana didahulukan; kalau gilirannya keburu selesai,
-            ia jadi giliran berikutnya. Return True bila karakter sudah
-            ditangani di sini (pemanggil tak perlu memprosesnya lagi)."""
+            ia jadi giliran berikutnya.
+
+            PERINTAH (/model, /mode, …) diperlakukan lain: ia tak pernah
+            disisipkan ke giliran — perintah ditujukan ke program, bukan ke AI —
+            melainkan menunggu sampai giliran benar-benar selesai. Return True
+            bila karakter sudah ditangani di sini (pemanggil tak perlu
+            memprosesnya lagi)."""
             if ch in ("\r", "\n"):
                 teks = typing_state["buf"].strip()
                 typing_state["buf"] = ""
@@ -2260,7 +2287,8 @@ def main(resume: bool = False) -> None:
                 view.typing = ""
                 view.typing_pos = 0
                 if teks:
-                    prompt_queue.append(teks)
+                    with antre_lock:
+                        prompt_queue.append(teks)
                     # Gema pesannya SEKARANG, sama persis seperti pesan yang
                     # dikirim dari kotak idle — pengguna cuma perlu tahu
                     # pesannya terkirim, bukan bagaimana ia disalurkan.
@@ -2268,6 +2296,12 @@ def main(resume: bool = False) -> None:
                     # sengaja tak ada — lihat gelung utama.)
                     _commit([_oneline(Text.from_markup(
                         f"  [bold #fcc048]❯[/] [bold #ffffff]{_esc(teks)}[/]"))])
+                    # Perintah menunggu; tanpa keterangan ini ia tampak
+                    # "terkirim tapi tak terjadi apa-apa" sampai giliran usai.
+                    if _perintah(teks):
+                        _commit([_oneline(Text.from_markup(
+                            f"  [dim]dijalankan setelah {_esc(agent.model_spec.label)} "
+                            f"selesai menjawab[/dim]"))])
                 return True
             if ch in ("\x08", "\x7f"):             # Backspace / Ctrl+Backspace
                 # KEDUANYA hapus 1 HURUF. Arah byte-nya tak bisa dipercaya:
@@ -3538,9 +3572,13 @@ def main(resume: bool = False) -> None:
         # dikerjakan berurutan. TANPA gema lagi di sini — pesannya sudah
         # tergema saat diketik (lihat _ketik), jadi menggemakannya sekali lagi
         # membuat satu pesan tampak dikirim dua kali.
-        if prompt_queue:
-            raw = prompt_queue.pop(0)
-        else:
+        #
+        # Di sinilah perintah yang diketik selagi AI menjawab akhirnya
+        # dijalankan: ia sengaja dilewati penyisipan (lihat _ambil_sisipan) dan
+        # menunggu di antrean sampai giliran benar-benar berhenti.
+        with antre_lock:
+            raw = prompt_queue.pop(0) if prompt_queue else None
+        if raw is None:
             try:
                 # patch_stdout: aktivitas bot Telegram (dari thread latar)
                 # tercetak RAPI di atas kotak, tak merusak baris ketikan.
