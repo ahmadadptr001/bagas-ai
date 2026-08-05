@@ -517,12 +517,14 @@ def _lebar_kotak() -> int:
 _KOSONG = Text("")
 
 
-def _kotak_chat(isi: str = "") -> list:
+def _kotak_chat(isi: str = "", pos: int | None = None) -> list:
     """Tiga baris kotak chat selebar terminal: tepi atas, baris isi, tepi bawah.
 
     Kembarannya saat idle adalah KotakChat (prompt_toolkit) — bentuk, lebar,
     dan warna "❯"-nya sengaja dibuat sama persis supaya kotak chat terasa satu
-    benda yang sama, bukan dua tampilan yang mirip."""
+    benda yang sama, bukan dua tampilan yang mirip.
+
+    `pos` = letak kursor di dalam `isi`. None berarti di ujung."""
     lebar = _lebar_kotak()
     atas = Text()
     atas.append("╭" + "─" * (lebar - 2) + "╮", style=_GARIS_KOTAK)
@@ -530,10 +532,19 @@ def _kotak_chat(isi: str = "") -> list:
     baris.append("│ ", style=_GARIS_KOTAK)
     baris.append("❯ ", style="bold #fcc048")
     if isi:
-        # Ekor yang ditampilkan, bukan kepala: yang mau dilihat pengguna adalah
-        # huruf yang BARU saja ia ketik.
-        baris.append(isi[-(lebar - 6):], style="#f2e3cc")
+        n = len(isi)
+        k = n if pos is None else max(0, min(int(pos), n))
+        muat = max(8, lebar - 6)
+        # Jendela geser yang selalu MEMUAT KURSOR. Dulu yang ditampilkan selalu
+        # ekor teks — benar selama mengetik di ujung, tapi begitu kursor bisa
+        # digeser, membetulkan awal kalimat panjang jadi mustahil: yang terlihat
+        # tetap ekornya sementara kursornya entah di mana.
+        mulai = 0 if n <= muat else max(0, min(k - muat // 2, n - muat))
+        tampak = isi[mulai:mulai + muat]
+        rel = k - mulai
+        baris.append(tampak[:rel], style="#f2e3cc")
         baris.append("▌", style="#fcc048")
+        baris.append(tampak[rel:], style="#f2e3cc")
     # Potong dulu, baru ratakan sampai tepi kanan — kalau tidak, isi yang
     # kepanjangan mendorong tepi kanannya keluar layar dan kotaknya patah.
     baris.truncate(lebar - 1, overflow="ellipsis")
@@ -805,12 +816,17 @@ class KotakChat:
         ])
 
     # --- pemakaian -----------------------------------------------------------
-    def tanya(self, default: str = "") -> str:
+    def tanya(self, default: str = "", posisi: int | None = None) -> str:
         """Tampilkan kotak sampai Enter, kembalikan teksnya.
 
-        `default` = sisa ketikan dari giliran sebelumnya, jadi tak ada ketikan
-        yang hilang. KeyboardInterrupt/EOFError diteruskan ke pemanggil."""
-        self.buffer.reset(Document(default, len(default)))
+        `default` = sisa ketikan dari giliran sebelumnya, `posisi` = di mana
+        kursornya tadi berada. Keduanya dibawa utuh supaya penyerahan dari
+        kotak-saat-sibuk ke kotak idle tak terasa: kursor tak melompat ke ujung
+        di tengah kalimat yang sedang dibetulkan. KeyboardInterrupt/EOFError
+        diteruskan ke pemanggil."""
+        n = len(default)
+        kursor = n if posisi is None else max(0, min(int(posisi), n))
+        self.buffer.reset(Document(default, kursor))
         return self.app.run()
 
     def _terima(self, buf: Buffer) -> bool:
@@ -1220,6 +1236,7 @@ class TurnView:
         # dikerjakan setelah giliran ini selesai. Itu urusan di balik layar:
         # tak ada satu pun teks di layar yang menyebut-nyebut antrean.
         self.typing = ""
+        self.typing_pos = 0
 
     # --- mutasi (dipanggil dari worker) ---
     def add_narasi(self, text: str) -> None:
@@ -1293,7 +1310,7 @@ class TurnView:
         Mengetik di sini tetap "mengetik pesan"; kalau AI kebetulan belum
         selesai, pesannya dikerjakan setelah giliran ini — diam-diam, tanpa
         perlu diumumkan lewat teks di layar."""
-        return _kotak_chat(self.typing)
+        return _kotak_chat(self.typing, self.typing_pos)
 
     # --- render satu langkah (dipanggil SEKALI saat langkah selesai) ---
     def _render_step(self, rec: dict) -> list:
@@ -1557,7 +1574,10 @@ def main(resume: bool = False) -> None:
     # menyimpan ketikan yang belum di-Enter; sisa ketikan saat giliran selesai
     # dibawa ke prompt berikutnya sebagai isi awal (tak ada ketikan yang hilang).
     prompt_queue: list[str] = []
-    typing_state = {"buf": ""}
+    # `pos` = letak kursor di dalam `buf`. Tanpa ini ketikan cuma bisa
+    # tumbuh & disusut dari ujung — salah ketik di tengah kalimat panjang
+    # berarti menghapus semuanya dulu.
+    typing_state = {"buf": "", "pos": 0}
     # Mode tampilan giliran: True = tampilan mengalir dengan footer status hidup
     # (langkah/diff/jawaban statis di scrollback); False = tampilan klasik.
     tui_mode = {"on": True}
@@ -2082,6 +2102,93 @@ def main(resume: bool = False) -> None:
         worker_thread = threading.Thread(target=worker, daemon=True)
         interrupted = False
 
+        # --- penyunting baris mini untuk ketikan SELAMA giliran berjalan ---
+        #
+        # Di sini prompt_toolkit tak bisa dipakai: ia menguasai terminal, dan
+        # terminalnya sedang dipegang rich.Live yang menggambar footer. Jadi
+        # ketikan dibaca mentah lewat msvcrt, dan seluruh penyuntingan baris
+        # harus disediakan sendiri. Sebelumnya yang ada cuma "tambah di ujung"
+        # dan "hapus di ujung" — kursor tak bisa digeser sama sekali, sehingga
+        # salah ketik di tengah kalimat panjang berarti menghapus semuanya.
+        #
+        # Kodenya sengaja tetap kecil: hanya perpindahan yang benar-benar
+        # dipakai orang saat membetulkan satu kalimat (huruf, kata, ujung).
+        def _sinkron() -> None:
+            """Kirim ketikan + posisi kursor ke kotak chat di footer."""
+            view.typing = typing_state["buf"]
+            view.typing_pos = typing_state["pos"]
+
+        def _batas_kata(mundur: bool) -> int:
+            """Posisi awal kata sebelumnya / awal kata berikutnya."""
+            buf, p = typing_state["buf"], typing_state["pos"]
+            if mundur:
+                i = p
+                while i > 0 and buf[i - 1].isspace():
+                    i -= 1
+                while i > 0 and not buf[i - 1].isspace():
+                    i -= 1
+                return i
+            i = p
+            while i < len(buf) and not buf[i].isspace():
+                i += 1
+            while i < len(buf) and buf[i].isspace():
+                i += 1
+            return i
+
+        def _hapus_sebelum() -> None:
+            p = typing_state["pos"]
+            if p <= 0:
+                return
+            buf = typing_state["buf"]
+            typing_state["buf"] = buf[:p - 1] + buf[p:]
+            typing_state["pos"] = p - 1
+            _sinkron()
+
+        def _hapus_kata() -> None:
+            awal = _batas_kata(True)
+            p = typing_state["pos"]
+            if awal >= p:
+                return
+            buf = typing_state["buf"]
+            typing_state["buf"] = buf[:awal] + buf[p:]
+            typing_state["pos"] = awal
+            _sinkron()
+
+        # Scancode msvcrt untuk tombol yang datang setelah prefix \x00/\xe0.
+        _NAV = {
+            "K": "kiri", "M": "kanan", "G": "awal", "O": "akhir",
+            "S": "hapus_depan",
+            "s": "kata_kiri", "t": "kata_kanan",     # Ctrl+kiri / Ctrl+kanan
+            "\x93": "hapus_kata_depan",              # Ctrl+Delete
+        }
+
+        def _navigasi(kode: str) -> None:
+            aksi = _NAV.get(kode)
+            if aksi is None:
+                return                                # tombol yang tak dipakai
+            buf = typing_state["buf"]
+            p = typing_state["pos"]
+            if aksi == "kiri":
+                typing_state["pos"] = max(0, p - 1)
+            elif aksi == "kanan":
+                typing_state["pos"] = min(len(buf), p + 1)
+            elif aksi == "awal":
+                typing_state["pos"] = 0
+            elif aksi == "akhir":
+                typing_state["pos"] = len(buf)
+            elif aksi == "kata_kiri":
+                typing_state["pos"] = _batas_kata(True)
+            elif aksi == "kata_kanan":
+                typing_state["pos"] = _batas_kata(False)
+            elif aksi == "hapus_depan":
+                if p < len(buf):
+                    typing_state["buf"] = buf[:p] + buf[p + 1:]
+            elif aksi == "hapus_kata_depan":
+                akhir = _batas_kata(False)
+                if akhir > p:
+                    typing_state["buf"] = buf[:p] + buf[akhir:]
+            _sinkron()
+
         def _ketik(ch: str) -> bool:
             """Tangani SATU karakter ketikan selama giliran berjalan.
 
@@ -2094,7 +2201,9 @@ def main(resume: bool = False) -> None:
             if ch in ("\r", "\n"):
                 teks = typing_state["buf"].strip()
                 typing_state["buf"] = ""
+                typing_state["pos"] = 0
                 view.typing = ""
+                view.typing_pos = 0
                 if teks:
                     prompt_queue.append(teks)
                     # Gema pesannya SEKARANG, sama persis seperti pesan yang
@@ -2111,20 +2220,38 @@ def main(resume: bool = False) -> None:
                 # (Windows Terminal) TERBUKTI mengirim '\x7f' untuk Backspace
                 # POLOS (regresi v1.0.42 di jalur prompt_toolkit). Salah tebak
                 # di sini berarti Backspace polos menghapus sekata — merusak.
-                # Hapus-kata selama giliran cukup lewat menahan Backspace.
-                typing_state["buf"] = typing_state["buf"][:-1]
-                view.typing = typing_state["buf"]
+                _hapus_sebelum()
                 return True
             if ch in ("\x00", "\xe0"):             # prefix tombol khusus msvcrt
-                if _msvcrt is not None:
-                    try:
-                        _msvcrt.getwch()           # buang scancode pasangannya
-                    except Exception:  # noqa: BLE001
-                        pass
+                # Tombol navigasi datang BERPASANGAN: prefix ini lalu scancode.
+                # Dulu scancode-nya cuma dibuang, sehingga panah kiri/kanan,
+                # Home/End, dan Delete tak berfungsi sama sekali selama giliran
+                # berjalan — ketikan hanya bisa tumbuh & disusut dari ujung.
+                if _msvcrt is None:
+                    return True
+                try:
+                    kode = _msvcrt.getwch()
+                except Exception:  # noqa: BLE001
+                    return True
+                _navigasi(kode)
+                return True
+            if ch == "\x01":                        # Ctrl+A -> awal baris
+                typing_state["pos"] = 0
+                _sinkron()
+                return True
+            if ch == "\x05":                        # Ctrl+E -> akhir baris
+                typing_state["pos"] = len(typing_state["buf"])
+                _sinkron()
+                return True
+            if ch == "\x17":                        # Ctrl+W -> hapus satu kata
+                _hapus_kata()
                 return True
             if ch >= " ":                          # karakter tercetak
-                typing_state["buf"] += ch
-                view.typing = typing_state["buf"]
+                p = typing_state["pos"]
+                buf = typing_state["buf"]
+                typing_state["buf"] = buf[:p] + ch + buf[p:]
+                typing_state["pos"] = p + 1
+                _sinkron()
                 return True
             return False                            # kontrol lain (^R/^C dsb.)
 
@@ -3274,9 +3401,11 @@ def main(resume: bool = False) -> None:
                 # `default` = sisa ketikan yang belum di-Enter saat giliran
                 # tadi selesai — tak ada ketikan yang hilang, tinggal lanjut.
                 prefill = typing_state["buf"]
+                prefill_pos = typing_state["pos"]
                 typing_state["buf"] = ""
+                typing_state["pos"] = 0
                 with patch_stdout(raw=True):
-                    raw = kotak_chat.tanya(prefill)
+                    raw = kotak_chat.tanya(prefill, prefill_pos)
             except KeyboardInterrupt:
                 continue
             except EOFError:
