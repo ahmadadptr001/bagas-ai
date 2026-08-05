@@ -2556,6 +2556,7 @@ def main(resume: bool = False) -> None:
                     # artinya cuma satu hal: sudah sampai kesimpulan.
                     _suara.getar()
                     _suara.ucap(ans, penuh=True)
+                    _kabar_suara()
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
             if stps:
@@ -2593,8 +2594,11 @@ def main(resume: bool = False) -> None:
         cur_step.clear()
         turn_start = time.time()
 
-        def say(content: str) -> None:
-            """Tampilkan ucapan/narasi bagas-ai: 1 header per giliran, indentasi rapi."""
+        def say(content: str, akhir: bool = False) -> None:
+            """Tampilkan ucapan/narasi bagas-ai: 1 header per giliran, indentasi rapi.
+
+            `akhir=True` menandai JAWABAN AKHIR, yang dibacakan utuh — bukan
+            dipotong sependek narasi antar-langkah."""
             if not content or not content.strip():
                 return
             baru_bicara = not header["shown"]
@@ -2608,7 +2612,8 @@ def main(resume: bool = False) -> None:
             # menyuarakan sendiri juga — kalau tidak, suara cuma bekerja di
             # satu mode tampilan dan pengguna mode lain mengira fiturnya rusak.
             if prefs.load().get("suara", True):
-                _suara.ucap(content)
+                _suara.ucap(content, penuh=akhir)
+                _kabar_suara()
 
         def on_retry(attempt: int, wait: float, exc: Exception) -> None:
             """Dipertahankan demi kecocokan; jalur web tak memakai on_retry —
@@ -2684,7 +2689,12 @@ def main(resume: bool = False) -> None:
             if (result["answer"] or "").strip() \
                     and prefs.load().get("suara", True):
                 _suara.getar()
-            say(result["answer"])
+            # penuh=True: jawaban AKHIR dibacakan utuh. Tanpa ini mode klasik
+            # memakai batas narasi (160 huruf) sementara mode mengalir memakai
+            # 900 — TERUKUR pada jawaban 1260 huruf: 125 vs 881. Itulah "kok
+            # suaranya baca setengah-setengah" yang dulu cuma diperbaiki di
+            # satu mode tampilan.
+            say(result["answer"], akhir=True)
             _turn_footer(turn_start)
         _reindex_if_edited()
 
@@ -2821,6 +2831,20 @@ def main(resume: bool = False) -> None:
         "espeak": ("espeak (luring)", "spd-say / espeak-ng"),
     }
 
+    def _kabar_suara() -> None:
+        """Umumkan SEKALI kalau suaranya bermasalah / berpindah mesin.
+
+        Tanpa ini alasannya cuma terlihat kalau pengguna kebetulan mengetik
+        /mic — padahal yang ia rasakan justru saat itu juga: suaranya berubah,
+        atau tiba-tiba tak ada bunyi sama sekali. Kesunyian yang tak dijelaskan
+        mustahil dibedakan dari fitur yang rusak."""
+        try:
+            pesan = _suara.catatan_baru()
+        except Exception:  # noqa: BLE001 - notifikasi tak boleh menjatuhkan giliran
+            return
+        if pesan:
+            console.print(f"  [dim]♪ {_esc(pesan)}[/dim]")
+
     def show_mic(arg: str = "") -> None:
         """/mic — kabar AI dibacakan pengeras suara; on/off/tes.
 
@@ -2844,9 +2868,19 @@ def main(resume: bool = False) -> None:
                 console.print("  [#f7d488]suara sedang MATI[/] "
                               "[dim]— nyalakan dulu: /mic on[/dim]\n")
                 return
+            # DIPERIKSA dulu, bukan langsung mengaku berhasil. Dulu baris
+            # "mengucapkan contoh…" tercetak apa pun keadaannya — termasuk saat
+            # tak ada satu pun mesin yang memenuhi syarat bahasa, sehingga
+            # sebuah tes yang PASTI gagal tetap dilaporkan seolah berjalan.
+            if not _suara.mesin_tersedia():
+                console.print(f"  [yellow]⚠ {_esc(_suara.alasan_diam())}"
+                              "[/yellow]\n")
+                return
             _suara.ucap("Halo, ini suara bagas a i. Kabar dari model akan "
                         "dibacakan seperti ini.")
-            console.print("  [dim]♪ mengucapkan contoh…[/dim]\n")
+            console.print("  [dim]♪ mengucapkan contoh…[/dim]")
+            _kabar_suara()
+            console.print()
             return
 
         mesin = _suara.mesin_tersedia()
@@ -2859,10 +2893,11 @@ def main(resume: bool = False) -> None:
             f"[{'#9fc93c' if aktif else '#f7d488'}]{'aktif' if aktif else 'mati'}[/]"
             f"  [dim]· /mic off · /mic tes[/dim]")
         console.print("  [dim]giliran yang sampai kesimpulan ditandai dua "
-                      "dengung pendek — 'getaran' penanda selesai[/dim]\n")
+                      "dengung pendek — 'getaran' penanda selesai[/dim]")
+        console.print("  [dim]hanya suara berbahasa Indonesia yang dipakai; "
+                      "mesin tanpa suara Indonesia dilewati[/dim]\n")
         if not mesin:
-            console.print("  [yellow]⚠ tak ada mesin suara di sistem ini — "
-                          "tak akan ada bunyi.[/yellow]\n")
+            console.print(f"  [yellow]⚠ {_esc(_suara.alasan_diam())}[/yellow]\n")
             return
         # Urutannya PENTING ditampilkan: yang teratas dipakai, sisanya cadangan
         # kalau yang di atas gagal (mis. laptop sedang luring).
@@ -2879,10 +2914,23 @@ def main(resume: bool = False) -> None:
         catatan = _suara.catatan()
         if catatan:
             console.print(f"\n  [dim]catatan terakhir: {_esc(catatan)}[/dim]")
+        # KENAPA suara Windows tak ikut jadi cadangan. Ini pertanyaan yang pasti
+        # muncul begitu daftarnya cuma berisi satu baris, dan jawabannya bukan
+        # "rusak" melainkan pilihan yang disengaja.
+        if sys.platform == "win32" and "sapi" not in mesin:
+            terpasang = _suara.suara_tersedia()
+            daftar = ", ".join(b.split("|")[0].strip() for b in terpasang)
+            console.print(
+                "\n  [dim]Suara bawaan Windows[/] [#f7d488]tidak dipakai[/] "
+                "[dim]— tak ada suara Indonesia terpasang"
+                + (f" (yang ada: {_esc(daftar)})" if daftar else "")
+                + ". Suara Inggris sengaja dilewati: melafalkan kalimat "
+                "Indonesia dengannya sulit dimengerti, dan terdengar seperti "
+                "suara asing yang muncul sendiri.[/dim]")
+            console.print("  [dim]Mau cadangan luring? tambahkan suara "
+                          "Indonesia lewat Settings › Time & language › "
+                          "Speech.[/dim]")
         if "edge" not in mesin:
-            # Tanpa ini, satu-satunya yang tersedia adalah suara Inggris yang
-            # melafalkan teks Indonesia — bisa didengar, tapi jauh dari enak.
-            # Pengguna berhak tahu bahwa memperbaikinya cuma satu baris.
             console.print("\n  [dim]Untuk suara Indonesia yang natural: "
                           "[/][bold]pip install edge-tts[/]"
                           "[dim] (butuh internet saat dipakai).[/dim]")
