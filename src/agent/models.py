@@ -59,6 +59,13 @@ MODELS: dict[str, ModelSpec] = {
         connector="qwen",
         note="Via browser chat.qwen.ai — multibahasa & cepat",
     ),
+    "glm-web": ModelSpec(
+        id="web/glm",
+        label="GLM (web)",
+        connector="glm",
+        note=("Via browser chat.z.ai — GLM-5.2 & saudaranya, kuat di koding "
+              "dan tugas panjang; punya mode berpikir (High/Max)"),
+    ),
     "dola-web": ModelSpec(
         id="web/dola",
         label="Dola (web)",

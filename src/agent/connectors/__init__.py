@@ -25,6 +25,7 @@ from .browser import (
     WebLimitError, playwright_available,
 )
 from .dola import DolaConnector
+from .glm import GlmConnector
 from .kimi import KimiConnector
 from .qwen import QwenConnector
 from .gemini import GeminiConnector
@@ -37,6 +38,7 @@ _REGISTRY: dict[str, type[WebConnector]] = {
     "qwen": QwenConnector,
     "gemini": GeminiConnector,
     "dola": DolaConnector,
+    "glm": GlmConnector,
 }
 
 # service -> instance (cache; sesi browser bertahan lintas giliran).

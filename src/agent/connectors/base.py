@@ -1808,10 +1808,55 @@ class WebConnector:
             page.wait_for_timeout(400)
             if self._kotak_kosong(page, inp):
                 return
+        # Menyerah. Teks yang gagal berangkat WAJIB disapu dulu: percobaan
+        # berikutnya mengetik dengan insert_text di posisi caret, jadi sisa
+        # pesan lama membuat kiriman ulang berisi pesan yang sama DUA KALI
+        # sambung-menyambung — model lalu membacanya sebagai satu permintaan
+        # aneh yang panjang.
+        self._kosongkan_kotak(page, inp)
+        # Baru sesudah itu penyebabnya ditanyakan ke halaman. TERLIHAT di
+        # kimi.com: spanduk "Server exception, please try again later." muncul
+        # dan komposernya ikut terkunci — gejalanya di terminal justru
+        # "komposer menolak Enter", tuduhan yang salah sasaran dan tak bisa
+        # ditindaklanjuti pengguna. Yang benar: itu galat SEMENTARA milik situs,
+        # jadi diangkat sebagai WebBusyError supaya core menunggu lalu mengirim
+        # ulang sendiri (15/40/75 detik) tanpa menggagalkan giliran.
+        self._raise_if_busy_page(page)
+        # Komposer juga bisa terkunci karena percakapannya memang sudah penuh
+        # atau kuota habis; keduanya punya jalan keluar sendiri (pemadatan
+        # otomatis / tanya pengguna) yang jauh lebih berguna daripada menyuruh
+        # "coba kirim ulang" ke kotak yang tak akan menerima apa pun.
+        self._raise_if_context_full(page)
+        self._raise_if_limited(page)
         raise BrowserError(
             f"pesan tak mau terkirim di {self.label} — komposer menolak Enter "
-            "maupun tombol kirim (mungkin sedang terkunci situs). Teks masih "
-            "tertinggal di kotak input; coba kirim ulang.")
+            "maupun tombol kirim (mungkin sedang terkunci situs). Kotak input "
+            "sudah dikosongkan lagi; coba kirim ulang.")
+
+    def _kosongkan_kotak(self, page: Any, inp: Any) -> None:
+        """Sapu isi komposer, sebisanya (kegagalan di sini tak fatal).
+
+        Dipakai sesudah pengiriman gagal. <textarea> bisa dikosongkan langsung,
+        editor kaya (contenteditable) tidak — di sana nilainya dikelola
+        ProseMirror & kawan-kawan, jadi caranya lewat papan ketik: pilih semua
+        lalu hapus, persis seperti yang dilakukan manusia."""
+        try:
+            self._taruh_caret(inp)
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Delete")
+            page.wait_for_timeout(120)
+            if not self._input_text(inp):
+                return
+        except Exception:  # noqa: BLE001 - dicoba sekali lagi lewat DOM
+            pass
+        try:
+            inp.evaluate(
+                "el => { if (el.value !== undefined) { el.value = ''; } "
+                "else { el.innerHTML = ''; } "
+                "el.dispatchEvent(new Event('input', {bubbles: true})); }",
+                timeout=2000)
+        except Exception:  # noqa: BLE001 - sudah usaha terbaik
+            pass
 
     @staticmethod
     def _input_text(inp: Any, timeout: float = 2500) -> str | None:
@@ -1964,6 +2009,29 @@ class WebConnector:
                      r"chat not found", bersih, re.I):
             raise WebChatRusakError(bersih)
         raise BrowserError(f"{self.label} menolak permintaan: {bersih}")
+
+    def detect_busy(self, page: Any) -> str:
+        """Teks spanduk "situs sedang bermasalah/sibuk" bila sedang tampil.
+
+        Saudara halaman dari _raise_if_busy (yang menilai TEKS BALASAN). Yang
+        ini dipakai saat balasan bahkan belum sempat ada — mis. komposer
+        terkunci sesudah situs memunculkan galat sementaranya. Area percakapan
+        dikecualikan supaya jawaban model yang kebetulan membahas "server
+        exception" tak dikira spanduk situs."""
+        if not self.busy_patterns:
+            return ""
+        try:
+            return page.evaluate(JS_FIND_TEXT, {
+                "patterns": list(self.busy_patterns),
+                "exclude": list(self.limit_exclude_selectors),
+            }) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _raise_if_busy_page(self, page: Any) -> None:
+        pesan = self.detect_busy(page)
+        if pesan:
+            raise WebBusyError(" ".join(pesan.split())[:160])
 
     def _raise_if_busy(self, text: str) -> None:
         """Balasan ternyata cuma pemberitahuan "server sibuk"? -> WebBusyError,

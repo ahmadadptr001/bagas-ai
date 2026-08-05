@@ -1728,6 +1728,15 @@ class Agent:
             dianggap selesai: kode putus di tengah, dan blok [[TOOL]] yang belum
             tertutup tak pernah dieksekusi. Di sini potongannya diminta
             DILANJUTKAN (maks _MAX_LANJUT kali) lalu digabung."""
+            # WAJIB di baris pertama, bukan di dalam `except` di bawah.
+            # Penyusun CPython memindai badan `try` lalu blok `else` DULU, baru
+            # blok `except`-nya. Karena `padat` dibaca di `else`, deklarasi yang
+            # ditaruh di dalam `except` terhitung datang TERLAMBAT:
+            #     SyntaxError: name 'padat' is used prior to nonlocal declaration
+            # Python 3.13 kebetulan memaafkannya, Python 3.10-3.12 tidak — jadi
+            # pemasangan di laptop lain gagal total sejak impor pertama padahal
+            # di sini mulus. Menaruhnya di sini aman di semua versi.
+            nonlocal padat
             # PERCAKAPAN PENUH, DUA BENTUK.
             #
             # (a) Situs menolak melanjutkan -> WebKonteksPenuhError, tak ada
@@ -1743,7 +1752,6 @@ class Agent:
             try:
                 out = _send_raw(msg, new_chat, open_chat_id, attachments)
             except connectors.WebKonteksPenuhError:
-                nonlocal padat
                 if padat >= _MAKS_PADAT:
                     raise
                 padat += 1

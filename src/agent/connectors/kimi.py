@@ -211,8 +211,18 @@ class KimiConnector(WebConnector):
     # Sengaja dijangkar pada kata "busy" bersama subjeknya (system/capacity/
     # server) supaya kalimat biasa yang memuat "busy" tak ikut tertangkap;
     # penjaga panjang di base (busy_max_chars) menutup sisanya.
+    #
+    # "Server exception, please try again later." ikut di sini, bukan di
+    # error_patterns: TERLIHAT di layar, spanduk itu muncul dua kali beruntun
+    # lalu KOMPOSERNYA ikut terkunci — Enter maupun tombol kirim tak
+    # berpengaruh. Sifatnya sementara persis seperti "system is busy", jadi
+    # perlakuannya harus sama: tunggu lalu kirim ulang sendiri, bukan
+    # menggagalkan giliran dengan tuduhan "komposer menolak Enter". Kata
+    # "exception" dijangkar pada "server" tepat di depannya supaya jawaban
+    # model soal exception di kode tak ikut tertangkap.
     busy_patterns = (
         r"\b(system|capacity|server|service)\s+is\s+(currently\s+)?busy\b",
+        r"\bserver\s+exception\b",
         r"\bsistem\s+sedang\s+sibuk\b",
         r"\bplease\s+wait\s+or\s+upgrade\b",
     )
