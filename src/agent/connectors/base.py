@@ -594,6 +594,25 @@ class WebConnector:
     web_model_button: str = ""
     # (label, urutan teks yang diklik, keterangan[, selector tombol pembuka])
     web_actions: tuple[tuple, ...] = ()
+    # MODE KERJA situs — beda maksud dari web_actions, jadi sengaja dipisah.
+    #
+    #   web_actions = varian MODEL & usaha berpikir (dipakai /effort);
+    #   web_modes   = tombol yang mengubah APA yang dihasilkan situs —
+    #                 "Create Image", "Create Video", "Deep Search", dsb.
+    #
+    # Dipisah karena keduanya menjawab pertanyaan pengguna yang berbeda ("model
+    # mana?" vs "mau bikin apa?"), dan mencampurnya jadi satu menu membuat
+    # pengguna harus memilah sendiri mana yang mana.
+    #
+    # Bentuk tiap entri sama persis dengan web_actions:
+    #   (label, (teks yang diklik berurutan…), deskripsi, tombol_pembuka)
+    # `tombol_pembuka` kosong = tombolnya LANGSUNG ada di komposer, tak perlu
+    # membuka menu apa pun lebih dulu.
+    web_modes: tuple[tuple, ...] = ()
+    # Selector tombol MEMATIKAN mode kerja (kembali ke chat biasa). Kosong =
+    # belum dipetakan; /mode tak menawarkannya, dan pengguna diberi tahu bahwa
+    # jalan pulangnya adalah memulai chat baru.
+    web_mode_off_selector: str = ""
     # Kandidat selector ITEM MENU — dipakai untuk memastikan menu benar-benar
     # terbuka DAN untuk mengeklik pilihannya. Bawaannya pola ARIA yang lazim.
     #
@@ -843,13 +862,17 @@ class WebConnector:
         return _sekali()
 
     def set_web_option(self, label: str) -> str:
-        """Klik OPSI di UI web (varian model / mode) — dipakai /effort.
-        `label` = label aksi dari web_options() (mis. "Sonnet 5", "Effort: High")."""
-        entry = next((a for a in self.web_actions if a[0] == label), None)
+        """Klik OPSI di UI web (varian model / mode berpikir) — dipakai /effort.
+        `label` = label aksi dari web_options() (mis. "K3", "Effort: High").
+
+        web_modes ikut dicari supaya /mode bisa memakai jalur yang sama persis:
+        mekanismenya identik, yang beda cuma pengelompokannya di menu."""
+        entry = next((a for a in tuple(self.web_actions) + tuple(self.web_modes)
+                      if a[0] == label), None)
         if entry is None:
             raise BrowserError(f"opsi '{label}' tak dikenal untuk {self.label}")
         path = entry[1]
-        # Tombol pxembuka khusus aksi ini (bila ada) — penting untuk situs yang
+        # Tombol pembuka khusus aksi ini (bila ada) — penting untuk situs yang
         # kontrolnya tersebar di beberapa tempat.
         opener = entry[3] if len(entry) > 3 and entry[3] else self.web_model_button
         return hub().submit(
@@ -857,9 +880,43 @@ class WebConnector:
             timeout=self.login_timeout + 60,
         )
 
+    def clear_web_mode(self) -> str:
+        """Matikan mode kerja situs — kembali ke chat biasa.
+
+        Perlu ada karena mode itu MENEMPEL selama halaman tak dimuat ulang:
+        sekali "Create Video" menyala, semua pesan berikutnya dianggap permintaan
+        video. Tanpa jalan pulang, satu klik keliru mengunci sesi sampai
+        browsernya ditutup."""
+        if not self.web_mode_off_selector:
+            raise BrowserError(
+                f"cara mematikan mode di {self.label} belum dipetakan — "
+                "mulai chat baru (/new) untuk kembali ke chat biasa")
+        return hub().submit(self._clear_mode_on_hub,
+                            timeout=self.login_timeout + 60)
+
+    def _clear_mode_on_hub(self, h: Any) -> str:
+        page, _ = self._acquire_ready_page(h, lambda m: None, lambda: None)
+        loc = page.locator(self.web_mode_off_selector).first
+        try:
+            if loc.count() == 0:
+                return f"{self.label} memang sedang di chat biasa"
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(
+                f"keadaan mode {self.label} tak terbaca") from exc
+        self._click_element(loc, timeout=8000)
+        page.wait_for_timeout(600)
+        return f"mode kerja {self.label} dimatikan — kembali ke chat biasa"
+
     def web_options(self) -> list[tuple[str, str]]:
-        """Daftar (label, deskripsi) opsi web yang bisa dikendalikan program."""
+        """Daftar (label, deskripsi) varian model/berpikir — untuk /effort."""
         return [(a[0], a[2]) for a in self.web_actions]
+
+    def web_mode_options(self) -> list[tuple[str, str]]:
+        """Daftar (label, deskripsi) MODE KERJA situs — untuk /mode.
+
+        Kosong berarti situs ini belum dipetakan tombol modenya, BUKAN berarti
+        ia tak punya. Bedanya penting saat memberi tahu pengguna."""
+        return [(m[0], m[2]) for m in self.web_modes]
 
     # ---- hook opsional untuk subclass ----
     def _is_done(self, page: Any) -> bool:
@@ -939,7 +996,7 @@ class WebConnector:
             self._focus_input(inp)
         counts_before = self._msg_counts(page)
         text_before = self._read_last_message(page)
-        if self.input_is_contenteditable:
+        if self._editor_kaya(inp):
             self._ketik_contenteditable(page, inp, prompt)
         else:
             # Batas waktu eksplisit: kotak sudah dipastikan bisa diisi di atas,
@@ -1128,6 +1185,15 @@ class WebConnector:
         """Klik aksi UI (varian model / mode). Buka tombol menunya bila ada, lalu
         klik tiap teks di `path` berurutan (dukungan menu bertingkat)."""
         page, _ = self._acquire_ready_page(h, lambda m: None, lambda: None)
+        # Dialog/banner yang menutupi komposer membuat klik nyata meleset, dan
+        # gejalanya menyesatkan: "opsi tak bisa diklik" padahal tombolnya ada.
+        self._tutup_penghalang(page)
+        # Lebar layout dipastikan DI SINI, bukan cuma saat halaman dibuka: pada
+        # jendela sempit situs MENYEMBUNYIKAN sebagian tombolnya (terukur di
+        # dola.com — "Create Video" lenyap di bawah 990 px), dan tombol yang
+        # tersembunyi itulah yang justru mau ditekan. Tanpa ini, /mode gagal
+        # kadang-kadang saja — tergantung ukuran jendela browsernya.
+        self._normalize_layout(page)
 
         opened = self._open_menu(page, opener) if opener else False
         if opener and not opened:
@@ -1167,11 +1233,28 @@ class WebConnector:
         masih sibuk sehingga klik pertama tak terdaftar dan menu tak terbuka —
         gejalanya 'opsi tak bisa diklik' yang muncul kadang-kadang. Karena itu
         kemunculan menu ditunggu, dan pembuka diklik ulang sekali bila perlu."""
+        # Tombol pembukanya DITUNGGU dulu, tak cukup diperiksa sekali: komposer
+        # dirender beberapa saat sesudah halaman dinyatakan siap, dan pemeriksaan
+        # seketika menangkap keadaan "belum ada" lalu menyerah. TERUKUR di
+        # kimi.com — `.current-model` tak ada pada tik pertama, tapi ada di
+        # setiap lebar jendela beberapa ratus milidetik kemudian. Gejalanya:
+        # "menu tak mau terbuka" yang muncul hilang-timbul.
+        batas = time.time() + 6.0
+        btn = None
+        while time.time() < batas:
+            try:
+                kandidat = page.query_selector(opener)
+                if kandidat is not None and kandidat.is_visible():
+                    btn = kandidat
+                    break
+            except Exception:  # noqa: BLE001 - DOM sedang transisi
+                pass
+            page.wait_for_timeout(250)
+        if btn is None:
+            return False
+
         for _ in range(2):
             try:
-                btn = page.query_selector(opener)
-                if btn is None or not btn.is_visible():
-                    return False
                 self._click_element(btn)   # jendela di latar -> fallback dispatch
             except Exception:  # noqa: BLE001
                 return False
@@ -1198,19 +1281,44 @@ class WebConnector:
         Dibatasi ke item menu supaya tak salah mengeklik elemen lain berteks
         sama di halaman."""
         esc = text.replace('"', '\\"')
-        for kandidat in self._menu_items():
-            loc = page.locator(f'{kandidat}:has-text("{esc}")').first
-            try:
-                if loc.count() == 0:
+        # Dicoba beberapa kali: baris tombol komposer digambar ulang beberapa
+        # saat sesudah halaman siap (terukur di dola.com — tombolnya sempat ada,
+        # lalu elemennya lepas dan klik yang sedang berjalan menggantung sampai
+        # kehabisan waktu). Sekali gagal belum tentu tombolnya tak ada.
+        pernah_ada = False
+        for _ in range(3):
+            for kandidat in self._menu_items():
+                semua = page.locator(f'{kandidat}:has-text("{esc}")')
+                try:
+                    # Yang TERLIHAT diutamakan: situs kerap menyisakan salinan
+                    # tersembunyi dari baris tombolnya, dan `.first` bisa jatuh
+                    # ke salinan itu — yang takkan pernah bisa diklik.
+                    loc = semua.locator("visible=true").first
+                    if loc.count() == 0:
+                        loc = semua.first
+                        if loc.count() == 0:
+                            continue
+                except Exception:  # noqa: BLE001 - selector tak sah -> kandidat lain
                     continue
-            except Exception:  # noqa: BLE001 - selector tak sah -> kandidat lain
-                continue
-            try:
-                loc.scroll_into_view_if_needed(timeout=1500)
-            except Exception:  # noqa: BLE001
-                pass
-            self._click_element(loc)
-            return
+                pernah_ada = True
+                try:
+                    loc.scroll_into_view_if_needed(timeout=1500)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    self._click_element(loc, timeout=8000)
+                    return
+                except Exception:  # noqa: BLE001 - elemen lepas -> coba lagi
+                    break
+            page.wait_for_timeout(800)
+        # Dua kegagalan ini butuh penanganan yang berbeda, jadi jangan disamakan:
+        # yang satu berarti teksnya salah/ tombolnya tak ada, yang satu lagi
+        # berarti tombolnya ADA tapi tak bisa ditekan (tertutup, atau lepas saat
+        # halaman menggambar ulang).
+        if pernah_ada:
+            raise BrowserError(
+                f"item menu '{text}' ada tapi tak bisa ditekan — mungkin "
+                "tertutup elemen lain atau halaman sedang menggambar ulang")
         raise BrowserError(
             f"item menu '{text}' tak ditemukan "
             f"({', '.join(self._menu_items())})")
@@ -1364,17 +1472,24 @@ class WebConnector:
             return False
 
     @staticmethod
-    def _click_element(loc: Any) -> None:
+    def _click_element(loc: Any, timeout: float | None = None) -> None:
         """Klik elemen; bila klik mouse nyata gagal, kirim event klik langsung.
 
         Browser connector berjalan DI LATAR dengan jendela tersembunyi, dan di
         keadaan itu klik mouse sungguhan tak bisa melakukan hit-test sehingga
         selalu kehabisan waktu (terbukti: klik biasa GAGAL, dispatch BERHASIL).
-        Klik nyata tetap dicoba lebih dulu karena paling setia meniru pengguna."""
+        Klik nyata tetap dicoba lebih dulu karena paling setia meniru pengguna.
+
+        `timeout` membatasi tunggu dispatch-nya. Bawaannya 30 detik, dan itu
+        terlalu lama untuk pemanggil yang mau mengulang sendiri: elemen yang
+        lepas menahan satu percobaan penuh sampai batasnya habis."""
         try:
             loc.click(timeout=4000)
         except Exception:  # noqa: BLE001
-            loc.dispatch_event("click")
+            if timeout is None:
+                loc.dispatch_event("click")
+            else:
+                loc.dispatch_event("click", timeout=timeout)
 
     # ---- pembacaan pesan (multi-kandidat, tahan perubahan layout) ----
     def _msg_selectors(self) -> tuple[str, ...]:
@@ -1556,6 +1671,25 @@ class WebConnector:
         except Exception:  # noqa: BLE001 - dinilai lewat pemeriksaan isi kotak
             pass
 
+    def _editor_kaya(self, inp: Any) -> bool:
+        """Kotak ketik ini editor kaya (contenteditable), bukan <textarea>?
+
+        Ditanyakan ke ELEMENNYA, bukan hanya dibaca dari atribut kelas, karena
+        satu situs bisa punya DUA macam komposer sekaligus: dola.com memakai
+        <textarea> untuk chat biasa, lalu menggantinya dengan editor ProseMirror
+        begitu mode "Create Video" dinyalakan lewat /mode. Kalau jenisnya
+        ditetapkan di kelas saja, prompt di mode itu diisi dengan cara yang salah
+        dan tak pernah mendarat — gagal senyap, tanpa galat apa pun.
+
+        Atribut kelasnya tetap dihormati sebagai penegasan: situs yang sudah
+        dipastikan selalu contenteditable tak perlu ditanya tiap kali."""
+        if self.input_is_contenteditable:
+            return True
+        try:
+            return bool(inp.evaluate("e => e.isContentEditable"))
+        except Exception:  # noqa: BLE001 - elemen lepas -> perlakukan sbg biasa
+            return False
+
     def _ketik_contenteditable(self, page: Any, inp: Any, prompt: str) -> None:
         """Ketik ke editor contenteditable & PASTIKAN teksnya benar-benar masuk.
 
@@ -1594,7 +1728,7 @@ class WebConnector:
         sudah kosong = terkirim; kalau masih berisi, tombol kirim diklik sebagai
         cadangan. Tanpa tombol kirim yang dikenal, perilakunya sama seperti
         dulu — tekan Enter lalu biarkan penantian jawaban yang menilai."""
-        if self.input_is_contenteditable:
+        if self._editor_kaya(inp):
             # Editor kaya memperbarui keadaan internalnya lewat event; menekan
             # Enter pada tik yang sama bisa mengirim keadaan yang belum sinkron.
             page.wait_for_timeout(200)

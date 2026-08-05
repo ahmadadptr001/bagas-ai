@@ -235,11 +235,17 @@ class KimiConnector(WebConnector):
     # Urutan penting: `.effort-option` didahulukan supaya "Standard"/"High"
     # mengenai pilihan di submenu, bukan `.effort-item` induknya yang teksnya
     # juga memuat nilai terpilih ("Thinking effort Standard").
+    # `.connect-item` = pilihan di submenu "Web search" (Auto/Off); ditaruh
+    # sebelum `.toolkit-item` supaya tingkat kedua tak salah mengenai item
+    # popover induknya.
     menu_item_selector = (".effort-option", ".effort-item", ".model-item",
-                          ".toolkit-item")
+                          ".connect-item", ".toolkit-item")
     web_model_button = _BTN_MODEL
     web_actions = (
-        ("K2.6", ("K2.6",), "obrolan cepat, balasan singkat", _BTN_MODEL),
+        # TERCACAH ulang dari menu yang dibuka sungguhan: pilihan cepatnya kini
+        # bernama "Instant" — "K2.6" sudah tak ada di daftar, dan /effort selalu
+        # gagal selama namanya masih yang lama.
+        ("Instant", ("Instant",), "obrolan cepat, balasan singkat", _BTN_MODEL),
         ("K3", ("K3",), "chat & agent, model andalan", _BTN_MODEL),
         ("K3 Swarm", ("K3 Swarm",),
          "pencarian masif & pemrosesan borongan", _BTN_MODEL),
@@ -247,6 +253,22 @@ class KimiConnector(WebConnector):
          "usaha berpikir standar", _BTN_MODEL),
         ("Thinking effort: High", ("Thinking effort", "High"),
          "usaha berpikir tinggi", _BTN_MODEL),
+    )
+
+    # --- /mode: alat yang mengubah CARA Kimi mengerjakan permintaan ---
+    # TERCACAH dari popover toolkit: isinya "Add files & photos", "Plugins",
+    # "Skills", "Web search". Hanya "Web search" yang benar-benar mode kerja —
+    # "Plugins"/"Skills" membuka daftar lain lagi (belum dipetakan), dan lampiran
+    # sudah punya jalurnya sendiri lewat perintah /file.
+    #
+    # "Web search" BUKAN sakelar sekali-tekan seperti dikira semula: ia membuka
+    # submenu berisi "Auto" dan "Off" (TERCACAH). Jadi jalurnya dua tingkat, dan
+    # mematikannya jadi pilihan tersendiri — bukan menekan tombol yang sama lagi.
+    web_modes = (
+        ("Web search: Auto", ("Web search", "Auto"),
+         "boleh membuka web saat perlu", _BTN_TOOLKIT),
+        ("Web search: Off", ("Web search", "Off"),
+         "tanpa akses web sama sekali", _BTN_TOOLKIT),
     )
 
     def _upload(self, page: Any, paths: list[str]) -> None:

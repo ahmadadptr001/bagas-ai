@@ -190,6 +190,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("menu", "menu interaktif"),
     ("model", "pilih model + saran"),
     ("effort", "mode berpikir"),
+    ("mode", "mode kerja situs: buat gambar/video, dll"),
     ("add-dir", "tambah folder konteks"),
     ("dirs", "folder konteks aktif"),
     ("rm-dir", "hapus folder konteks"),
@@ -2628,6 +2629,97 @@ def main(resume: bool = False) -> None:
         else:
             console.print(f"  [#9fc93c]✓ {_esc(str(result['ok']))}[/]\n")
 
+    def pick_web_mode() -> None:
+        """/mode — pilih MODE KERJA situs (buat gambar, buat video, dsb) lalu
+        program yang menekan tombolnya di browser.
+
+        Beda dari /effort yang memilih varian MODEL & usaha berpikir: yang ini
+        mengubah APA yang dihasilkan situs. Di Dola, membuat video memang tak
+        bisa diminta lewat kalimat — tombolnya harus ditekan lebih dulu, dan
+        sesudah itu komposernya berganti jadi "Describe the actions in the
+        video". Tanpa tombol itu, permintaan sebagus apa pun dijawab teks."""
+        spec = agent.model_spec
+        try:
+            from .. import connectors
+            conn = connectors.get_connector(spec.connector)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]connector tak siap: {_esc(str(exc))}[/red]")
+            return
+        opts = conn.web_mode_options()
+        if not opts:
+            # Dibedakan dengan tegas dari "situsnya tak punya": yang belum
+            # dipetakan bisa dipetakan nanti, dan pengguna berhak tahu bedanya.
+            console.print(
+                f"  [dim]Tombol mode {_esc(spec.label)} belum dipetakan di "
+                "bagas-ai. Situsnya mungkin punya, tapi selektornya belum "
+                "diukur — jadi belum bisa ditekan dari sini. Yang sudah siap: "
+                "Dola & Qwen.[/dim]\n")
+            return
+        # Mode itu MENEMPEL: sekali "Create Video" menyala, semua pesan
+        # berikutnya dianggap permintaan video. Jalan pulangnya ditawarkan di
+        # menu yang sama — kalau tidak, satu klik keliru mengunci sesi.
+        MATIKAN = "← chat biasa"
+        width = max([len(t) for t, _ in opts] + [len(MATIKAN)])
+        choices = [Choice(text, f"{text:<{width}}  —  {desc}")
+                   for text, desc in opts]
+        if conn.web_mode_off_selector:
+            choices.append(Choice(
+                MATIKAN, f"{MATIKAN:<{width}}  —  matikan mode, kembali "
+                         "mengobrol seperti biasa"))
+        # Situs tanpa tombol "matikan" (mis. Dola) tetap harus punya jalan
+        # pulang yang JELAS — kalau tidak, mode yang menempel terasa seperti
+        # kerusakan. Untuk situs itu jalannya memulai chat baru.
+        petunjuk = ("Tombolnya ditekan langsung di situsnya; berlaku untuk "
+                    "pesan berikutnya.")
+        if not conn.web_mode_off_selector:
+            petunjuk += " Untuk kembali ke chat biasa, mulai chat baru (/new)."
+        try:
+            sel = inquirer.select(
+                message=f"Mode kerja {spec.label} (ditekan di UI web)",
+                choices=choices, pointer="❯",
+                long_instruction=petunjuk,
+            ).execute()
+        except (KeyboardInterrupt, EOFError):
+            return
+
+        result: dict = {"ok": None, "error": None}
+
+        def worker() -> None:
+            try:
+                result["ok"] = (conn.clear_web_mode() if sel == MATIKAN
+                                else conn.set_web_option(sel))
+            except BaseException as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        wt = threading.Thread(target=worker, daemon=True)
+        FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        try:
+            with Live(_oneline(Text()), console=console, refresh_per_second=10,
+                      transient=True) as live:
+                wt.start()
+                while wt.is_alive():
+                    frame = FRAMES[int(time.time() * 10) % len(FRAMES)]
+                    kerja = ("mematikan mode" if sel == MATIKAN
+                             else f"menekan '{_esc(sel)}'")
+                    live.update(_oneline(Text.from_markup(
+                        f"  [#fcc048]{frame}[/] [dim]{kerja} di "
+                        f"{_esc(spec.label)}…[/dim]")))
+                    wt.join(timeout=0.1)
+        except KeyboardInterrupt:
+            _reset_web_hub_if_stuck(wt)
+            console.print("  [yellow]◼ dibatalkan[/yellow]\n")
+            return
+
+        if result["error"] is not None:
+            console.print(f"  [yellow]⚠ {_esc(str(result['error']))}[/yellow]\n")
+        elif sel == MATIKAN:
+            console.print(f"  [#9fc93c]✓ {_esc(str(result['ok']))}[/]\n")
+        else:
+            console.print(
+                f"  [#9fc93c]✓ {_esc(str(result['ok']))}[/]  "
+                f"[dim]— kirim pesanmu sekarang; mode ini berlaku untuk "
+                f"permintaan berikutnya.[/dim]\n")
+
     def _web_service_pick() -> str:
         """Pilih service web mana yang dikelola (kalau lebih dari satu punya
         profil login tersimpan). Return "" bila batal / tak ada."""
@@ -2849,7 +2941,7 @@ def main(resume: bool = False) -> None:
             f"[{c}]/reset[/]    kosongkan riwayat      [{c}]/clear[/]    bersihkan layar\n"
             f"[{c}]/review[/]   cari bug seluruh proyek [{c}]/scan[/]     segarkan peta proyek\n"
             f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
-            f"[{c}]/live[/]     tampilan mengalir      [{c}]/scripts[/]  script memory\n"
+            f"[{c}]/mode[/]     mode kerja situs       [{c}]/scripts[/]  script memory\n"
             f"[{c}]/update[/]   cek pembaruan          [#f0603c]/exit[/]     keluar",
             title="[bold #fcc048]❔ Bantuan[/]", title_align="left",
             border_style="#fcc048", box=box.ROUNDED, padding=(1, 2)))
@@ -3528,6 +3620,8 @@ def main(resume: bool = False) -> None:
                     do_rm_dir(parts[1].strip().strip('"').strip("'"))
                 else:
                     console.print("  [yellow]Pakai: /rm-dir <path folder>[/yellow]\n")
+            elif cmd == "mode":
+                pick_web_mode()
             elif cmd == "live":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:

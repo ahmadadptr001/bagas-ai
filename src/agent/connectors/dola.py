@@ -78,9 +78,19 @@ class DolaConnector(WebConnector):
     # <textarea class="semi-input-textarea semi-input-textarea-autosize">,
     # BUKAN contenteditable. Tak ada elemen [contenteditable] sama sekali di
     # halaman itu — jadi urutan kandidatnya dimulai dari textarea.
+    #
+    # KECUALI di mode kerja: begitu "Create Video"/"Create Image" dinyalakan
+    # lewat /mode, Dola MENGGANTI komposernya dengan editor ProseMirror dan
+    # <textarea>-nya lenyap sama sekali (terukur: kotak input tak ditemukan).
+    # Karena itu editor itu ikut didaftarkan — sesudah kandidat textarea supaya
+    # chat biasa tetap memakai jalur lamanya, tapi SEBELUM `textarea` polos
+    # karena di mode video masih tersisa satu <textarea> tanpa kelas yang bukan
+    # komposer.
     input_selector = (
         "textarea.semi-input-textarea",
         ".semi-input-textarea",
+        'div.tiptap[contenteditable="true"]',
+        '[contenteditable="true"]',
         "textarea",
     )
     input_is_contenteditable = False
@@ -127,6 +137,36 @@ class DolaConnector(WebConnector):
         '[class*="cookie-footer"] button',
         'button:has-text("Accept all")',
     )
+
+    # --- mode kerja: tombol di komposer (DIPETAKAN dari DOM) ---
+    #
+    # Inilah alasan Dola ada di bagas-ai. Membuat gambar/video di situs ini
+    # BUKAN soal cara meminta — ada tombol yang harus ditekan lebih dulu, dan
+    # sesudah ditekan komposernya berganti ("Describe the actions in the
+    # video"). Tanpa menekannya, permintaan sebagus apa pun tetap dijawab
+    # sebagai teks biasa.
+    #
+    # Terpetakan dari sensus tombol di paruh bawah layar (y≈840, tinggi ≤60):
+    #   Fast · Create Image · Writing · Create Video · Translate · Homework
+    # Semuanya <button> LANGSUNG di komposer — tak ada menu yang perlu dibuka
+    # dulu, jadi tombol_pembuka dikosongkan.
+    #
+    # CATATAN LEBAR: tombol-tombol ini melipat ke "More" pada jendela sempit
+    # ("Create Video" bahkan lenyap di bawah 990 px) — lihat min_layout_width
+    # di atas, yang dipatok 1280 justru supaya /mode selalu punya tombolnya.
+    web_modes = (
+        ("Create Image", ("Create Image",),
+         "buat GAMBAR dari deskripsi", ""),
+        ("Create Video", ("Create Video",),
+         "buat VIDEO dari deskripsi / gambar acuan", ""),
+        ("Writing", ("Writing",), "mode menulis panjang", ""),
+        ("Translate", ("Translate",), "mode terjemahan", ""),
+        ("Homework", ("Homework",), "mode bantu tugas sekolah", ""),
+    )
+    # Tombol mode Dola adalah <button> POLOS, bukan elemen ber-role ARIA. Daftar
+    # bawaan base.py ([role=menuitem] dsb) tak cocok satu pun di sini, jadi
+    # tanpa penimpaan ini /mode akan selalu bilang "tak bisa diklik".
+    menu_item_selector = ("button", '[role="menuitem"]', '[role="option"]')
 
     # --- deteksi belum-login (TERVERIFIKASI sebagai tamu) ---
     # Halaman tamu menampilkan tombol "Log In" di header DAN panel "Log In to

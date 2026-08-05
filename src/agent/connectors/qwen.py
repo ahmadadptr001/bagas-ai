@@ -137,11 +137,36 @@ class QwenConnector(WebConnector):
          "model cepat & seimbang (bar atas)", _BTN_MODEL),
         ("Qwen3.7-Max", ("Qwen3.7-Max",),
          "flagship generasi sebelumnya (bar atas)", _BTN_MODEL),
-        ("Mode: Deep Research", ("Deep Research",),
-         "riset mendalam bertahap (menu alat)", _BTN_MODE),
-        ("Mode: Web Dev", ("Web Dev",),
-         "mode bantu ngoding web (menu alat)", _BTN_MODE),
     )
+
+    # --- /mode: tombol yang mengubah APA yang dihasilkan situs ---
+    # Deep Research & Web Dev DIPINDAH ke sini dari web_actions: keduanya bukan
+    # soal usaha berpikir (arti /effort), melainkan mode kerja — dan berkumpul
+    # dengan saudara-saudaranya di menu yang sama jauh lebih mudah dicari.
+    #
+    # TERCACAH dari menu "Select Mode" yang dibuka sungguhan; empat yang terakhir
+    # bersembunyi di submenu "More", karena itu jalurnya dua tingkat.
+    web_modes = (
+        ("Deep Research", ("Deep Research",),
+         "riset mendalam bertahap", _BTN_MODE),
+        ("Create Image", ("Create Image",),
+         "buat GAMBAR dari deskripsi", _BTN_MODE),
+        ("Create Video", ("Create Video",),
+         "buat VIDEO dari deskripsi", _BTN_MODE),
+        ("Web Dev", ("Web Dev",),
+         "bikin halaman web yang bisa dijalankan", _BTN_MODE),
+        ("Slides", ("Slides",), "susun slide presentasi", _BTN_MODE),
+        ("Web search", ("More", "Web search"),
+         "cari di web dulu sebelum menjawab", _BTN_MODE),
+        ("Artifacts", ("More", "Artifacts"),
+         "hasil ditaruh di panel artifact", _BTN_MODE),
+        ("Learn", ("More", "Learn"), "menjelaskan bertahap ala belajar", _BTN_MODE),
+        ("Travel Planner", ("More", "Travel Planner"),
+         "menyusun rencana perjalanan", _BTN_MODE),
+    )
+    # Silang kecil di chip mode yang sedang aktif — satu-satunya jalan kembali ke
+    # chat biasa tanpa memuat ulang halaman (TERBACA dari markup chip-nya).
+    web_mode_off_selector = ".mode-select-current-mode-close"
 
     # Teks pemberitahuan limit Qwen belum pernah terlihat; dikosongkan agar tak
     # ada pola longgar yang salah menangkap jawaban biasa.
