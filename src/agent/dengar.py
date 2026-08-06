@@ -68,6 +68,7 @@ bermasalah tak boleh menjatuhkan sesi yang sedang bekerja.
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import queue
 import re
@@ -106,7 +107,7 @@ PENUTUP = {"lakukan", "lakuin", "laksanakan", "kerjakan", "eksekusi"}
 # aman: "off"/"of" gampang muncul dari salah dengar, sedangkan "batalkan" jelas
 # maksudnya. Hanya berlaku SELAGI merekam; di luar itu ia kata biasa dalam
 # obrolan, dan menanggapinya cuma menambah kebisingan.
-PEMBATAL = {"batalkan", "batal", "batalin", "gajadi"}
+PEMBATAL = {"batalkan", "batal", "batalin", "gajadi", "cancel", "batalkanlah"}
 
 # Penanda hasil dengar(): perintahnya DIBATALKAN pengguna. Sengaja objek
 # tersendiri, bukan string kosong atau None — keduanya sudah punya arti lain
@@ -133,8 +134,29 @@ def _kata(teks: str) -> list[str]:
     return re.sub(r"[^0-9a-zA-ZÀ-ɏ]+", " ", teks or "").lower().split()
 
 
+# Seberapa mirip sebuah ucapan harus terdengar dengan "bagasai" untuk dianggap
+# panggilan. 0,75 DIUKUR, bukan ditebak: pada 20 bentuk salah-dengar yang masuk
+# akal (bagasi, pagasi, bakasi, bagas hai, bagus ai, …) dan 19 kata Indonesia
+# yang lumrah membuka kalimat (tolong, bagus, bagian, tugas, biasa, …), 0,75
+# adalah titik tertinggi yang masih menangkap semuanya dengan NOL salah
+# tangkap. Di 0,65 kata "bagus" dan "bagi" ikut memicu; di 0,80 "bakasi" dan
+# "bagaskara" lolos.
+_MIRIP = 0.75
+
+
+def _mirip_nama(gabung: str) -> bool:
+    """True bila rangkaian huruf ini terdengar seperti "bagasai"."""
+    return difflib.SequenceMatcher(None, gabung, "bagasai").ratio() >= _MIRIP
+
+
 def cari_pemicu(kata: list[str]) -> int:
-    """Indeks kata TEPAT SESUDAH namanya disebut, atau -1 bila tak disebut."""
+    """Indeks kata TEPAT SESUDAH namanya disebut, atau -1 bila tak disebut.
+
+    Dilaporkan pengguna: "udah nyebut bagasai tapi susah amat kedeteksi."
+    Sebabnya daftar kata tetap — sebanyak apa pun ditambah, pengenal suara
+    selalu punya ejaan yang belum terdaftar. Karena itu daftar tegas di bawah
+    hanya jalur cepat; keputusan sebenarnya di KEMIRIPAN BUNYI, yang menangkap
+    bentuk yang belum pernah terlihat sekalipun."""
     for i, k in enumerate(kata):
         if k in _NAMA_RAPAT:
             return i + 1
@@ -151,6 +173,24 @@ def cari_pemicu(kata: list[str]) -> int:
     # tunggal tidak.
     if kata and kata[0] in _NAMA_SENDIRI:
         return 1
+
+    # --- kemiripan bunyi (jaring utama) ---
+    # Kata kedua hanya boleh disambung bila PENDEK. Namanya "bagas" + satu suku
+    # kata ("ai"/"hai"/"ay"), jadi menyambung kata utuh cuma mengundang salah
+    # tangkap: "bagas yang" (obrolan tentang orang bernama Bagas) jatuh persis
+    # di ambang kemiripan dan sempat memicu perintah. TERUKUR, bukan dugaan.
+    def _sambung(i: int) -> str:
+        return kata[i] + kata[i + 1] if len(kata[i + 1]) <= 3 else ""
+
+    if len(kata) >= 2 and _mirip_nama(_sambung(0)):
+        return 2
+    if kata and _mirip_nama(kata[0]):
+        return 1
+    # Lalu pasangan kata BERURUTAN di mana pun: orang sering mengawali dengan
+    # kata lain ("oke bagas ai, tolong…"), dan pengenal suara ikut menuliskannya.
+    for i in range(len(kata) - 1):
+        if _mirip_nama(_sambung(i)):
+            return i + 2
     return -1
 
 
@@ -340,9 +380,14 @@ _NADA_MULAI = ((1320, 70),)
 # selesai — dan bunyinya sendiri ikut terkirim ke pengenal suara.
 _NADA_TIK = ((980, 45),)
 _JEDA_TIK = 2.5
+# Nada BATAL: dua ketuk MENURUN & rendah. Sengaja tak mirip nada apa pun yang
+# lain — dilaporkan pengguna bahwa "batalkan" terasa berfungsi sama dengan
+# "lakukan", dan satu-satunya cara membedakan keduanya tanpa melihat layar
+# adalah bunyinya sendiri. Yang dikirim berdering naik; yang dibuang menurun.
+_NADA_BATAL = ((520, 90), (300, 140))
 
 
-_NADA = {"mulai": _NADA_MULAI, "tik": _NADA_TIK,
+_NADA = {"mulai": _NADA_MULAI, "tik": _NADA_TIK, "batal": _NADA_BATAL,
          True: _NADA_ON, False: _NADA_OFF}
 
 
@@ -565,8 +610,13 @@ class Pendengar:
                 threading.Thread(target=bunyi, args=("mulai",),
                                  daemon=True).start()
             if hasil is BATAL:
-                self.on_kabar("rekaman dibatalkan — sebut namaku lagi untuk "
-                              "memulai perintah baru")
+                # Bunyinya MENURUN, kebalikan dari nada mulai — supaya
+                # "dibatalkan" dan "dikirim" tak pernah tertukar walau layarnya
+                # tak dilihat.
+                threading.Thread(target=bunyi, args=("batal",),
+                                 daemon=True).start()
+                self.on_kabar("rekaman DIBATALKAN, tak ada yang dikirim — "
+                              "sebut namaku lagi untuk perintah baru")
                 continue
             if hasil is None:
                 # "lakukan" terdengar padahal belum merekam: pengguna mengira

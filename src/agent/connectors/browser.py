@@ -932,6 +932,29 @@ class BrowserHub:
         Bila peluncuran GAGAL karena profil masih dikunci Chrome sisa (proses
         lama belum mati -> 'Target ... has been closed'), Chrome profil itu
         dibunuh lalu peluncuran DIULANG sekali."""
+        # JENDELA TAK BOLEH BERKELEBAT SAAT SUDAH LOGIN.
+        #
+        # Selama ini jendelanya MUNCUL dulu lalu disembunyikan (ShowWindow),
+        # jadi tiap kali mulai mengetik ada kotak Chrome yang berkedip di layar
+        # — mengganggu, dan mencuri fokus dari terminal. Dilaporkan pengguna.
+        #
+        # Yang dipakai di sini: jendelanya DILAHIRKAN JAUH DI LUAR LAYAR. Ia
+        # tetap jendela sungguhan (Cloudflare menolak sesi headless, jadi
+        # headless bukan pilihan) dan tetap merender normal, cuma tak pernah
+        # terlihat. Penyembunyian ShowWindow tetap jalan sesudahnya; ini
+        # menutup celah beberapa ratus milidetik sebelum ia sempat bekerja.
+        #
+        # Hanya bila profilnya SUDAH ADA — artinya pernah login. Pemasangan
+        # pertama justru harus terlihat: di situ pengguna memang perlu jendela
+        # untuk memasukkan akunnya.
+        sembunyi = False
+        try:
+            prof = Path(user_data_dir)
+            sembunyi = (not headless and prof.exists()
+                        and any(prof.iterdir())
+                        and not config.CONNECTOR_SHOW)
+        except Exception:  # noqa: BLE001
+            sembunyi = False
         opts = dict(
             user_data_dir=user_data_dir,
             headless=headless,
@@ -959,6 +982,16 @@ class BrowserHub:
         # meminta jendela yang sudah terlanjur jalan untuk membukanya.
         porta = self._porta_bebas()
         opts["args"].append(f"--remote-debugging-port={porta}")
+        if sembunyi:
+            # Ditaruh di koordinat yang mustahil terlihat di monitor mana pun,
+            # dan ukurannya tetap wajar supaya situs merender seperti biasa
+            # (layout responsif situs chat berubah di jendela sempit).
+            opts["args"] += ["--window-position=-32000,-32000",
+                             "--window-size=1280,900"]
+            # --start-maximized MEMBATALKAN posisi di atas: Chrome memaksimalkan
+            # jendelanya ke layar utama, jadi ia muncul persis di tengah.
+            opts["args"] = [a for a in opts["args"]
+                            if a != "--start-maximized"]
         channel = config.CONNECTOR_BROWSER_CHANNEL
 
         def _try() -> Any:
