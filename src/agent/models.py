@@ -20,7 +20,7 @@ Konsekuensi yang disengaja:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -32,12 +32,30 @@ class ModelSpec:
     connector: str = ""
     multimodal: bool = True  # semua situs AI web menerima lampiran gambar
     note: str = ""  # keterangan singkat
+    # DITUNDA: entrinya tetap ada & tetap tampil di /model, tapi tak bisa
+    # dipilih. Lihat catatan _DITUNDA di bawah.
+    ditunda: bool = False
 
     @property
     def is_web(self) -> bool:
         """True bila model ini connector web-AI (butuh browser + login)."""
         return bool(self.connector)
 
+    @property
+    def aktif(self) -> bool:
+        """True bila model ini boleh dipilih pengguna sekarang."""
+        return not self.ditunda
+
+
+# MODEL YANG SEDANG DITUNDA — atas permintaan pengguna: untuk sementara hanya
+# GLM yang boleh dipakai. Entri lain SENGAJA TIDAK DIHAPUS: connector-nya utuh,
+# ujinya utuh, profil login-nya utuh. Yang berubah cuma satu — ia tak bisa
+# dipilih. Menghidupkannya kembali = keluarkan aliasnya dari himpunan ini,
+# tanpa menyentuh kode lain.
+#
+# Sengaja daftar ALIAS yang ditunda, bukan daftar yang aktif: menambah model
+# baru kelak tak boleh diam-diam ikut terkunci hanya karena lupa didaftarkan.
+_DITUNDA = {"kimi-web", "gemini-web", "qwen-web", "dola-web"}
 
 # Alias pendek -> spesifikasi. Urutan menentukan nomor pada /model.
 MODELS: dict[str, ModelSpec] = {
@@ -76,10 +94,23 @@ MODELS: dict[str, ModelSpec] = {
     ),
 }
 
+MODELS = {k: (v if k not in _DITUNDA else
+              # replace(): ModelSpec frozen, jadi penandaannya dibuat sebagai
+              # salinan. Ditandai DI SINI, bukan ditulis satu per satu di tiap
+              # entri, supaya daftar _DITUNDA tetap satu-satunya sumber
+              # kebenaran — tak ada kemungkinan keduanya berselisih.
+              replace(v, ditunda=True))
+          for k, v in MODELS.items()}
+
 _ORDER = list(MODELS.keys())
+_AKTIF = [k for k in _ORDER if MODELS[k].aktif]
+if not _AKTIF:      # jaring pengaman: tak boleh ada keadaan "tak ada model"
+    _AKTIF = _ORDER
 
 # Model bawaan bila tak ada preferensi tersimpan / preferensinya tak dikenal.
-DEFAULT_ID = MODELS[_ORDER[0]].id
+# Diambil dari yang AKTIF: bawaan yang ditunda berarti bagas-ai mendarat di
+# model yang pengguna sendiri tak boleh memilihnya.
+DEFAULT_ID = MODELS[_AKTIF[0]].id
 
 
 # Nama LAMA yang masih melekat di ingatan pengguna. Diterima diam-diam supaya
@@ -88,8 +119,30 @@ DEFAULT_ID = MODELS[_ORDER[0]].id
 _ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web"}
 
 
-def resolve(name: str) -> ModelSpec:
-    """Cari ModelSpec dari alias, nomor (1..N), ID penuh, atau label."""
+def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
+    """Tolak model yang sedang ditunda — dengan alasan, bukan sekadar 'gagal'.
+
+    Penolakannya di SINI, satu pintu untuk semua jalan masuk (/model, argumen
+    baris perintah, tombol Telegram, preferensi tersimpan): kalau tiap
+    antarmuka menyaring sendiri-sendiri, cepat atau lambat ada satu yang lupa."""
+    if spec.aktif:
+        return spec
+    raise ValueError(
+        f"Model {spec.label} sedang DITUNDA — untuk sementara bagas-ai hanya "
+        "memakai " + ", ".join(MODELS[k].label for k in _AKTIF) + ". "
+        "Connector-nya tak dihapus, jadi ini bisa dibuka lagi kapan saja."
+    )
+
+
+def cari(name: str) -> ModelSpec:
+    """Model apa yang DIMAKSUD sebuah nama — tanpa peduli ia ditunda atau tidak.
+
+    Dipisah dari resolve() dengan sengaja: "nama ini merujuk ke model apa" dan
+    "boleh tidak saya pindah ke sana" adalah dua pertanyaan berbeda. Yang
+    pertama tetap dibutuhkan untuk model yang ditunda — mis. memeriksa alias
+    lama, menampilkan namanya, atau mengurus profil login-nya.
+
+    Terima alias, nomor (1..N), ID penuh, atau label."""
     key = name.strip().lower()
     key = _ALIAS_LAMA.get(key, key)
 
@@ -116,22 +169,39 @@ def resolve(name: str) -> ModelSpec:
     )
 
 
+def resolve(name: str) -> ModelSpec:
+    """Model yang BOLEH dipakai sekarang, dari alias/nomor/ID/label.
+
+    Model yang ditunda tetap dikenali lalu ditolak dengan alasannya — bukan
+    dijawab "tidak dikenal", yang akan membuat pengguna mengira model itu
+    hilang lalu mencari-cari nama yang sebenarnya masih ada."""
+    return _pastikan_aktif(cari(name))
+
+
 def spec_for_id(model_id: str) -> ModelSpec:
     """ModelSpec dari ID tersimpan (prefs/.env).
 
     ID lama peninggalan era NVIDIA (mis. "z-ai/glm-5.2") tak lagi ada. Alih-alih
     membuat ModelSpec palsu yang pasti gagal saat dipakai, kembalikan model
     bawaan — pengguna lama otomatis mendarat di model yang benar-benar jalan.
+
+    Model yang DITUNDA diperlakukan sama: preferensi lama yang menunjuk ke sana
+    dialihkan ke bawaan. Kalau tidak, sesi berikutnya dimulai dengan model yang
+    tak boleh dipilih, dan tiap /model justru menolak mengembalikannya.
     """
     for spec in MODELS.values():
-        if spec.id == model_id:
+        if spec.id == model_id and spec.aktif:
             return spec
-    return MODELS[_ORDER[0]]
+    return MODELS[_AKTIF[0]]
 
 
 def is_known_id(model_id: str) -> bool:
-    """True bila ID ini benar-benar ada di daftar (bukan hasil pemetaan ulang)."""
-    return any(spec.id == model_id for spec in MODELS.values())
+    """True bila ID ini masih boleh dipakai apa adanya.
+
+    Model yang ditunda sengaja dijawab False: pemanggilnya (Agent.__init__)
+    memakai ini untuk MENYIMPAN ULANG preferensi ke model hasil pemetaan —
+    tanpa itu, peringatan yang sama muncul tiap kali bagas-ai dijalankan."""
+    return any(spec.id == model_id and spec.aktif for spec in MODELS.values())
 
 
 # random_fallback() DIHAPUS: pemakainya dulu _escalate (naik-kelas otomatis) dan
@@ -143,17 +213,34 @@ def is_known_id(model_id: str) -> bool:
 
 
 def catalog() -> list[tuple[int, str, ModelSpec]]:
-    """Daftar (nomor, alias, spec) terurut — untuk ditampilkan sebagai tabel."""
+    """Daftar (nomor, alias, spec) terurut — TERMASUK yang ditunda.
+
+    Sengaja lengkap: /model menampilkannya (redup, tak bisa dipilih) dan /web
+    tetap perlu mengurus profil login layanan yang sedang ditunda."""
     return [(i, key, MODELS[key]) for i, key in enumerate(_ORDER, start=1)]
+
+
+def catalog_aktif() -> list[tuple[int, str, ModelSpec]]:
+    """Hanya model yang BOLEH dipilih. Dipakai jalur yang memilih SENDIRI
+    (mis. tawaran pindah model saat kuota habis) — di situ entri yang ditunda
+    bukan cuma tak terpilih, tapi tak boleh ditawarkan sama sekali."""
+    return [(i, key, spec) for i, key, spec in catalog() if spec.aktif]
 
 
 def list_text(current_id: str | None = None) -> str:
     """Daftar model siap tampil untuk perintah /model."""
-    lines = ["Model tersedia (semua via browser — butuh login sekali):"]
+    lines = ["Model (semua via browser — butuh login sekali):"]
+    if len(_AKTIF) < len(_ORDER):
+        lines.append(
+            "Untuk sementara hanya " + ", ".join(MODELS[k].label for k in _AKTIF)
+            + " yang bisa dipilih; sisanya ditunda (connector-nya tak dihapus).")
     for i, key in enumerate(_ORDER, start=1):
         spec = MODELS[key]
         tag = f"  [{spec.note}]" if spec.note else ""
         mark = "  <- aktif" if current_id and spec.id == current_id else ""
+        if spec.ditunda:
+            mark = "  (ditunda — belum bisa dipilih)"
         lines.append(f"  {i:>2}. {key:12s} {spec.label}{tag}{mark}")
-    lines.append("Pilih: /model <nama|nomor>   contoh: /model kimi-web  atau  /model 1")
+    contoh = _AKTIF[0]
+    lines.append(f"Pilih: /model <nama|nomor>   contoh: /model {contoh}")
     return "\n".join(lines)

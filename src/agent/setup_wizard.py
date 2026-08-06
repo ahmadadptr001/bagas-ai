@@ -29,7 +29,9 @@ _ENV_ORDER = [
 ]
 
 _DEFAULTS = {
-    "CHAT_MODEL": "web/kimi",
+    # Ikut models._DITUNDA: menulis model yang ditunda ke .env pemasangan baru
+    # berarti tiap sesi dimulai dengan pemetaan-ulang diam-diam.
+    "CHAT_MODEL": "web/glm",
     "MAX_TOOL_ITERATIONS": "8",
     "ALLOW_CODE_EXEC": "true",
     "CODE_EXEC_TIMEOUT": "30",

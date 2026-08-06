@@ -63,15 +63,22 @@ class Choice:
     """Satu pilihan: `value` yang dikembalikan, `name` yang ditampilkan.
 
     Bentuknya sengaja sama dengan InquirerPy.base.control.Choice supaya
-    pemanggil lama tak perlu diubah sama sekali."""
+    pemanggil lama tak perlu diubah sama sekali.
 
-    __slots__ = ("value", "name", "enabled")
+    `nonaktif` = entri yang TAMPIL tapi tak bisa dipilih. Dipakai untuk pilihan
+    yang sengaja ditunda: menghapusnya dari daftar membuat pengguna mengira
+    fiturnya hilang, sedangkan membiarkannya bisa dipilih membuat ia menabrak
+    penolakan sesudah menekan Enter. Yang benar: kelihatan, jelas alasannya,
+    dan kursor melewatinya begitu saja."""
+
+    __slots__ = ("value", "name", "enabled", "nonaktif")
 
     def __init__(self, value: Any, name: str | None = None,
-                 enabled: bool = False) -> None:
+                 enabled: bool = False, nonaktif: bool = False) -> None:
         self.value = value
         self.name = str(value) if name is None else str(name)
         self.enabled = bool(enabled)
+        self.nonaktif = bool(nonaktif)
 
     def __repr__(self) -> str:  # pragma: no cover - bantu debug saja
         return f"Choice({self.value!r}, {self.name!r})"
@@ -220,19 +227,26 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
     if not _interaktif():
         return _pilih_polos(message, opsi, default)
 
-    idx = 0
+    # Kursor tak boleh MULAI di entri yang tak bisa dipilih — kalau tidak,
+    # Enter pertama tak melakukan apa-apa dan menunya tampak beku.
+    idx = next((i for i, c in enumerate(opsi) if not c.nonaktif), 0)
     for i, c in enumerate(opsi):
-        if default is not None and c.value == default:
+        if default is not None and c.value == default and not c.nonaktif:
             idx = i
             break
     boleh_cari = len(opsi) > _AMBANG_CARI
     keadaan = {"idx": idx, "kueri": ""}
 
     def tersaring() -> list[int]:
+        """Entri yang TAMPAK (termasuk yang nonaktif — ia memang harus terlihat)."""
         q = keadaan["kueri"].lower()
         if not q:
             return list(range(len(opsi)))
         return [i for i, c in enumerate(opsi) if q in c.name.lower()]
+
+    def bisa_dipilih() -> list[int]:
+        """Entri yang boleh dihinggapi kursor: tampak DAN tidak nonaktif."""
+        return [i for i in tersaring() if not opsi[i].nonaktif]
 
     def selaraskan() -> None:
         """Pastikan kursor menunjuk entri yang MASIH lolos saringan.
@@ -242,9 +256,9 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
         — ketikan cepat, teks yang ditempel, atau masukan terprogram — bisa
         sampai ke Enter sebelum satu pun gambar-ulang terjadi, sehingga yang
         terpilih adalah entri pertama daftar ASLI, bukan hasil pencarian."""
-        lihat = tersaring()
-        if lihat and keadaan["idx"] not in lihat:
-            keadaan["idx"] = lihat[0]
+        boleh = bisa_dipilih()
+        if boleh and keadaan["idx"] not in boleh:
+            keadaan["idx"] = boleh[0]
 
     def bangun() -> FormattedText:
         lihat = tersaring()
@@ -268,6 +282,12 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
             c = opsi[i]
             dipilih = i == keadaan["idx"]
             nomor = "" if boleh_cari else f"{urut + 1}. "
+            if c.nonaktif:
+                # Tampil REDUP seluruhnya & tanpa penunjuk: sekali lihat sudah
+                # jelas ia ada tapi bukan pilihan.
+                isi.append([(REDUP, "  " + nomor
+                             + _potong(c.name, lebar - len(nomor)))])
+                continue
             isi.append([
                 (f"{warna} bold" if dipilih else "", "❯ " if dipilih else "  "),
                 (REDUP if not dipilih else f"{warna} bold", nomor),
@@ -290,11 +310,13 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
     kb = KeyBindings()
 
     def geser(langkah: int) -> None:
-        lihat = tersaring()
-        if not lihat:
+        # Bergerak di antara yang BISA DIPILIH saja: entri nonaktif dilewati,
+        # jadi menahan ↓ tak pernah menyangkut di baris yang menolak Enter.
+        boleh = bisa_dipilih()
+        if not boleh:
             return
-        pos = lihat.index(keadaan["idx"]) if keadaan["idx"] in lihat else 0
-        keadaan["idx"] = lihat[(pos + langkah) % len(lihat)]
+        pos = boleh.index(keadaan["idx"]) if keadaan["idx"] in boleh else 0
+        keadaan["idx"] = boleh[(pos + langkah) % len(boleh)]
 
     @kb.add("up")
     @kb.add("c-p")
@@ -313,21 +335,21 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
 
     @kb.add("home")
     def _(_e):
-        lihat = tersaring()
-        if lihat:
-            keadaan["idx"] = lihat[0]
+        boleh = bisa_dipilih()
+        if boleh:
+            keadaan["idx"] = boleh[0]
 
     @kb.add("end")
     def _(_e):
-        lihat = tersaring()
-        if lihat:
-            keadaan["idx"] = lihat[-1]
+        boleh = bisa_dipilih()
+        if boleh:
+            keadaan["idx"] = boleh[-1]
 
     @kb.add("enter")
     def _(e):
-        if tersaring():
+        if keadaan["idx"] in bisa_dipilih():
             e.app.exit(result=opsi[keadaan["idx"]])
-        # tak ada yang cocok -> jangan keluar dengan hasil kosong
+        # tak ada yang cocok / entri nonaktif -> jangan keluar dengan hasil kosong
 
     @kb.add("escape")
     @kb.add("c-c")
@@ -351,7 +373,10 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
         if ch.isdigit() and ch != "0":
             lihat = tersaring()
             n = int(ch) - 1
-            if n < len(lihat):
+            # Nomornya mengikuti yang TAMPIL (termasuk entri nonaktif), supaya
+            # angka di layar dan angka yang diketik selalu sama. Yang nonaktif
+            # cuma tak jadi dipilih.
+            if n < len(lihat) and not opsi[lihat[n]].nonaktif:
                 keadaan["idx"] = lihat[n]
                 e.app.exit(result=opsi[keadaan["idx"]])
 
@@ -600,15 +625,19 @@ def _pilih_polos(message: str, opsi: list[Choice], default: Any) -> Any:
     Tanpa ini, prompt_toolkit melempar galat yang tak berarti bagi pengguna."""
     print(message)
     for i, c in enumerate(opsi, 1):
-        print(f"  {i}. {c.name}")
+        print(f"  {i}. {c.name}" + ("   (tak bisa dipilih)" if c.nonaktif else ""))
+    boleh = [c for c in opsi if not c.nonaktif] or list(opsi)
     try:
         jawab = input("Pilih nomor: ").strip()
-        return opsi[int(jawab) - 1].value
+        pilih = opsi[int(jawab) - 1]
+        if pilih.nonaktif:               # entri ditunda -> jatuh ke bawah
+            raise ValueError(pilih.name)
+        return pilih.value
     except (ValueError, IndexError, EOFError, OSError):
-        for c in opsi:
+        for c in boleh:
             if c.value == default:
                 return c.value
-        return opsi[0].value
+        return boleh[0].value
 
 
 # ------------------------------------------- lapisan kompatibel InquirerPy

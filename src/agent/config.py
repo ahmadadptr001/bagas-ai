@@ -71,9 +71,13 @@ def _get_bool(name: str, default: bool) -> bool:
 # (mis. "z-ai/glm-5.2") diabaikan: models.spec_for_id memetakannya ke model
 # bawaan, jadi pengguna lama otomatis mendarat di model yang benar-benar jalan
 # alih-alih terjebak di ID yang sudah tak ada.
-CHAT_MODEL: str = os.getenv("CHAT_MODEL", "web/kimi").strip()
+#
+# Bawaannya GLM: untuk sementara hanya model itu yang boleh dipilih (lihat
+# _DITUNDA di models.py). Nilai lain yang masih tertulis di .env tak apa-apa —
+# models.spec_for_id memetakan model yang ditunda ke model aktif.
+CHAT_MODEL: str = os.getenv("CHAT_MODEL", "web/glm").strip()
 if not CHAT_MODEL.startswith("web/"):
-    CHAT_MODEL = "web/kimi"
+    CHAT_MODEL = "web/glm"
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()

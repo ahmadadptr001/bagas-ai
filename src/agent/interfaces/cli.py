@@ -2846,18 +2846,24 @@ def main(resume: bool = False) -> None:
             # Semua model kini web, jadi lencana reasoning/multimodal tak lagi
             # membedakan apa pun — cukup satu penanda bahwa ini lewat browser.
             badge = " 🌐" if spec.is_web else "  "
+            if spec.ditunda:
+                return f"{spec.label:<28}{badge}  —  ⏸ ditunda sementara"
             note = f"  —  {spec.note}" if spec.note else ""
             return f"{spec.label:<28}{badge}{note}"
 
+        # Model yang ditunda TETAP TAMPIL, tapi redup & dilewati kursor. Kalau
+        # dibuang dari daftar, pengguna mengira connector-nya sudah dihapus —
+        # padahal utuh dan tinggal dinyalakan lagi.
         choices = [
-            Choice(key, _describe(spec)) for _, key, spec in models.catalog()
+            Choice(key, _describe(spec), nonaktif=spec.ditunda)
+            for _, key, spec in models.catalog()
         ]
         try:
             sel = inquirer.select(
                 message="Pilih model (tiap model ada sarannya)",
                 choices=choices, pointer="❯",
                 default=next((k for _, k, s in models.catalog()
-                              if s.id == agent.model), None),
+                              if s.id == agent.model and s.aktif), None),
             ).execute()
             prev = agent.model
             console.print(f"[green]✓ Model: {agent.set_model(sel)}[/green] "

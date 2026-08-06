@@ -1778,7 +1778,10 @@ class Agent:
         tahu mana yang cocok, jadi ia yang memilih — bukan ditebak."""
         from . import connectors, interaction, models
 
-        lain = [k for _, k, s in models.catalog()
+        # catalog_aktif: model yang sedang DITUNDA tak boleh ditawarkan sebagai
+        # jalan keluar — set_model akan menolaknya, dan pengguna sudah telanjur
+        # memilih "pindah" di tengah pekerjaan yang terhenti.
+        lain = [k for _, k, s in models.catalog_aktif()
                 if s.is_web and k != self.model_id]
         TUNGGU = "⏳ Tunggu di sini sampai kuotanya pulih, lalu lanjut otomatis"
         GANTI = "🔀 Ganti model sekarang (konteks chat mulai dari kosong)"
