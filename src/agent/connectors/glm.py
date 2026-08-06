@@ -467,6 +467,24 @@ class GlmConnector(WebConnector):
     # itu, dan agent-nya jalan terus di atas jawaban kosong. Dengan pola ini ia
     # jadi WebBusyError, dan core menunggu 15/40/75 detik lalu mengirim ulang
     # pesan yang sama ke percakapan yang sama.
+    # VERIFIKASI KEAMANAN (captcha geser). Teks persis dari layar pengguna:
+    #   "Please complete security verification"
+    #   "Please drag the slider to complete the puzzle"
+    # Selama kotak ini tampil, komposer terkunci dan jawaban tak pernah datang —
+    # dan dulu gejalanya muncul sebagai DUA tuduhan yang keduanya salah sasaran
+    # ("komposer menolak Enter", "tak ada balasan baru").
+    #
+    # Polanya menuntut kata yang khas milik kotak itu, bukan kata "verification"
+    # atau "captcha" sendirian: bagas-ai dipakai untuk ngoding, dan keduanya
+    # lumrah muncul di jawaban model. Area percakapan juga dikecualikan
+    # (limit_exclude_selectors di bawah).
+    captcha_patterns = (
+        r"(?i)complete\s+(?:the\s+)?security\s+verification",
+        r"(?i)drag\s+the\s+slider\s+to\s+complete",
+        r"(?i)geser\s+(?:potongan|puzzle)\s+untuk",
+        r"(?i)verifikasi\s+keamanan\s+(?:diperlukan|dibutuhkan)",
+    )
+
     busy_patterns = (
         r"(?i)\bno response,?\s*please try again later\b",
         # Cadangan bila kalimat di atas berubah: kotak merahnya tetap muncul.

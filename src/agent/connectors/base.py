@@ -602,6 +602,13 @@ class WebConnector:
     # dan pesannya masih bisa dikirim tanpa gambar. Kosong = situs ini belum
     # pernah terlihat membatasi.
     attach_limit_patterns: tuple[str, ...] = ()
+    # CAPTCHA / verifikasi keamanan yang muncul di tengah jalan. Situs
+    # memasangnya tanpa aba-aba, dan selama ia tampil komposer terkunci &
+    # jawaban tak pernah datang — gejalanya di terminal tampak seperti dua
+    # kerusakan lain sekaligus ("komposer menolak Enter", "tak ada balasan
+    # baru"). Satu-satunya jalan keluar adalah TANGAN MANUSIA, jadi yang bisa
+    # dilakukan bagas-ai cuma mengenalinya lalu membukakan jendelanya.
+    captcha_patterns: tuple[str, ...] = ()
     # Tombol BATAL pada tiap kartu lampiran di komposer (silang kecilnya).
     # Dipakai saat unggahan gagal/ditolak: kartu yang terlanjur menempel harus
     # dilepas, kalau tidak pesan pengganti yang dikirim menyusul ikut membawa
@@ -1026,6 +1033,7 @@ class WebConnector:
         check_cancel()
         # Sudah kena limit sebelum mengetik? Jangan buang waktu mengirim.
         self._raise_if_limited(page)
+        self._status_captcha = status
         status(f"mengetik pesan ke {self.label}…")
         # Mencari kotak input SEKALIGUS menunggu sampai bisa diisi (situs
         # mengunci komposer selagi menjawab). Bisa dibatalkan dengan Ctrl+C.
@@ -1071,6 +1079,19 @@ class WebConnector:
                 started = True
                 break
             page.wait_for_timeout(300)
+        if not started and not self._read_last_message(page):
+            # Captcha yang muncul SESUDAH pesan terkirim: jawabannya tertahan di
+            # belakang kotak verifikasi, jadi menunggu lebih lama tak menolong.
+            # Sesudah diselesaikan, situs melanjutkan sendiri permintaan yang
+            # tertahan — karena itu penantiannya diulang, bukan digagalkan.
+            if self.tangani_captcha(page, status, check_cancel):
+                t0 = time.time()
+                while time.time() - t0 < self.start_timeout:
+                    check_cancel()
+                    if self._answer_started(page, counts_before, text_before):
+                        started = True
+                        break
+                    page.wait_for_timeout(300)
         if not started and not self._read_last_message(page):
             self._raise_if_limited(page)   # penyebab paling umum
             # Percakapan sudah kepanjangan: situs menolak melanjutkan sampai
@@ -1902,6 +1923,11 @@ class WebConnector:
     # sedang dipakai.
     _TUNGGU_SELESAI = 120.0
 
+    # Saluran status yang dipakai _submit & penanganan captcha. Dititipkan
+    # _send_on_hub tiap kirim: keduanya tak menerima on_status sebagai argumen,
+    # sementara justru di situlah pengguna paling butuh diberi tahu.
+    _status_captcha: Any = None
+
     def _submit(self, page: Any, inp: Any) -> None:
         """Kirim pesan, dan PASTIKAN benar-benar terkirim.
 
@@ -1954,6 +1980,26 @@ class WebConnector:
             page.wait_for_timeout(400)
             if self._sudah_terkirim(page, inp, counts0, url0):
                 return
+        # SEBELUM APA PUN: captcha? Itu penyebab yang paling sering menyamar
+        # jadi "komposer menolak Enter" — dan satu-satunya yang butuh tangan
+        # manusia. Ditangani lebih dulu supaya pengguna tak dikirimi tuduhan
+        # yang salah lalu disuruh mengirim ulang ke kotak yang memang terkunci.
+        if self.tangani_captcha(page, self._status_captcha, None):
+            page.keyboard.press(self.submit_key)
+            page.wait_for_timeout(600)
+            if self._sudah_terkirim(page, inp, counts0, url0):
+                return
+            try:
+                btn = page.locator(self.send_button_selector).first
+                if btn.count():
+                    self._click_element(btn)
+            except Exception:  # noqa: BLE001
+                pass
+            for _ in range(8):
+                if self._sudah_terkirim(page, inp, counts0, url0):
+                    return
+                page.wait_for_timeout(500)
+
         # SEBELUM MENYERAH: situsnya mungkin MASIH MENJAWAB pesan sebelumnya.
         # Komposer memang dikunci selama itu, dan tak ada spanduk apa pun yang
         # muncul — jadi gejalanya persis "komposer menolak Enter", tuduhan yang
@@ -2179,6 +2225,81 @@ class WebConnector:
         msg = self.detect_limit(page)
         if msg:
             raise WebLimitError(msg)
+
+    def detect_captcha(self, page: Any) -> str:
+        """Teks verifikasi keamanan bila sedang tampil, else "".
+
+        Area percakapan DIKECUALIKAN dengan alasan yang sama seperti limit:
+        bagas-ai dipakai untuk ngoding, dan jawaban model yang kebetulan
+        membahas captcha tak boleh dikira captcha sungguhan."""
+        if not self.captcha_patterns:
+            return ""
+        try:
+            return page.evaluate(JS_FIND_TEXT, {
+                "patterns": list(self.captcha_patterns),
+                "exclude": list(self.limit_exclude_selectors),
+            }) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    # Berapa lama menunggu captcha diselesaikan sebelum menyerah, dan berapa
+    # detik pemberitahuannya tampil sebelum jendelanya dibuka. Jeda itu bukan
+    # basa-basi: jendela yang tiba-tiba melompat ke depan tanpa penjelasan
+    # tampak seperti program yang lepas kendali.
+    _CAPTCHA_TUNGGU = 300.0
+    _CAPTCHA_JEDA = 4.0
+
+    def tangani_captcha(self, page: Any, status: Any = None,
+                        check_cancel: Any = None) -> bool:
+        """Captcha muncul -> beri tahu, BUKA jendelanya, tunggu diselesaikan.
+
+        Return True bila tadi memang ada captcha DAN sekarang sudah hilang.
+        Sesudahnya jendela dikembalikan ke latar seperti semula, jadi pengguna
+        cukup menyelesaikan tekaannya lalu kembali ke terminal."""
+        pesan = self.detect_captcha(page)
+        if not pesan:
+            return False
+
+        def lapor(m: str) -> None:
+            if status:
+                try:
+                    status(m)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        singkat = " ".join(pesan.split())[:80]
+        lapor(f"{self.label} meminta verifikasi keamanan ({singkat}) — "
+              f"jendelanya kubuka {self._CAPTCHA_JEDA:.0f} detik lagi, "
+              "selesaikan lalu biarkan; sisanya kuurus sendiri")
+        # Diberi jeda supaya pemberitahuannya sempat terbaca SEBELUM jendelanya
+        # melompat ke depan dan merebut perhatian.
+        habis = time.time() + self._CAPTCHA_JEDA
+        while time.time() < habis:
+            if check_cancel:
+                check_cancel()
+            page.wait_for_timeout(200)
+
+        self._foreground(page)
+        lapor(f"selesaikan verifikasi di jendela {self.label} — "
+              "aku menunggu di sini")
+        batas = time.time() + self._CAPTCHA_TUNGGU
+        while time.time() < batas:
+            if check_cancel:
+                check_cancel()
+            page.wait_for_timeout(1000)
+            if not self.detect_captcha(page):
+                # Beri jeda sebentar: sebagian situs menutup kotaknya lebih dulu
+                # baru melanjutkan permintaan yang tertahan.
+                page.wait_for_timeout(1200)
+                self._background(page)
+                lapor(f"verifikasi selesai — {self.label} kembali ke latar")
+                return True
+        self._background(page)
+        raise BrowserError(
+            f"{self.label} meminta verifikasi keamanan (captcha) dan belum "
+            f"diselesaikan dalam {self._CAPTCHA_TUNGGU / 60:.0f} menit. "
+            "Jendelanya sudah dibuka tadi — selesaikan tekaannya lalu kirim "
+            "ulang pesannya.")
 
     def detect_context_full(self, page: Any) -> str:
         """Teks "percakapan sudah kepanjangan" bila sedang tampil, else "".
