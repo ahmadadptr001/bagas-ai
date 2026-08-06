@@ -205,30 +205,25 @@ KONTEKS_BERKAS: bool = _get_bool("BAGASAI_KONTEKS_BERKAS", True)
 KONTEKS_DIR = CONFIG_HOME / "konteks"
 
 # Besar MAKSIMAL satu berkas ingatan, dalam byte — yaitu ambang PEMECAHAN.
+# Di bawah angka ini berkasnya SATU, apa pun isinya; dipecah hanya kalau lewat.
 #
-# Angka ini tampak kecil, dan memang harus. Diukur langsung di chat.z.ai:
+# DITETAPKAN PENGGUNA: 1 MB, dan tak boleh dipecah sebelum melewatinya.
 #
-#   47 KB   -> terbaca utuh
-#   63 KB   -> TIDAK terbaca ("berkas tidak bisa saya buka") walau unggahan sukses
-#   300 KB  -> DIPOTONG DIAM-DIAM: dari penanda yang ditanam di kedalaman
-#              1/5/10/20/40/60/80/100 persen, yang sampai ke model cuma sampai
-#              10% — sekitar 30 KB pertama. Sisanya hilang tanpa satu pun galat.
-#
-# Jadi berkas raksasa BUKAN cara memperbesar ingatan: 3 MB dalam satu berkas
-# akan mengirimkan ±1% isinya, dan kegagalannya tak kelihatan dari mana pun.
-# Yang bekerja adalah memecah (lihat KONTEKS_MAKS_BAGIAN). Naikkan angka ini
-# hanya bila situs yang kamu pakai terbukti sanggup membaca berkas lebih besar.
-KONTEKS_MAKS_BYTES: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BYTES", "40000"))
+# Catatan pengukuran, supaya ada yang bisa dilihat kalau nanti ingatannya
+# terasa tak nyambung — di chat.z.ai berkas besar TIDAK ditolak melainkan
+# dipotong diam-diam: dari berkas 300 KB dengan penanda di kedalaman
+# 1/5/10/20/40/60/80/100 persen, yang sampai ke model cuma sampai 10%. Karena
+# itu bagas-ai selalu MEMERIKSA (kode periksa di ujung tiap berkas) dan
+# mengabarkan kalau isinya tak sampai — bukan diam lalu bekerja dari ingatan
+# yang bolong. Kalau kabar itu muncul, turunkan angka ini (mis. 40000) supaya
+# ingatannya dipecah jadi beberapa berkas yang terbukti terbaca utuh.
+KONTEKS_MAKS_BYTES: int = int(
+    os.getenv("BAGASAI_KONTEKS_MAKS_BYTES", str(1024 * 1024)))
 
-# Berapa BERKAS boleh dikirim sekaligus — di sinilah ruang ingatan sebenarnya.
+# Berapa BERKAS paling banyak dikirim sekaligus BILA ingatannya sampai dipecah.
 # Diukur di chat.z.ai: 8 berkas @39 KB (±320 KB) dalam SATU pesan terbaca
-# SEMUANYA sampai baris terakhir tiap berkas. Jadi jatah ingatan dinaikkan
-# dengan menambah berkas, bukan membesarkannya.
-#
-# Batas atasnya jatah berkas per percakapan di situs (chat.z.ai: 10), yang juga
-# dipakai screenshot pratinjau — dengan 8 di sini, tersisa 2 untuk gambar
-# sebelum pratinjau lanjut tanpa gambar (lihat WebLampiranPenuhError). Turunkan
-# bila kamu lebih sering butuh pratinjau daripada ingatan panjang.
+# semuanya sampai baris terakhir. Batas atasnya jatah berkas per percakapan di
+# situs (chat.z.ai: 10) yang juga dipakai screenshot pratinjau.
 KONTEKS_MAKS_BAGIAN: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BAGIAN", "8"))
 
 ENV_FILE = CONFIG_HOME / ".env"

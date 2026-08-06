@@ -1090,6 +1090,10 @@ class Agent:
         # Sedang mengirim KONTEKS (bukan pekerjaan) -> jangan dicatat ke
         # riwayat. Lihat _tanpa_catatan.
         self._diam_catat = False
+        # Berkas ingatan yang PALING AKHIR ditulis /compact di sesi ini.
+        # Diingat path-nya, bukan dicari ulang dengan "yang terbaru": berkas
+        # konteks internal lahir belakangan dan pernah menyerobot giliran ini.
+        self._memory_terakhir: list = []
         if session is not None:
             saved = (getattr(session, "web_chats", None) or {}).get(
                 self.model_spec.connector or "")
@@ -1292,11 +1296,20 @@ class Agent:
                     (0.70, "memecah jadi bagian yang muat dibaca situs"),
                     (1.00, "ingatan tersimpan"))
 
-    def simpan_memory(self, on_progress: Any = None) -> list:
+    def simpan_memory(self, on_progress: Any = None,
+                      awalan: str = konteks.AWALAN) -> list:
         """Tulis KONTEKS + RIWAYAT percakapan ke berkas. Return daftar Path.
 
         `on_progress(pecahan, keterangan)` dipanggil di tiap tahap — dipakai
         terminal untuk bar & perkiraan sisa waktu.
+
+        `awalan` memisahkan DUA jenis berkas yang selama ini tercampur:
+        `memory-*` (ingatan pengguna, yang dikirim /send-compact) dan
+        `konteks-*` (berkas pembuka yang dibuat bagas-ai sendiri tiap memulai
+        chat — peta proyek tanpa riwayat, sekali pakai). Dulu keduanya
+        bernama sama dan /send-compact memilih yang PALING BARU; akibatnya
+        ingatan yang barusan dipadatkan kalah oleh berkas konteks 2 KB yang
+        lahir sesudahnya, lalu itulah yang terkirim.
 
         Inilah "/compact" yang sebenarnya: seluruhnya dikerjakan bagas-ai
         sendiri di laptop. Tak ada pesan yang dikirim ke situs, model tak
@@ -1335,8 +1348,15 @@ class Agent:
                     on_progress(awal + (akhir - awal) * pecahan, ket)
 
             berkas = konteks.tulis(
-                payload, on_progress=tulis_maju if on_progress else None)
+                payload, awalan=awalan,
+                sesi=getattr(self.session, "id", "") or "",
+                on_progress=tulis_maju if on_progress else None)
             lapor(3)
+            # Yang diingat HANYA ingatan pengguna. /send-compact memakai path
+            # ini apa adanya, jadi berkas konteks internal (yang lahir tiap
+            # kali chat baru dibuka) tak bisa lagi menyerobot gilirannya.
+            if awalan == konteks.AWALAN:
+                self._memory_terakhir = list(berkas)
             return berkas
         except Exception:  # noqa: BLE001
             log.debug("gagal menulis berkas memory", exc_info=True)
@@ -1367,18 +1387,17 @@ class Agent:
                if giliran else
                "- BELUM ada percakapan yang tercatat di sesi ini — yang "
                "tersimpan baru konteks proyeknya")
-        # Dipecah kalau perlu: satu berkas besar TAK terbaca utuh oleh situs
-        # (diukur: 47 KB terbaca, 63 KB tidak), sedangkan beberapa berkas
-        # sedang dalam satu pesan terbaca semua.
-        pecah = (f"\n- Dipecah jadi {len(berkas)} berkas agar situsnya sanggup "
-                 "membaca utuh." if len(berkas) > 1 else "")
+        # Dipecah HANYA bila melewati batas ukuran; selama muat ia satu berkas.
+        pecah = (f"\n- Dipecah jadi {len(berkas)} berkas karena melewati "
+                 f"{config.KONTEKS_MAKS_BYTES // 1024} KB."
+                 if len(berkas) > 1 else "")
         return (
             f"Ingatan tersimpan di `{berkas[0].parent}`:\n"
             + "\n".join(f"  - {p.name}" for p in berkas) + "\n\n"
             f"{isi} (±{besar // 1024} KB), plus peta proyek & memori.{pecah}\n"
             "- Chat di situs TIDAK diapa-apakan dan tak ada yang dikirim.\n\n"
             "Untuk melanjutkan di percakapan yang bersih: `/new` lalu "
-            "`/send-compact` — berkas inilah yang diunggah ke chat barunya."
+            "`/send-compact` — berkas INI yang diunggah, bukan yang lain."
         )
 
     def _simpan_otomatis(self, conn: Any = None, on_notice: Any = None,
@@ -1423,12 +1442,25 @@ class Agent:
         from . import connectors
         if not self.model_spec.is_web:
             return "Perintah ini hanya untuk model web."
-        # Pengguna cukup menyebut SATU berkas; yang dikirim seluruh bagiannya
-        # (ingatan yang besar dipecah — lihat konteks.bagi).
-        berkas = konteks.sekelompok(path) if path else konteks.terbaru()
-        berkas = [p for p in berkas if p.is_file()]
+        # URUTAN PEMILIHANNYA PENTING, dan inilah bug yang pernah terjadi:
+        #   1. path yang disebut pengguna;
+        #   2. berkas yang BARUSAN ditulis /compact di sesi ini (diingat
+        #      path-nya, bukan dicari lagi);
+        #   3. baru "memory-* terbaru" dari sesi mana pun — untuk /send-compact
+        #      sesudah /new atau sesudah bagas-ai dijalankan ulang.
+        # Dulu langkah 3 satu-satunya, dan berkas KONTEKS internal yang lahir
+        # sesudah /compact selalu menang karena lebih baru: yang terkirim
+        # ingatan 2 KB tanpa satu pun giliran, sementara hasil /compact-nya
+        # tertinggal di disk.
+        if path:
+            berkas = konteks.sekelompok(path)
+        elif [p for p in self._memory_terakhir if Path(p).is_file()]:
+            berkas = list(self._memory_terakhir)
+        else:
+            berkas = konteks.terbaru(konteks.AWALAN)
+        berkas = [Path(p) for p in berkas if Path(p).is_file()]
         if not berkas:
-            return ("Belum ada berkas memory yang tersimpan. Jalankan "
+            return ("Belum ada berkas ingatan yang tersimpan. Jalankan "
                     "`/compact` dulu di percakapan yang ingin kamu bawa.")
         conn = connectors.get_connector(self.model_spec.connector)
         if not conn.supports_attachments():
@@ -1467,13 +1499,19 @@ class Agent:
             self._link_web_chat(dibuat)
         self._web_ctx_sent = True
         self._persist()
+        # Isi berkasnya disebut apa adanya — jumlah giliran, besar, dan nama
+        # berkasnya. Kalau yang terkirim ternyata ingatan kosong, pengguna
+        # melihatnya SEKARANG, bukan setelah AI menjawab seolah tak tahu
+        # apa-apa. Persis keluhan yang memunculkan perbaikan ini.
+        rincian = (f"{konteks.jumlah_giliran(berkas)} giliran percakapan, "
+                   f"±{konteks.ukuran(berkas) // 1024} KB\n"
+                   + "\n".join(f"  - {p.parent.name}/{p.name}" for p in berkas))
         if jawab is None:
-            return (f"Ingatan ({len(berkas)} berkas) gagal dibaca "
-                    f"{self.model_spec.label}. Coba lagi, atau lanjutkan biasa "
-                    "— konteks proyek tetap dikirim otomatis di giliran "
-                    "berikutnya.")
-        return (f"Ingatan sudah dibaca {self.model_spec.label} "
-                f"({len(berkas)} berkas).\n\n> {(jawab or '').strip()[:300]}")
+            return (f"Ingatan GAGAL dikirim ke {self.model_spec.label}:\n"
+                    f"{rincian}\n\nCoba lagi, atau lanjutkan biasa — konteks "
+                    "proyek tetap dikirim otomatis di giliran berikutnya.")
+        return (f"Ingatan sudah dibaca {self.model_spec.label}:\n{rincian}\n\n"
+                f"> {(jawab or '').strip()[:300]}")
 
     # Pesan yang MENGGANTIKAN tembok konteks di badan pesan: menunjuk berkasnya,
     # lalu meminta bukti bahwa berkas itu sungguh terbaca. Kata-katanya dijaga
@@ -2218,7 +2256,11 @@ class Agent:
                 berkas_ctx = []
                 if (config.KONTEKS_BERKAS and conn.supports_attachments()
                         and not self._lampiran_mati):
-                    berkas_ctx = self.simpan_memory()
+                    # awalan "konteks": berkas pembuka milik bagas-ai sendiri,
+                    # BUKAN ingatan pengguna — /send-compact tak boleh
+                    # mengambilnya (lihat simpan_memory).
+                    berkas_ctx = self.simpan_memory(
+                        awalan=konteks.AWALAN_KONTEKS)
                 if berkas_ctx:
                     kode_ctx = konteks.kode(berkas_ctx)
                     self._kirim_konteks(

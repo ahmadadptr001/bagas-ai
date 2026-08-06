@@ -1,33 +1,41 @@
-"""Riwayat & konteks yang DITITIPKAN sebagai berkas, bukan diketik.
+"""Ingatan & konteks yang DITITIPKAN sebagai berkas, bukan diketik.
 
 Pesan pembuka bagas-ai dulu memuat semuanya sekaligus — aturan protokol tool,
 peta proyek, memori, riwayat — dan di proyek ini saja itu ±40 rb karakter yang
-harus DIKETIK satu per satu ke komposer situs. Tiga akibatnya sudah terlihat:
-situs MEMOTONG pesan yang kepanjangan (dan yang terpotong justru aturan
-mainnya), mengetiknya makan waktu sendiri tiap sesi, dan tiap kali pekerjaan
-pindah chat tembok teks itu diketik LAGI.
+harus DIKETIK satu per satu ke komposer situs. Situs memotong pesan sepanjang
+itu, mengetiknya makan waktu, dan tiap pindah chat ia diketik ulang.
 
-TIGA hal di modul ini ditentukan oleh percobaan langsung di chat.z.ai, bukan
-oleh selera — dan ketiganya gagal dengan cara yang DIAM:
+DUA JENIS BERKAS, DAN INI BUKAN RINCIAN SEPELE:
 
-1. BERKASNYA .txt, ISINYA JSON. Berkas berekstensi .json ditolak situs tanpa
-   sepatah kata: kartu unggahannya tak pernah muncul sampai batas 90 detik.
-   Isi yang sama persis dengan nama .txt (atau .md) terbaca sempurna. Isinya
-   tetap JSON supaya terstruktur & bisa dibaca balik oleh bagas-ai (baca()).
+  memory-*   ingatan percakapan milik PENGGUNA. Lahir dari /compact (atau
+             simpanan otomatis), berisi riwayat verbatim. Inilah yang dikirim
+             /send-compact.
+  konteks-*  berkas pembuka yang dibuat bagas-ai SENDIRI tiap memulai chat di
+             situs: peta proyek + memori, tanpa riwayat. Sekali pakai.
 
-2. DIPECAH JADI BEBERAPA BAGIAN. Satu berkas 47 KB terbaca; 63 KB tidak; dan
-   yang paling berbahaya — berkas 300 KB TIDAK DITOLAK melainkan DIPOTONG
-   diam-diam: dari penanda yang ditanam di kedalaman 1/5/10/20/40/60/80/100
-   persen, yang sampai ke model cuma sampai 10%. Sebaliknya 8 berkas @39 KB
-   (±320 KB) dalam SATU pesan terbaca semuanya sampai baris terakhir. Jadi
-   ingatan diperbesar dengan MENAMBAH BERKAS, bukan membesarkan berkasnya.
+Keduanya dulu satu kolam dengan nama yang sama, dan /send-compact memilih "yang
+paling baru". Akibatnya persis seperti yang dilaporkan: sesudah /compact,
+giliran berikutnya menulis berkas konteks yang jauh lebih baru dan JAUH lebih
+kecil (2,4 KB, nol giliran riwayat) — lalu itulah yang terkirim, sementara
+ingatan 43 KB yang baru saja dipadatkan tak pernah berangkat. Sekarang
+/send-compact hanya melihat memory-*, dan berkas yang barusan ditulis /compact
+diingat path-nya apa adanya.
 
-3. KODE PERIKSA DI UJUNG BERKAS, DAN TAK BOLEH ADA DI NAMANYA. Kode itu bukti
-   bahwa isi berkas terbaca. Dulu ia ikut tertulis di nama berkas, dan balasan
-   "berkas <nama> tidak bisa saya buka" justru LULUS pemeriksaan — mengutip
-   nama, bukan isi. Dan karena berkas besar dipotong dari belakang, kode yang
-   ditaruh di kepala berkas pun tak membuktikan apa-apa; ia ditaruh paling
-   akhir supaya mengutipnya berarti berkasnya benar-benar dibaca sampai habis.
+DIPETAKAN PER SESI. Tiap sesi terminal punya foldernya sendiri
+(~/.bagasai/konteks/sesi-<id>/), jadi "ingatan sesi yang mana" bisa dijawab
+dengan melihat foldernya — bukan dengan menebak dari cap waktu di satu
+tumpukan.
+
+BERKASNYA .txt, ISINYA JSON. Diuji di chat.z.ai: berkas berekstensi .json
+DITOLAK diam-diam (kartu unggahannya tak pernah muncul sampai batas 90 detik),
+sedangkan .txt dengan isi persis sama terbaca. Isinya tetap JSON supaya
+terstruktur & bisa dibaca balik oleh bagas-ai sendiri (baca()).
+
+KODE PERIKSA DI UJUNG BERKAS. Kode itu bukti bahwa isi berkas terbaca. Ia tak
+boleh ada di NAMA berkas (balasan "berkas <nama> tak bisa dibuka" pernah lolos
+justru karena mengutip nama), dan tak boleh di kepala berkas: situs terbukti
+memotong berkas besar dari belakang, jadi kode di awal tetap terkutip walau
+sisanya tak pernah terbaca.
 """
 from __future__ import annotations
 
@@ -35,6 +43,7 @@ import json
 import logging
 import re
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -43,15 +52,22 @@ from . import config
 
 log = logging.getLogger(__name__)
 
-# Berapa KELOMPOK berkas terakhir yang disimpan di ~/.bagasai/konteks. Bukan
-# sampah: berkas inilah wujud persis apa yang dibaca model, jadi saat sesuatu
-# berjalan aneh ia satu-satunya bukti.
-SIMPAN = 8
+# Berapa KELOMPOK berkas terakhir yang disimpan per sesi, dan berapa FOLDER
+# sesi yang ditahan. Bukan sampah: berkas inilah wujud persis apa yang dibaca
+# model, jadi saat sesuatu berjalan aneh ia satu-satunya bukti.
+SIMPAN = 6
+SIMPAN_SESI = 12
 
+# Ingatan pengguna (dari /compact) vs berkas pembuka buatan bagas-ai sendiri.
+# Dipisah namanya supaya /send-compact tak pernah lagi salah ambil.
 AWALAN = "memory"
-# Ekstensi berkasnya, bukan format isinya (lihat catatan 1 di atas).
+AWALAN_KONTEKS = "konteks"
+# Ekstensi berkasnya, bukan format isinya (lihat catatan di atas).
 EKSTENSI = ".txt"
-# "memory-20260806-160000-ab12-b2dari3.txt" -> kelompok "memory-20260806-160000-ab12"
+
+# "memory-20260806-160000-ab12-b2dari3" -> kelompok "memory-20260806-160000-ab12"
+# Berkas yang TIDAK dipecah tak memakai akhiran ini sama sekali — satu berkas
+# ya satu berkas, tanpa embel-embel "b1dari1" yang cuma bikin bingung.
 _BAGIAN_RE = re.compile(r"^(?P<grup>.+)-b(?P<no>\d+)dari(?P<total>\d+)$")
 
 # Kunci payload yang memuat riwayat percakapan verbatim. Bagian pertama berisi
@@ -62,11 +78,10 @@ _KUNCI_RIWAYAT = "percakapan_terakhir_apa_adanya"
 def kode_periksa() -> str:
     """Kode acak pendek yang WAJIB dikutip balik oleh model.
 
-    Ini satu-satunya bukti bahwa berkasnya benar-benar dibaca. Situs bisa
-    menerima unggahan lalu diam-diam tak mengurainya, dan tak ada galat apa pun
-    yang muncul dari kegagalan seperti itu — tanpa kode ini bagas-ai bisa
-    bekerja sepanjang sesi dengan model yang belum pernah melihat satu baris
-    pun riwayatnya."""
+    Ini satu-satunya bukti bahwa berkasnya benar-benar dibaca sampai habis.
+    Situs bisa menerima unggahan lalu diam-diam tak mengurainya (atau
+    memotongnya di tengah), dan tak ada galat apa pun yang muncul dari
+    kegagalan seperti itu."""
     return secrets.token_hex(3)
 
 
@@ -74,19 +89,45 @@ def _teks(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=1)
 
 
+# --------------------------------------------------------------- folder sesi
+def nama_sesi(sesi: str = "") -> str:
+    """Nama folder untuk sebuah sesi terminal ("" -> tanpa sesi)."""
+    bersih = re.sub(r"[^A-Za-z0-9_.-]", "", str(sesi or ""))[:40]
+    return f"sesi-{bersih}" if bersih else "tanpa-sesi"
+
+
+def dir_sesi(sesi: str = "", buat: bool = False) -> Path:
+    """Folder ingatan milik satu sesi terminal.
+
+    Dipisah per sesi supaya pertanyaan "ini ingatan percakapan yang mana?"
+    dijawab oleh struktur folder, bukan oleh tebakan dari cap waktu."""
+    d = config.KONTEKS_DIR / nama_sesi(sesi)
+    if buat:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def bagi(payload: dict[str, Any], maks: int = 0,
          maks_bagian: int = 0) -> list[dict[str, Any]]:
-    """Pecah payload jadi bagian-bagian yang masing-masing muat dibaca situs.
+    """Pecah payload jadi bagian-bagian — HANYA bila melewati batas ukuran.
 
-    Bagian 1 = KONTEKS saja (lingkungan, peta proyek, memori). Bagian 2 dst =
-    potongan riwayat verbatim, urut lama ke baru. Pemisahan itu yang membuat
-    pemangkasan di bawah sederhana: kalau bagiannya kebanyakan, yang dibuang
-    potongan riwayat PALING LAMA — konteksnya tak pernah ikut terbuang.
+    Selama masih muat dalam satu berkas, ia TETAP satu berkas: pemecahan bukan
+    tujuan, ia cuma jalan keluar saat berkasnya kebesaran.
 
-    Tiap bagian dapat kode periksanya sendiri, jadi model yang cuma membaca
-    bagian pertama tak bisa lolos."""
+    Kalau memang harus dipecah: bagian 1 = KONTEKS saja (lingkungan, peta
+    proyek, memori), bagian 2 dst = potongan riwayat verbatim urut lama ke
+    baru. Pemisahan itu yang membuat pemangkasan sederhana — kalau bagiannya
+    kebanyakan, yang dibuang potongan riwayat PALING LAMA, konteksnya tak
+    pernah ikut terbuang.
+
+    Tiap bagian dapat kode periksanya sendiri di UJUNG berkas, jadi model yang
+    berhenti di bagian pertama tak bisa lolos."""
     maks = maks or int(config.KONTEKS_MAKS_BYTES)
     maks_bagian = maks_bagian or int(config.KONTEKS_MAKS_BAGIAN)
+
+    # Muat dalam satu berkas? Selesai — jangan dipecah tanpa sebab.
+    if len(_teks(payload).encode("utf-8")) <= maks:
+        return [_lengkapi(dict(payload), 1, 1)]
 
     riwayat = payload.get(_KUNCI_RIWAYAT) or {}
     giliran = list(riwayat.get("giliran") or [])
@@ -125,46 +166,45 @@ def bagi(payload: dict[str, Any], maks: int = 0,
                 "giliran": isi,
             },
         })
-    for i, b in enumerate(bagian, start=1):
+    return [_lengkapi(b, i, total) for i, b in enumerate(bagian, start=1)]
+
+
+def _lengkapi(b: dict[str, Any], i: int, total: int) -> dict[str, Any]:
+    """Tambahkan penanda bagian + kode periksa DI UJUNG berkas."""
+    if total > 1:
         b["bagian"] = f"{i} dari {total}"
-        if total > 1:
-            b["catatan_bagian"] = (
-                f"Ingatan ini dipecah jadi {total} berkas karena satu berkas "
-                "besar TIDAK terbaca utuh oleh situs — isinya dipotong diam-diam "
-                "di tengah jalan. Baca SEMUA berkas, urut dari bagian 1 sampai "
-                f"bagian {total}, masing-masing dari baris pertama sampai baris "
-                "terakhir. Jangan berhenti di berkas pertama dan jangan "
-                "melompati bagian tengah."
-            )
-        # kode_periksa ditaruh PALING AKHIR, bukan di kepala berkas. Sebabnya
-        # terukur: situs MEMOTONG berkas besar tanpa memberi tahu (dari berkas
-        # 300 KB, yang sampai ke model cuma ~30 KB pertama). Kode yang tertulis
-        # di awal akan tetap terkutip walau 90% isinya tak pernah terbaca —
-        # pemeriksaannya jadi hiasan. Di ujung berkas, mengutipnya berarti
-        # isinya memang terbaca sampai habis.
-        b["kode_periksa"] = kode_periksa()
-    return bagian
+        b["catatan_bagian"] = (
+            f"Ingatan ini dipecah jadi {total} berkas karena satu berkas "
+            "sebesar itu tidak terbaca utuh oleh situs — isinya dipotong "
+            f"diam-diam. Baca SEMUA berkas, urut dari bagian 1 sampai bagian "
+            f"{total}, masing-masing dari baris pertama sampai baris terakhir. "
+            "Jangan berhenti di berkas pertama dan jangan melompati bagian "
+            "tengah."
+        )
+    # kode_periksa PALING AKHIR — lihat catatan di kepala modul.
+    b["kode_periksa"] = kode_periksa()
+    return b
 
 
-def tulis(payload: dict[str, Any], awalan: str = AWALAN,
+def tulis(payload: dict[str, Any], awalan: str = AWALAN, sesi: str = "",
           on_progress: Any = None) -> list[Path]:
-    """Tulis payload jadi satu/beberapa berkas siap unggah, urut bagian.
+    """Tulis payload ke folder sesinya; kembalikan daftar berkasnya, urut.
 
-    Nama berkasnya ikut terbaca pengguna di layar situs, jadi dibuat
-    menjelaskan diri sendiri: "memory-20260806-160000-ab12-b2dari3.txt".
-    Penanda acaknya SENGAJA bukan kode_periksa (lihat catatan 3 di atas)."""
-    config.KONTEKS_DIR.mkdir(parents=True, exist_ok=True)
+    Satu berkas selama muat; dipecah hanya bila melewati batas. Nama berkasnya
+    ikut terbaca pengguna di layar situs, jadi dibuat menjelaskan diri sendiri.
+    Penanda acaknya SENGAJA bukan kode_periksa (lihat catatan kepala modul)."""
+    folder = dir_sesi(sesi, buat=True)
     grup = f"{awalan}-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
     bagian = bagi(payload)
     total = len(bagian)
     keluar: list[Path] = []
     for i, isi in enumerate(bagian, start=1):
-        # Kemajuan dilaporkan sebagai pecahan 0..1 dari tahap MENULIS saja;
-        # pemanggil yang memetakannya ke bagian jatahnya di bar (lihat
-        # Agent.simpan_memory) — modul ini tak perlu tahu soal tampilan.
         if on_progress:
-            on_progress((i - 1) / total, f"menulis bagian {i}/{total}")
-        path = config.KONTEKS_DIR / f"{grup}-b{i}dari{total}{EKSTENSI}"
+            on_progress((i - 1) / total,
+                        "menulis berkas ingatan" if total == 1
+                        else f"menulis bagian {i}/{total}")
+        akhiran = "" if total == 1 else f"-b{i}dari{total}"
+        path = folder / f"{grup}{akhiran}{EKSTENSI}"
         path.write_text(_teks(isi), encoding="utf-8")
         keluar.append(path)
     if on_progress:
@@ -173,39 +213,60 @@ def tulis(payload: dict[str, Any], awalan: str = AWALAN,
     return keluar
 
 
-def daftar(awalan: str = AWALAN) -> list[list[Path]]:
-    """Ingatan tersimpan sebagai KELOMPOK berkas, terbaru dulu."""
-    try:
-        semua = [p for p in config.KONTEKS_DIR.glob(f"{awalan}-*")
-                 if p.suffix in (EKSTENSI, ".json")]
-    except OSError:
-        return []
+def _grup_dari(path: Path) -> str:
+    m = _BAGIAN_RE.match(path.stem)
+    return m.group("grup") if m else path.stem
+
+
+def daftar(awalan: str = AWALAN, sesi: str | None = None) -> list[list[Path]]:
+    """Ingatan tersimpan sebagai KELOMPOK berkas, TERBARU dulu.
+
+    `sesi=None` -> seluruh sesi (dipakai /send-compact sesudah /new: ingatan
+    yang mau dibawa justru milik sesi SEBELUMNYA). `sesi="<id>"` -> satu sesi.
+    """
+    folder = [dir_sesi(sesi)] if sesi is not None else _semua_folder()
     grup: dict[str, list[Path]] = {}
-    for p in sorted(semua):
-        m = _BAGIAN_RE.match(p.stem)
-        grup.setdefault(m.group("grup") if m else p.stem, []).append(p)
+    for d in folder:
+        try:
+            berkas = [p for p in d.glob(f"{awalan}-*")
+                      if p.suffix in (EKSTENSI, ".json")]
+        except OSError:
+            continue
+        for p in sorted(berkas):
+            grup.setdefault(f"{d.name}/{_grup_dari(p)}", []).append(p)
     return sorted(grup.values(),
                   key=lambda ps: max(x.stat().st_mtime for x in ps),
                   reverse=True)
 
 
-def terbaru(awalan: str = AWALAN) -> list[Path]:
-    """Kelompok berkas ingatan terakhir ([] bila belum ada)."""
-    semua = daftar(awalan)
+def _semua_folder() -> list[Path]:
+    """Folder sesi + folder induk (berkas peninggalan versi tanpa folder sesi)."""
+    try:
+        anak = [d for d in config.KONTEKS_DIR.iterdir() if d.is_dir()]
+    except OSError:
+        anak = []
+    return [config.KONTEKS_DIR] + sorted(anak)
+
+
+def terbaru(awalan: str = AWALAN, sesi: str | None = None) -> list[Path]:
+    """Kelompok berkas terakhir ([] bila belum ada)."""
+    semua = daftar(awalan, sesi)
     return semua[0] if semua else []
 
 
 def sekelompok(path: Path | str) -> list[Path]:
-    """Semua bagian yang sekelompok dengan berkas ini (untuk /send-compact
-    <path>: pengguna menyebut satu berkas, yang dikirim seluruh bagiannya)."""
+    """Semua bagian yang sekelompok dengan berkas ini.
+
+    Dipakai `/send-compact <path>`: pengguna menyebut satu berkas, yang dikirim
+    seluruh bagiannya — bukan sepotong."""
     p = Path(path)
-    m = _BAGIAN_RE.match(p.stem)
-    if not m:
-        return [p]
-    for grup in daftar():
-        if p in grup:
-            return grup
-    return [p]
+    grup = _grup_dari(p)
+    try:
+        sekitar = sorted(x for x in p.parent.glob(f"{grup}*")
+                         if x.suffix in (EKSTENSI, ".json"))
+    except OSError:
+        sekitar = []
+    return sekitar or [p]
 
 
 def baca(path: Path | str) -> dict[str, Any]:
@@ -227,16 +288,52 @@ def kode(paths: list[Path]) -> list[str]:
     return keluar
 
 
-def bersihkan(simpan: int = SIMPAN) -> int:
-    """Buang kelompok lama, sisakan `simpan` yang terbaru."""
+def jumlah_giliran(paths: list[Path]) -> int:
+    """Berapa giliran percakapan yang tersimpan di kelompok berkas ini.
+
+    Dipakai untuk melaporkan isinya apa adanya: berkas berisi NOL giliran itu
+    konteks kosong, dan pengguna berhak tahu itu SEBELUM mengirimnya."""
+    n = 0
+    for p in paths:
+        riw = baca(p).get(_KUNCI_RIWAYAT) or {}
+        n += len(riw.get("giliran") or [])
+    return n
+
+
+def bersihkan(simpan: int = SIMPAN, simpan_sesi: int = SIMPAN_SESI) -> int:
+    """Buang kelompok lama (per sesi) & folder sesi yang paling lama."""
     dibuang = 0
-    for grup in daftar()[max(simpan, 0):]:
-        for p in grup:
+    for d in _semua_folder():
+        for awalan in (AWALAN, AWALAN_KONTEKS):
+            grup: dict[str, list[Path]] = {}
             try:
-                p.unlink()
+                berkas = [p for p in d.glob(f"{awalan}-*")
+                          if p.suffix in (EKSTENSI, ".json")]
+            except OSError:
+                continue
+            for p in sorted(berkas):
+                grup.setdefault(_grup_dari(p), []).append(p)
+            urut = sorted(grup.values(),
+                          key=lambda ps: max(x.stat().st_mtime for x in ps),
+                          reverse=True)
+            for kelompok in urut[max(simpan, 0):]:
+                for p in kelompok:
+                    try:
+                        p.unlink()
+                        dibuang += 1
+                    except OSError:      # sedang dipakai / hak akses
+                        log.debug("gagal menghapus berkas ingatan: %s", p)
+    # Folder sesi yang paling lama ikut dibuang seluruhnya, kalau tidak
+    # foldernya menumpuk selamanya walau isinya sudah rapi.
+    folder = [d for d in _semua_folder() if d != config.KONTEKS_DIR]
+    if len(folder) > simpan_sesi:
+        folder.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        for d in folder[simpan_sesi:]:
+            try:
+                shutil.rmtree(d)
                 dibuang += 1
-            except OSError:      # sedang dipakai / hak akses — tak fatal
-                log.debug("gagal menghapus berkas memory lama: %s", p)
+            except OSError:
+                log.debug("gagal menghapus folder sesi lama: %s", d)
     return dibuang
 
 
