@@ -1087,7 +1087,10 @@ class WebConnector:
         t0 = time.time()
         started = False
         next_limit_check = 0.0
-        next_captcha_check = time.time() + self._CAPTCHA_PERIKSA
+        # Intipan captcha dimulai dari nol untuk giliran ini: yang membatasi
+        # frekuensinya waktu (lihat _intip_captcha), dan sisa hitungan giliran
+        # sebelumnya tak boleh menunda pemeriksaan pertama.
+        self._captcha_berikut = 0.0
         while time.time() - t0 < self.start_timeout:
             check_cancel()
             # Captcha diintip BERKALA, bukan sesudah menyerah. Selama kotaknya
@@ -1095,11 +1098,9 @@ class WebConnector:
             # menunggu lebih lama tak pernah menolong, dan yang dilihat pengguna
             # cuma "sedang berpikir…" berkepanjangan. Kalau ditemukan, ia
             # ditangani sampai selesai lalu penantian ini diulang dari nol.
-            if time.time() >= next_captcha_check:
-                next_captcha_check = time.time() + self._CAPTCHA_PERIKSA
-                if self.tangani_captcha(page, status, check_cancel):
-                    t0 = time.time()
-                    status(f"{self.label} sedang berpikir…")
+            if self._intip_captcha(page, status, check_cancel):
+                t0 = time.time()
+                status(f"{self.label} sedang berpikir…")
             # Limit paling sering baru MUNCUL tepat setelah prompt dikirim —
             # laporkan segera daripada menunggu jawaban yang tak akan datang.
             # Dijeda (bukan tiap 300 ms) karena pemeriksaannya memindai DOM.
@@ -1160,6 +1161,13 @@ class WebConnector:
         deadline = time.time() + self.answer_timeout
         while time.time() < deadline:
             check_cancel()
+            # Captcha bisa menyusul SESUDAH jawaban mulai mengalir: teksnya
+            # membeku di tengah dan situs tak pernah menyatakan selesai. Tanpa
+            # intipan di sini, gilirannya berputar sampai batas waktu penuh.
+            if self._intip_captcha(page, status, check_cancel):
+                deadline = time.time() + self.answer_timeout
+                status(f"{self.label} sedang menjawab…")
+                continue
             cur = self._read_last_message(page)
             # Yang terbaca masih BALASAN LAMA? Wadah pesan yang baru sering
             # belum berisi apa-apa untuk beberapa saat (di kimi.com bilah tombol
@@ -1192,10 +1200,6 @@ class WebConnector:
                 # ada satu pun pemeriksaan captcha di sini, sehingga terminal
                 # berputar sampai batas 5 menit lalu melapor "tak ada balasan
                 # baru" — kabar captcha-nya tak pernah terpicu sama sekali.
-                if emitted == 0 and time.time() >= next_captcha_check:
-                    next_captcha_check = time.time() + self._CAPTCHA_PERIKSA
-                    if self.tangani_captcha(page, status, check_cancel):
-                        deadline = time.time() + self.answer_timeout
                 page.wait_for_timeout(self._poll_ms)
                 continue
             if on_token and len(cur) > emitted:
@@ -2111,6 +2115,10 @@ class WebConnector:
             while time.time() < habis and not self._is_done(page):
                 if self._sudah_terkirim(page, inp, counts0, url0):
                     return          # ternyata berangkat juga
+                # "Situs masih menulis" dan "captcha mengunci komposer" tampak
+                # sama persis dari luar. Menunggu 2 menit untuk yang kedua cuma
+                # membuang waktu pengguna: yang dibutuhkan tangannya.
+                self._intip_captcha(page, self._status_captcha, None)
                 page.wait_for_timeout(500)
             page.keyboard.press(self.submit_key)
             page.wait_for_timeout(400)
@@ -2392,6 +2400,28 @@ class WebConnector:
     # terbuka. Captcha muncul mendadak di tengah giliran, jadi harus DIINTIP
     # berkala, bukan ditunggu sampai menyerah.
     _CAPTCHA_PERIKSA = 5.0
+
+    def _intip_captcha(self, page: Any, status: Any = None,
+                       check_cancel: Any = None) -> bool:
+        """Intip captcha, paling sering sekali per _CAPTCHA_PERIKSA detik.
+
+        Dipanggil dari SETIAP perulangan yang bisa menggantung — menunggu
+        komposer, menunggu jawaban mulai, memantau jawaban, menunggu situs
+        selesai menulis. Itu bukan berlebihan: captcha muncul beberapa detik
+        SESUDAH pesan terkirim (terukur di pemakaian pengguna), jadi tak ada
+        satu titik pun yang bisa dipercaya sebagai "tempat memeriksanya".
+
+        Dulu pemeriksaan di perulangan pemantau dipagari syarat "belum ada satu
+        huruf pun yang mengalir". Begitu situs sempat menulis sepotong lalu
+        membeku di belakang kotak verifikasi, syarat itu tak pernah terpenuhi
+        lagi dan gilirannya berputar sampai batas 5 menit tanpa satu pun kabar.
+        Pembatasnya kini WAKTU, bukan keadaan: sekali pindai 45 ms sekali per 5
+        detik — tak ada alasan menghematnya dengan syarat yang bisa salah."""
+        kini = time.time()
+        if kini < getattr(self, "_captcha_berikut", 0.0):
+            return False
+        self._captcha_berikut = kini + self._CAPTCHA_PERIKSA
+        return self.tangani_captcha(page, status, check_cancel)
 
     def tangani_captcha(self, page: Any, status: Any = None,
                         check_cancel: Any = None) -> bool:
