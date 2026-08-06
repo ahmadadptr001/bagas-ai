@@ -4,31 +4,35 @@ CARA PAKAI (dari sisi pengguna):
 
     /voice on          mikrofon menyala, bagas-ai mendengarkan
     "bagas ai ..."     namanya disebut -> ucapan berikutnya dianggap perintah
-    "... lakukan"      kata penutup -> perintah dikirim ke kotak terminal
+    (diam 2 detik)     perintah DITUTUP & dikirim ke kotak terminal
     "... batalkan"     buang rekaman yang sedang berjalan
     /voice off         mikrofon mati (ini keadaan bawaannya)
 
-Kata penutupnya lentur: "lakukan", "laksanakan", "kerjakan", "lakuin",
-"eksekusi" — sama saja. Begitu pula pembatalnya: "batalkan",
-"batal", "batalin". Orang tak mengucapkan kata yang persis sama tiap kali, dan
-aba-aba yang menuntut hafalan satu kata justru bikin perintah gagal berangkat.
+TAK ADA kata penutup. Berhenti bicara dua detik sudah cukup; kalau kalimatnya
+diteruskan sebelum dua detik habis, hitungannya diulang dari nol. Pembatalnya
+tetap berupa kata ("batalkan"/"batal"/"batalin") — membatalkan harus bisa
+dilakukan SEKARANG, bukan dengan menunggu diam.
 
 Satu perintah boleh sepanjang 30 detik sejak namanya disebut (MAKS_REKAM).
 Lewat itu ia dibatalkan, bukan dikirim setengah jadi.
 
-KENAPA HARUS ADA KATA PEMICU DAN KATA PENUTUP
----------------------------------------------
+KENAPA NAMANYA HARUS DISEBUT
+---------------------------
 Mikrofon yang hidup terus mendengar SEMUA yang terucap di ruangan — obrolan
 dengan orang lain, telepon, suara video. Tanpa kata pemicu, semua itu jadi
-perintah. Dan tanpa kata penutup, bagas-ai harus MENEBAK kapan sebuah kalimat
-selesai; tebakan yang salah memotong perintah di tengah ("tolong hapus" —
-padahal lanjutannya "…berkas sementara saja"). Dua kata itu memindahkan
-keputusan mulai & selesai ke pengguna, dan itu satu-satunya tempat yang benar.
+perintah. Namanya sendiri yang jadi pemicu: ia khas, jadi hampir mustahil
+terucap kebetulan.
+
+Ujung kalimatnya lain ceritanya. Dulu ditutup kata aba-aba ("lakukan"), dan
+itu dibuang: mengucapkan aba-aba di ujung kalimat tak alami, yang lupa
+kehilangan seluruh perintahnya, dan kata apa pun yang dipilih pasti muncul
+juga DI DALAM perintah. Sekarang yang menutupnya BERHENTINYA suara — hal yang
+memang sudah dilakukan orang tanpa perlu diajari.
 
 APA YANG DIKIRIM
 ----------------
-Hanya yang berada DI ANTARA keduanya. "bagas ai tolong buka main.py
-lakukan" menjadi perintah "tolong buka main.py" — kata pemicu & penutupnya dibuang,
+Hanya yang terucap SESUDAH namanya. "bagas ai tolong buka main.py" (lalu
+diam) menjadi perintah "tolong buka main.py" — kata pemicu & penutupnya dibuang,
 sebab keduanya ditujukan ke programnya, bukan ke AI.
 
 PENGENALAN SUARANYA TIDAK SEMPURNA, DAN ITU DIPERHITUNGKAN
@@ -91,17 +95,13 @@ _NAMA_RAPAT = {"bagasai", "bagas-ai", "bagasi", "pagasai", "bagasay",
 _NAMA_PERTAMA = {"bagas", "pagas", "bagus", "begas", "bagaz"}
 # Yang boleh jadi panggilan TUNGGAL di awal kalimat — lihat cari_nama().
 _NAMA_SENDIRI = {"bagas", "bagaz"}
-# KATA PENUTUP: "lakukan" beserta kerabatnya. "enter" sempat dipakai lalu
-# dikembalikan atas permintaan pengguna. Beberapa bentuk diterima sekaligus
-# karena orang tak mengucapkan kata yang persis sama tiap kali — dan aba-aba
-# yang menuntut hafalan satu kata justru bikin perintah gagal berangkat.
-#
-# "jalankan" sempat ikut lalu DIBUANG: ia justru kata yang paling sering muncul
-# DI DALAM perintahnya sendiri ("jalankan ujinya", "jalankan npm run build"),
-# jadi ia akan memotong kalimat tepat di tengah lalu mengirim separuhnya.
-# Ujinya menangkap ini sebelum sempat dipakai. Aturannya: kata penutup harus
-# yang JARANG jadi isi perintah — bukan sekadar yang terdengar mirip artinya.
-PENUTUP = {"lakukan", "lakuin", "laksanakan", "kerjakan", "eksekusi"}
+# TAK ADA LAGI KATA PENUTUP. Perintah ditutup oleh BERHENTINYA suara — lihat
+# JEDA_SELESAI. Perjalanannya: "lakukan" -> "enter" -> kembali "lakukan" ->
+# akhirnya tak ada sama sekali, dan yang terakhir ini yang paling masuk akal.
+# Dua sebabnya nyata: mengucapkan aba-aba di ujung kalimat tak alami (yang lupa
+# kehilangan seluruh perintahnya tanpa tahu sebabnya), dan kata apa pun yang
+# dipilih pasti muncul juga DI DALAM perintah — "jalankan ujinya lakukan"
+# terpotong di tempat yang salah.
 # Kata BATAL: membuang rekaman yang sedang berjalan. "off" sempat dipakai lalu
 # dikembalikan ke "batalkan" atas permintaan pengguna — dan itu memang lebih
 # aman: "off"/"of" gampang muncul dari salah dengar, sedangkan "batalkan" jelas
@@ -127,6 +127,15 @@ BATAL = object()
 # Dihitung dari namanya disebut, BUKAN dari ucapan terakhir: yang dibatasi
 # panjang satu perintah, dan itu memang yang dimaksud "maksimal merekam".
 MAKS_REKAM = 30.0
+
+# Berapa lama SUNYI menandai perintah sudah selesai. Diukur dari suaranya, bukan
+# dari teks hasil pengenalan: teks datang terlambat beberapa detik karena harus
+# lewat jaringan, dan menghitung diam dari situ akan memotong orang yang baru
+# saja berhenti menarik napas.
+#
+# Kalau pembicara meneruskan kalimat sebelum 2 detik habis, hitungannya
+# DIULANG dari nol — jadi jeda berpikir sependek apa pun tak pernah memotong.
+JEDA_SELESAI = 2.0
 
 
 def _kata(teks: str) -> list[str]:
@@ -194,14 +203,6 @@ def cari_pemicu(kata: list[str]) -> int:
     return -1
 
 
-def cari_penutup(kata: list[str]) -> int:
-    """Indeks kata penutup pertama, atau -1."""
-    for i, k in enumerate(kata):
-        if k in PENUTUP:
-            return i
-    return -1
-
-
 def cari_pembatal(kata: list[str]) -> int:
     """Indeks kata pembatal pertama, atau -1."""
     for i, k in enumerate(kata):
@@ -240,6 +241,17 @@ class Perakit:
         self.merekam = False
         self.potongan = []
 
+    def selesai(self) -> str:
+        """Tutup perintah yang sedang direkam & kembalikan isinya.
+
+        Dipanggil perekam saat pembicara BERHENTI cukup lama (lihat
+        JEDA_SELESAI). Menggantikan kata penutup: orang tak alami mengucapkan
+        aba-aba di akhir kalimat, dan yang lupa mengucapkannya kehilangan
+        seluruh perintahnya tanpa tahu sebabnya."""
+        isi = self.sementara
+        self.batalkan()
+        return isi
+
     def dengar(self, teks: str, sekarang: float | None = None) -> Any:
         """Umpankan satu hasil pengenalan suara.
 
@@ -264,27 +276,18 @@ class Perakit:
             kata = kata[i:]
 
         self.terakhir = sekarang
-        j = cari_penutup(kata)
+        # PEMBATAL masih berupa kata: membatalkan harus bisa dilakukan SEKARANG,
+        # tanpa menunggu diam. Kata PENUTUP tak lagi ada — perintah ditutup oleh
+        # berhentinya suara (lihat Pendengar & JEDA_SELESAI), sebab mengucapkan
+        # aba-aba di akhir kalimat tak alami dan yang lupa kehilangan seluruh
+        # perintahnya tanpa tahu sebabnya.
         b = cari_pembatal(kata)
-        # Yang DULUAN terucap yang berlaku. "…lakukan, eh batalkan" berarti
-        # perintahnya sudah berangkat; "…batalkan saja, jangan lakukan" berarti
-        # dibuang. Membaca urutannya adalah satu-satunya cara menghormati
-        # maksud pengguna tanpa menebak.
-        if b >= 0 and (j < 0 or b < j):
+        if b >= 0:
             self.batalkan()
             return BATAL
-        if j < 0:
-            if kata:
-                self.potongan.append(" ".join(kata))
-            return None
-        # Kata penutup terdengar: yang dikirim hanya yang SEBELUMNYA. Sisa
-        # kalimat sesudah "lakukan" sengaja dibuang — di situlah orang biasanya
-        # menambahkan komentar untuk dirinya sendiri, bukan untuk AI.
-        if j:
-            self.potongan.append(" ".join(kata[:j]))
-        perintah = self.sementara
-        self.batalkan()
-        return perintah
+        if kata:
+            self.potongan.append(" ".join(kata))
+        return None
 
     def kedaluwarsa(self, sekarang: float | None = None) -> bool:
         """True (dan membatalkan) bila perintah sudah melewati batas merekam.
@@ -478,6 +481,14 @@ class Pendengar:
         # pengenal suara — dan yang lebih buruk, ia menahan pemotong ucapan
         # supaya tak pernah melihat sunyi.
         self._abaikan_sampai = 0.0
+        # Sejak kapan pembicara BERHENTI (0 = sedang bicara / belum mulai).
+        # Dibaca penyelesai: perintah ditutup bila diamnya sudah cukup lama.
+        self._sunyi_sejak = 0.0
+        # Berapa potongan ucapan yang masih menunggu jawaban pengenal suara.
+        # Perintah TAK BOLEH ditutup selagi ini > 0: teksnya datang beberapa
+        # detik sesudah suaranya, dan menutup lebih dulu berarti mengirim
+        # kalimat yang belum lengkap.
+        self._menunggu = 0
         self._antre: queue.Queue = queue.Queue()
         self._threads: list[threading.Thread] = []
         self.galat = ""
@@ -579,6 +590,13 @@ class Pendengar:
                 continue          # bunyi sendiri — jangan direkam
             keras = _rms(data) > ambang
             lama_blok = BLOK / LAJU
+            # Penanda "sejak kapan sunyi" — dasar penutup perintah. Diukur dari
+            # SUARA, bukan dari teks: teksnya datang terlambat lewat jaringan.
+            if keras:
+                self._sunyi_sejak = 0.0
+            elif not self._sunyi_sejak:
+                self._sunyi_sejak = time.time()
+            self._periksa_selesai()
             if not potongan:
                 awalan.append(data.copy())
                 if len(awalan) > 5:
@@ -593,6 +611,7 @@ class Pendengar:
             panjang = time.time() - mulai
             if sunyi >= _DIAM_SELESAI or panjang >= _MAKS_UCAPAN:
                 if panjang - sunyi >= _MIN_UCAPAN:
+                    self._menunggu += 1
                     self._antre.put(np.concatenate(potongan).tobytes())
                 potongan = []
                 sunyi = 0.0
@@ -603,8 +622,35 @@ class Pendengar:
                     f"perintah suara dibatalkan — {MAKS_REKAM:.0f} detik "
                     "habis dan kata `lakukan` tak terdengar")
 
+    def _periksa_selesai(self) -> None:
+        """Tutup perintah bila pembicara sudah diam cukup lama.
+
+        Tiga syarat, dan ketiganya perlu:
+          1. memang sedang merekam & sudah ada isinya;
+          2. diam sudah melewati JEDA_SELESAI — bicara lagi sebelum itu
+             mengulang hitungannya dari nol (lihat _sunyi_sejak);
+          3. TAK ADA potongan yang masih menunggu jawaban pengenal. Tanpa
+             syarat ketiga, kalimat terakhir yang masih di jalan akan hilang —
+             dan yang terkirim cuma separuh perintah.
+        """
+        if not (self.perakit.merekam and self._sunyi_sejak):
+            return
+        if time.time() - self._sunyi_sejak < JEDA_SELESAI:
+            return
+        if self._menunggu or not self._antre.empty():
+            return
+        if not self.perakit.sementara:
+            return
+        perintah = self.perakit.selesai()
+        self._sunyi_sejak = 0.0
+        try:
+            self.on_perintah(perintah)
+        except Exception:  # noqa: BLE001 - UI tak boleh menjatuhkan mikrofon
+            log.debug("penerima perintah suara melempar", exc_info=True)
+
     # --- thread 2: potongan ucapan -> teks -> perintah ---
     def _kenali(self) -> None:
+        """Thread pengenal: ambil potongan ucapan dari antrean, ubah jadi teks."""
         try:
             import speech_recognition as sr
         except Exception as exc:  # noqa: BLE001
@@ -616,58 +662,54 @@ class Pendengar:
             if data is None:
                 return
             try:
-                teks = rec.recognize_google(sr.AudioData(data, LAJU, 2),
-                                            language="id-ID")
-            except sr.UnknownValueError:
-                # Diteruskan lewat on_dengar, TIDAK dicetak sendiri. Terminal
-                # sengaja tak menampilkan transkrip apa pun di atas kotak chat
-                # (permintaan pengguna: itu barisan debug, bukan untuk dipakai
-                # sehari-hari) — jalurnya tetap ada untuk penelusuran.
-                self.on_dengar("(tertangkap, tapi tak terdengar jelas)",
-                               self.perakit.merekam)
-                continue
-            except Exception as exc:  # noqa: BLE001 - jaringan/layanan
-                self.on_kabar(f"pengenalan suara gagal: {exc}")
-                continue
-            if not teks.strip():
-                continue
-            self.on_dengar(teks, self.perakit.merekam)
-            sedang = self.perakit.merekam
-            hasil = self.perakit.dengar(teks)
-            if not sedang and self.perakit.merekam:
-                # Namaku baru saja terdeteksi. Ketukan ini yang menjawab
-                # pertanyaan "tadi kedengeran nggak sih?" — tanpa itu pengguna
-                # baru tahu jawabannya setelah selesai bicara panjang lebar.
-                threading.Thread(target=bunyi, args=("mulai",),
-                                 daemon=True).start()
-            if hasil is BATAL:
-                # Bunyinya MENURUN, kebalikan dari nada mulai — supaya
-                # "dibatalkan" dan "dikirim" tak pernah tertukar walau layarnya
-                # tak dilihat.
-                threading.Thread(target=bunyi, args=("batal",),
-                                 daemon=True).start()
-                self.on_kabar("rekaman DIBATALKAN, tak ada yang dikirim — "
-                              "sebut namaku lagi untuk perintah baru")
-                continue
-            if hasil is None:
-                # "lakukan" terdengar padahal belum merekam: pengguna mengira
-                # ia sedang memerintah, bagas-ai menganggapnya obrolan. Dulu
-                # keadaan ini SENYAP total — dan itu persis yang membuatnya
-                # tampak "tak berbuat apa-apa". (Dilaporkan pengguna.)
-                if not sedang and cari_penutup(_kata(teks)) >= 0:
-                    self.on_kabar(
-                        "terdengar kata penutup, tapi namaku belum disebut — "
-                        "awali dengan \"bagas ai\", mis. "
-                        "\"bagas ai tolong baca file ini lakukan\"")
-                continue
-            if not hasil:
-                self.on_kabar("kata `lakukan` terdengar, tapi tak ada perintah "
-                              "di antaranya — diabaikan")
-                continue
-            try:
-                self.on_perintah(hasil)
-            except Exception:  # noqa: BLE001 - UI tak boleh menjatuhkan mikrofon
-                log.debug("penerima perintah suara melempar", exc_info=True)
+                self._satu_ucapan(rec, sr, data)
+            except Exception:  # noqa: BLE001 - satu potongan gagal, jangan mati
+                log.debug("pengenalan satu ucapan gagal", exc_info=True)
+            finally:
+                # Diturunkan SESUDAH teksnya masuk ke perakit. Kalau lebih awal,
+                # penyelesai bisa menutup perintah tepat di celah antara "audio
+                # selesai dikenali" dan "teksnya tercatat" — dan kalimat
+                # terakhir hilang.
+                self._menunggu = max(0, self._menunggu - 1)
+
+    def _satu_ucapan(self, rec: Any, sr: Any, data: bytes) -> None:
+        """Kenali SATU potongan ucapan lalu umpankan ke perakit."""
+        try:
+            teks = rec.recognize_google(sr.AudioData(data, LAJU, 2),
+                                        language="id-ID")
+        except sr.UnknownValueError:
+            # Diteruskan lewat on_dengar, TIDAK dicetak sendiri: terminal
+            # sengaja tak menampilkan transkrip apa pun di atas kotak chat
+            # (permintaan pengguna — itu barisan debug). Jalurnya tetap ada
+            # untuk penelusuran.
+            self.on_dengar("(tertangkap, tapi tak terdengar jelas)",
+                           self.perakit.merekam)
+            return
+        except Exception as exc:  # noqa: BLE001 - jaringan/layanan
+            self.on_kabar(f"pengenalan suara gagal: {exc}")
+            return
+        if not teks.strip():
+            return
+
+        self.on_dengar(teks, self.perakit.merekam)
+        sedang = self.perakit.merekam
+        hasil = self.perakit.dengar(teks)
+        if not sedang and self.perakit.merekam:
+            # Namaku baru saja terdeteksi. Ketukan ini yang menjawab pertanyaan
+            # "tadi kedengeran nggak sih?" — tanpa itu pengguna baru tahu
+            # jawabannya setelah selesai bicara panjang lebar.
+            threading.Thread(target=bunyi, args=("mulai",), daemon=True).start()
+        if hasil is BATAL:
+            # Bunyinya MENURUN, kebalikan nada mulai — supaya "dibatalkan" dan
+            # "dikirim" tak pernah tertukar walau layarnya tak dilihat.
+            threading.Thread(target=bunyi, args=("batal",), daemon=True).start()
+            self.on_kabar("rekaman DIBATALKAN, tak ada yang dikirim — sebut "
+                          "namaku lagi untuk perintah baru")
+            return
+        # Selain itu tak ada yang perlu dilakukan di sini: perintahnya ditutup
+        # oleh BERHENTINYA suara, bukan oleh kata apa pun (lihat
+        # _periksa_selesai). Yang mengirimnya thread perekam, yang memang tahu
+        # persis kapan pembicara berhenti.
 
     def _gagal(self, pesan: str) -> None:
         self.galat = pesan
