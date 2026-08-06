@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.0.100"
+version = "1.0.101"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,12 @@ dependencies = [
     # karena hasilnya jauh lebih enak didengar, dan satu-satunya suara
     # berbahasa Indonesia yang tersedia tanpa memasang paket bahasa Windows.
     "edge-tts>=6.1.0",
+    # /voice — mikrofon jadi cara memberi perintah (lihat dengar.py).
+    # Sama seperti edge-tts: BUKAN syarat mati. Tanpa keduanya /voice
+    # menolak menyala dan menyebutkan paket mana yang kurang, sedangkan
+    # sisa bagas-ai jalan seperti biasa.
+    "sounddevice>=0.4.6",
+    "SpeechRecognition>=3.10.0",
     "ddgs>=6.0.0",
     "python-telegram-bot>=21.0",
     "fastapi>=0.110.0",

@@ -13,3 +13,7 @@ requests>=2.31.0
 # browser ke kimi.com / chat.qwen.ai. Setelah install, jalankan sekali:
 #   playwright install chromium
 playwright>=1.40.0
+# Opsional: /voice — mikrofon (sounddevice merekam, SpeechRecognition
+# mengenali lewat layanan daring Google, bahasa id-ID).
+sounddevice>=0.4.6
+SpeechRecognition>=3.10.0

@@ -66,6 +66,7 @@ except Exception:  # pragma: no cover
     Figlet = None  # type: ignore
 
 from .. import config, interaction, llm, longmem, models, osinfo, permissions, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
+from .. import dengar as _dengar  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from .. import suara as _suara  # noqa: E402
 from .. import tempelan as _tempelan  # noqa: E402
@@ -196,6 +197,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("mode", "mode kerja situs: buat gambar/video, dll"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
+    ("voice", "mikrofon: sebut \"bagas ai …\" lalu \"lakukan\" (on/off/tes)"),
     ("compact", "simpan riwayat percakapan ke berkas memory"),
     ("send-compact", "kirim berkas memory terakhir ke percakapan sekarang"),
     ("add-dir", "tambah folder konteks"),
@@ -980,6 +982,39 @@ class KotakChat:
         kursor = n if posisi is None else max(0, min(int(posisi), n))
         self.buffer.reset(Document(default, kursor))
         return self.app.run()
+
+    def kirim_dari_luar(self, teks: str) -> bool:
+        """Kirim `teks` seolah diketik lalu di-Enter, DARI THREAD LAIN.
+
+        Dipakai perintah suara (/voice): saat kotak idle sedang menunggu, ia
+        memblokir thread utama, jadi menaruh perintah di antrean saja takkan
+        pernah terbaca sampai pengguna menekan Enter — persis hal yang tak
+        mungkin ia lakukan kalau sedang bicara, bukan mengetik.
+
+        Return False bila kotaknya memang tidak sedang menunggu (giliran sedang
+        berjalan); pemanggil lalu memakai antrean biasa."""
+        app = self.app
+        try:
+            if not app.is_running:
+                return False
+            loop = app.loop
+        except Exception:  # noqa: BLE001 - aplikasi sedang dibongkar
+            return False
+        if loop is None:
+            return False
+
+        def _kirim() -> None:
+            try:
+                self.buffer.reset(Document(teks, len(teks)))
+                app.exit(result=teks)
+            except Exception:  # noqa: BLE001 - keburu ditutup pengguna
+                pass
+
+        try:
+            loop.call_soon_threadsafe(_kirim)
+        except Exception:  # noqa: BLE001
+            return False
+        return True
 
     def sisa(self) -> str:
         """Teks yang masih ada di kotak — dibaca SESUDAH tanya() terputus.
@@ -1820,6 +1855,10 @@ def main(resume: bool = False) -> None:
 
     live_holder: dict = {"live": None}
     tg_service: dict = {"svc": None}   # layanan bot Telegram di dalam sesi ini
+    # Pendengar mikrofon (/voice). SELALU mulai dari mati & tak disimpan ke
+    # preferensi: mikrofon yang menyala sendiri di sesi berikutnya adalah
+    # kejutan yang tak seorang pun minta.
+    voice_state: dict = {"pendengar": None}
     # Total token PERSISTEN lintas semua sesi ("dimanapun").
     # "sesi" (agent.tokens_session) kini persisten per-sesi (ikut saat --resume),
     # dan sudah termasuk di total global. Agar tidak dobel saat resume, base =
@@ -3056,6 +3095,119 @@ def main(resume: bool = False) -> None:
         if pesan:
             console.print(f"  [dim]♪ {_esc(pesan)}[/dim]")
 
+    # --- /voice: mikrofon jadi cara memberi perintah ------------------------
+    def _voice_masuk(teks: str) -> None:
+        """Satu perintah utuh dari mikrofon. Dipanggil dari THREAD PENDENGAR.
+
+        Diperlakukan persis seperti kalimat yang diketik — termasuk gemanya —
+        supaya tak ada jalur kedua yang perlu dipelihara. Bedanya cuma satu
+        penanda 🎙 supaya pengguna bisa membedakan mana yang ia ucapkan."""
+        teks = (teks or "").strip()
+        if not teks:
+            return
+        console.print(f"\n  [#fcc048]🎙 ❯[/] [bold #ffffff]{_esc(teks)}[/]")
+        # Kotak idle sedang menunggu -> teksnya dimasukkan ke sana (kotak itu
+        # memblokir thread utama; antrean saja takkan pernah terbaca). Kalau
+        # giliran sedang berjalan, ia masuk antrean seperti ketikan biasa dan
+        # disisipkan di batas langkah berikutnya.
+        if kotak_chat.kirim_dari_luar(teks):
+            return
+        with antre_lock:
+            prompt_queue.append(teks)
+        console.print("  [dim]— disisipkan ke giliran yang sedang berjalan[/dim]")
+
+    def _voice_kabar(pesan: str) -> None:
+        console.print(f"  [dim]🎙 {_esc(pesan)}[/dim]")
+
+    def _voice_dengar(teks: str, merekam: bool) -> None:
+        """Yang TERDENGAR, ditampilkan apa adanya.
+
+        Termasuk saat namanya belum disebut. Tanpa ini, mikrofon yang salah
+        dengar mustahil dibedakan dari mikrofon yang mati — keduanya sama-sama
+        tak menghasilkan apa pun di layar."""
+        tanda = "▸" if merekam else "·"
+        console.print(f"  [dim]🎙 {tanda} {_esc(teks)}[/dim]")
+
+    def show_voice(arg: str = "") -> None:
+        """/voice — mikrofon: sebut "bagas ai …" lalu "lakukan".
+
+        Sengaja MATI secara bawaan, dan tak disimpan ke preferensi: mikrofon
+        yang menyala sendiri di sesi berikutnya adalah kejutan yang tak seorang
+        pun minta."""
+        pilihan = arg.strip().lower()
+        pendengar = voice_state.get("pendengar")
+
+        if pilihan in ("off", "mati"):
+            if pendengar is not None:
+                pendengar.berhenti()
+                voice_state["pendengar"] = None
+            console.print("  [#f7d488]○ mikrofon MATI[/]\n")
+            return
+
+        if pilihan in ("on", "hidup"):
+            if pendengar is not None and pendengar.aktif:
+                console.print("  [dim]mikrofon sudah menyala.[/dim]\n")
+                return
+            p = _dengar.Pendengar(_voice_masuk, _voice_kabar, _voice_dengar)
+            alasan = p.mulai()
+            if alasan:
+                console.print(f"  [yellow]⚠ mikrofon tak bisa dinyalakan:[/]\n"
+                              f"  [dim]{_esc(alasan)}[/dim]\n")
+                return
+            voice_state["pendengar"] = p
+            nama = _dengar.nama_mikrofon() or "mikrofon bawaan"
+            console.print(
+                f"  [#9fc93c]● mikrofon AKTIF[/] [dim]— {_esc(nama)}[/]\n"
+                "  [dim]sebut[/] [#fcc048]\"bagas ai\"[/] [dim]untuk mulai, "
+                "tutup dengan[/] [#fcc048]\"lakukan\"[/][dim]. Contoh:[/]\n"
+                "  [dim]  \"bagas ai tolong buka main.py lakukan\"[/]\n"
+                f"  [dim]yang terdengar langsung tampil di sini, dan yang di "
+                f"antara kedua kata itu masuk ke kotak ketikan. Satu perintah "
+                f"maksimal {_dengar.MAKS_REKAM:.0f} detik.[/dim]\n")
+            return
+
+        if pilihan in ("tes", "test", "coba"):
+            ok, alasan = _dengar.siap()
+            if not ok:
+                console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]\n")
+                return
+            # Sesudah merekam masih ada perjalanan ke pengenal suara (daring,
+            # TERUKUR ±3 detik). Tanpa disebut, jeda itu tampak seperti macet.
+            console.print("  [dim]🎙 merekam 5 detik — bicaralah sekarang, "
+                          "lalu tunggu sebentar untuk pengenalannya…[/dim]")
+            try:
+                teks, puncak = _dengar.dengar_sekali(5.0)
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [red]✖ gagal merekam:[/red] {exc}\n")
+                return
+            # Dua kegagalan yang dari luar tampak sama (tak ada teks) dipisah
+            # oleh angka ini: mikrofon bisu vs pengenalan yang tak paham.
+            console.print(f"  [dim]tingkat suara tertinggi: {puncak:.0f}"
+                          f"{'  (mikrofon terdengar sunyi)' if puncak < 180 else ''}"
+                          "[/dim]")
+            if teks:
+                console.print(f"  [#9fc93c]✓ terdengar:[/] "
+                              f"[#f2e3cc]{_esc(teks)}[/]\n")
+            else:
+                console.print("  [yellow]tak ada ucapan yang dikenali[/yellow]"
+                              "[dim] — coba lebih dekat ke mikrofon, atau "
+                              "periksa koneksi (pengenalannya daring).[/dim]\n")
+            return
+
+        aktif = pendengar is not None and pendengar.aktif
+        ok, alasan = _dengar.siap()
+        console.print()
+        console.print("  [bold #fcc048]🎙 Perintah suara[/] "
+                      f"[dim]— {'AKTIF' if aktif else 'MATI'}[/]")
+        console.print(f"  [dim]mikrofon :[/] {_esc(_dengar.nama_mikrofon() or '-')}")
+        if not ok:
+            console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]")
+        console.print("  [dim]cara pakai:[/] sebut [#fcc048]\"bagas ai\"[/] "
+                      "lalu ucapkan perintahnya, tutup dengan "
+                      "[#fcc048]\"lakukan\"[/]")
+        console.print("  [dim]yang dikirim hanya yang di ANTARA keduanya.[/dim]")
+        console.print("  [dim]/voice on · /voice off · /voice tes[/dim]\n")
+
     def show_mic(arg: str = "") -> None:
         """/mic — kabar AI dibacakan pengeras suara; on/off/tes.
 
@@ -4102,10 +4254,15 @@ def main(resume: bool = False) -> None:
         # dibuang hanya tampilannya, karena angka seumur-hidup itu tak pernah
         # menjadi dasar keputusan apa pun saat mengetik. Pemakaian sesi tetap
         # ada: itu yang berubah selama bekerja.
+        # Mikrofon yang hidup TIDAK boleh cuma diketahui dari ingatan pengguna:
+        # ia merekam ruangan, jadi keadaannya harus terbaca sekali lihat di
+        # tempat yang selalu tampak.
+        _p = voice_state.get("pendengar")
+        mik = f"{sep}<sesi>🎙 dengar</sesi>" if (_p is not None and _p.aktif) else ""
         bagian = {
             "merek": " <brand>⬢ bagas-ai</brand>",
             "model": f"{sep}{kind} <model>{spec.label}</model>{eff}",
-            "sesi": f"{sep}<sesi>⚡ {_fmt(s.total)}</sesi> <muted>sesi</muted>",
+            "sesi": f"{sep}<sesi>⚡ {_fmt(s.total)}</sesi> <muted>sesi</muted>{mik}",
             "perintah": "<cmd>/menu</cmd> <muted>·</muted> ",
             "ctrlc": " <muted>atau ctrl+c</muted>",
             "exit": "<exit>/exit</exit>",
@@ -4245,6 +4402,8 @@ def main(resume: bool = False) -> None:
                 show_tim(text[4:].strip())
             elif cmd == "mic" or cmd.startswith("mic "):
                 show_mic(text[4:].strip())
+            elif cmd == "voice" or cmd.startswith("voice "):
+                show_voice(text[6:].strip())
             elif cmd == "compact":
                 do_compact()
             elif cmd == "send-compact" or cmd.startswith("send-compact "):
@@ -4288,6 +4447,14 @@ def main(resume: bool = False) -> None:
         _suara.tutup()
     except Exception:  # noqa: BLE001
         pass
+    # Mikrofon DILEPAS. Thread-nya daemon (takkan menahan proses), tapi aliran
+    # audionya memegang perangkat: tanpa ini indikator "sedang merekam" di
+    # Windows bisa menyala beberapa saat sesudah bagas-ai ditutup.
+    if voice_state.get("pendengar") is not None:
+        try:
+            voice_state["pendengar"].berhenti()
+        except Exception:  # noqa: BLE001
+            pass
     # Tutup browser connector dengan RAPI supaya Chrome tak mengira dirinya
     # crash & menawarkan "Restore pages?" saat dipakai lagi.
     try:
