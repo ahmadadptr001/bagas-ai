@@ -142,7 +142,7 @@ def _user32() -> Any:
         u.SetForegroundWindow.argtypes = [wintypes.HWND]
         u.SetForegroundWindow.restype = wintypes.BOOL
         # Menampilkan jendela TIDAK sama dengan membuatnya terlihat: jendela
-        # connector dilahirkan di -32000,-32000 (lihat _launch), jadi sesudah
+        # connector dilahirkan di luar layar (lihat posisi_sembunyi), jadi sesudah
         # ShowWindow ia tetap di luar setiap monitor. Tiga fungsi ini yang
         # menyeretnya kembali ke dalam layar.
         u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
@@ -185,12 +185,38 @@ def _kelas_jendela(u: Any, hwnd: Any) -> str:
         return ""
 
 
+def posisi_sembunyi() -> tuple[int, int]:
+    """Koordinat "di luar layar tapi MASUK AKAL" untuk melahirkan jendela.
+
+    Dulu dipakai -32000,-32000: pasti tak terlihat, tapi juga pasti mustahil.
+    Halaman membaca posisi jendela lewat window.screenX/screenY, dan tak ada
+    manusia yang punya monitor di koordinat itu — bagi mesin penilai risiko
+    (chat.z.ai memakai Aliyun Captcha) itu penanda yang menonjol. TERCATAT di
+    repo ini: jendela mulai dilahirkan di -32000,-32000 pada 6 Agu 20:24, dan
+    captcha pertama dilaporkan pengguna sekitar 22:27 hari yang sama. Korelasi,
+    bukan bukti — tapi tak ada alasan mempertahankan angka yang mustahil itu.
+
+    Yang dipakai sekarang: persis di sebelah KANAN seluruh layar, seukuran
+    tepat satu jendela. Tetap tak pernah terlihat, tapi bentuknya sama seperti
+    jendela yang dibuka di monitor kedua — hal yang sehari-hari terjadi."""
+    u = _user32()
+    if u is None:
+        return -2000, 40
+    try:
+        vx, vw = u.GetSystemMetrics(76), u.GetSystemMetrics(78)
+        if vw > 0:
+            return vx + vw + 8, 40
+    except Exception:  # noqa: BLE001
+        pass
+    return -2000, 40
+
+
 def _di_luar_layar(u: Any, hwnd: Any) -> bool:
     """True bila jendela itu praktis tak ada di layar mana pun.
 
     Bukan sekadar "sebagian keluar tepi": yang dicari adalah jendela yang tak
     menyisakan bidang yang cukup untuk disentuh — termasuk jendela connector
-    yang memang dilahirkan di -32000,-32000."""
+    yang memang dilahirkan di luar layar (lihat posisi_sembunyi)."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -318,7 +344,7 @@ def set_windows_visible(service: str, visible: bool) -> int:
                 # jendela tiap kali pesan dikirim berarti merebut fokus dari
                 # terminal yang sedang diketik pengguna.
                 # "Terlihat" menurut Windows TIDAK berarti terlihat oleh mata:
-                # jendela di -32000,-32000 berstatus visible. Tanpa syarat
+                # jendela di luar layar tetap berstatus visible. Tanpa syarat
                 # terakhir ini, jendela yang sudah pernah di-ShowWindow proses
                 # lain akan dilewati di sini dan pengguna dikirimi kabar
                 # "jendelanya sudah terbuka" untuk jendela yang tak ada di
@@ -1084,7 +1110,8 @@ class BrowserHub:
             # Ditaruh di koordinat yang mustahil terlihat di monitor mana pun,
             # dan ukurannya tetap wajar supaya situs merender seperti biasa
             # (layout responsif situs chat berubah di jendela sempit).
-            opts["args"] += ["--window-position=-32000,-32000",
+            sx, sy = posisi_sembunyi()
+            opts["args"] += [f"--window-position={sx},{sy}",
                              "--window-size=1280,900"]
             # --start-maximized MEMBATALKAN posisi di atas: Chrome memaksimalkan
             # jendelanya ke layar utama, jadi ia muncul persis di tengah.

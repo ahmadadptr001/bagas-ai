@@ -2941,7 +2941,7 @@ class WebConnector:
             cdp = page.context.new_cdp_session(page)
             info = cdp.send("Browser.getWindowForTarget")
             # Posisinya ikut ditentukan, bukan cuma windowState. Jendela ini
-            # dilahirkan di -32000,-32000 supaya tak pernah berkelebat, dan
+            # dilahirkan di LUAR LAYAR supaya tak pernah berkelebat, dan
             # "normal" saja mengembalikannya persis ke sana — tampil menurut
             # sistem, tapi tak ada di layar pengguna.
             cdp.send("Browser.setWindowBounds", {
