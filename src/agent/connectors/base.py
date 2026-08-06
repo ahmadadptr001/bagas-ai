@@ -1896,6 +1896,12 @@ class WebConnector:
             f"{self.service}.py."
         )
 
+    # Berapa lama menunggu situs SELESAI menjawab sebelum menyatakan komposer
+    # terkunci. Jawaban panjang di chat.z.ai bisa menulis semenit lebih, dan
+    # menyerah lebih cepat berarti menuduh komposer rusak padahal ia cuma
+    # sedang dipakai.
+    _TUNGGU_SELESAI = 120.0
+
     def _submit(self, page: Any, inp: Any) -> None:
         """Kirim pesan, dan PASTIKAN benar-benar terkirim.
 
@@ -1948,6 +1954,36 @@ class WebConnector:
             page.wait_for_timeout(400)
             if self._sudah_terkirim(page, inp, counts0, url0):
                 return
+        # SEBELUM MENYERAH: situsnya mungkin MASIH MENJAWAB pesan sebelumnya.
+        # Komposer memang dikunci selama itu, dan tak ada spanduk apa pun yang
+        # muncul — jadi gejalanya persis "komposer menolak Enter", tuduhan yang
+        # salah sasaran dan tak bisa ditindaklanjuti pengguna.
+        #
+        # Terjadi berpasangan dengan kegagalan sebelumnya: giliran yang berakhir
+        # "tak ada balasan baru" bisa meninggalkan situs yang masih menulis, dan
+        # kiriman berikutnya menabrak kunci itu. Karena itu ditunggu — bukan
+        # ditebak — lalu dicoba sekali lagi.
+        if not self._is_done(page):
+            habis = time.time() + self._TUNGGU_SELESAI
+            while time.time() < habis and not self._is_done(page):
+                if self._sudah_terkirim(page, inp, counts0, url0):
+                    return          # ternyata berangkat juga
+                page.wait_for_timeout(500)
+            page.keyboard.press(self.submit_key)
+            page.wait_for_timeout(400)
+            if self._sudah_terkirim(page, inp, counts0, url0):
+                return
+            try:
+                btn = page.locator(self.send_button_selector).first
+                if btn.count():
+                    self._click_element(btn)
+            except Exception:  # noqa: BLE001
+                pass
+            for _ in range(6):
+                if self._sudah_terkirim(page, inp, counts0, url0):
+                    return
+                page.wait_for_timeout(500)
+
         # Menyerah. Teks yang gagal berangkat WAJIB disapu dulu: percobaan
         # berikutnya mengetik dengan insert_text di posisi caret, jadi sisa
         # pesan lama membuat kiriman ulang berisi pesan yang sama DUA KALI
@@ -1972,10 +2008,23 @@ class WebConnector:
         # "coba kirim ulang" ke kotak yang tak akan menerima apa pun.
         self._raise_if_context_full(page)
         self._raise_if_limited(page)
+        # Keadaan situs ikut disebut: "masih menulis" dan "diam tapi menolak"
+        # adalah dua masalah yang berbeda, dan menyamakan kalimatnya membuat
+        # yang pertama tampak seperti kerusakan padahal ia cuma butuh waktu.
+        try:
+            masih = not self._is_done(page)
+        except Exception:  # noqa: BLE001
+            masih = False
         raise BrowserError(
             f"pesan tak mau terkirim di {self.label} — komposer menolak Enter "
-            "maupun tombol kirim (mungkin sedang terkunci situs). Kotak input "
-            "sudah dikosongkan lagi; coba kirim ulang.")
+            "maupun tombol kirim. "
+            + (f"Situsnya MASIH menulis jawaban sebelumnya walau sudah ditunggu "
+               f"{self._TUNGGU_SELESAI:.0f} detik — jawaban yang kepanjangan "
+               "atau situs yang tersendat. "
+               if masih else
+               "Situsnya tak sedang menulis apa pun, jadi komposernya memang "
+               "terkunci (atau selektor tombol kirimnya berubah). ")
+            + "Kotak input sudah dikosongkan lagi; coba kirim ulang.")
 
     def _sudah_terkirim(self, page: Any, inp: Any, counts0: dict[str, int],
                         url0: str) -> bool:
