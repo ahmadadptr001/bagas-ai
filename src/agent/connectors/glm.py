@@ -140,7 +140,18 @@ class GlmConnector(WebConnector):
     # Kartu pratinjau di komposer: <button class="relative group flex items-center
     # gap-2.5 …"> berisi nama berkas + "PNG · 358.5 KB", tersusun di dalam
     # `.chip-scroll`. Ini yang dihitung sebagai bukti "file sudah menempel".
-    attach_item_selector = ".messageInputContainer .chip-scroll button"
+    #
+    # `>` (anak LANGSUNG) itu penting, bukan gaya penulisan: tiap kartu memuat
+    # TIGA <button> (kartunya sendiri, thumbnail di dalamnya, dan silang
+    # penghapusnya). TERUKUR: 3 berkas terbaca 9 dengan selektor keturunan —
+    # dan penantian unggahan menunggu `sebelum + jumlah berkas`, jadi hitungan
+    # yang membengkak membuatnya berhenti sebelum unggahannya benar-benar
+    # tuntas, lalu pesan berangkat tanpa gambar.
+    attach_item_selector = ".messageInputContainer .chip-scroll > button"
+    # Silang penghapus di pojok tiap kartu (kelasnya `invisible … rounded-full`
+    # — hanya terlihat saat kartunya di-hover, tapi tetap bisa diklik program).
+    attach_clear_selector = (
+        ".messageInputContainer .chip-scroll button.rounded-full")
 
     # Kandidat ITEM MENU untuk jalur BAWAAN base — dipakai HANYA oleh daftar
     # model, karena panel effort & mode ditangani sendiri di bawah.

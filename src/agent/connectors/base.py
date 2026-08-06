@@ -602,6 +602,12 @@ class WebConnector:
     # dan pesannya masih bisa dikirim tanpa gambar. Kosong = situs ini belum
     # pernah terlihat membatasi.
     attach_limit_patterns: tuple[str, ...] = ()
+    # Tombol BATAL pada tiap kartu lampiran di komposer (silang kecilnya).
+    # Dipakai saat unggahan gagal/ditolak: kartu yang terlanjur menempel harus
+    # dilepas, kalau tidak pesan pengganti yang dikirim menyusul ikut membawa
+    # (atau ikut diblokir oleh) lampiran yang sama. Kosong = connector ini
+    # belum dipetakan tombol batalnya.
+    attach_clear_selector: str = ""
     # Teks yang BUKAN jawaban (chrome UI situs), mis. indikator berpikir
     # "Thought for 2s". Bila SELURUH teks yang terbaca hanya ini, artinya jawaban
     # BELUM muncul — jangan dianggap sebagai balasan (akar bug: giliran berhenti
@@ -1702,9 +1708,30 @@ class WebConnector:
             page.wait_for_timeout(400)
         # Sebelum menyerah, sekali lagi: toast-nya bisa muncul terlambat.
         self._raise_if_attach_limit(page)
+        # Unggahan yang tak pernah selesai juga meninggalkan kartu setengah
+        # jadi di komposer; pesan berikutnya tak boleh membawanya.
+        self._bersihkan_lampiran(page)
         raise BrowserError(
             f"unggahan lampiran ke {self.label} tak selesai dalam "
             f"{self.attach_timeout:.0f} detik.")
+
+    def _bersihkan_lampiran(self, page: Any, batas: int = 15) -> int:
+        """Lepas semua kartu lampiran dari komposer. Kembalikan jumlah yang
+        berhasil dilepas (best-effort; kegagalan di sini tak fatal)."""
+        if not self.attach_clear_selector:
+            return 0
+        lepas = 0
+        for _ in range(batas):
+            try:
+                loc = page.locator(self.attach_clear_selector)
+                if not loc.count():
+                    break
+                self._click_element(loc.first, timeout=4000)
+                lepas += 1
+                page.wait_for_timeout(350)
+            except Exception:  # noqa: BLE001 - kartu keburu hilang/DOM berubah
+                break
+        return lepas
 
     def detect_attach_limit(self, page: Any) -> str:
         """Teks pemberitahuan "batas jumlah berkas" bila sedang tampil."""
@@ -1719,9 +1746,20 @@ class WebConnector:
             return ""
 
     def _raise_if_attach_limit(self, page: Any) -> None:
+        """Batas berkas kena -> BUANG kartu yang terlanjur menempel, lalu
+        laporkan.
+
+        Membuangnya bukan kerapian melainkan SYARAT: pemanggil menjawab galat
+        ini dengan mengirim ULANG pesannya tanpa lampiran, dan kartu yang masih
+        nangkring di komposer membuat kiriman itu ikut ditolak — persis
+        kegagalan yang sama, sekali lagi. Situsnya pun tak akan menerima
+        berkasnya: jatahnya sudah habis, jadi kartu itu tak akan pernah bisa
+        berangkat."""
         pesan = self.detect_attach_limit(page)
-        if pesan:
-            raise WebLampiranPenuhError(" ".join(pesan.split())[:160])
+        if not pesan:
+            return
+        self._bersihkan_lampiran(page)
+        raise WebLampiranPenuhError(" ".join(pesan.split())[:160])
 
     # Taruh CARET di dalam elemen contenteditable, di akhir isinya.
     #
@@ -1868,6 +1906,10 @@ class WebConnector:
         # sambung-menyambung — model lalu membacanya sebagai satu permintaan
         # aneh yang panjang.
         self._kosongkan_kotak(page, inp)
+        # Kartu lampiran ikut disapu: kalau pengirimannya gagal justru KARENA
+        # lampiran (mis. jatah berkas habis), meninggalkannya di komposer
+        # membuat percobaan berikutnya gagal dengan alasan yang sama.
+        self._bersihkan_lampiran(page)
         # Baru sesudah itu penyebabnya ditanyakan ke halaman. TERLIHAT di
         # kimi.com: spanduk "Server exception, please try again later." muncul
         # dan komposernya ikut terkunci — gejalanya di terminal justru
