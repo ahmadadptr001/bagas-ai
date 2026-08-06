@@ -3212,6 +3212,19 @@ def main(resume: bool = False) -> None:
             threading.Thread(target=_dengar.bunyi, args=(True,),
                              daemon=True).start()
             nama = _dengar.nama_mikrofon() or "mikrofon bawaan"
+            # Kalibrasi derau berjalan di thread perekam & butuh ±0,7 detik;
+            # angkanya ditampilkan begitu siap supaya "kenapa tak dengar" bisa
+            # dijawab tanpa menebak.
+            def _lapor_ambang() -> None:
+                for _ in range(30):
+                    if p.ambang:
+                        console.print(
+                            f"  [dim]🎙 derau ruangan {p.derau:.1f} → ambang "
+                            f"bicara {p.ambang:.0f}[/dim]")
+                        return
+                    time.sleep(0.1)
+
+            threading.Thread(target=_lapor_ambang, daemon=True).start()
             console.print(
                 f"  [#9fc93c]● mikrofon AKTIF[/] [dim]— {_esc(nama)}[/]\n"
                 "  [dim]sebut[/] [#fcc048]\"bagas ai\"[/] [dim]untuk mulai, "
@@ -3241,9 +3254,19 @@ def main(resume: bool = False) -> None:
                 return
             # Dua kegagalan yang dari luar tampak sama (tak ada teks) dipisah
             # oleh angka ini: mikrofon bisu vs pengenalan yang tak paham.
-            console.print(f"  [dim]tingkat suara tertinggi: {puncak:.0f}"
-                          f"{'  (mikrofon terdengar sunyi)' if puncak < 180 else ''}"
-                          "[/dim]")
+            # Angkanya DIBANDINGKAN dengan ambangnya, bukan berdiri sendiri.
+            # "Mikrofonnya tuli" kemarin lahir persis dari sini: ambang dipatok
+            # 180 sementara mikrofon pengguna ber-gain rendah (derau 0,5), jadi
+            # suaranya tak pernah lewat — dan tak ada satu angka pun di layar
+            # yang bisa menunjukkannya.
+            console.print(
+                f"  [dim]tingkat suara tertinggi: {puncak:.0f}   "
+                f"ambang bicara: ±{_dengar._LANTAI:.0f} (mengikuti derau "
+                f"ruangan)[/dim]"
+                + ("\n  [yellow]mikrofonnya nyaris tak menangkap apa-apa[/]"
+                   "[dim] — periksa mikrofon yang dipilih Windows, atau "
+                   "naikkan volumenya di Pengaturan Suara.[/dim]"
+                   if puncak < _dengar._LANTAI else ""))
             if teks:
                 console.print(f"  [#9fc93c]✓ terdengar:[/] "
                               f"[#f2e3cc]{_esc(teks)}[/]\n")

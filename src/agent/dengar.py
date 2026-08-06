@@ -318,7 +318,33 @@ _MAKS_UCAPAN = 15.0     # satu POTONGAN kirim ke pengenal (bukan batas
                         # supaya yang terdengar muncul di layar sambil
                         # pengguna masih bicara, bukan menunggu 30 detik.
 _KALIBRASI = 0.7        # lama mengukur derau ruangan sebelum mulai
-_LANTAI = 180.0         # ambang terendah; di bawah ini mikrofon dianggap sunyi
+# Ambang terendah. DITURUNKAN dari 180 setelah keluhan "mic-nya rada tuli".
+# Sebabnya terukur: derau ruangan di laptop pengguna cuma 0,5 (mikrofon
+# ber-gain rendah), sementara ambangnya dipatok 180 — 360 kali lipat derau,
+# jadi suara bicara yang wajar tak pernah melewatinya dan seluruh ucapan
+# dibuang sebelum sempat dikenali.
+#
+# Yang benar: ambang mengikuti DERAU, bukan angka mati. Angka di bawah ini cuma
+# lantai pengaman supaya mikrofon yang benar-benar sunyi tak menganggap desis
+# elektroniknya sendiri sebagai ucapan.
+_LANTAI = 25.0
+# Berapa kali derau ruangan harus dilampaui. Dinaikkan dari 3,5 karena
+# lantainya turun jauh: di ruangan berisik, kelipatan inilah yang menjaga
+# supaya kipas/AC tak terus-menerus dikira orang bicara.
+_KALI_DERAU = 6.0
+# UCAPAN TIDAK DIKERASKAN — dan itu keputusan yang DIUKUR, bukan kelalaian.
+#
+# Menaikkan volume sebelum mengirim ke pengenal terdengar masuk akal untuk
+# mikrofon ber-gain rendah, dan sempat dipasang. Percobaan dengan kalimat yang
+# sama pada beberapa tingkat volume menunjukkan sebaliknya:
+#
+#   puncak 384  -> tanpa penguatan BENAR, dengan penguatan BENAR
+#   puncak 192  -> tanpa penguatan BENAR, dengan penguatan "tak terdengar jelas"
+#
+# Pengenalnya sudah menormalkan sendiri; yang ikut dibesarkan oleh penguatan
+# justru derau kuantisasi, dan di suara paling pelan itulah yang mematikannya.
+# Jadi yang membuat mikrofon terasa "tuli" bukan volumenya, melainkan AMBANG
+# di atas — dan itu yang diperbaiki.
 
 
 def siap() -> tuple[bool, str]:
@@ -442,6 +468,10 @@ class Pendengar:
         # on_dengar(teks, sedang_merekam) -> ditampilkan sebagai "yang terdengar"
         self.on_dengar = on_dengar or (lambda _t, _m: None)
         self.perakit = Perakit(maks_rekam)
+        # Hasil kalibrasi derau ruangan — ditampilkan ke pengguna supaya
+        # "mikrofonnya tuli" bisa dijawab angka, bukan dugaan.
+        self.derau = 0.0
+        self.ambang = 0.0
         self._stop = threading.Event()
         # Sampai kapan blok audio DIBUANG (selagi ketukan penanda berbunyi).
         # Tanpa ini, bunyi bagas-ai sendiri ikut terekam lalu dikirim ke
@@ -516,7 +546,8 @@ class Pendengar:
             data, _ = stream.read(BLOK)
             contoh.append(_rms(data))
         derau = sorted(contoh)[len(contoh) // 2] if contoh else 0.0
-        ambang = max(derau * 3.5, _LANTAI)
+        ambang = max(derau * _KALI_DERAU, _LANTAI)
+        self.derau, self.ambang = derau, ambang
         log.debug("derau ruangan %.0f -> ambang %.0f", derau, ambang)
 
         potongan: list[Any] = []
