@@ -38,6 +38,25 @@ titik p lalu perbaiki galaknya lakukan". Dua pelajarannya terpasang di sini:
      yang salah dengar tetap ditampilkan apa adanya sebelum dikerjakan, jadi
      pengguna melihat apa yang akan dijalankan.
 
+KESUNYIAN ITU BUG, BUKAN KEADAAN NORMAL
+---------------------------------------
+Dilaporkan pengguna: "sudah bilang … lakukan, tapi AI-nya tak berbuat apa-apa."
+Yang terjadi terlihat di layarnya sendiri — tiap barisnya bertanda "·" (belum
+merekam), artinya namanya tak pernah sampai ke pengenal suara. Bagas-ai tahu
+itu dan DIAM SAJA; pengguna tak punya cara menebaknya.
+
+Tiga hal yang lahir dari situ, semuanya soal membuat yang tak terlihat jadi
+terlihat:
+
+  - ucapan yang tertangkap tapi tak terpahami tetap DILAPORKAN. Di situlah kata
+    pemicu paling sering hilang: ia pendek, diucapkan sendirian, lalu tak
+    terbaca — dan dulu itu berakhir di `continue` tanpa sepatah kata;
+  - kata penutup yang terdengar SEBELUM namanya disebut dijawab dengan
+    petunjuk, bukan didiamkan;
+  - jeda pemisah ucapan dilonggarkan (0,9 -> 1,3 detik), sebab orang menyebut
+    nama lalu berhenti sebentar menunggu tanda diterima — dan jeda itulah yang
+    memotong "bagas ai" jadi potongan tersendiri yang gagal dikenali.
+
 Semua kegagalan di modul ini berakhir jadi kabar, bukan lemparan: mikrofon yang
 bermasalah tak boleh menjatuhkan sesi yang sedang bekerja.
 """
@@ -55,9 +74,12 @@ log = logging.getLogger(__name__)
 # --- kata pemicu & penutup -------------------------------------------------
 # Ditulis sebagai POLA PER-KATA, bukan potongan teks: pengenal suara memisah
 # "bagasai" jadi dua kata dan sesekali salah dengar konsonan awalnya.
-_NAMA_KEDUA = {"ai", "hai", "ay", "a", "i", "eye"}
-_NAMA_RAPAT = {"bagasai", "bagas-ai", "bagasi", "pagasai", "bagasay"}
-_NAMA_PERTAMA = {"bagas", "pagas", "bagus", "begas"}
+_NAMA_KEDUA = {"ai", "hai", "ay", "a", "i", "eye", "ei"}
+_NAMA_RAPAT = {"bagasai", "bagas-ai", "bagasi", "pagasai", "bagasay",
+               "bagasih", "bagaskara", "bagasi"}
+_NAMA_PERTAMA = {"bagas", "pagas", "bagus", "begas", "bagaz"}
+# Yang boleh jadi panggilan TUNGGAL di awal kalimat — lihat cari_nama().
+_NAMA_SENDIRI = {"bagas", "bagaz"}
 PENUTUP = {"lakukan", "lakuin", "laksanakan", "kerjakan"}
 
 # BATAS MEREKAM: 30 detik sejak namanya disebut. Lewat itu, perintahnya
@@ -86,6 +108,17 @@ def cari_nama(kata: list[str]) -> int:
             return i + 1
         if k in _NAMA_PERTAMA and i + 1 < len(kata) and kata[i + 1] in _NAMA_KEDUA:
             return i + 2
+    # "Bagas" SENDIRIAN diterima hanya bila ia kata PERTAMA. Orang yang
+    # memanggil memang sering menjatuhkan "ai"-nya ("bagas, tolong buka…"),
+    # sementara "bagas" di tengah kalimat jauh lebih mungkin bagian obrolan.
+    #
+    # Daftarnya SENGAJA lebih sempit daripada _NAMA_PERTAMA: salah-dengar yang
+    # ditampung di sana ("bagus", "pagas") adalah kata-kata yang lumrah
+    # diucapkan sendiri — "bagus sekali" akan memicu perintah tanpa seorang pun
+    # bermaksud memanggil. Sebagai pasangan "ai" mereka aman, sebagai panggilan
+    # tunggal tidak.
+    if kata and kata[0] in _NAMA_SENDIRI:
+        return 1
     return -1
 
 
@@ -181,7 +214,13 @@ class Perakit:
 # --- mikrofon --------------------------------------------------------------
 LAJU = 16000            # 16 kHz mono: yang diminta hampir semua pengenal suara
 BLOK = 1024             # ±64 ms per blok
-_DIAM_SELESAI = 0.9     # sunyi selama ini -> satu ucapan dianggap selesai
+_DIAM_SELESAI = 1.3     # sunyi selama ini -> satu ucapan dianggap selesai.
+                        # DINAIKKAN dari 0,9: orang menyebut nama lalu
+                        # BERHENTI SEBENTAR menunggu tanda diterima, dan
+                        # jeda itu memotong "bagas ai" jadi ucapan
+                        # tersendiri — potongan sependek itu paling sering
+                        # gagal dikenali, jadi namanya hilang tanpa jejak
+                        # dan sisa kalimatnya dikira obrolan ruangan.
 _MIN_UCAPAN = 0.35      # lebih pendek dari ini: dentuman meja, bukan ucapan
 _MAKS_UCAPAN = 15.0     # satu POTONGAN kirim ke pengenal (bukan batas
                         # perintah — lihat MAKS_REKAM). Dipotong berkala
@@ -406,15 +445,32 @@ class Pendengar:
                 teks = rec.recognize_google(sr.AudioData(data, LAJU, 2),
                                             language="id-ID")
             except sr.UnknownValueError:
-                continue               # cuma derau/dehem — bukan kegagalan
+                # DIKATAKAN, tidak ditelan. Ucapan yang tertangkap tapi tak
+                # terpahami itu keadaan yang sama sekali berbeda dari mikrofon
+                # yang diam — dan dari luar keduanya sama-sama tak menghasilkan
+                # apa pun di layar. Justru di sinilah kata pemicu paling sering
+                # hilang: ia pendek, diucapkan sendirian, lalu tak terbaca.
+                self.on_dengar("(tertangkap, tapi tak terdengar jelas)",
+                               self.perakit.merekam)
+                continue
             except Exception as exc:  # noqa: BLE001 - jaringan/layanan
                 self.on_kabar(f"pengenalan suara gagal: {exc}")
                 continue
             if not teks.strip():
                 continue
             self.on_dengar(teks, self.perakit.merekam)
+            sedang = self.perakit.merekam
             hasil = self.perakit.dengar(teks)
             if hasil is None:
+                # "lakukan" terdengar padahal belum merekam: pengguna mengira
+                # ia sedang memerintah, bagas-ai menganggapnya obrolan. Dulu
+                # keadaan ini SENYAP total — dan itu persis yang membuatnya
+                # tampak "tak berbuat apa-apa". (Dilaporkan pengguna.)
+                if not sedang and cari_penutup(_kata(teks)) >= 0:
+                    self.on_kabar(
+                        "terdengar kata penutup, tapi namaku belum disebut — "
+                        "mulai dengan \"bagas ai\", mis. "
+                        "\"bagas ai tolong baca file ini lakukan\"")
                 continue
             if not hasil:
                 self.on_kabar("kata `lakukan` terdengar, tapi tak ada perintah "
