@@ -198,7 +198,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("mode", "mode kerja situs: buat gambar/video, dll"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
-    ("voice", "mikrofon: ucapkan \"on …\" lalu \"enter\" (on/off/tes)"),
+    ("voice", "mikrofon: sebut \"bagas ai …\" lalu \"lakukan\" (on/off/tes)"),
     ("compact", "simpan riwayat percakapan ke berkas memory"),
     ("send-compact", "kirim berkas memory terakhir ke percakapan sekarang"),
     ("add-dir", "tambah folder konteks"),
@@ -3181,7 +3181,7 @@ def main(resume: bool = False) -> None:
     # dengar.Pendengar.on_dengar untuk penelusuran.
 
     def show_voice(arg: str = "") -> None:
-        """/voice — mikrofon: ucapkan "on …" lalu "enter".
+        """/voice — mikrofon: sebut "bagas ai …" lalu "lakukan".
 
         Sengaja MATI secara bawaan, dan tak disimpan ke preferensi: mikrofon
         yang menyala sendiri di sesi berikutnya adalah kejutan yang tak seorang
@@ -3214,13 +3214,13 @@ def main(resume: bool = False) -> None:
             nama = _dengar.nama_mikrofon() or "mikrofon bawaan"
             console.print(
                 f"  [#9fc93c]● mikrofon AKTIF[/] [dim]— {_esc(nama)}[/]\n"
-                "  [dim]ucapkan[/] [#fcc048]\"on\"[/] [dim]untuk mulai, tutup "
-                "dengan[/] [#fcc048]\"enter\"[/][dim]. Contoh:[/]\n"
-                "  [dim]  \"on tolong buka main.py enter\"[/]\n"
+                "  [dim]sebut[/] [#fcc048]\"bagas ai\"[/] [dim]untuk mulai, "
+                "tutup dengan[/] [#fcc048]\"lakukan\"[/][dim]. Contoh:[/]\n"
+                "  [dim]  \"bagas ai tolong buka main.py lakukan\"[/]\n"
                 "  [dim]begitu namaku terdengar ada ketukan pendek, lalu "
                 "ketukan halus tiap beberapa detik SELAMA merekam — dan bar "
                 "status di bawah berubah jadi[/] [#fcc048]● merekam[/][dim]. "
-                "Ucapkan[/] [#fcc048]\"off\"[/] [dim]untuk membuang "
+                "Ucapkan[/] [#fcc048]\"batalkan\"[/] [dim]untuk membuang "
                 "rekaman yang sedang berjalan. Satu perintah maksimal "
                 f"{_dengar.MAKS_REKAM:.0f} detik.[/dim]\n")
             return
@@ -3261,10 +3261,10 @@ def main(resume: bool = False) -> None:
         console.print(f"  [dim]mikrofon :[/] {_esc(_dengar.nama_mikrofon() or '-')}")
         if not ok:
             console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]")
-        console.print("  [dim]cara pakai:[/] ucapkan [#fcc048]\"on\"[/] "
+        console.print("  [dim]cara pakai:[/] sebut [#fcc048]\"bagas ai\"[/] "
                       "lalu perintahnya, tutup dengan "
-                      "[#fcc048]\"enter\"[/] [dim]· buang dengan[/] "
-                      "[#fcc048]\"off\"[/]")
+                      "[#fcc048]\"lakukan\"[/] [dim]· buang dengan[/] "
+                      "[#fcc048]\"batalkan\"[/]")
         console.print("  [dim]yang dikirim hanya yang di ANTARA keduanya.[/dim]")
         console.print("  [dim]/voice on · /voice off · /voice tes[/dim]\n")
 

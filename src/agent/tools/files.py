@@ -618,7 +618,27 @@ def edit_file(path: str, old_text: str, new_text: str, count: int = 1) -> str:
         return "[error] tidak ada yang berubah."
     _snapshot(target)   # pre-image untuk undo_changes
     target.write_text(baru, encoding="utf-8")
-    msg = (f"Diubah: {_display(target)} ({diganti} kemunculan, "
+    # DIBACA ULANG untuk memastikan perubahannya BENAR-BENAR mendarat.
+    # Dilaporkan pengguna: "2 suntingan diterapkan" padahal katanya tak ada yang
+    # berubah. Tanpa pemeriksaan ini, laporan berhasil cuma bersandar pada
+    # write_text yang tak melempar — dan itu tak sama dengan berkasnya berubah
+    # (berkas terkunci program lain, ditulis ulang proses lain, disk penuh,
+    # tersinkron balik oleh OneDrive/Dropbox).
+    try:
+        sesudah = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as ex:
+        return (f"[GAGAL] {_display(target)} ditulis tapi tak bisa dibaca "
+                f"ulang untuk diperiksa: {ex}")
+    if sesudah != baru:
+        return (f"[GAGAL] tulisan ke {target} TIDAK mendarat: sesudah ditulis, "
+                f"isinya {len(sesudah)} karakter (seharusnya {len(baru)}). "
+                "Berkasnya kemungkinan dikunci/ditimpa program lain — periksa "
+                "editor yang sedang membukanya atau folder yang tersinkron "
+                "(OneDrive/Dropbox).")
+    # Path LENGKAP disebut, bukan yang relatif. Saat pengguna merasa "tak ada
+    # yang teredit", pertanyaan pertamanya selalu "berkas yang MANA" — dan path
+    # relatif tak pernah bisa menjawabnya.
+    msg = (f"Diubah: {target} ({diganti} kemunculan, "
            f"{len(isi)} -> {len(baru)} karakter).{catatan}")
     chk = _syntax_check(target)
     if chk:

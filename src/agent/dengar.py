@@ -3,16 +3,15 @@
 CARA PAKAI (dari sisi pengguna):
 
     /voice on          mikrofon menyala, bagas-ai mendengarkan
-    "on ..."           aba-aba mulai -> ucapan berikutnya dianggap perintah
-    "... enter"        kata penutup -> perintah dikirim ke kotak terminal
-    "... off"          batalkan rekaman yang sedang berjalan
+    "bagas ai ..."     namanya disebut -> ucapan berikutnya dianggap perintah
+    "... lakukan"      kata penutup -> perintah dikirim ke kotak terminal
+    "... batalkan"     buang rekaman yang sedang berjalan
     /voice off         mikrofon mati (ini keadaan bawaannya)
 
-Nama "bagas ai" tetap diterima sebagai aba-aba mulai selain "on". Ia cadangan
-yang sengaja dipertahankan: "on" cuma dua huruf, dan sekali saja ia salah
-dengar, seluruh perintah sesudahnya jadi obrolan biasa tanpa pengguna tahu
-sebabnya. Bedanya, "on" HARUS jadi kata pertama sebuah ucapan — di tengah
-kalimat ia terlalu lumrah ("nyalain wifi on") untuk dianggap panggilan.
+Kata penutupnya lentur: "lakukan", "laksanakan", "kerjakan", "lakuin",
+"eksekusi" — sama saja. Begitu pula pembatalnya: "batalkan",
+"batal", "batalin". Orang tak mengucapkan kata yang persis sama tiap kali, dan
+aba-aba yang menuntut hafalan satu kata justru bikin perintah gagal berangkat.
 
 Satu perintah boleh sepanjang 30 detik sejak namanya disebut (MAKS_REKAM).
 Lewat itu ia dibatalkan, bukan dikirim setengah jadi.
@@ -28,8 +27,8 @@ keputusan mulai & selesai ke pengguna, dan itu satu-satunya tempat yang benar.
 
 APA YANG DIKIRIM
 ----------------
-Hanya yang berada DI ANTARA keduanya. "on tolong buka main.py enter"
-menjadi perintah "tolong buka main.py" — kata pemicu & penutupnya dibuang,
+Hanya yang berada DI ANTARA keduanya. "bagas ai tolong buka main.py
+lakukan" menjadi perintah "tolong buka main.py" — kata pemicu & penutupnya dibuang,
 sebab keduanya ditujukan ke programnya, bukan ke AI.
 
 PENGENALAN SUARANYA TIDAK SEMPURNA, DAN ITU DIPERHITUNGKAN
@@ -81,29 +80,33 @@ log = logging.getLogger(__name__)
 # --- kata pemicu & penutup -------------------------------------------------
 # Ditulis sebagai POLA PER-KATA, bukan potongan teks: pengenal suara memisah
 # "bagasai" jadi dua kata dan sesekali salah dengar konsonan awalnya.
-# KATA PEMICU UTAMA: "on". Diterima HANYA sebagai kata PERTAMA sebuah ucapan —
-# ia terlalu pendek dan terlalu lumrah untuk diterima di tengah kalimat
-# ("nyalain wifi on" bukan panggilan). Di depan kalimat, ia jelas sebuah aba-aba.
-# Bentuk salah-dengarnya ikut ditampung: pengenal suara Indonesia menuliskan
-# kata Inggris sependek ini dengan bermacam ejaan.
-PEMICU = {"on", "onn", "own", "hon", "oon"}
+# KATA PEMICU: NAMANYA SENDIRI. "on" sempat dipakai lalu dikembalikan ke sini
+# atas permintaan pengguna — dan memang itu pilihan yang lebih sehat: aba-aba
+# dua huruf gampang salah dengar DAN gampang terpicu tanpa sengaja, sementara
+# "bagas ai" khas dan hampir mustahil muncul kebetulan.
 _NAMA_KEDUA = {"ai", "hai", "ay", "a", "i", "eye", "ei"}
 _NAMA_RAPAT = {"bagasai", "bagas-ai", "bagasi", "pagasai", "bagasay",
                "bagasih", "bagaskara", "bagasi"}
 _NAMA_PERTAMA = {"bagas", "pagas", "bagus", "begas", "bagaz"}
 # Yang boleh jadi panggilan TUNGGAL di awal kalimat — lihat cari_nama().
 _NAMA_SENDIRI = {"bagas", "bagaz"}
-# KATA PENUTUP: "enter". Dipilih karena sepadan dengan "on"/"off" (sama-sama
-# aba-aba pendek, bukan kata yang lazim muncul di tengah kalimat Indonesia) DAN
-# karena ia menggambarkan persis apa yang terjadi: teksnya masuk ke kotak
-# ketikan terminal lalu di-Enter. "lakukan" dan kerabatnya TETAP diterima —
-# kebiasaan yang sudah terbentuk tak perlu dipatahkan hanya karena ada kata yang
-# lebih tepat.
-PENUTUP = {"enter", "eksekusi", "lakukan", "lakuin", "laksanakan", "kerjakan"}
-# Kata BATAL: membuang rekaman yang sedang berjalan. Hanya berlaku SELAGI
-# merekam — di luar itu ia kata biasa dalam obrolan, dan menanggapinya cuma
-# menambah kebisingan.
-PEMBATAL = {"off", "of", "ov", "batalkan", "batal", "batalin"}
+# KATA PENUTUP: "lakukan" beserta kerabatnya. "enter" sempat dipakai lalu
+# dikembalikan atas permintaan pengguna. Beberapa bentuk diterima sekaligus
+# karena orang tak mengucapkan kata yang persis sama tiap kali — dan aba-aba
+# yang menuntut hafalan satu kata justru bikin perintah gagal berangkat.
+#
+# "jalankan" sempat ikut lalu DIBUANG: ia justru kata yang paling sering muncul
+# DI DALAM perintahnya sendiri ("jalankan ujinya", "jalankan npm run build"),
+# jadi ia akan memotong kalimat tepat di tengah lalu mengirim separuhnya.
+# Ujinya menangkap ini sebelum sempat dipakai. Aturannya: kata penutup harus
+# yang JARANG jadi isi perintah — bukan sekadar yang terdengar mirip artinya.
+PENUTUP = {"lakukan", "lakuin", "laksanakan", "kerjakan", "eksekusi"}
+# Kata BATAL: membuang rekaman yang sedang berjalan. "off" sempat dipakai lalu
+# dikembalikan ke "batalkan" atas permintaan pengguna — dan itu memang lebih
+# aman: "off"/"of" gampang muncul dari salah dengar, sedangkan "batalkan" jelas
+# maksudnya. Hanya berlaku SELAGI merekam; di luar itu ia kata biasa dalam
+# obrolan, dan menanggapinya cuma menambah kebisingan.
+PEMBATAL = {"batalkan", "batal", "batalin", "gajadi"}
 
 # Penanda hasil dengar(): perintahnya DIBATALKAN pengguna. Sengaja objek
 # tersendiri, bukan string kosong atau None — keduanya sudah punya arti lain
@@ -131,14 +134,7 @@ def _kata(teks: str) -> list[str]:
 
 
 def cari_pemicu(kata: list[str]) -> int:
-    """Indeks kata TEPAT SESUDAH aba-aba mulai, atau -1 bila tak ada.
-
-    Dua bentuk diterima: kata pemicu "on" (harus di DEPAN kalimat) dan nama
-    bagas-ai (boleh di mana saja). Namanya dipertahankan sebagai cadangan —
-    "on" cuma dua huruf, dan kalau ia salah dengar sekali saja, seluruh
-    perintah berikutnya jadi obrolan biasa tanpa pengguna tahu sebabnya."""
-    if kata and kata[0] in PEMICU:
-        return 1
+    """Indeks kata TEPAT SESUDAH namanya disebut, atau -1 bila tak disebut."""
     for i, k in enumerate(kata):
         if k in _NAMA_RAPAT:
             return i + 1
@@ -579,9 +575,9 @@ class Pendengar:
                 # tampak "tak berbuat apa-apa". (Dilaporkan pengguna.)
                 if not sedang and cari_penutup(_kata(teks)) >= 0:
                     self.on_kabar(
-                        "terdengar kata penutup, tapi belum ada aba-aba "
-                        "mulai — awali dengan \"on\", mis. "
-                        "\"on tolong baca file ini enter\"")
+                        "terdengar kata penutup, tapi namaku belum disebut — "
+                        "awali dengan \"bagas ai\", mis. "
+                        "\"bagas ai tolong baca file ini lakukan\"")
                 continue
             if not hasil:
                 self.on_kabar("kata `lakukan` terdengar, tapi tak ada perintah "
