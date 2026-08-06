@@ -141,6 +141,21 @@ def _user32() -> Any:
         u.GetClassNameW.restype = ctypes.c_int
         u.SetForegroundWindow.argtypes = [wintypes.HWND]
         u.SetForegroundWindow.restype = wintypes.BOOL
+        # Menampilkan jendela TIDAK sama dengan membuatnya terlihat: jendela
+        # connector dilahirkan di -32000,-32000 (lihat _launch), jadi sesudah
+        # ShowWindow ia tetap di luar setiap monitor. Tiga fungsi ini yang
+        # menyeretnya kembali ke dalam layar.
+        u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        u.GetWindowRect.restype = wintypes.BOOL
+        u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_uint]
+        u.SetWindowPos.restype = wintypes.BOOL
+        u.GetSystemMetrics.argtypes = [ctypes.c_int]
+        u.GetSystemMetrics.restype = ctypes.c_int
+        u.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT,
+                                            ctypes.c_void_p, wintypes.UINT]
+        u.SystemParametersInfoW.restype = wintypes.BOOL
         _U32.update(dll=u, proc=proc, hwnd=wintypes.HWND,
                     dword=wintypes.DWORD, byref=ctypes.byref,
                     buf=ctypes.create_unicode_buffer)
@@ -170,6 +185,73 @@ def _kelas_jendela(u: Any, hwnd: Any) -> str:
         return ""
 
 
+def _di_luar_layar(u: Any, hwnd: Any) -> bool:
+    """True bila jendela itu praktis tak ada di layar mana pun.
+
+    Bukan sekadar "sebagian keluar tepi": yang dicari adalah jendela yang tak
+    menyisakan bidang yang cukup untuk disentuh — termasuk jendela connector
+    yang memang dilahirkan di -32000,-32000."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        r = wintypes.RECT()
+        if not u.GetWindowRect(hwnd, ctypes.byref(r)):
+            return False
+        # Layar VIRTUAL: gabungan semua monitor, jadi jendela di monitor kedua
+        # tak dikira hilang lalu diseret paksa ke monitor utama.
+        vx, vy = u.GetSystemMetrics(76), u.GetSystemMetrics(77)
+        vw, vh = u.GetSystemMetrics(78), u.GetSystemMetrics(79)
+        if vw <= 0 or vh <= 0:
+            return False
+        lebar = min(r.right, vx + vw) - max(r.left, vx)
+        tinggi = min(r.bottom, vy + vh) - max(r.top, vy)
+        return lebar < 300 or tinggi < 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ke_layar(u: Any, hwnd: Any) -> bool:
+    """Seret jendela KEMBALI KE DALAM LAYAR bila ia di luar. True bila dipindah.
+
+    Menampilkan jendela tidak sama dengan membuatnya terlihat. Jendela
+    connector sengaja dilahirkan jauh di luar layar supaya tak pernah
+    berkelebat (lihat _launch), dan ShowWindow mengembalikannya persis ke
+    koordinat mustahil itu. Akibatnya fatal justru di saat yang paling
+    membutuhkan: captcha hanya bisa diselesaikan tangan manusia, pengguna
+    disuruh menyelesaikannya "di jendela yang sudah kubuka" — dan jendela itu
+    tak ada di layarnya. DILAPORKAN PENGGUNA: "jendelanya gada di layar,
+    terlalu tergeser ke samping"."""
+    if not _di_luar_layar(u, hwnd):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        r = wintypes.RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(r))
+        lebar, tinggi = r.right - r.left, r.bottom - r.top
+        kerja = wintypes.RECT()
+        # Bidang KERJA layar utama (di luar taskbar), bukan seluruh layar:
+        # jendela yang tepinya tertutup taskbar susah digeser lagi.
+        if not u.SystemParametersInfoW(0x0030, 0, ctypes.byref(kerja), 0):
+            kerja.left = kerja.top = 0
+            kerja.right = u.GetSystemMetrics(0)
+            kerja.bottom = u.GetSystemMetrics(1)
+        kw, kh = kerja.right - kerja.left, kerja.bottom - kerja.top
+        if lebar < 400 or lebar > kw:
+            lebar = max(400, kw - 120)
+        if tinggi < 300 or tinggi > kh:
+            tinggi = max(300, kh - 120)
+        x = kerja.left + max(0, (kw - lebar) // 2)
+        y = kerja.top + max(0, (kh - tinggi) // 2)
+        SWP_SHOWWINDOW = 0x0040
+        return bool(u.SetWindowPos(hwnd, None, x, y, lebar, tinggi,
+                                   SWP_SHOWWINDOW))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def set_windows_visible(service: str, visible: bool) -> int:
     """Sembunyikan / tampilkan JENDELA browser milik `service` (Windows).
 
@@ -195,6 +277,14 @@ def set_windows_visible(service: str, visible: bool) -> int:
                 hw = HWND(h)
                 if u.IsWindow(hw):
                     u.ShowWindow(hw, SW_SHOWNOACTIVATE)
+                    # Kalau ia harus diseret kembali ke layar, artinya ia
+                    # memang sedang benar-benar tersembunyi — dan yang
+                    # memanggil pasti butuh pengguna MENYENTUHNYA (login atau
+                    # captcha). Baru di situ fokus direbut; kalau jendelanya
+                    # sudah di layar, jangan ganggu terminal yang sedang
+                    # diketik.
+                    if _ke_layar(u, hw):
+                        u.SetForegroundWindow(hw)
                     shown += 1
             if shown:
                 return shown
@@ -227,9 +317,17 @@ def set_windows_visible(service: str, visible: bool) -> int:
                 # pengambilan halaman saat CONNECTOR_SHOW aktif, dan mengangkat
                 # jendela tiap kali pesan dikirim berarti merebut fokus dari
                 # terminal yang sedang diketik pengguna.
-                if u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd):
+                # "Terlihat" menurut Windows TIDAK berarti terlihat oleh mata:
+                # jendela di -32000,-32000 berstatus visible. Tanpa syarat
+                # terakhir ini, jendela yang sudah pernah di-ShowWindow proses
+                # lain akan dilewati di sini dan pengguna dikirimi kabar
+                # "jendelanya sudah terbuka" untuk jendela yang tak ada di
+                # layarnya.
+                if (u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd)
+                        and not _di_luar_layar(u, hwnd)):
                     return True
                 u.ShowWindow(hwnd, SW_RESTORE)
+                _ke_layar(u, hwnd)
                 u.SetForegroundWindow(hwnd)
                 shown += 1
                 return True

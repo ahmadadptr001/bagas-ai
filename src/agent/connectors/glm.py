@@ -478,6 +478,20 @@ class GlmConnector(WebConnector):
     # atau "captcha" sendirian: bagas-ai dipakai untuk ngoding, dan keduanya
     # lumrah muncul di jawaban model. Area percakapan juga dikecualikan
     # (limit_exclude_selectors di bawah).
+    # TERBACA LANGSUNG dari halaman pengguna saat captchanya sedang tampil:
+    # yang dipasang chat.z.ai adalah Aliyun Captcha, di dokumen utama (bukan
+    # iframe, bukan shadow DOM), dengan id yang tetap:
+    #   div#aliyunCaptcha-mask.mask-show          -> tirai layar penuh, z 1e7
+    #   div#aliyunCaptcha-window-popup.window-show -> kotaknya, 332x329, z 1e7+1
+    #     span#aliyunCaptcha-title         "Please complete security verification"
+    #     span#aliyunCaptcha-sliding-text  "Please drag the slider to complete…"
+    # Id-nya yang dipakai, bukan kelas -show/-hide: kelas itu bisa berganti
+    # nama, sedangkan "terlihat atau tidak" tetap bisa diukur apa adanya.
+    captcha_selectors = (
+        "#aliyunCaptcha-window-popup",
+        "#aliyunCaptcha-mask",
+    )
+
     captcha_patterns = (
         r"(?i)complete\s+(?:the\s+)?security\s+verification",
         r"(?i)drag\s+the\s+slider\s+to\s+complete",

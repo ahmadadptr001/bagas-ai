@@ -616,6 +616,14 @@ class WebConnector:
     # baru"). Satu-satunya jalan keluar adalah TANGAN MANUSIA, jadi yang bisa
     # dilakukan bagas-ai cuma mengenalinya lalu membukakan jendelanya.
     captcha_patterns: tuple[str, ...] = ()
+    # Elemen kotak captchanya, bila bentuknya sudah diketahui. Ini penanda yang
+    # jauh lebih kokoh daripada teks: teks bisa berganti bahasa (situsnya
+    # Tiongkok — kalimatnya sewaktu-waktu bisa jadi Mandarin), berganti kata,
+    # atau digambar di canvas. Elemennya tidak. TERUKUR di halaman pengguna:
+    # kotak Aliyun Captcha punya id tetap dan tinggal diperiksa terlihat atau
+    # tidak. Yang diperiksa VISIBILITASNYA, bukan keberadaannya — widgetnya
+    # menyisakan elemennya di DOM (display:none) sesudah tekaannya selesai.
+    captcha_selectors: tuple[str, ...] = ()
     # Tombol BATAL pada tiap kartu lampiran di komposer (silang kecilnya).
     # Dipakai saat unggahan gagal/ditolak: kartu yang terlanjur menempel harus
     # dilepas, kalau tidak pesan pengganti yang dikirim menyusul ikut membawa
@@ -2327,6 +2335,25 @@ class WebConnector:
         teksnya sama sekali — pemindaian yang berhenti di dokumen utama akan
         selamanya menjawab "tak ada captcha" sementara layarnya jelas-jelas
         memintanya, dan giliran itu menggantung tanpa satu pun kabar."""
+        # Penanda STRUKTURAL lebih dulu: kalau elemen kotaknya sudah dikenal,
+        # tak perlu menebak-nebak lewat kalimat.
+        for sel in self.captcha_selectors:
+            try:
+                el = page.locator(sel).first
+                if not el.count() or not el.is_visible(timeout=1000):
+                    continue
+                kotak = el.bounding_box()
+                if not kotak or kotak["width"] < 80 or kotak["height"] < 60:
+                    continue        # sisa elemen yang menciut, bukan kotak nyata
+                teks = el.inner_text(timeout=1000) or ""
+            except Exception:  # noqa: BLE001
+                continue
+            # Buang glyph ikon dari font sendiri (Private Use Area): di kotak
+            # Aliyun ada tiga di antara kalimatnya, dan di terminal itu tampil
+            # sebagai kotak-kotak rusak di tengah pemberitahuan.
+            teks = " ".join("".join(
+                ch for ch in teks if not 0xE000 <= ord(ch) <= 0xF8FF).split())
+            return teks[:180] or "kotak verifikasi keamanan sedang tampil"
         if not self.captcha_patterns:
             return ""
         arg = {"patterns": list(self.captcha_patterns),
@@ -2883,9 +2910,14 @@ class WebConnector:
         try:
             cdp = page.context.new_cdp_session(page)
             info = cdp.send("Browser.getWindowForTarget")
+            # Posisinya ikut ditentukan, bukan cuma windowState. Jendela ini
+            # dilahirkan di -32000,-32000 supaya tak pernah berkelebat, dan
+            # "normal" saja mengembalikannya persis ke sana — tampil menurut
+            # sistem, tapi tak ada di layar pengguna.
             cdp.send("Browser.setWindowBounds", {
                 "windowId": info["windowId"],
-                "bounds": {"windowState": "normal"},
+                "bounds": {"windowState": "normal", "left": 60, "top": 40,
+                           "width": 1200, "height": 850},
             })
         except Exception:  # noqa: BLE001
             pass
