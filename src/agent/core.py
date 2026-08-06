@@ -2087,6 +2087,10 @@ class Agent:
                         open_chat_id=open_chat_id,
                         complete_when=_web_reply_complete,
                         attachments=attachments,
+                        # Kabar yang HARUS terbaca pengguna (captcha muncul,
+                        # jendela dibuka, verifikasi selesai). Lewat on_status
+                        # kalimatnya diringkas jadi satu kata fase dan hilang.
+                        on_notice=on_notice,
                     )
                     break
                 except connectors.WebBusyError:

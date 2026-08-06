@@ -851,6 +851,7 @@ class WebConnector:
         open_chat_id: str = "",
         complete_when: Callable[[str], bool] | None = None,
         attachments: list[str] | None = None,
+        on_notice: Callable[[str], None] | None = None,
     ) -> str:
         """Kirim prompt ke situs & kembalikan teks jawaban (lewat thread hub).
 
@@ -887,6 +888,17 @@ class WebConnector:
         def _antre() -> None:
             if on_status:
                 on_status("menunggu giliran browser sebelumnya selesai…")
+
+        # Saluran KABAR dititipkan lewat atribut, bukan argumen: ia cuma dipakai
+        # penanganan captcha, dan menambah satu parameter lagi ke rantai
+        # send -> _send_on_hub -> _submit hanya untuk itu membuat tiga tanda
+        # tangan fungsi ikut melar tanpa alasan.
+        #
+        # PENTING: on_status TIDAK cukup. Terminal meringkas status connector
+        # jadi SATU KATA fase (cli._web_phase), jadi kalimat "selesaikan captcha
+        # di jendela" hilang seluruhnya sebelum sampai ke mata pengguna —
+        # pemberitahuan yang tak pernah terbaca sama saja dengan tak ada.
+        self._kabar = on_notice
 
         def _sekali() -> str:
             return hub().submit(
@@ -1927,6 +1939,9 @@ class WebConnector:
     # _send_on_hub tiap kirim: keduanya tak menerima on_status sebagai argumen,
     # sementara justru di situlah pengguna paling butuh diberi tahu.
     _status_captcha: Any = None
+    # Saluran KABAR ke terminal (tercetak permanen, bukan baris status yang
+    # berkedip). Diisi send(); lihat catatan di sana.
+    _kabar: Any = None
 
     def _submit(self, page: Any, inp: Any) -> None:
         """Kirim pesan, dan PASTIKAN benar-benar terkirim.
@@ -2261,16 +2276,26 @@ class WebConnector:
             return False
 
         def lapor(m: str) -> None:
-            if status:
+            """Sampaikan ke terminal lewat DUA saluran sekaligus.
+
+            Kabar dicetak permanen ke riwayat terminal — itu yang benar-benar
+            dibaca pengguna. Status cuma menghidupkan baris fase di footer, dan
+            kalimat panjang di situ diringkas jadi satu kata; mengandalkannya
+            saja berarti pemberitahuannya tak pernah sampai."""
+            for saluran in (self._kabar, status):
+                if not saluran:
+                    continue
                 try:
-                    status(m)
+                    saluran(m)
                 except Exception:  # noqa: BLE001
                     pass
 
-        singkat = " ".join(pesan.split())[:80]
-        lapor(f"{self.label} meminta verifikasi keamanan ({singkat}) — "
-              f"jendelanya kubuka {self._CAPTCHA_JEDA:.0f} detik lagi, "
-              "selesaikan lalu biarkan; sisanya kuurus sendiri")
+        singkat = " ".join(pesan.split())[:70]
+        lapor(f"⚠ {self.label} meminta VERIFIKASI KEAMANAN (captcha): "
+              f"\"{singkat}\". Captcha hanya bisa diselesaikan MANUSIA, jadi "
+              f"jendela browsernya akan kubuka {self._CAPTCHA_JEDA:.0f} detik "
+              "lagi — selesaikan tekaannya di sana, lalu tak usah apa-apakan "
+              "lagi: jendelanya kututup sendiri dan percakapan ini kulanjutkan.")
         # Diberi jeda supaya pemberitahuannya sempat terbaca SEBELUM jendelanya
         # melompat ke depan dan merebut perhatian.
         habis = time.time() + self._CAPTCHA_JEDA
@@ -2280,8 +2305,9 @@ class WebConnector:
             page.wait_for_timeout(200)
 
         self._foreground(page)
-        lapor(f"selesaikan verifikasi di jendela {self.label} — "
-              "aku menunggu di sini")
+        lapor(f"jendela {self.label} sudah terbuka — selesaikan captcha-nya "
+              "sekarang. Aku menunggu di sini (maksimal "
+              f"{self._CAPTCHA_TUNGGU / 60:.0f} menit; Ctrl+C untuk batal).")
         batas = time.time() + self._CAPTCHA_TUNGGU
         while time.time() < batas:
             if check_cancel:
@@ -2292,7 +2318,8 @@ class WebConnector:
                 # baru melanjutkan permintaan yang tertahan.
                 page.wait_for_timeout(1200)
                 self._background(page)
-                lapor(f"verifikasi selesai — {self.label} kembali ke latar")
+                lapor(f"✓ verifikasi selesai — jendela {self.label} kembali "
+                      "ke latar, percakapan dilanjutkan")
                 return True
         self._background(page)
         raise BrowserError(

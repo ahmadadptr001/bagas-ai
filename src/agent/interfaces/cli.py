@@ -2383,6 +2383,15 @@ def main(resume: bool = False) -> None:
             dan tanpa embel-embel "konteks dipertahankan": kalimat itu benar
             untuk pemulihan anti-macet, tapi jadi membingungkan pada peristiwa
             yang sama sekali bukan pemulihan."""
+            # CAPTCHA: pengguna harus BERTINDAK, dan jendela browser akan
+            # melompat ke depan beberapa detik lagi. Ditampilkan menonjol —
+            # kabar sebaris redup di tengah giliran yang sibuk terlalu mudah
+            # terlewat, dan yang terlewat di sini berakhir jadi giliran yang
+            # menggantung tanpa sebab yang kelihatan.
+            if "VERIFIKASI KEAMANAN" in msg or "captcha" in msg.lower():
+                _commit([_KOSONG, Text.from_markup(
+                    f"  [bold #f0603c]🔒 {_esc(msg)}[/]"), _KOSONG])
+                return
             if "disisipkan" in msg:
                 _commit([Text.from_markup(
                     f"  [#fc9018]✉ {_esc(msg)}[/] "
