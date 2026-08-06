@@ -122,7 +122,21 @@ def list_sessions(project_root: Path | None = None) -> list[Session]:
 
 
 def delete(sess: Session) -> bool:
-    """Hapus file sesi. Kembalikan True bila berhasil."""
+    """Hapus sesi BESERTA ingatannya. Kembalikan True bila berkasnya terhapus.
+
+    Berkas /compact milik sesi ini ikut dibuang. Menyimpannya setelah sesinya
+    dihapus bukan sekadar menyisakan sampah: isinya percakapan APA ADANYA —
+    kode, path, isi berkas — jadi menghapus sesi sambil meninggalkan salinan
+    utuhnya di disk adalah janji yang tak ditepati. Foldernya per sesi justru
+    supaya pembersihan ini bisa tepat sasaran (lihat konteks.dir_sesi).
+    """
+    import shutil
+
+    from . import konteks
+    try:
+        shutil.rmtree(konteks.dir_sesi(sess.id), ignore_errors=True)
+    except Exception:  # noqa: BLE001 - ingatan gagal dibuang tak boleh
+        pass          # menggagalkan penghapusan sesinya sendiri
     try:
         sess.path.unlink()
         return True

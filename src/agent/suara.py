@@ -1030,18 +1030,30 @@ def tutup() -> None:
         pass
 
 
+# Batas kewajaran satu bacaan. Dipakai sibuk(): penanda "mulai berbunyi" bisa
+# tertinggal menyala kalau mesin suaranya mati di tengah jalan, dan tanpa batas
+# ini penanda "tugas selesai" akan menunggu keadaan yang tak pernah berubah.
+_MAKS_BACA = 300.0
+
+
 def sibuk() -> bool:
     """True bila masih ada kabar yang mengantre atau sedang dibacakan."""
     p = _PENGUCAP
     if p is None:
         return False
     try:
-        return (not p._antre.empty()) or p._mulai_bunyi is not None
+        if not p._antre.empty():
+            return True
+        mulai = p._mulai_bunyi
+        if mulai is None:
+            return False
+        # Sudah kelewat lama = penandanya basi, bukan bacaan yang masih jalan.
+        return (time.monotonic() - mulai) < _MAKS_BACA
     except Exception:  # noqa: BLE001
         return False
 
 
-def tunggu_diam(batas: float = 30.0) -> None:
+def tunggu_diam(batas: float = 300.0) -> None:
     """Tahan sampai bacaannya selesai (atau `batas` detik terlampaui).
 
     Dipakai penanda "tugas selesai": bunyinya harus jatuh SESUDAH jawaban akhir

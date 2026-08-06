@@ -37,10 +37,14 @@ tempat menaruh bunyi pilihan sendiri:
     ~/.bagasai/suara/selesai-punyaku.wav     <- WAV apa pun; tak pernah ditimpa
     BAGASAI_SUARA_SELESAI=/path/ke/berkas.wav
 
-Bawaannya diambil dari repo bagas-ai saat pemasangan/pembaruan (unduh()). Kalau
-unduhannya gagal — luring, repo tak terjangkau — nadanya DIBANGKITKAN SENDIRI
-di laptop dengan bentuk yang sama. Fitur penanda tak boleh mati cuma karena
-satu berkas gagal diambil.
+Bawaannya diambil dari repo bagas-ai saat pemasangan/pembaruan (unduh()) —
+itulah berkas yang didengar semua pemasangan baru.
+
+Kalau unduhannya gagal (luring, repo tak terjangkau), yang dibunyikan BUKAN
+berkas itu melainkan nada lonceng yang dibangkitkan di laptop. Bunyinya jelas
+berbeda, dan itu memang disengaja: penanda yang tetap ada lebih berguna
+daripada penanda yang bisu hanya karena satu berkas gagal diambil. Begitu
+`bagas-ai update` berjalan dengan koneksi, berkas aslinya menggantikannya.
 """
 from __future__ import annotations
 
@@ -155,10 +159,13 @@ def unduh(paksa: bool = False) -> str:
         raise ValueError("isi berkas bukan WAV")
     except Exception as exc:  # noqa: BLE001 - luring / repo tak terjangkau
         log.debug("unduh bunyi penanda gagal: %s", exc)
-    # Cadangan: dibangkitkan sendiri. Bentuk nadanya sama, jadi pengguna tak
-    # bisa membedakannya — yang penting penandanya tetap ada.
+    # Cadangan: nada lonceng yang dibangkitkan sendiri. Bunyinya JELAS BERBEDA
+    # dari berkas bawaan, dan pengguna diberi tahu — penanda yang tetap ada
+    # lebih berguna daripada yang bisu, tapi menyamarkan bedanya cuma membuat
+    # orang mengira bunyinya salah pasang.
     if _bangkitkan(BERKAS):
-        return "bunyi penanda dibuat di laptop (unduhan tak tersedia)"
+        return ("bunyi bawaan tak bisa diunduh — sementara memakai nada "
+                "buatan sendiri (jalankan `bagas-ai update` saat daring)")
     return ""
 
 
@@ -180,8 +187,13 @@ def _bunyikan() -> None:
         import numpy as np
         import sounddevice as sd
         with wave.open(str(berkas), "rb") as w:
-            laju = w.getframerate()
+            laju, kanal = w.getframerate(), w.getnchannels()
             data = np.frombuffer(w.readframes(w.getnframes()), dtype="int16")
+        # Bunyi pilihan pengguna bisa STEREO (berkas bawaannya memang stereo).
+        # Tanpa dibentuk ulang per-kanal, sampelnya terbaca berurutan sebagai
+        # satu kanal — hasilnya berbunyi dua kali lebih cepat dan sember.
+        if kanal > 1:
+            data = data.reshape(-1, kanal)
         sd.play(data.astype("float32") / 32768.0, laju, blocking=True)
         return
     except Exception:  # noqa: BLE001

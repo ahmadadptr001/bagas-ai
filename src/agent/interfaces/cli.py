@@ -2739,7 +2739,7 @@ def main(resume: bool = False) -> None:
                 # "berhenti", dan merayakannya sebagai penyelesaian itu keliru.
                 if not interrupted:
                     _tanda.selesai(
-                        tunggu=(lambda: _suara.tunggu_diam(30.0))
+                        tunggu=(lambda: _suara.tunggu_diam())
                         if bersuara else None)
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
@@ -2880,6 +2880,16 @@ def main(resume: bool = False) -> None:
             # suaranya baca setengah-setengah" yang dulu cuma diperbaiki di
             # satu mode tampilan.
             say(result["answer"], akhir=True)
+            # PENANDA TUGAS SELESAI — dipasang di sini JUGA. Dilaporkan
+            # pengguna: "selesai tapi sound-nya nggak bunyi". Sebabnya
+            # penandanya cuma ada di jalur mode mengalir, sementara mode klasik
+            # (juga jalur cadangan saat mode mengalir gagal) punya penutupnya
+            # sendiri — persis pola yang sudah pernah terjadi pada getaran &
+            # panjang bacaan, dan terulang lagi di sini.
+            if (result["answer"] or "").strip():
+                _tanda.selesai(
+                    tunggu=(lambda: _suara.tunggu_diam())
+                    if prefs.load().get("suara", True) else None)
             _turn_footer(turn_start)
         _reindex_if_edited()
 
