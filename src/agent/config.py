@@ -168,6 +168,50 @@ CONNECTOR_BROWSER_CHANNEL: str = os.getenv("CONNECTOR_BROWSER_CHANNEL", "chrome"
 # 0 = jangan pernah hapus otomatis (bersihkan manual lewat /web).
 CONNECTOR_KEEP_CHATS: int = int(os.getenv("CONNECTOR_KEEP_CHATS", "20"))
 
+# --- /compact: riwayat percakapan disimpan jadi berkas ---
+# Berapa KARAKTER TERAKHIR percakapan (pesan bagas-ai + balasan model, apa
+# adanya, termasuk kode & hasil tool) yang ikut disimpan ke berkas memory.
+# Diambil dari EKOR, bukan dari awal: yang menentukan langkah berikutnya adalah
+# pekerjaan terakhir, sedangkan pembukaan sesi sudah diwakili blok konteks yang
+# ikut di berkas yang sama.
+#
+# Boleh dinaikkan — batas sebenarnya ada di jendela konteks situsnya, bukan di
+# sini. Ancar-ancar: 80 rb karakter ≈ 20 rb token, 320 rb ≈ 80 rb token. Naikkan
+# lewat BAGASAI_COMPACT_RIWAYAT_CHARS bila modelnya berjendela lebar.
+COMPACT_RIWAYAT_CHARS: int = int(
+    os.getenv("BAGASAI_COMPACT_RIWAYAT_CHARS", "80000"))
+
+# Percakapan di situs AI tak punya penghitung yang bisa dibaca dari luar, jadi
+# bagas-ai menghitung sendiri: karakter yang IA kirim & terima di percakapan
+# itu. Begitu melewati ambang ini, riwayatnya OTOMATIS disimpan ke berkas
+# (tanpa mengirim apa pun ke situs & tanpa membuka chat baru) lalu pengguna
+# diberi tahu bahwa lanjutan bersihnya tinggal satu perintah.
+#
+# Ambangnya kasar: 80 rb karakter ≈ 20 rb token, sementara pesan pembuka
+# bagas-ai saja (aturan protokol + peta proyek) sudah ±25 rb karakter. 0 =
+# matikan simpanan otomatis (tetap bisa manual lewat /compact).
+AUTO_COMPACT_CHARS: int = int(os.getenv("BAGASAI_AUTO_COMPACT_CHARS", "80000"))
+
+# Konteks (peta proyek, memori, riwayat) dikirim sebagai BERKAS JSON yang
+# DILAMPIRKAN ke pesan pembuka — bukan diketik ke kotak pesan. Lihat
+# agent/konteks.py untuk alasan & jaring pengamannya. Matikan bila situsnya
+# bermasalah dengan unggahan berkas: BAGASAI_KONTEKS_BERKAS=false.
+KONTEKS_BERKAS: bool = _get_bool("BAGASAI_KONTEKS_BERKAS", True)
+KONTEKS_DIR = CONFIG_HOME / "konteks"
+
+# Besar MAKSIMAL satu berkas ingatan, dalam byte. Diukur langsung di chat.z.ai:
+# berkas 47 KB terbaca utuh, 63 KB dan 126 KB TIDAK (model menjawab "berkas
+# tidak bisa saya buka" walau unggahannya sukses). Dipatok di bawah batas yang
+# terbukti, sebab kegagalannya diam-diam — tak ada galat, cuma model yang
+# bekerja tanpa tahu apa-apa.
+KONTEKS_MAKS_BYTES: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BYTES", "40000"))
+# Berapa BERKAS boleh dikirim sekaligus. Dua berkas @39 KB dalam satu pesan
+# terbukti terbaca dua-duanya, jadi jatah ingatan dinaikkan dengan MEMECAH,
+# bukan dengan membesarkan berkasnya. Batas atasnya jatah berkas per percakapan
+# di situs (chat.z.ai: 10) yang juga dipakai screenshot pratinjau — karena itu
+# tak dihabiskan.
+KONTEKS_MAKS_BAGIAN: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BAGIAN", "4"))
+
 ENV_FILE = CONFIG_HOME / ".env"
 
 # has_api_key()/require_api_key() DIHAPUS bersama model ber-API-key. bagas-ai

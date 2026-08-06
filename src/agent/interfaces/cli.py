@@ -196,7 +196,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("mode", "mode kerja situs: buat gambar/video, dll"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
-    ("compact", "ringkas konteks lalu lanjut di percakapan situs yang baru"),
+    ("compact", "simpan riwayat percakapan ke berkas memory"),
+    ("send-compact", "kirim berkas memory terakhir ke percakapan sekarang"),
     ("add-dir", "tambah folder konteks"),
     ("dirs", "folder konteks aktif"),
     ("rm-dir", "hapus folder konteks"),
@@ -2833,19 +2834,28 @@ def main(resume: bool = False) -> None:
     }
 
     def do_compact() -> None:
-        """/compact — ringkas konteks lalu lanjut di percakapan situs yang baru.
+        """/compact — simpan riwayat percakapan ke berkas memory JSON.
 
-        Situs AI web punya batas panjang percakapan (kimi.com mengumumkannya:
-        "Your conversation with Kimi is getting too long"). Begitu batas itu
-        tersentuh, melanjutkan berarti kehilangan seluruh konteks — termasuk
-        berkas yang sedang setengah diedit. Pemadatan ini juga berjalan SENDIRI
-        saat peringatan itu terdeteksi; perintah ini untuk melakukannya lebih
-        awal, atas kemauan sendiri."""
+        Seluruhnya dikerjakan di laptop: tak ada pesan yang dikirim ke situs,
+        model tak dimintai ringkasan, dan chat yang sedang berjalan TIDAK
+        diapa-apakan. Berkasnya bekal untuk percakapan berikutnya — dipasang
+        dengan /send-compact sesudah /new."""
+        teks = agent.padatkan_sekarang()
+        console.print("  [#9fc93c]✓ riwayat tersimpan[/] [dim]— chat di situs "
+                      "tak disentuh.[/]\n")
+        console.print(Padding(_md(teks), (0, 3, 1, 3)))
+
+    def do_send_compact(arg: str = "") -> None:
+        """/send-compact — unggah berkas memory ke percakapan web sekarang.
+
+        Pasangan /compact: yang itu menyimpan, yang ini memasang. Dipakai
+        sesudah /new, sehingga chat yang bersih langsung tahu sudah sampai mana
+        pekerjaannya — tanpa mengetik ulang puluhan ribu karakter."""
         if not agent.model_spec.is_web:
-            console.print("  [yellow]/compact hanya untuk model web "
-                          "(Kimi/Qwen/Gemini/Dola).[/yellow]\n")
+            console.print("  [yellow]/send-compact hanya untuk model web."
+                          "[/yellow]\n")
             return
-        state = {"pesan": "meringkas konteks percakapan…"}
+        state = {"pesan": "menyiapkan berkas ingatan…"}
 
         def render():
             return Text.from_markup(
@@ -2855,7 +2865,8 @@ def main(resume: bool = False) -> None:
 
         def kerja() -> None:
             try:
-                hasil["teks"] = agent.padatkan_sekarang(
+                hasil["teks"] = agent.kirim_memory(
+                    arg.strip().strip('"').strip("'") or None,
                     on_status=lambda m: state.__setitem__("pesan", m),
                     on_notice=lambda m: state.__setitem__("pesan", m))
             except BaseException as exc:  # noqa: BLE001
@@ -2873,11 +2884,11 @@ def main(resume: bool = False) -> None:
             console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
             return
         if hasil["galat"] is not None:
-            console.print(f"\n  [red]✖ gagal memadatkan:[/red] "
+            console.print(f"\n  [red]✖ gagal mengirim ingatan:[/red] "
                           f"{hasil['galat']}\n")
             return
-        console.print("  [#9fc93c]✓ konteks dipadatkan[/] [dim]— percakapan "
-                      "baru di situs sudah memuat serah-terimanya.[/]\n")
+        console.print("  [#9fc93c]✓ ingatan terpasang[/] [dim]— lanjutkan "
+                      "seperti biasa.[/]\n")
         teks = (hasil["teks"] or "").strip()
         if teks:
             console.print(Padding(_md(teks), (0, 3, 1, 3)))
@@ -4087,6 +4098,8 @@ def main(resume: bool = False) -> None:
                 show_mic(text[4:].strip())
             elif cmd == "compact":
                 do_compact()
+            elif cmd == "send-compact" or cmd.startswith("send-compact "):
+                do_send_compact(text[13:].strip())
             elif cmd == "live":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:

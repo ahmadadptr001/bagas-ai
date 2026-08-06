@@ -1,6 +1,9 @@
 """System prompt untuk bagas-ai — dibangun dinamis (root project, memory, skrip)."""
 from __future__ import annotations
 
+import time
+from typing import Any
+
 from . import config, longmem, osinfo, projectindex, scripts, workspace
 
 BASE = """Kamu adalah bagas-ai, asisten AI serbaguna yang cerdas, kritis, dan teliti.
@@ -295,21 +298,20 @@ def build_system_prompt() -> str:
     return "\n".join(parts)
 
 
-def build_transcript_digest(
+def transcript_rows(
     messages: list, max_turns: int = 14, max_chars: int = 5000,
     per_msg: int = 700,
-) -> str:
-    """Ringkas percakapan sejauh ini agar model BARU bisa langsung menyambung.
+) -> list[dict[str, str]]:
+    """Giliran percakapan sejauh ini, sudah disaring & dipangkas.
 
-    Dipakai saat pengguna berpindah model di tengah kerja (mis. Kimi web kena
-    limit lalu ganti ke Qwen, atau sebaliknya): AI web yang baru memulai chat
-    kosong di situsnya sendiri, jadi riwayat dari memory bagas-ai dikirim
-    sebagai ringkasan supaya konteksnya tidak hilang.
+    Bentuk datanya: [{"dari": "saya"|"kamu", "isi": "…"}, …] — urut lama ke
+    baru. Dipakai dua-duanya: dirangkai jadi teks (build_transcript_digest) dan
+    dititipkan apa adanya ke berkas konteks JSON (lihat konteks.py).
 
     Hanya giliran user & jawaban asisten yang diambil (pesan sistem, hasil tool,
     dan instruksi internal dilewati), dibatasi jumlah & panjangnya agar hemat.
     """
-    rows: list[tuple[str, str]] = []
+    rows: list[dict[str, str]] = []
     for m in messages or []:
         role = m.get("role")
         if role not in ("user", "assistant"):
@@ -325,21 +327,36 @@ def build_transcript_digest(
             text = text.split("PERMINTAAN SAYA:", 1)[1].strip()
         if len(text) > per_msg:
             text = text[:per_msg].rstrip() + " …"
-        rows.append(("Saya" if role == "user" else "Kamu/AI", text))
+        rows.append({"dari": "saya" if role == "user" else "kamu", "isi": text})
 
     rows = rows[-max_turns:]
-    if not rows:
-        return ""
-    out: list[str] = []
+    hasil: list[dict[str, str]] = []
     total = 0
-    for who, text in reversed(rows):           # jaga giliran TERBARU bila dipotong
-        piece = f"{who}: {text}"
-        if total + len(piece) > max_chars:
+    for r in reversed(rows):                   # jaga giliran TERBARU bila dipotong
+        total += len(r["isi"]) + 8
+        if total > max_chars:
             break
-        out.append(piece)
-        total += len(piece)
-    out.reverse()
-    return "\n\n".join(out)
+        hasil.append(r)
+    hasil.reverse()
+    return hasil
+
+
+def build_transcript_digest(
+    messages: list, max_turns: int = 14, max_chars: int = 5000,
+    per_msg: int = 700,
+) -> str:
+    """Ringkas percakapan sejauh ini agar model BARU bisa langsung menyambung.
+
+    Dipakai saat pengguna berpindah model di tengah kerja (mis. Kimi web kena
+    limit lalu ganti ke Qwen, atau sebaliknya): AI web yang baru memulai chat
+    kosong di situsnya sendiri, jadi riwayat dari memory bagas-ai dikirim
+    sebagai ringkasan supaya konteksnya tidak hilang.
+    """
+    rows = transcript_rows(messages, max_turns, max_chars, per_msg)
+    return "\n\n".join(
+        f"{'Saya' if r['dari'] == 'saya' else 'Kamu/AI'}: {r['isi']}"
+        for r in rows
+    )
 
 
 def build_web_context() -> str:
@@ -373,6 +390,107 @@ def build_web_context() -> str:
             "\n# Hal yang perlu kamu ingat tentang saya\n" + mem
         )
     return "\n".join(parts)
+
+
+def build_context_payload(
+    *,
+    messages: list | None = None,
+    riwayat: list[dict] | None = None,
+    dipotong: bool = False,
+) -> dict[str, Any]:
+    """Isi berkas memory JSON: konteks proyek + riwayat percakapan apa adanya.
+
+    Dua lapis, dan keduanya memang perlu:
+
+      - KONTEKS (lingkungan, peta proyek, memori) — data yang sama dengan
+        build_web_context(), tapi sebagai data, bukan prosa yang harus diketik
+        ke kotak pesan;
+      - RIWAYAT (`riwayat`) — percakapan APA ADANYA: pesan yang bagas-ai kirim
+        dan balasan model, lengkap dengan blok kode & hasil tool. Inilah yang
+        membuat chat baru bisa menyambung pekerjaan, bukan sekadar tahu
+        proyeknya.
+
+    Yang TIDAK ikut ke sini: aturan protokol tool. Aturan tetap di badan pesan,
+    sebab aturan yang jauh dari titik keputusan terbukti diabaikan.
+    """
+    payload: dict[str, Any] = {
+        "berkas": "memory-bagas-ai",
+        "versi": 1,
+        "dibuat": time.strftime("%Y-%m-%d %H:%M"),
+        # `kode_periksa` TIDAK diisi di sini: berkasnya bisa dipecah jadi
+        # beberapa bagian (konteks.bagi), dan tiap bagian dapat kodenya
+        # sendiri-sendiri supaya model yang berhenti di bagian pertama tak
+        # lolos. Menyebut satu kode di sini justru akan berbeda dari kode yang
+        # akhirnya tertulis di berkasnya.
+        #
+        # Kalimatnya menyesuaikan isi: menyebut "ingatan percakapan sebelumnya"
+        # pada berkas yang riwayatnya memang kosong membuat model mencari-cari
+        # sesuatu yang tak pernah ada, dan itu berakhir jadi pertanyaan balik.
+        "petunjuk": (
+            ("Berkas ini INGATAN percakapan kita sebelumnya, plus keadaan "
+             "mesin & proyek saya. Baca seluruhnya sekali supaya kamu paham "
+             "sudah sampai mana kita, "
+             if riwayat else
+             "Berkas ini keadaan mesin & proyek saya. Baca sekali supaya kamu "
+             "paham konteks permintaan-permintaan saya berikutnya, ")
+            + "lalu tunggu permintaan saya di pesan berikutnya. Ini KONTEKS, "
+            "bukan tugas: jangan dibalas isi per isi, jangan mengulang "
+            "pekerjaan yang di dalamnya sudah selesai, dan jangan mengerjakan "
+            "apa pun hanya karena terbaca di sini. Aturan main (format usulan "
+            "langkah) ada di badan pesan, bukan di berkas ini. Sebagai tanda "
+            "berkas ini benar-benar terbaca, kutip nilai `kode_periksa` yang "
+            "tertulis di berkas ini pada balasanmu."
+        ),
+        "lingkungan": {
+            "sistem_operasi": osinfo.summary(),
+            "folder_proyek_aktif": str(config.PROJECT_ROOT),
+        },
+    }
+
+    tambahan = []
+    for d in workspace.list_dirs():
+        tambahan.append({"path": str(d), "isi": workspace.tree(d).splitlines()})
+    if tambahan:
+        payload["folder_konteks_tambahan"] = tambahan
+
+    try:
+        peta = projectindex.as_payload()
+    except Exception:  # noqa: BLE001 - konteks tanpa peta masih berguna
+        peta = {}
+    if peta:
+        payload["peta_proyek"] = peta
+
+    fakta = longmem.all_facts()
+    if fakta:
+        payload["yang_perlu_kamu_ingat_tentang_saya"] = fakta
+
+    # Ringkasan giliran: HANYA permintaan pengguna & jawaban akhir, tanpa
+    # langkah di antaranya. Murah (±5 rb karakter) dan menjawab pertanyaan yang
+    # berbeda dari riwayat mentah di bawah — "apa saja yang pernah diminta",
+    # bukan "apa yang barusan dikerjakan".
+    if messages:
+        rows = transcript_rows(messages)
+        if rows:
+            payload["ringkasan_giliran"] = rows
+
+    if riwayat:
+        payload["percakapan_terakhir_apa_adanya"] = {
+            "keterangan": (
+                "Percakapan mentah antara bagas-ai (di laptop saya) dan kamu, "
+                "urut lama ke baru. 'saya' = pesan yang dikirim bagas-ai "
+                "(permintaan pengguna, hasil tool, teguran); 'kamu' = "
+                "balasanmu, termasuk blok [[TOOL]] yang benar-benar "
+                "dijalankan. Isi yang sangat panjang dipotong di TENGAH — "
+                "kepala & ekornya tetap utuh."
+            ),
+            "dipotong_dari_awal": bool(dipotong),
+            "giliran": [
+                {"dari": r.get("dari", ""),
+                 "isi": str(r.get("isi", "")).splitlines()}
+                for r in riwayat
+            ],
+        }
+    return payload
 
 
 # Kompatibilitas: sebagian modul lama mengimpor SYSTEM_PROMPT.

@@ -242,13 +242,14 @@ class KimiConnector(WebConnector):
     # mengikuti model yang sedang dipakai (Kimi / Kimi K2 / K3), dan pemisah
     # kalimatnya juga — sebagian tampilan memakai baris baru, bukan titik.
     # BAHAYA YANG DIJAGA DI SINI: pemindaian membaca SELURUH halaman, dan
-    # halaman itu memuat pesan yang BAGAS-AI SENDIRI ketik. Permintaan
-    # serah-terima (core._MINTA_RINGKAS) jelas membahas "percakapan terlalu
-    # panjang" — kalau polanya longgar, ia mencocoki tulisannya sendiri lalu
-    # memadatkan konteks berulang-ulang tanpa sebab. Karena itu:
+    # halaman itu memuat pesan yang BAGAS-AI SENDIRI ketik — termasuk pengantar
+    # berkas ingatan (core._RUJUK_BERKAS) yang memang membicarakan percakapan
+    # panjang & pesan yang dipotong situs. Kalau polanya longgar, ia mencocoki
+    # tulisannya sendiri lalu memindahkan chat berulang-ulang tanpa sebab.
+    # Karena itu:
     #   - tiap pola WAJIB memuat kata-kata yang khas milik SITUS, dan
     #   - teks yang bagas-ai kirim sengaja ditulis agar tak mungkin cocok
-    #     (lihat catatan di core._MINTA_RINGKAS).
+    #     (lihat catatan di core._RUJUK_BERKAS).
     # Pola "try starting a new session" yang berdiri sendiri sengaja TIDAK
     # dipakai: kalimat itu terlalu lumrah, dan model sendiri gampang
     # menuliskannya sebagai saran.

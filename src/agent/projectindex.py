@@ -254,3 +254,38 @@ def as_prompt_block(root: Path | None = None) -> str:
         return ensure(root)
     except Exception:
         return ""
+
+
+def as_payload(root: Path | None = None) -> dict:
+    """Peta proyek sebagai DATA, untuk berkas konteks JSON (lihat konteks.py).
+
+    Diurai dari teks peta yang SAMA, bukan dipindai ulang: peta itu sudah
+    di-cache di disk dan dipakai system prompt, jadi jalur kedua berarti dua
+    hasil yang bisa berbeda — dan pemindaian seluruh proyek dua kali tiap sesi.
+    Bentuk barisnya ditentukan build() di berkas ini juga, cuma tiga macam:
+    "- path", "    · simbol", dan baris "…" penanda peta dipotong.
+    """
+    teks = as_prompt_block(root)
+    if not teks:
+        return {}
+    berkas: dict[str, list[str]] = {}
+    kini = ""
+    dipotong = False
+    for baris in teks.splitlines():
+        if baris.startswith("- "):
+            kini = baris[2:].strip()
+            berkas[kini] = []
+        elif baris.lstrip().startswith("·"):
+            if kini:
+                berkas[kini].append(baris.lstrip()[1:].strip())
+        elif baris.lstrip().startswith("…"):
+            dipotong = True
+    out: dict = {
+        "folder": Path(root or config.PROJECT_ROOT).name,
+        "keterangan": "daftar berkas -> simbol kunci di dalamnya; baca berkas "
+                      "utuh HANYA bila butuh detail yang tak terlihat di sini",
+        "berkas": berkas,
+    }
+    if dipotong:
+        out["dipotong"] = "proyek lebih besar dari yang tercantum di sini"
+    return out
