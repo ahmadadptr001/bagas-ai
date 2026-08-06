@@ -1167,11 +1167,14 @@ class WebConnector:
         # pengguna meski penjaga di loop sudah menolaknya. Lebih baik gagal
         # terang-terangan; pemanggil bisa mengirim ulang.
         if not last:
+            # KEADAAN INI PUNYA BEBERAPA SEBAB YANG SANGAT BERBEDA, dan pesan
+            # lamanya cuma menuduh satu (message_selector usang). Tanpa bukti,
+            # yang paling sering terjadi justru tak pernah terpikir: pesannya
+            # TAK PERNAH TERKIRIM. Karena itu keadaan halaman dilaporkan apa
+            # adanya — sekali lihat ketahuan mana yang terjadi.
             raise BrowserError(
-                f"{self.label} tidak menghasilkan balasan baru untuk pesan ini "
-                "(yang terbaca di halaman masih jawaban sebelumnya). Kirim ulang; "
-                "bila berulang, periksa message_selector di connectors/"
-                f"{self.service}.py."
+                f"{self.label} tidak menghasilkan balasan baru untuk pesan ini.\n"
+                + self._bukti_tanpa_balasan(page, prompt, counts_before)
             )
 
         final = ""
@@ -1667,6 +1670,51 @@ class WebConnector:
         except Exception:  # noqa: BLE001 - DOM sedang transisi
             return ""
         return (teks or "").strip()
+
+    def _bukti_tanpa_balasan(self, page: Any, prompt: str,
+                             counts_before: Any) -> str:
+        """Keadaan halaman saat balasan tak kunjung datang — untuk dilaporkan.
+
+        Tiga fakta yang memisahkan sebab-sebab yang selama ini tercampur:
+
+          1. PESANNYA ADA DI HALAMAN? Kalau tidak, ia tak pernah terkirim —
+             dan seluruh tuduhan soal selector jawaban salah alamat.
+          2. JUMLAH ELEMEN PESAN bertambah atau tidak? Bertambah berarti situs
+             MEMBUAT wadah balasan tapi isinya tak terbaca (di situlah selector
+             benar-benar tersangka); tetap berarti situs memang tak menjawab.
+          3. Ekor teks yang terbaca — memastikan yang terbaca memang balasan
+             lama, bukan sesuatu yang lain.
+
+        Semua pembacaan di sini dibungkus: fungsi yang dipakai untuk MELAPORKAN
+        kegagalan tak boleh ikut gagal dan menutupi kegagalan aslinya."""
+        baris = []
+        try:
+            cuplik = " ".join((prompt or "").split())[:60]
+            isi = page.evaluate("() => document.body.innerText || ''") or ""
+            baris.append("- pesanku terlihat di halaman: "
+                         + ("YA" if cuplik and cuplik in " ".join(isi.split())
+                            else "TIDAK — kemungkinan besar tak pernah terkirim"))
+        except Exception:  # noqa: BLE001
+            baris.append("- pesanku terlihat di halaman: (tak terbaca)")
+        try:
+            kini = self._msg_counts(page)
+            tambah = self._ada_pesan_baru(page, counts_before)
+            baris.append(f"- elemen pesan: {counts_before} -> {kini}"
+                         + ("  (ada wadah balasan BARU, tapi isinya tak terbaca "
+                            "-> message_selector patut dicurigai)" if tambah
+                            else "  (tak ada wadah balasan baru -> situsnya "
+                                 "memang tak menjawab)"))
+        except Exception:  # noqa: BLE001
+            baris.append("- elemen pesan: (tak terbaca)")
+        try:
+            ekor = " ".join((self._read_last_message(page) or "").split())[-160:]
+            baris.append(f"- yang terbaca terakhir: {ekor or '(kosong)'}")
+        except Exception:  # noqa: BLE001
+            pass
+        baris.append("Kirim ulang pesannya. Bila terus berulang DAN barisnya "
+                     "menyebut wadah balasan baru, perbarui message_selector di "
+                     f"connectors/{self.service}.py.")
+        return "\n".join(baris)
 
     def supports_attachments(self) -> bool:
         """True bila situs ini bisa menerima lampiran file dari bagas-ai."""
