@@ -15,15 +15,19 @@ oleh selera — dan ketiganya gagal dengan cara yang DIAM:
    Isi yang sama persis dengan nama .txt (atau .md) terbaca sempurna. Isinya
    tetap JSON supaya terstruktur & bisa dibaca balik oleh bagas-ai (baca()).
 
-2. DIPECAH JADI BEBERAPA BAGIAN. Satu berkas 47 KB terbaca; 63 KB dan 126 KB
-   TIDAK — model menjawab "berkas tidak bisa saya buka" walau unggahannya
-   sukses. Tapi DUA berkas @39 KB dalam satu pesan terbaca dua-duanya. Jadi
-   batasnya per-berkas, dan jalan keluarnya memecah, bukan mengecilkan.
+2. DIPECAH JADI BEBERAPA BAGIAN. Satu berkas 47 KB terbaca; 63 KB tidak; dan
+   yang paling berbahaya — berkas 300 KB TIDAK DITOLAK melainkan DIPOTONG
+   diam-diam: dari penanda yang ditanam di kedalaman 1/5/10/20/40/60/80/100
+   persen, yang sampai ke model cuma sampai 10%. Sebaliknya 8 berkas @39 KB
+   (±320 KB) dalam SATU pesan terbaca semuanya sampai baris terakhir. Jadi
+   ingatan diperbesar dengan MENAMBAH BERKAS, bukan membesarkan berkasnya.
 
-3. KODE PERIKSA TAK BOLEH ADA DI NAMA BERKAS. Kode itu bukti bahwa ISI berkas
-   terbaca. Waktu ia ikut tertulis di nama berkas, balasan "berkas <nama> tidak
-   bisa saya buka" justru LULUS pemeriksaan — mengutip nama berkas, bukan
-   isinya.
+3. KODE PERIKSA DI UJUNG BERKAS, DAN TAK BOLEH ADA DI NAMANYA. Kode itu bukti
+   bahwa isi berkas terbaca. Dulu ia ikut tertulis di nama berkas, dan balasan
+   "berkas <nama> tidak bisa saya buka" justru LULUS pemeriksaan — mengutip
+   nama, bukan isi. Dan karena berkas besar dipotong dari belakang, kode yang
+   ditaruh di kepala berkas pun tak membuktikan apa-apa; ia ditaruh paling
+   akhir supaya mengutipnya berarti berkasnya benar-benar dibaca sampai habis.
 """
 from __future__ import annotations
 
@@ -123,13 +127,22 @@ def bagi(payload: dict[str, Any], maks: int = 0,
         })
     for i, b in enumerate(bagian, start=1):
         b["bagian"] = f"{i} dari {total}"
-        b["kode_periksa"] = kode_periksa()
         if total > 1:
             b["catatan_bagian"] = (
                 f"Ingatan ini dipecah jadi {total} berkas karena satu berkas "
-                "besar tak terbaca utuh oleh situs. Baca SEMUANYA, urut, "
-                "sebelum membalas."
+                "besar TIDAK terbaca utuh oleh situs — isinya dipotong diam-diam "
+                "di tengah jalan. Baca SEMUA berkas, urut dari bagian 1 sampai "
+                f"bagian {total}, masing-masing dari baris pertama sampai baris "
+                "terakhir. Jangan berhenti di berkas pertama dan jangan "
+                "melompati bagian tengah."
             )
+        # kode_periksa ditaruh PALING AKHIR, bukan di kepala berkas. Sebabnya
+        # terukur: situs MEMOTONG berkas besar tanpa memberi tahu (dari berkas
+        # 300 KB, yang sampai ke model cuma ~30 KB pertama). Kode yang tertulis
+        # di awal akan tetap terkutip walau 90% isinya tak pernah terbaca —
+        # pemeriksaannya jadi hiasan. Di ujung berkas, mengutipnya berarti
+        # isinya memang terbaca sampai habis.
+        b["kode_periksa"] = kode_periksa()
     return bagian
 
 

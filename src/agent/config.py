@@ -179,11 +179,12 @@ CONNECTOR_KEEP_CHATS: int = int(os.getenv("CONNECTOR_KEEP_CHATS", "20"))
 # pekerjaan terakhir, sedangkan pembukaan sesi sudah diwakili blok konteks yang
 # ikut di berkas yang sama.
 #
-# Boleh dinaikkan — batas sebenarnya ada di jendela konteks situsnya, bukan di
-# sini. Ancar-ancar: 80 rb karakter ≈ 20 rb token, 320 rb ≈ 80 rb token. Naikkan
-# lewat BAGASAI_COMPACT_RIWAYAT_CHARS bila modelnya berjendela lebar.
+# Boleh dinaikkan — batas sebenarnya bukan di sini, melainkan berapa banyak
+# yang sanggup DIBACA situsnya (lihat dua setelan di bawah). Ancar-ancar:
+# 200 rb karakter ≈ 50 rb token, dan sesudah dirakit jadi JSON ia memakan
+# ±280 KB, pas untuk 7 berkas riwayat @40 KB + 1 berkas konteks.
 COMPACT_RIWAYAT_CHARS: int = int(
-    os.getenv("BAGASAI_COMPACT_RIWAYAT_CHARS", "80000"))
+    os.getenv("BAGASAI_COMPACT_RIWAYAT_CHARS", "200000"))
 
 # Percakapan di situs AI tak punya penghitung yang bisa dibaca dari luar, jadi
 # bagas-ai menghitung sendiri: karakter yang IA kirim & terima di percakapan
@@ -203,18 +204,32 @@ AUTO_COMPACT_CHARS: int = int(os.getenv("BAGASAI_AUTO_COMPACT_CHARS", "80000"))
 KONTEKS_BERKAS: bool = _get_bool("BAGASAI_KONTEKS_BERKAS", True)
 KONTEKS_DIR = CONFIG_HOME / "konteks"
 
-# Besar MAKSIMAL satu berkas ingatan, dalam byte. Diukur langsung di chat.z.ai:
-# berkas 47 KB terbaca utuh, 63 KB dan 126 KB TIDAK (model menjawab "berkas
-# tidak bisa saya buka" walau unggahannya sukses). Dipatok di bawah batas yang
-# terbukti, sebab kegagalannya diam-diam — tak ada galat, cuma model yang
-# bekerja tanpa tahu apa-apa.
+# Besar MAKSIMAL satu berkas ingatan, dalam byte — yaitu ambang PEMECAHAN.
+#
+# Angka ini tampak kecil, dan memang harus. Diukur langsung di chat.z.ai:
+#
+#   47 KB   -> terbaca utuh
+#   63 KB   -> TIDAK terbaca ("berkas tidak bisa saya buka") walau unggahan sukses
+#   300 KB  -> DIPOTONG DIAM-DIAM: dari penanda yang ditanam di kedalaman
+#              1/5/10/20/40/60/80/100 persen, yang sampai ke model cuma sampai
+#              10% — sekitar 30 KB pertama. Sisanya hilang tanpa satu pun galat.
+#
+# Jadi berkas raksasa BUKAN cara memperbesar ingatan: 3 MB dalam satu berkas
+# akan mengirimkan ±1% isinya, dan kegagalannya tak kelihatan dari mana pun.
+# Yang bekerja adalah memecah (lihat KONTEKS_MAKS_BAGIAN). Naikkan angka ini
+# hanya bila situs yang kamu pakai terbukti sanggup membaca berkas lebih besar.
 KONTEKS_MAKS_BYTES: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BYTES", "40000"))
-# Berapa BERKAS boleh dikirim sekaligus. Dua berkas @39 KB dalam satu pesan
-# terbukti terbaca dua-duanya, jadi jatah ingatan dinaikkan dengan MEMECAH,
-# bukan dengan membesarkan berkasnya. Batas atasnya jatah berkas per percakapan
-# di situs (chat.z.ai: 10) yang juga dipakai screenshot pratinjau — karena itu
-# tak dihabiskan.
-KONTEKS_MAKS_BAGIAN: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BAGIAN", "4"))
+
+# Berapa BERKAS boleh dikirim sekaligus — di sinilah ruang ingatan sebenarnya.
+# Diukur di chat.z.ai: 8 berkas @39 KB (±320 KB) dalam SATU pesan terbaca
+# SEMUANYA sampai baris terakhir tiap berkas. Jadi jatah ingatan dinaikkan
+# dengan menambah berkas, bukan membesarkannya.
+#
+# Batas atasnya jatah berkas per percakapan di situs (chat.z.ai: 10), yang juga
+# dipakai screenshot pratinjau — dengan 8 di sini, tersisa 2 untuk gambar
+# sebelum pratinjau lanjut tanpa gambar (lihat WebLampiranPenuhError). Turunkan
+# bila kamu lebih sering butuh pratinjau daripada ingatan panjang.
+KONTEKS_MAKS_BAGIAN: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BAGIAN", "8"))
 
 ENV_FILE = CONFIG_HOME / ".env"
 
