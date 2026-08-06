@@ -138,6 +138,55 @@ MAKS_REKAM = 30.0
 JEDA_SELESAI = 2.0
 
 
+# --- sapaan saat namaku terdengar -------------------------------------------
+# Pola nama pengguna di memory jangka panjang. Ditulis longgar karena isinya
+# kalimat bebas buatan model, bukan borang: "Nama pengguna: Bagas", "panggil
+# saya Bagas", "namanya Bagas".
+_ISI = r"([^\n.,;]{2,30})"
+_POLA_NAMA = (
+    re.compile(r"nama(?:\s+panggilan)?\s+(?:pengguna|user)\s*[:=-]\s*" + _ISI,
+               re.I),
+    re.compile(r"(?:panggil|sapa)\s+(?:saya|aku|gw|gue)\s+" + _ISI, re.I),
+    re.compile(r"nama\s+(?:saya|aku|gw|gue)\s+(?:adalah\s+)?" + _ISI, re.I),
+    re.compile(r"penggunanya?\s+bernama\s+" + _ISI, re.I),
+)
+
+
+def nama_pengguna() -> str:
+    """Nama pengguna dari memory jangka panjang ("" bila memang tak ada).
+
+    Sengaja TAK menebak dari sumber lain (nama folder Windows, akun) — nama
+    yang salah tebak lalu diucapkan keras-keras jauh lebih canggung daripada
+    sapaan tanpa nama."""
+    try:
+        from . import longmem
+        fakta = longmem.all_facts()
+    except Exception:  # noqa: BLE001
+        return ""
+    for f in fakta:
+        for pola in _POLA_NAMA:
+            m = pola.search(str(f))
+            if m:
+                nama = m.group(1).strip(" '\"")
+                if nama and len(nama.split()) <= 3:
+                    return nama
+    return ""
+
+
+def sapaan() -> str:
+    """Kalimat yang diucapkan saat bagas-ai siap menerima perintah."""
+    nama = nama_pengguna()
+    return (f"Hai {nama}, saya siap menerima perintah." if nama
+            else "Hai, saya siap menerima perintah.")
+
+
+# Diucapkan saat perintahnya DITUTUP oleh diam, sebelum dikirim. Gunanya
+# menjawab pertanyaan yang muncul persis di detik itu: "tadi kedengeran nggak,
+# atau aku harus mengulang?" — dan tanpa jawaban, orang cenderung mengulangi
+# perintah yang sebenarnya sudah berangkat.
+DITERIMA = "Baik, saya telah menerima perintah."
+
+
 def _kata(teks: str) -> list[str]:
     """Pecah jadi kata-kata polos: huruf kecil, tanda baca dibuang."""
     return re.sub(r"[^0-9a-zA-ZÀ-ɏ]+", " ", teks or "").lower().split()
@@ -586,8 +635,14 @@ class Pendengar:
                                      daemon=True).start()
             elif not self.perakit.merekam:
                 tik = 0.0
-            if time.time() < self._abaikan_sampai:
-                continue          # bunyi sendiri — jangan direkam
+            if time.time() < self._abaikan_sampai or self._bagasai_bicara():
+                # Bagas-ai sedang mengeluarkan suara (sapaan, ketukan, atau
+                # kabar yang dibacakan). Bloknya DIBUANG supaya suaranya sendiri
+                # tak ikut jadi perintah, dan hitungan diam DIULANG supaya
+                # bacaannya tak dihitung sebagai "pengguna sudah berhenti".
+                potongan = []
+                self._sunyi_sejak = time.time()
+                continue
             keras = _rms(data) > ambang
             lama_blok = BLOK / LAJU
             # Penanda "sejak kapan sunyi" — dasar penutup perintah. Diukur dari
@@ -622,6 +677,35 @@ class Pendengar:
                     f"perintah suara dibatalkan — {MAKS_REKAM:.0f} detik "
                     "habis dan kata `lakukan` tak terdengar")
 
+    @staticmethod
+    def _bagasai_bicara() -> bool:
+        """True bila bagas-ai sendiri sedang mengeluarkan suara."""
+        try:
+            from . import suara
+            return suara.sibuk()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _ucapkan(self, teks: str, nada_cadangan: Any = "mulai") -> None:
+        """Ucapkan satu kalimat pendek; tak pernah menahan pemanggil.
+
+        Bila mesin suaranya bermasalah, jatuh ke ketukan nada — penanda yang
+        kurang jelas masih jauh lebih baik daripada tak ada penanda sama
+        sekali."""
+        def _jalan() -> None:
+            try:
+                from . import suara
+                suara.ucap(teks)
+            except Exception:  # noqa: BLE001 - penanda tak boleh menggagalkan
+                log.debug("kalimat penanda gagal diucapkan", exc_info=True)
+                bunyi(nada_cadangan)
+
+        threading.Thread(target=_jalan, daemon=True).start()
+
+    def _sapa(self) -> None:
+        """Ucapkan "siap menerima perintah"."""
+        self._ucapkan(sapaan())
+
     def _periksa_selesai(self) -> None:
         """Tutup perintah bila pembicara sudah diam cukup lama.
 
@@ -643,6 +727,12 @@ class Pendengar:
             return
         perintah = self.perakit.selesai()
         self._sunyi_sejak = 0.0
+        # DIJAWAB DULU, baru dikirim. Di detik ini pengguna baru saja berhenti
+        # bicara dan belum tahu apakah kalimatnya tertangkap; tanpa jawaban, ia
+        # cenderung mengulangi perintah yang sebenarnya sudah berangkat.
+        # Pengirimannya tak menunggu suaranya selesai — AI boleh mulai bekerja
+        # selagi kalimat ini dibacakan.
+        self._ucapkan(DITERIMA, nada_cadangan=True)
         try:
             self.on_perintah(perintah)
         except Exception:  # noqa: BLE001 - UI tak boleh menjatuhkan mikrofon
@@ -695,10 +785,16 @@ class Pendengar:
         sedang = self.perakit.merekam
         hasil = self.perakit.dengar(teks)
         if not sedang and self.perakit.merekam:
-            # Namaku baru saja terdeteksi. Ketukan ini yang menjawab pertanyaan
-            # "tadi kedengeran nggak sih?" — tanpa itu pengguna baru tahu
-            # jawabannya setelah selesai bicara panjang lebar.
-            threading.Thread(target=bunyi, args=("mulai",), daemon=True).start()
+            # Namaku baru saja terdeteksi -> BAGAS-AI MENJAWAB. Dulu cuma
+            # ketukan pendek; kalimat utuh jauh lebih jelas, dan menjawab
+            # pertanyaan "tadi kedengeran nggak sih?" tanpa perlu dihafal
+            # artinya. Diucapkan lewat mesin suara yang sama dengan kabar
+            # lain (edge-tts, suara Indonesia).
+            #
+            # Mikrofon MENGABAIKAN dirinya sendiri selama ini berbunyi (lihat
+            # _gelung): kalau tidak, sapaannya ikut terekam lalu dikenali
+            # sebagai bagian perintah.
+            self._sapa()
         if hasil is BATAL:
             # Bunyinya MENURUN, kebalikan nada mulai — supaya "dibatalkan" dan
             # "dikirim" tak pernah tertukar walau layarnya tak dilihat.
