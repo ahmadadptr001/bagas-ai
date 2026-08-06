@@ -68,6 +68,7 @@ except Exception:  # pragma: no cover
 from .. import config, interaction, llm, longmem, models, osinfo, permissions, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
 from .. import dengar as _dengar  # noqa: E402
 from .. import session as session_mod  # noqa: E402
+from .. import tanda as _tanda  # noqa: E402
 from .. import suara as _suara  # noqa: E402
 from .. import tempelan as _tempelan  # noqa: E402
 from ..core import Agent  # noqa: E402
@@ -197,7 +198,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("mode", "mode kerja situs: buat gambar/video, dll"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
-    ("voice", "mikrofon: sebut \"bagas ai …\" lalu \"lakukan\" (on/off/tes)"),
+    ("voice", "mikrofon: ucapkan \"on …\" lalu \"enter\" (on/off/tes)"),
     ("compact", "simpan riwayat percakapan ke berkas memory"),
     ("send-compact", "kirim berkas memory terakhir ke percakapan sekarang"),
     ("add-dir", "tambah folder konteks"),
@@ -2714,7 +2715,8 @@ def main(resume: bool = False) -> None:
                 # datang beruntun — di sini tak ada langkah berikutnya yang
                 # perlu dikejar, jadi memotongnya cuma membuat pesannya
                 # terdengar separuh.
-                if not interrupted and prefs.load().get("suara", True):
+                bersuara = not interrupted and prefs.load().get("suara", True)
+                if bersuara:
                     # GETARAN dulu, baru dibacakan. Kabar antar-langkah dan
                     # jawaban akhir sama-sama keluar sebagai kalimat, jadi dari
                     # jendela lain keduanya terdengar serupa dan pengguna tak
@@ -2724,6 +2726,21 @@ def main(resume: bool = False) -> None:
                     _suara.getar()
                     _suara.ucap(ans, penuh=True)
                     _kabar_suara()
+                # PENANDA TUGAS SELESAI — dering + jendela berkedip di taskbar.
+                # Diletakkan di sini, bukan di tiap langkah: yang ditandai
+                # adalah "tak ada lagi serah-terima perintah", yaitu saat
+                # jawaban akhir sudah tampil.
+                #
+                # Bila jawabannya sedang DIBACAKAN, penandanya MENUNGGU sampai
+                # bacaannya habis — deringan yang menimpa kalimat terakhir
+                # justru menelan kabar yang sedang disampaikan.
+                #
+                # Tidak dibunyikan saat giliran dibatalkan: Ctrl+C berarti
+                # "berhenti", dan merayakannya sebagai penyelesaian itu keliru.
+                if not interrupted:
+                    _tanda.selesai(
+                        tunggu=(lambda: _suara.tunggu_diam(30.0))
+                        if bersuara else None)
             # Ringkasan giliran SETELAH jawaban (urutan yang benar).
             stps = view.all_steps
             if stps:
@@ -3143,17 +3160,18 @@ def main(resume: bool = False) -> None:
     def _voice_kabar(pesan: str) -> None:
         console.print(f"  [dim]🎙 {_esc(pesan)}[/dim]")
 
-    def _voice_dengar(teks: str, merekam: bool) -> None:
-        """Yang TERDENGAR, ditampilkan apa adanya.
-
-        Termasuk saat namanya belum disebut. Tanpa ini, mikrofon yang salah
-        dengar mustahil dibedakan dari mikrofon yang mati — keduanya sama-sama
-        tak menghasilkan apa pun di layar."""
-        tanda = "▸" if merekam else "·"
-        console.print(f"  [dim]🎙 {tanda} {_esc(teks)}[/dim]")
+    # TRANSKRIP TIAP UCAPAN TIDAK DITAMPILKAN. Ia sempat ada dan berguna saat
+    # menelusuri kenapa perintah tak tertangkap, tapi dalam pemakaian
+    # sehari-hari ia membanjiri layar di atas kotak chat dengan potongan
+    # obrolan ruangan — itu keluaran debug, bukan bagian dari alat kerja.
+    #
+    # Yang tetap tampil dua hal saja: perintah yang JADI (gemanya sama persis
+    # dengan ketikan) dan kabar yang bisa ditindaklanjuti (mis. kata penutup
+    # terucap padahal namaku belum disebut). Jalurnya sendiri tetap ada di
+    # dengar.Pendengar.on_dengar untuk penelusuran.
 
     def show_voice(arg: str = "") -> None:
-        """/voice — mikrofon: sebut "bagas ai …" lalu "lakukan".
+        """/voice — mikrofon: ucapkan "on …" lalu "enter".
 
         Sengaja MATI secara bawaan, dan tak disimpan ke preferensi: mikrofon
         yang menyala sendiri di sesi berikutnya adalah kejutan yang tak seorang
@@ -3172,7 +3190,7 @@ def main(resume: bool = False) -> None:
             if pendengar is not None and pendengar.aktif:
                 console.print("  [dim]mikrofon sudah menyala.[/dim]\n")
                 return
-            p = _dengar.Pendengar(_voice_masuk, _voice_kabar, _voice_dengar)
+            p = _dengar.Pendengar(_voice_masuk, _voice_kabar)
             alasan = p.mulai()
             if alasan:
                 console.print(f"  [yellow]⚠ mikrofon tak bisa dinyalakan:[/]\n"
@@ -3186,12 +3204,15 @@ def main(resume: bool = False) -> None:
             nama = _dengar.nama_mikrofon() or "mikrofon bawaan"
             console.print(
                 f"  [#9fc93c]● mikrofon AKTIF[/] [dim]— {_esc(nama)}[/]\n"
-                "  [dim]sebut[/] [#fcc048]\"bagas ai\"[/] [dim]untuk mulai, "
-                "tutup dengan[/] [#fcc048]\"lakukan\"[/][dim]. Contoh:[/]\n"
-                "  [dim]  \"bagas ai tolong buka main.py lakukan\"[/]\n"
-                f"  [dim]yang terdengar langsung tampil di sini, dan yang di "
-                f"antara kedua kata itu masuk ke kotak ketikan. Satu perintah "
-                f"maksimal {_dengar.MAKS_REKAM:.0f} detik.[/dim]\n")
+                "  [dim]ucapkan[/] [#fcc048]\"on\"[/] [dim]untuk mulai, tutup "
+                "dengan[/] [#fcc048]\"enter\"[/][dim]. Contoh:[/]\n"
+                "  [dim]  \"on tolong buka main.py enter\"[/]\n"
+                "  [dim]begitu namaku terdengar ada ketukan pendek, lalu "
+                "ketukan halus tiap beberapa detik SELAMA merekam — dan bar "
+                "status di bawah berubah jadi[/] [#fcc048]● merekam[/][dim]. "
+                "Ucapkan[/] [#fcc048]\"off\"[/] [dim]untuk membuang "
+                "rekaman yang sedang berjalan. Satu perintah maksimal "
+                f"{_dengar.MAKS_REKAM:.0f} detik.[/dim]\n")
             return
 
         if pilihan in ("tes", "test", "coba"):
@@ -3230,9 +3251,10 @@ def main(resume: bool = False) -> None:
         console.print(f"  [dim]mikrofon :[/] {_esc(_dengar.nama_mikrofon() or '-')}")
         if not ok:
             console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]")
-        console.print("  [dim]cara pakai:[/] sebut [#fcc048]\"bagas ai\"[/] "
-                      "lalu ucapkan perintahnya, tutup dengan "
-                      "[#fcc048]\"lakukan\"[/]")
+        console.print("  [dim]cara pakai:[/] ucapkan [#fcc048]\"on\"[/] "
+                      "lalu perintahnya, tutup dengan "
+                      "[#fcc048]\"enter\"[/] [dim]· buang dengan[/] "
+                      "[#fcc048]\"off\"[/]")
         console.print("  [dim]yang dikirim hanya yang di ANTARA keduanya.[/dim]")
         console.print("  [dim]/voice on · /voice off · /voice tes[/dim]\n")
 
@@ -4286,7 +4308,12 @@ def main(resume: bool = False) -> None:
         # ia merekam ruangan, jadi keadaannya harus terbaca sekali lihat di
         # tempat yang selalu tampak.
         _p = voice_state.get("pendengar")
-        mik = f"{sep}<sesi>🎙 dengar</sesi>" if (_p is not None and _p.aktif) else ""
+        mik = ""
+        if _p is not None and _p.aktif:
+            # DUA keadaan yang sangat berbeda: "mendengarkan" (menunggu namaku)
+            # dan "merekam" (apa pun yang terucap sekarang jadi perintah).
+            mik = (f"{sep}<sesi>● merekam</sesi>" if _p.merekam
+                   else f"{sep}<sesi>🎙 dengar</sesi>")
         bagian = {
             "merek": " <brand>⬢ bagas-ai</brand>",
             "model": f"{sep}{kind} <model>{spec.label}</model>{eff}",

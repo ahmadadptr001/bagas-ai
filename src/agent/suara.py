@@ -964,8 +964,12 @@ def _getar_sekarang() -> None:
         pass
 
 
-def getar() -> None:
+def getar(latar: bool = True) -> None:
     """Tanda bahwa giliran sudah sampai di KESIMPULAN.
+
+    `latar=False` menahan pemanggil sampai dengungnya habis — dipakai penanda
+    "tugas selesai" (tanda.py) supaya getaran dan deringnya berurutan, bukan
+    bertabrakan.
 
     Gunanya persis sama dengan fitur suara: memberitahu tanpa perlu melihat
     layar. Bedanya, ini menandai satu momen — bukan membacakan isi — jadi ia
@@ -974,6 +978,9 @@ def getar() -> None:
 
     Tak pernah menahan pemanggil dan tak pernah melempar."""
     try:
+        if not latar:
+            _getar_sekarang()
+            return
         threading.Thread(target=_getar_sekarang, daemon=True,
                          name="bagasai-getar").start()
     except Exception:  # noqa: BLE001 - notifikasi tak boleh menjatuhkan giliran
@@ -1021,6 +1028,31 @@ def tutup() -> None:
             _PENGUCAP.tutup()
     except Exception:  # noqa: BLE001
         pass
+
+
+def sibuk() -> bool:
+    """True bila masih ada kabar yang mengantre atau sedang dibacakan."""
+    p = _PENGUCAP
+    if p is None:
+        return False
+    try:
+        return (not p._antre.empty()) or p._mulai_bunyi is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def tunggu_diam(batas: float = 30.0) -> None:
+    """Tahan sampai bacaannya selesai (atau `batas` detik terlampaui).
+
+    Dipakai penanda "tugas selesai": bunyinya harus jatuh SESUDAH jawaban akhir
+    selesai dibacakan, bukan menimpanya. Berbatas waktu dengan sengaja — mesin
+    suara yang menggantung tak boleh ikut menahan penandanya selamanya."""
+    habis = time.monotonic() + max(0.0, batas)
+    # Jeda kecil dulu: ucapan yang baru saja diantrekan butuh sesaat sebelum
+    # terhitung "sibuk", dan tanpa ini penantiannya selesai sebelum dimulai.
+    time.sleep(0.35)
+    while sibuk() and time.monotonic() < habis:
+        time.sleep(0.15)
 
 
 def catatan() -> str:

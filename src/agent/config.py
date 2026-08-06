@@ -226,6 +226,11 @@ KONTEKS_MAKS_BYTES: int = int(
 # situs (chat.z.ai: 10) yang juga dipakai screenshot pratinjau.
 KONTEKS_MAKS_BAGIAN: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BAGIAN", "8"))
 
+# Bunyi penanda "tugas selesai" pilihan sendiri (path ke berkas WAV). Kosong =
+# pakai bawaan di ~/.bagasai/suara/ (lihat tanda.py). Cara lain tanpa menyentuh
+# .env: taruh berkasnya di ~/.bagasai/suara/selesai-punyaku.wav.
+SUARA_SELESAI: str = os.getenv("BAGASAI_SUARA_SELESAI", "").strip()
+
 ENV_FILE = CONFIG_HOME / ".env"
 
 # has_api_key()/require_api_key() DIHAPUS bersama model ber-API-key. bagas-ai

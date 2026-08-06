@@ -992,6 +992,15 @@ def apply(force: bool = True) -> dict:
         note = ((note + "  ") if note else "") + (
             "pemasangan selesai tapi isi paket masih belum sama dengan repo: "
             + "; ".join(reinst.get("beda") or [])[:200])
+    # Aset yang tak ikut di dalam paket Python DIAMBIL DI SINI — sekali per
+    # pembaruan, bukan saat pertama kali dibutuhkan. Kalau menunggu dibutuhkan,
+    # penanda "tugas selesai" pertama sesudah update berbunyi terlambat (atau
+    # tak berbunyi sama sekali kalau laptopnya sedang luring saat itu).
+    try:
+        from . import tanda as _tanda
+        _tanda.unduh(paksa=True)
+    except Exception:  # noqa: BLE001 - aset opsional, jangan gagalkan update
+        log.debug("unduh aset penanda gagal", exc_info=True)
     return {
         "status": "updated",
         "pull": pull_out,

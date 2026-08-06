@@ -3,9 +3,16 @@
 CARA PAKAI (dari sisi pengguna):
 
     /voice on          mikrofon menyala, bagas-ai mendengarkan
-    "bagas ai ..."     namanya disebut -> mulai dianggap perintah
-    "... lakukan"      kata penutup -> perintah dikirim ke kotak terminal
+    "on ..."           aba-aba mulai -> ucapan berikutnya dianggap perintah
+    "... enter"        kata penutup -> perintah dikirim ke kotak terminal
+    "... off"          batalkan rekaman yang sedang berjalan
     /voice off         mikrofon mati (ini keadaan bawaannya)
+
+Nama "bagas ai" tetap diterima sebagai aba-aba mulai selain "on". Ia cadangan
+yang sengaja dipertahankan: "on" cuma dua huruf, dan sekali saja ia salah
+dengar, seluruh perintah sesudahnya jadi obrolan biasa tanpa pengguna tahu
+sebabnya. Bedanya, "on" HARUS jadi kata pertama sebuah ucapan — di tengah
+kalimat ia terlalu lumrah ("nyalain wifi on") untuk dianggap panggilan.
 
 Satu perintah boleh sepanjang 30 detik sejak namanya disebut (MAKS_REKAM).
 Lewat itu ia dibatalkan, bukan dikirim setengah jadi.
@@ -21,7 +28,7 @@ keputusan mulai & selesai ke pengguna, dan itu satu-satunya tempat yang benar.
 
 APA YANG DIKIRIM
 ----------------
-Hanya yang berada DI ANTARA keduanya. "bagas ai tolong buka main.py lakukan"
+Hanya yang berada DI ANTARA keduanya. "on tolong buka main.py enter"
 menjadi perintah "tolong buka main.py" — kata pemicu & penutupnya dibuang,
 sebab keduanya ditujukan ke programnya, bukan ke AI.
 
@@ -74,13 +81,35 @@ log = logging.getLogger(__name__)
 # --- kata pemicu & penutup -------------------------------------------------
 # Ditulis sebagai POLA PER-KATA, bukan potongan teks: pengenal suara memisah
 # "bagasai" jadi dua kata dan sesekali salah dengar konsonan awalnya.
+# KATA PEMICU UTAMA: "on". Diterima HANYA sebagai kata PERTAMA sebuah ucapan —
+# ia terlalu pendek dan terlalu lumrah untuk diterima di tengah kalimat
+# ("nyalain wifi on" bukan panggilan). Di depan kalimat, ia jelas sebuah aba-aba.
+# Bentuk salah-dengarnya ikut ditampung: pengenal suara Indonesia menuliskan
+# kata Inggris sependek ini dengan bermacam ejaan.
+PEMICU = {"on", "onn", "own", "hon", "oon"}
 _NAMA_KEDUA = {"ai", "hai", "ay", "a", "i", "eye", "ei"}
 _NAMA_RAPAT = {"bagasai", "bagas-ai", "bagasi", "pagasai", "bagasay",
                "bagasih", "bagaskara", "bagasi"}
 _NAMA_PERTAMA = {"bagas", "pagas", "bagus", "begas", "bagaz"}
 # Yang boleh jadi panggilan TUNGGAL di awal kalimat — lihat cari_nama().
 _NAMA_SENDIRI = {"bagas", "bagaz"}
-PENUTUP = {"lakukan", "lakuin", "laksanakan", "kerjakan"}
+# KATA PENUTUP: "enter". Dipilih karena sepadan dengan "on"/"off" (sama-sama
+# aba-aba pendek, bukan kata yang lazim muncul di tengah kalimat Indonesia) DAN
+# karena ia menggambarkan persis apa yang terjadi: teksnya masuk ke kotak
+# ketikan terminal lalu di-Enter. "lakukan" dan kerabatnya TETAP diterima —
+# kebiasaan yang sudah terbentuk tak perlu dipatahkan hanya karena ada kata yang
+# lebih tepat.
+PENUTUP = {"enter", "eksekusi", "lakukan", "lakuin", "laksanakan", "kerjakan"}
+# Kata BATAL: membuang rekaman yang sedang berjalan. Hanya berlaku SELAGI
+# merekam — di luar itu ia kata biasa dalam obrolan, dan menanggapinya cuma
+# menambah kebisingan.
+PEMBATAL = {"off", "of", "ov", "batalkan", "batal", "batalin"}
+
+# Penanda hasil dengar(): perintahnya DIBATALKAN pengguna. Sengaja objek
+# tersendiri, bukan string kosong atau None — keduanya sudah punya arti lain
+# ("penutup tanpa isi" dan "belum apa-apa"), dan menumpuk arti ketiga di
+# atasnya membuat pemanggil tak bisa membedakan mana yang mana.
+BATAL = object()
 
 # BATAS MEREKAM: 30 detik sejak namanya disebut. Lewat itu, perintahnya
 # DIBATALKAN — bukan dikirim setengah jadi.
@@ -101,8 +130,15 @@ def _kata(teks: str) -> list[str]:
     return re.sub(r"[^0-9a-zA-ZÀ-ɏ]+", " ", teks or "").lower().split()
 
 
-def cari_nama(kata: list[str]) -> int:
-    """Indeks kata TEPAT SESUDAH nama bagas-ai, atau -1 bila tak disebut."""
+def cari_pemicu(kata: list[str]) -> int:
+    """Indeks kata TEPAT SESUDAH aba-aba mulai, atau -1 bila tak ada.
+
+    Dua bentuk diterima: kata pemicu "on" (harus di DEPAN kalimat) dan nama
+    bagas-ai (boleh di mana saja). Namanya dipertahankan sebagai cadangan —
+    "on" cuma dua huruf, dan kalau ia salah dengar sekali saja, seluruh
+    perintah berikutnya jadi obrolan biasa tanpa pengguna tahu sebabnya."""
+    if kata and kata[0] in PEMICU:
+        return 1
     for i, k in enumerate(kata):
         if k in _NAMA_RAPAT:
             return i + 1
@@ -126,6 +162,14 @@ def cari_penutup(kata: list[str]) -> int:
     """Indeks kata penutup pertama, atau -1."""
     for i, k in enumerate(kata):
         if k in PENUTUP:
+            return i
+    return -1
+
+
+def cari_pembatal(kata: list[str]) -> int:
+    """Indeks kata pembatal pertama, atau -1."""
+    for i, k in enumerate(kata):
+        if k in PEMBATAL:
             return i
     return -1
 
@@ -160,11 +204,14 @@ class Perakit:
         self.merekam = False
         self.potongan = []
 
-    def dengar(self, teks: str, sekarang: float | None = None) -> str | None:
+    def dengar(self, teks: str, sekarang: float | None = None) -> Any:
         """Umpankan satu hasil pengenalan suara.
 
-        Return: perintah lengkap (str) bila kata penutup terdengar, "" bila
-        penutupnya terdengar tapi tak ada isinya, atau None bila belum apa-apa.
+        Return:
+          - perintah lengkap (str) bila kata penutup terdengar;
+          - "" bila penutupnya terdengar tapi tak ada isinya;
+          - BATAL bila pengguna mengucapkan kata pembatal;
+          - None bila belum apa-apa.
         """
         sekarang = time.time() if sekarang is None else sekarang
         kata = _kata(teks)
@@ -172,7 +219,7 @@ class Perakit:
             return None
 
         if not self.merekam:
-            i = cari_nama(kata)
+            i = cari_pemicu(kata)
             if i < 0:
                 return None            # bukan untuk kita — abaikan diam-diam
             self.merekam = True
@@ -182,6 +229,14 @@ class Perakit:
 
         self.terakhir = sekarang
         j = cari_penutup(kata)
+        b = cari_pembatal(kata)
+        # Yang DULUAN terucap yang berlaku. "…lakukan, eh batalkan" berarti
+        # perintahnya sudah berangkat; "…batalkan saja, jangan lakukan" berarti
+        # dibuang. Membaca urutannya adalah satu-satunya cara menghormati
+        # maksud pengguna tanpa menebak.
+        if b >= 0 and (j < 0 or b < j):
+            self.batalkan()
+            return BATAL
         if j < 0:
             if kata:
                 self.potongan.append(" ".join(kata))
@@ -273,11 +328,31 @@ def nama_mikrofon() -> str:
 # bisa dibedakan tanpa menghafal nada.
 _NADA_ON = ((660, 90), (990, 130))
 _NADA_OFF = ((880, 90), (440, 150))
+# Satu ketuk pendek saat NAMAKU TERDETEKSI — tanda "aku mendengarkanmu
+# sekarang". Sengaja SEKALI dan pendek, bukan nada menerus selama
+# merekam: apa pun yang berbunyi selagi mikrofon hidup akan ikut terekam
+# dan mengacaukan pengenalan kalimat yang sedang diucapkan. Keadaan
+# "sedang merekam" ditunjukkan terus-menerus lewat bar status.
+_NADA_MULAI = ((1320, 70),)
+# KETUKAN BERULANG selama merekam — supaya "mikrofonku sedang merekam" bisa
+# diketahui tanpa melihat layar sama sekali.
+#
+# Ia PENDEK dan JARANG dengan sengaja, dan blok audio selama ia berbunyi
+# DIBUANG (lihat _abaikan_sampai). Sebabnya teknis, bukan selera: apa pun yang
+# keluar dari pengeras suara ikut masuk ke mikrofon. Nada menerus akan membuat
+# pemotong ucapan tak pernah melihat sunyi — kalimatnya tak pernah dianggap
+# selesai — dan bunyinya sendiri ikut terkirim ke pengenal suara.
+_NADA_TIK = ((980, 45),)
+_JEDA_TIK = 2.5
 
 
-def bunyi(nyala: bool) -> None:
-    """Bunyikan tanda mikrofon menyala/mati. Diam-diam gagal bila tak bisa."""
-    nada = _NADA_ON if nyala else _NADA_OFF
+_NADA = {"mulai": _NADA_MULAI, "tik": _NADA_TIK,
+         True: _NADA_ON, False: _NADA_OFF}
+
+
+def bunyi(nyala: Any = True) -> None:
+    """Bunyikan tanda: True=menyala, False=mati, "mulai"/"tik" saat merekam."""
+    nada = _NADA.get(nyala, _NADA_ON)
     try:
         import winsound                      # Windows: paling ringan & instan
         for f, ms in nada:
@@ -327,6 +402,11 @@ class Pendengar:
         self.on_dengar = on_dengar or (lambda _t, _m: None)
         self.perakit = Perakit(maks_rekam)
         self._stop = threading.Event()
+        # Sampai kapan blok audio DIBUANG (selagi ketukan penanda berbunyi).
+        # Tanpa ini, bunyi bagas-ai sendiri ikut terekam lalu dikirim ke
+        # pengenal suara — dan yang lebih buruk, ia menahan pemotong ucapan
+        # supaya tak pernah melihat sunyi.
+        self._abaikan_sampai = 0.0
         self._antre: queue.Queue = queue.Queue()
         self._threads: list[threading.Thread] = []
         self.galat = ""
@@ -334,6 +414,14 @@ class Pendengar:
     @property
     def aktif(self) -> bool:
         return any(t.is_alive() for t in self._threads)
+
+    @property
+    def merekam(self) -> bool:
+        """True bila namaku sudah disebut & perintahnya sedang dikumpulkan.
+
+        Dibaca bar status terminal: selama ini menyala, apa pun yang terucap
+        ikut jadi perintah — keadaan yang harus terbaca sekali lihat."""
+        return self.perakit.merekam
 
     def mulai(self) -> str:
         """Nyalakan mikrofon. Return "" bila berhasil, atau alasan gagalnya."""
@@ -397,12 +485,26 @@ class Pendengar:
         awalan: list[Any] = []
         sunyi = 0.0
         mulai = 0.0
+        tik = 0.0
         while not self._stop.is_set():
             try:
                 data, _ = stream.read(BLOK)
             except Exception as exc:  # noqa: BLE001
                 self._gagal(f"aliran mikrofon terputus: {exc}")
                 return
+            # Ketukan penanda "sedang merekam". Dibunyikan HANYA di sela
+            # ucapan (potongan kosong): kalau disisipkan di tengah kalimat, ia
+            # ikut terekam dan merusak pengenalannya.
+            if self.perakit.merekam and not potongan:
+                if time.time() - tik >= _JEDA_TIK:
+                    tik = time.time()
+                    self._abaikan_sampai = tik + _NADA_TIK[0][1] / 1000 + 0.25
+                    threading.Thread(target=bunyi, args=("tik",),
+                                     daemon=True).start()
+            elif not self.perakit.merekam:
+                tik = 0.0
+            if time.time() < self._abaikan_sampai:
+                continue          # bunyi sendiri — jangan direkam
             keras = _rms(data) > ambang
             lama_blok = BLOK / LAJU
             if not potongan:
@@ -445,11 +547,10 @@ class Pendengar:
                 teks = rec.recognize_google(sr.AudioData(data, LAJU, 2),
                                             language="id-ID")
             except sr.UnknownValueError:
-                # DIKATAKAN, tidak ditelan. Ucapan yang tertangkap tapi tak
-                # terpahami itu keadaan yang sama sekali berbeda dari mikrofon
-                # yang diam — dan dari luar keduanya sama-sama tak menghasilkan
-                # apa pun di layar. Justru di sinilah kata pemicu paling sering
-                # hilang: ia pendek, diucapkan sendirian, lalu tak terbaca.
+                # Diteruskan lewat on_dengar, TIDAK dicetak sendiri. Terminal
+                # sengaja tak menampilkan transkrip apa pun di atas kotak chat
+                # (permintaan pengguna: itu barisan debug, bukan untuk dipakai
+                # sehari-hari) — jalurnya tetap ada untuk penelusuran.
                 self.on_dengar("(tertangkap, tapi tak terdengar jelas)",
                                self.perakit.merekam)
                 continue
@@ -461,6 +562,16 @@ class Pendengar:
             self.on_dengar(teks, self.perakit.merekam)
             sedang = self.perakit.merekam
             hasil = self.perakit.dengar(teks)
+            if not sedang and self.perakit.merekam:
+                # Namaku baru saja terdeteksi. Ketukan ini yang menjawab
+                # pertanyaan "tadi kedengeran nggak sih?" — tanpa itu pengguna
+                # baru tahu jawabannya setelah selesai bicara panjang lebar.
+                threading.Thread(target=bunyi, args=("mulai",),
+                                 daemon=True).start()
+            if hasil is BATAL:
+                self.on_kabar("rekaman dibatalkan — sebut namaku lagi untuk "
+                              "memulai perintah baru")
+                continue
             if hasil is None:
                 # "lakukan" terdengar padahal belum merekam: pengguna mengira
                 # ia sedang memerintah, bagas-ai menganggapnya obrolan. Dulu
@@ -468,9 +579,9 @@ class Pendengar:
                 # tampak "tak berbuat apa-apa". (Dilaporkan pengguna.)
                 if not sedang and cari_penutup(_kata(teks)) >= 0:
                     self.on_kabar(
-                        "terdengar kata penutup, tapi namaku belum disebut — "
-                        "mulai dengan \"bagas ai\", mis. "
-                        "\"bagas ai tolong baca file ini lakukan\"")
+                        "terdengar kata penutup, tapi belum ada aba-aba "
+                        "mulai — awali dengan \"on\", mis. "
+                        "\"on tolong baca file ini enter\"")
                 continue
             if not hasil:
                 self.on_kabar("kata `lakukan` terdengar, tapi tak ada perintah "
