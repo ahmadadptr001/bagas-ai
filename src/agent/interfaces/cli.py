@@ -1153,6 +1153,94 @@ def show_logo() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bar kemajuan PIL bergaris putus-putus — dipakai saat ingatan dipadatkan
+# ---------------------------------------------------------------------------
+# Bentuk pilnya dibuat dari dua setengah-blok sebagai tutup ujung (▐ … ▌).
+# Sengaja BUKAN glif powerline ( ) yang bulat sempurna: glif itu cuma ada di
+# font yang sudah ditambal, dan di terminal biasa ia jadi kotak kosong — bar
+# yang rusak lebih buruk daripada bar yang sudutnya kurang bulat. Setengah-blok
+# ada di hampir semua font monospace.
+#
+# Isinya PUTUS-PUTUS (▰ / ╌) dan ruas terangnya BERGERAK tiap frame. Gerak itu
+# ada gunanya: pemadatan bisa berhenti sejenak di satu tahap (peta proyek yang
+# dibangun ulang), dan bar yang diam di angka yang sama tak bisa dibedakan dari
+# bar yang macet.
+_PIL_TUTUP_KIRI, _PIL_TUTUP_KANAN = "▐", "▌"
+_PIL_ISI, _PIL_KOSONG = "▰", "╌"
+_PIL_TERANG, _PIL_REDUP, _PIL_SISA = "bold #fcc048", "#a86a18", "#4a3826"
+
+
+def _bar_pil(frac: float, lebar: int = 20, fase: int = 0) -> Text:
+    """Bar pil putus-putus. `fase` menggeser ruas terangnya (animasi)."""
+    frac = max(0.0, min(1.0, frac))
+    isi = int(round(frac * lebar))
+    t = Text()
+    t.append(_PIL_TUTUP_KIRI, style=_PIL_TERANG if isi else _PIL_SISA)
+    for i in range(lebar):
+        if i < isi:
+            # Ruas 2 terang - 2 redup yang merayap: pola putus-putus yang hidup.
+            terang = ((i - fase) % 4) < 2
+            t.append(_PIL_ISI, style=_PIL_TERANG if terang else _PIL_REDUP)
+        else:
+            t.append(_PIL_KOSONG, style=_PIL_SISA)
+    t.append(_PIL_TUTUP_KANAN, style=_PIL_TERANG if isi >= lebar else _PIL_SISA)
+    return t
+
+
+# Berapa lama bar pemadatan MINIMAL tampak di layar. Menyimpan ingatan biasanya
+# selesai dalam sepersekian detik — tanpa jeda ini, satu-satunya jejak kejadian
+# penting itu cuma kedipan yang tak sempat terbaca. Jedanya JEDA TAMPILAN, bukan
+# pekerjaan yang dibuat-buat: barnya sudah 100% dan tertulis "tersimpan".
+_PADAT_MIN_TAMPIL = 1.4
+
+
+def _jeda_padat(view: Any):
+    """Callback on_padat: gerakkan bar, lalu TAHAN sebentar di akhir.
+
+    Penahanannya berjalan di thread worker — thread yang sama yang menjalankan
+    giliran — jadi gilirannya benar-benar berhenti selama bar terlihat, bukan
+    cuma tampak berhenti. Itu yang diminta: pemadatan menjeda semua aktivitas."""
+    def lapor(frac: float, ket: str) -> None:
+        # Sudah selesai & barnya sudah dilepas? Laporan 100% yang datang
+        # menyusul TIDAK boleh memulai penantian kedua — itu membuat jedanya
+        # dua kali lipat dari yang dijanjikan.
+        if frac >= 1.0 and view.padat is None:
+            return
+        view.note_padat(frac, ket)
+        if frac < 1.0:
+            return
+        mulai = view.padat[2] if view.padat else time.time()
+        sisa = _PADAT_MIN_TAMPIL - (time.time() - mulai)
+        if sisa > 0:
+            time.sleep(sisa)
+        view.padat = None          # kembali ke baris status biasa
+    return lapor
+
+
+def _baris_padat(frac: float, ket: str, sejak: float, el: float) -> Text:
+    """Satu baris status pemadatan: pil + persen + perkiraan sisa waktu."""
+    jalan = max(time.time() - sejak, 0.001)
+    t = Text()
+    t.append("  ⏸ ", style="bold #fcc048")
+    t.append("memadatkan ingatan", style="#fcc048")
+    t.append("  ")
+    t.append_text(_bar_pil(frac, fase=int(el * 12)))
+    t.append(f" {int(round(frac * 100)):>3}%", style="bold #fc9018")
+    # ETA dari kemajuan NYATA, bukan tebakan: waktu yang sudah lewat dibagi
+    # bagian yang sudah selesai. Di bawah 8% angkanya masih liar (satu tahap
+    # cepat bisa menghasilkan perkiraan sepersepuluh detik), jadi ditahan dulu.
+    # Ini juga sebabnya bar ini boleh ada sementara bar ETA untuk jawaban AI
+    # dulu dibuang: yang di sini mengukur pekerjaan LOKAL yang tahapannya
+    # diketahui, bukan menebak kapan situs selesai menjawab.
+    if 0.08 <= frac < 1.0:
+        t.append(f"  ~{jalan / frac - jalan:.1f}s", style="#f7d488")
+    t.append("  ·  ")
+    t.append(ket, style="dim")
+    t.append("  ·  dijeda", style="dim italic")
+    return _oneline(t)
+
+
+# ---------------------------------------------------------------------------
 # Indikator "berpikir" realtime (rich Live) — nempel inline pada task
 # ---------------------------------------------------------------------------
 # Kata FASE per-tool: bikin indikator status menjelaskan APA yang sedang
@@ -1210,6 +1298,14 @@ class Status:
         self.retry_until = 0.0
         self.retry_msg = ""
         self.cancelling = False
+        # Pemadatan ingatan yang sedang berjalan: (pecahan, keterangan, mulai).
+        # None = tak sedang memadatkan.
+        self.padat: tuple[float, str, float] | None = None
+
+    def note_padat(self, frac: float, ket: str) -> None:
+        """Kemajuan pemadatan ingatan (menggantikan baris status selagi jalan)."""
+        mulai = self.padat[2] if self.padat else time.time()
+        self.padat = (frac, ket, mulai)
 
     def note_retry(self, wait: float, msg: str) -> None:
         """Tandai bahwa bagas-ai sedang menunggu rate limit lalu melanjutkan."""
@@ -1261,6 +1357,12 @@ class Status:
         frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
 
         dot = "[#4a3826]•[/]"
+
+        # Ingatan sedang dipadatkan: SELURUH giliran berhenti di sini, jadi
+        # baris status biasa (fase/token/alat) tak lagi menggambarkan apa pun
+        # yang sedang terjadi — diganti utuh oleh bar pemadatan.
+        if self.padat is not None:
+            return _baris_padat(*self.padat, el)
 
         # Mode membatalkan: Ctrl+C ditekan, menunggu langkah aman berhenti.
         if self.cancelling:
@@ -1400,8 +1502,16 @@ class TurnView:
         # tak ada satu pun teks di layar yang menyebut-nyebut antrean.
         self.typing = ""
         self.typing_pos = 0
+        # Pemadatan ingatan yang sedang berjalan (lihat note_padat & _footer).
+        self.padat: tuple[float, str, float] | None = None
 
     # --- mutasi (dipanggil dari worker) ---
+    def note_padat(self, frac: float, ket: str) -> None:
+        """Kemajuan pemadatan ingatan. Selama ini hidup, seluruh baris status
+        diganti bar pemadatan — giliran memang sedang berhenti di situ."""
+        mulai = self.padat[2] if self.padat else time.time()
+        self.padat = (frac, ket, mulai)
+
     def add_narasi(self, text: str) -> None:
         """Narasi langsung DIBEKUKAN ke riwayat (bisa panjang) -> region live tetap
         pendek & tak berkedip."""
@@ -1527,6 +1637,8 @@ class TurnView:
         el = time.time() - self.start
         frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
         now = time.time()
+        if self.padat is not None:
+            return _baris_padat(*self.padat, el)
         if self.cancelling:
             return _oneline(Text.from_markup(
                 f"  [bold #f0603c]{frame}[/] [#f0603c]membatalkan — "
@@ -2265,6 +2377,8 @@ def main(resume: bool = False) -> None:
                 # yang sebenarnya ingin ditunjukkan pengguna.
                 return [_tempelan.simpanan().kembangkan(t) for t in diambil]
 
+        _padat = _jeda_padat(view)
+
         def worker() -> None:
             try:
                 result["answer"] = agent.run(
@@ -2272,7 +2386,7 @@ def main(resume: bool = False) -> None:
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status, ambil_sisipan=_ambil_sisipan,
-                    on_tim=_on_tim,
+                    on_tim=_on_tim, on_padat=_padat,
                     # on_token SENGAJA tak diteruskan: pratinjau kalimat yang
                     # sedang ditulis sudah dihapus dari layar, jadi tak ada lagi
                     # yang memakainya. Efek sampingnya justru menguntungkan —
@@ -2637,6 +2751,7 @@ def main(resume: bool = False) -> None:
                     on_retry=on_retry, cancel_event=cancel_event,
                     on_tool_result=finish_step,
                     on_status=lambda m: status_obj.note_phase(_web_phase(m)),
+                    on_padat=_jeda_padat(status_obj),
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
@@ -2839,11 +2954,39 @@ def main(resume: bool = False) -> None:
         Seluruhnya dikerjakan di laptop: tak ada pesan yang dikirim ke situs,
         model tak dimintai ringkasan, dan chat yang sedang berjalan TIDAK
         diapa-apakan. Berkasnya bekal untuk percakapan berikutnya — dipasang
-        dengan /send-compact sesudah /new."""
-        teks = agent.padatkan_sekarang()
+        dengan /send-compact sesudah /new.
+
+        Bar kemajuannya SAMA PERSIS dengan yang muncul saat pemadatan otomatis
+        — dua jalan yang mengerjakan hal yang sama tak boleh terlihat berbeda."""
+        class _Tampil:
+            """Penampung sekadarnya: _jeda_padat cuma butuh `.note_padat` &
+            `.padat`, jadi tak perlu menyeret seluruh mesin TurnView ke sini."""
+            padat = None
+
+            def note_padat(self, frac: float, ket: str) -> None:
+                mulai = self.padat[2] if self.padat else time.time()
+                self.padat = (frac, ket, mulai)
+
+        tampil = _Tampil()
+        lapor = _jeda_padat(tampil)
+        mulai = time.time()
+        hasil: dict = {"teks": ""}
+
+        def kerja() -> None:
+            hasil["teks"] = agent.padatkan_sekarang(on_padat=lapor)
+
+        wt = threading.Thread(target=kerja, daemon=True)
+        with Live(_KOSONG, console=console, refresh_per_second=12,
+                  transient=True) as live:
+            wt.start()
+            while wt.is_alive():
+                p = tampil.padat
+                live.update(_baris_padat(*p, time.time() - mulai) if p
+                            else Text("  ⏸ menyiapkan…", style="dim"))
+                wt.join(timeout=0.05)
         console.print("  [#9fc93c]✓ riwayat tersimpan[/] [dim]— chat di situs "
                       "tak disentuh.[/]\n")
-        console.print(Padding(_md(teks), (0, 3, 1, 3)))
+        console.print(Padding(_md(hasil["teks"]), (0, 3, 1, 3)))
 
     def do_send_compact(arg: str = "") -> None:
         """/send-compact — unggah berkas memory ke percakapan web sekarang.

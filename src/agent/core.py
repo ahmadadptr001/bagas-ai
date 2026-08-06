@@ -1283,8 +1283,20 @@ class Agent:
             total -= len(self._riwayat_web.pop(0)["isi"])
             self._riwayat_terpotong = True
 
-    def simpan_memory(self) -> list:
+    # Tahapan simpan_memory beserta JATAHNYA di bar kemajuan. Angkanya bukan
+    # hiasan: menyusun payload (baca peta proyek + rakit riwayat) memang bagian
+    # paling lama — menulis berkasnya sendiri nyaris seketika. Bar yang membagi
+    # rata malah berbohong: ia melompat ke 90% lalu menggantung di situ.
+    _TAHAP_PADAT = ((0.08, "membaca peta proyek & memori"),
+                    (0.62, "menyusun riwayat percakapan"),
+                    (0.70, "memecah jadi bagian yang muat dibaca situs"),
+                    (1.00, "ingatan tersimpan"))
+
+    def simpan_memory(self, on_progress: Any = None) -> list:
         """Tulis KONTEKS + RIWAYAT percakapan ke berkas. Return daftar Path.
+
+        `on_progress(pecahan, keterangan)` dipanggil di tiap tahap — dipakai
+        terminal untuk bar & perkiraan sisa waktu.
 
         Inilah "/compact" yang sebenarnya: seluruhnya dikerjakan bagas-ai
         sendiri di laptop. Tak ada pesan yang dikirim ke situs, model tak
@@ -1300,27 +1312,47 @@ class Agent:
         # Seluruhnya dijaga: /compact dipanggil dari REPL tanpa jaring apa pun
         # di atasnya, jadi satu galat kecil (peta proyek gagal dibaca, disk
         # penuh) tak boleh menjatuhkan seluruh sesi pengguna.
+        def lapor(i: int) -> None:
+            if on_progress:
+                on_progress(*self._TAHAP_PADAT[i])
+
         try:
+            lapor(0)
             payload = prompts.build_context_payload(
                 messages=self.memory.messages,
                 riwayat=list(self._riwayat_web),
                 dipotong=self._riwayat_terpotong,
             )
-            return konteks.tulis(payload)
+            lapor(1)
+            # Penulisan berkas berhenti sedikit SEBELUM 100%: yang berhak
+            # menyatakan selesai cuma tahap terakhir. Kalau tahap ini ikut
+            # menyentuh 1.0, penanda "selesai" datang dua kali dan penantian
+            # tampilan di sisi terminal berjalan dua putaran.
+            awal, akhir = self._TAHAP_PADAT[2][0], 0.97
+
+            def tulis_maju(pecahan: float, ket: str) -> None:
+                if on_progress:
+                    on_progress(awal + (akhir - awal) * pecahan, ket)
+
+            berkas = konteks.tulis(
+                payload, on_progress=tulis_maju if on_progress else None)
+            lapor(3)
+            return berkas
         except Exception:  # noqa: BLE001
             log.debug("gagal menulis berkas memory", exc_info=True)
             return []
 
     def padatkan_sekarang(self, on_status: Any = None,
-                          on_notice: Any = None) -> str:
-        """/compact: simpan riwayat percakapan ke berkas memory JSON.
+                          on_notice: Any = None,
+                          on_padat: Any = None) -> str:
+        """/compact: simpan riwayat percakapan ke berkas memory.
 
         Tak menyentuh situs sama sekali. Chat yang sedang berjalan TETAP
         berjalan — berkas ini bekal untuk chat berikutnya, dikirim saat
         pengguna memintanya lewat /send-compact."""
         if on_status:
             on_status("menyimpan riwayat percakapan…")
-        berkas = self.simpan_memory()
+        berkas = self.simpan_memory(on_progress=on_padat)
         if not berkas:
             return ("Riwayat tak bisa disimpan (berkasnya gagal ditulis di "
                     f"{config.KONTEKS_DIR}).")
@@ -1349,21 +1381,28 @@ class Agent:
             "`/send-compact` — berkas inilah yang diunggah ke chat barunya."
         )
 
-    def _simpan_otomatis(self, conn: Any = None, on_notice: Any = None) -> None:
+    def _simpan_otomatis(self, conn: Any = None, on_notice: Any = None,
+                         on_padat: Any = None) -> None:
         """Simpan ingatan SENDIRI begitu percakapannya sudah panjang.
 
-        Dipanggil di akhir tiap giliran. Tak mengirim apa pun ke situs dan tak
-        memindahkan pekerjaan ke mana pun — cuma menyiapkan bekal, supaya
-        keputusan pindah (yang milik pengguna) tinggal satu perintah kapan pun
-        ia diambil. Setelah lewat ambang, berkasnya diperbarui tiap giliran
-        agar isinya selalu mencerminkan pekerjaan terakhir; yang diumumkan
-        hanya sekali per percakapan supaya tak jadi berisik."""
+        Dipanggil di akhir tiap giliran, dan MENJEDA giliran itu selama
+        berlangsung — bukan karena harus, tapi karena kejadian sepenting ini
+        tak boleh lewat tanpa terlihat. `on_padat(pecahan, keterangan)`
+        menggerakkan bar di terminal; pemanggilnya boleh menahan sejenak di
+        akhir supaya animasinya sempat terbaca (lihat cli._jeda_padat).
+
+        Tak mengirim apa pun ke situs dan tak memindahkan pekerjaan ke mana
+        pun — cuma menyiapkan bekal, supaya keputusan pindah (yang milik
+        pengguna) tinggal satu perintah kapan pun ia diambil. Setelah lewat
+        ambang, berkasnya diperbarui tiap giliran agar isinya selalu
+        mencerminkan pekerjaan terakhir; yang diumumkan hanya sekali per
+        percakapan supaya tak jadi berisik."""
         ambang = int(config.AUTO_COMPACT_CHARS)
         situs_mengeluh = bool(getattr(conn, "konteks_penuh", False))
         panjang = ambang > 0 and self._web_chars >= ambang
         if not (panjang or situs_mengeluh):
             return
-        berkas = self.simpan_memory()
+        berkas = self.simpan_memory(on_progress=on_padat)
         if not berkas or self._kabar_panjang:
             return
         self._kabar_panjang = True
@@ -1656,6 +1695,10 @@ class Agent:
         # yang mengantre supaya bisa DISISIPKAN ke giliran berjalan.
         ambil_sisipan: Callable[[], list[str]] | None = None,
         on_tim: Callable[[list[str]], None] | None = None,
+        # Dipanggil saat ingatan percakapan disimpan otomatis di akhir giliran:
+        # on_padat(pecahan 0..1, keterangan). Terminal memakainya untuk bar
+        # kemajuan; giliran ini MENUNGGU selama pemanggilnya belum kembali.
+        on_padat: Callable[[float, str], None] | None = None,
     ) -> str:
         """Proses satu giliran. Kembalikan teks jawaban final.
 
@@ -1691,7 +1734,7 @@ class Agent:
             on_tool=on_tool, on_message=on_message,
             on_tool_result=on_tool_result, on_notice=on_notice,
             on_retry=on_retry, attachments=attachments,
-            ambil_sisipan=ambil_sisipan, on_tim=on_tim,
+            ambil_sisipan=ambil_sisipan, on_tim=on_tim, on_padat=on_padat,
         )
 
     # --- pemulihan saat situsnya bermasalah -------------------------------
@@ -1821,6 +1864,8 @@ class Agent:
         # Dipanggil dengan daftar nama rekan tim yang ikut meninjau satu
         # langkah — supaya terminal bisa menampilkan siapa yang bekerja.
         on_tim: Callable[[list[str]], None] | None = None,
+        # Bar kemajuan saat ingatan disimpan otomatis (lihat _simpan_otomatis).
+        on_padat: Callable[[float, str], None] | None = None,
     ) -> str:
         """Jalankan giliran lewat AI web (browser) sebagai AGENT penuh.
 
@@ -2789,7 +2834,7 @@ class Agent:
         # Ingatan disimpan di BATAS GILIRAN, bukan di tengah langkah: di sini
         # pekerjaannya utuh (jawaban akhir sudah masuk riwayat) dan tak ada
         # berkas yang ditulis belasan kali dalam satu giliran panjang.
-        self._simpan_otomatis(conn, on_notice)
+        self._simpan_otomatis(conn, on_notice, on_padat)
         # Web-AI tak melaporkan token; pakai estimasi ~4 karakter per token dari
         # TOTAL lalu-lintas giliran ini (semua pesan terkirim + semua balasan),
         # bukan hanya jawaban akhir, supaya angkanya mencerminkan biaya nyata.

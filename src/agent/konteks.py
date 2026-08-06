@@ -133,7 +133,8 @@ def bagi(payload: dict[str, Any], maks: int = 0,
     return bagian
 
 
-def tulis(payload: dict[str, Any], awalan: str = AWALAN) -> list[Path]:
+def tulis(payload: dict[str, Any], awalan: str = AWALAN,
+          on_progress: Any = None) -> list[Path]:
     """Tulis payload jadi satu/beberapa berkas siap unggah, urut bagian.
 
     Nama berkasnya ikut terbaca pengguna di layar situs, jadi dibuat
@@ -145,9 +146,16 @@ def tulis(payload: dict[str, Any], awalan: str = AWALAN) -> list[Path]:
     total = len(bagian)
     keluar: list[Path] = []
     for i, isi in enumerate(bagian, start=1):
+        # Kemajuan dilaporkan sebagai pecahan 0..1 dari tahap MENULIS saja;
+        # pemanggil yang memetakannya ke bagian jatahnya di bar (lihat
+        # Agent.simpan_memory) — modul ini tak perlu tahu soal tampilan.
+        if on_progress:
+            on_progress((i - 1) / total, f"menulis bagian {i}/{total}")
         path = config.KONTEKS_DIR / f"{grup}-b{i}dari{total}{EKSTENSI}"
         path.write_text(_teks(isi), encoding="utf-8")
         keluar.append(path)
+    if on_progress:
+        on_progress(1.0, "merapikan simpanan lama")
     bersihkan()
     return keluar
 
