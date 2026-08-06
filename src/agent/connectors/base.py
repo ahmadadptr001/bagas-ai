@@ -69,8 +69,15 @@ JS_FIND_TEXT = r"""
   }
   const excluded = (el) => skips.some(s => s.contains(el));
 
+  // Semua elemen, bukan daftar tag pilihan. Dulu daftarnya dibatasi
+  // div/span/p/h*/a/button, dan itu LUBANG SENYAP: bila teksnya dibungkus tag
+  // lain (label, li, td, strong, atau elemen kustom milik widget captcha),
+  // jalur cepat di atas cocok tapi tak ada satu pun elemen yang terpilih —
+  // hasilnya "" alias "tidak ada apa-apa", padahal teksnya jelas ada di layar.
+  // Perulangan ini hanya berjalan ketika jalur cepat sudah cocok (jarang),
+  // jadi memindai '*' tak membebani pemakaian normal.
   let best = "";
-  for (const el of document.querySelectorAll('div,span,p,h1,h2,h3,a,button')) {
+  for (const el of document.querySelectorAll('*')) {
     const t = (el.innerText || '').trim();
     if (!t || t.length > 220) continue;
     if (excluded(el)) continue;
@@ -1072,8 +1079,19 @@ class WebConnector:
         t0 = time.time()
         started = False
         next_limit_check = 0.0
+        next_captcha_check = time.time() + self._CAPTCHA_PERIKSA
         while time.time() - t0 < self.start_timeout:
             check_cancel()
+            # Captcha diintip BERKALA, bukan sesudah menyerah. Selama kotaknya
+            # tampil, situs menahan jawabannya di belakang layar verifikasi:
+            # menunggu lebih lama tak pernah menolong, dan yang dilihat pengguna
+            # cuma "sedang berpikir…" berkepanjangan. Kalau ditemukan, ia
+            # ditangani sampai selesai lalu penantian ini diulang dari nol.
+            if time.time() >= next_captcha_check:
+                next_captcha_check = time.time() + self._CAPTCHA_PERIKSA
+                if self.tangani_captcha(page, status, check_cancel):
+                    t0 = time.time()
+                    status(f"{self.label} sedang berpikir…")
             # Limit paling sering baru MUNCUL tepat setelah prompt dikirim —
             # laporkan segera daripada menunggu jawaban yang tak akan datang.
             # Dijeda (bukan tiap 300 ms) karena pemeriksaannya memindai DOM.
@@ -1159,6 +1177,17 @@ class WebConnector:
             # pada kasus ambigu (teks == balasan lama), jadi polling tetap murah.
             if not cur or (cur == text_before
                            and not self._ada_pesan_baru(page, counts_before)):
+                # Belum ada satu huruf pun yang mengalir, dan halaman diam saja.
+                # Inilah jalur tempat giliran benar-benar menggantung: situs
+                # sudah membuat wadah balasan (jadi "jawaban dianggap mulai")
+                # tapi isinya tertahan di belakang kotak verifikasi. Dulu tak
+                # ada satu pun pemeriksaan captcha di sini, sehingga terminal
+                # berputar sampai batas 5 menit lalu melapor "tak ada balasan
+                # baru" — kabar captcha-nya tak pernah terpicu sama sekali.
+                if emitted == 0 and time.time() >= next_captcha_check:
+                    next_captcha_check = time.time() + self._CAPTCHA_PERIKSA
+                    if self.tangani_captcha(page, status, check_cancel):
+                        deadline = time.time() + self.answer_timeout
                 page.wait_for_timeout(self._poll_ms)
                 continue
             if on_token and len(cur) > emitted:
@@ -1744,10 +1773,55 @@ class WebConnector:
             baris.append(f"- yang terbaca terakhir: {ekor or '(kosong)'}")
         except Exception:  # noqa: BLE001
             pass
+        jejak = self._rekam_halaman(page)
+        if jejak:
+            baris.append(f"- rekaman halaman saat macet: {jejak}")
         baris.append("Kirim ulang pesannya. Bila terus berulang DAN barisnya "
                      "menyebut wadah balasan baru, perbarui message_selector di "
                      f"connectors/{self.service}.py.")
         return "\n".join(baris)
+
+    def _rekam_halaman(self, page: Any) -> str:
+        """Simpan tangkapan layar + HTML halaman; kembalikan lokasinya.
+
+        Kegagalan "tak ada balasan" yang tak bisa dijelaskan selalu berakhir
+        sama: keadaan halamannya sudah hilang sebelum sempat dilihat, dan
+        sebabnya cuma bisa ditebak. Rekaman ini yang mengubah tebakan jadi
+        bukti — terutama untuk kotak verifikasi yang teksnya tak terbaca sama
+        sekali (digambar di canvas, atau bersembunyi di shadow DOM), yang dari
+        terminal tak bisa dibedakan dari situs yang sekadar diam.
+
+        Hanya beberapa rekaman terakhir yang disimpan: ini alat pelacak, bukan
+        arsip, dan tangkapan layar percakapan pribadi tak boleh menumpuk."""
+        try:
+            folder = Path(config.CONFIG_HOME) / "jejak"
+            folder.mkdir(parents=True, exist_ok=True)
+            cap = time.strftime("%Y%m%d-%H%M%S")
+            awalan = f"{self.service}-{cap}"
+            hasil = []
+            try:
+                png = folder / f"{awalan}.png"
+                page.screenshot(path=str(png), full_page=False, timeout=8000)
+                hasil.append(png)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                html = folder / f"{awalan}.html"
+                html.write_text(page.content(), encoding="utf-8", errors="replace")
+                hasil.append(html)
+            except Exception:  # noqa: BLE001
+                pass
+            if not hasil:
+                return ""
+            lama = sorted(folder.glob(f"{self.service}-*"))[:-12]
+            for f in lama:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            return str(hasil[0].parent / (awalan + ".*"))
+        except Exception:  # noqa: BLE001
+            return ""      # perekam bukti tak boleh ikut menggagalkan laporan
 
     def supports_attachments(self) -> bool:
         """True bila situs ini bisa menerima lampiran file dari bagas-ai."""
@@ -2246,16 +2320,37 @@ class WebConnector:
 
         Area percakapan DIKECUALIKAN dengan alasan yang sama seperti limit:
         bagas-ai dipakai untuk ngoding, dan jawaban model yang kebetulan
-        membahas captcha tak boleh dikira captcha sungguhan."""
+        membahas captcha tak boleh dikira captcha sungguhan.
+
+        IFRAME ikut dipindai. Kotak verifikasi lazim dirender di dalam bingkai
+        milik penyedia captcha, dan document.body halaman induk tak memuat
+        teksnya sama sekali — pemindaian yang berhenti di dokumen utama akan
+        selamanya menjawab "tak ada captcha" sementara layarnya jelas-jelas
+        memintanya, dan giliran itu menggantung tanpa satu pun kabar."""
         if not self.captcha_patterns:
             return ""
+        arg = {"patterns": list(self.captcha_patterns),
+               "exclude": list(self.limit_exclude_selectors)}
         try:
-            return page.evaluate(JS_FIND_TEXT, {
-                "patterns": list(self.captcha_patterns),
-                "exclude": list(self.limit_exclude_selectors),
-            }) or ""
+            hasil = page.evaluate(JS_FIND_TEXT, arg) or ""
+        except Exception:  # noqa: BLE001
+            hasil = ""
+        if hasil:
+            return hasil
+        try:
+            bingkai = list(page.frames)
         except Exception:  # noqa: BLE001
             return ""
+        for f in bingkai:
+            try:
+                if f is page.main_frame:
+                    continue        # sudah dipindai di atas
+                teks = f.evaluate(JS_FIND_TEXT, arg) or ""
+            except Exception:  # noqa: BLE001
+                continue            # bingkai yang keburu ditutup / tak terbaca
+            if teks:
+                return teks
+        return ""
 
     # Berapa lama menunggu captcha diselesaikan sebelum menyerah, dan berapa
     # detik pemberitahuannya tampil sebelum jendelanya dibuka. Jeda itu bukan
@@ -2263,6 +2358,13 @@ class WebConnector:
     # tampak seperti program yang lepas kendali.
     _CAPTCHA_TUNGGU = 300.0
     _CAPTCHA_JEDA = 4.0
+    # Sesering apa halaman diperiksa SELAGI menunggu jawaban. Dulu captcha baru
+    # diperiksa sesudah seluruh penantian habis (90 detik untuk mulai, 300 detik
+    # untuk selesai) — dan itu sama saja tak diperiksa: yang terlihat pengguna
+    # cuma "sedang berpikir…" yang tak berujung, tanpa kabar, tanpa jendela yang
+    # terbuka. Captcha muncul mendadak di tengah giliran, jadi harus DIINTIP
+    # berkala, bukan ditunggu sampai menyerah.
+    _CAPTCHA_PERIKSA = 5.0
 
     def tangani_captcha(self, page: Any, status: Any = None,
                         check_cancel: Any = None) -> bool:
