@@ -442,7 +442,7 @@ class GlmConnector(WebConnector):
             return self._atur_effort(page, path, label)
         return self._atur_mode(page, path, label)
 
-    # Pemberitahuan limit/galat/percakapan-penuh khas z.ai BELUM PERNAH terlihat
+    # Pemberitahuan limit & percakapan-penuh khas z.ai BELUM PERNAH terlihat
     # langsung. Sengaja DIKOSONGKAN daripada ditebak: pola longgar di sini
     # berakibat mahal — jawaban biasa yang kebetulan membahas "rate limit" bisa
     # membuat chat sehat dibuang atau giliran berhenti tanpa sebab. Isi kalau
@@ -450,4 +450,39 @@ class GlmConnector(WebConnector):
     limit_patterns = ()
     error_patterns = ()
     context_full_patterns = ()
-    busy_patterns = ()
+
+    # GAGAL SEMENTARA DI SISI SITUS. Teks aslinya, terlihat langsung di layar
+    # sebagai isi balasan (bukan spanduk terpisah):
+    #
+    #   No response, Please try again later.
+    #   SyntaxError: Unexpected token '<', "<!doctypeh"... is not valid JSON
+    #
+    # Bacaannya jelas: backend z.ai membalas HALAMAN HTML (galat 5xx/proxy)
+    # padahal situsnya menunggu JSON, lalu JSON.parse pecah di baris pertama —
+    # "<!doctype…". Jadi ini bukan jawaban model dan bukan kuota habis,
+    # melainkan servernya yang sedang tersandung; biasanya pulih sendiri.
+    #
+    # Tanpa pola ini teksnya diteruskan APA ADANYA sebagai jawaban GLM — persis
+    # yang dilaporkan pengguna: tiga giliran berturut-turut "menjawab" kalimat
+    # itu, dan agent-nya jalan terus di atas jawaban kosong. Dengan pola ini ia
+    # jadi WebBusyError, dan core menunggu 15/40/75 detik lalu mengirim ulang
+    # pesan yang sama ke percakapan yang sama.
+    busy_patterns = (
+        r"(?i)\bno response,?\s*please try again later\b",
+        # Cadangan bila kalimat di atas berubah: kotak merahnya tetap muncul.
+        # Sengaja MENGGABUNG dua penanda ("token '<'" + "not valid JSON")
+        # supaya kalimat yang cuma menyebut salah satunya tak ikut tertangkap.
+        r"(?i)unexpected token '<'.{0,60}not valid JSON",
+    )
+    # Lebih ketat dari bawaan 400 karena pola kedua di atas adalah galat
+    # JavaScript yang LAZIM DIBAHAS saat ngoding — dan bagas-ai memang dipakai
+    # untuk ngoding. Pemberitahuan aslinya cuma ±105 karakter, sedangkan
+    # penjelasan model soal galat yang sama hampir pasti jauh lebih panjang.
+    busy_max_chars = 220
+    # Pemindaian SEHALAMAN (dipakai saat komposer menolak kirim) tak boleh
+    # membaca isi percakapan: sekali galat di atas terjadi, kalimatnya menetap
+    # di riwayat chat: tanpa pengecualian ini, tiap kegagalan kirim BERIKUTNYA
+    # akan dilaporkan sebagai "server sibuk" karena membaca bekas yang lama.
+    limit_exclude_selectors = (
+        ".chat-assistant", ".markdown-prose", "[id^='message-']",
+    )
