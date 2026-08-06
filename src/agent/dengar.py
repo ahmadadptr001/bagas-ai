@@ -226,6 +226,41 @@ def nama_mikrofon() -> str:
         return ""
 
 
+# --- bunyi tanda -----------------------------------------------------------
+# Nada NAIK saat mikrofon menyala, nada TURUN saat mati. Bukan hiasan: begitu
+# fiturnya dipakai, mata pengguna ada di kodenya, bukan di baris status — dan
+# "mikrofon saya sedang hidup atau tidak" adalah pertanyaan yang jawabannya tak
+# boleh butuh melihat layar. Arahnya (naik/turun) sengaja berlawanan supaya
+# bisa dibedakan tanpa menghafal nada.
+_NADA_ON = ((660, 90), (990, 130))
+_NADA_OFF = ((880, 90), (440, 150))
+
+
+def bunyi(nyala: bool) -> None:
+    """Bunyikan tanda mikrofon menyala/mati. Diam-diam gagal bila tak bisa."""
+    nada = _NADA_ON if nyala else _NADA_OFF
+    try:
+        import winsound                      # Windows: paling ringan & instan
+        for f, ms in nada:
+            winsound.Beep(int(f), int(ms))
+        return
+    except Exception:  # noqa: BLE001 - bukan Windows / tak ada pengeras suara
+        pass
+    try:
+        # Di luar Windows: nadanya dibangkitkan sendiri lewat perangkat yang
+        # SUDAH dipakai fitur ini, jadi tak menambah satu pun kebergantungan.
+        import numpy as np
+        import sounddevice as sd
+        laju = 44100
+        potong = []
+        for f, ms in nada:
+            t = np.linspace(0, ms / 1000, int(laju * ms / 1000), endpoint=False)
+            potong.append((0.25 * np.sin(2 * np.pi * f * t)).astype("float32"))
+        sd.play(np.concatenate(potong), laju, blocking=True)
+    except Exception:  # noqa: BLE001 - tanda suara tak boleh menggagalkan apa pun
+        log.debug("bunyi tanda gagal", exc_info=True)
+
+
 def _rms(blok: Any) -> float:
     import numpy as np
     x = np.asarray(blok, dtype="float32")

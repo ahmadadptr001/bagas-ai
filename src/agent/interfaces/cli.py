@@ -983,6 +983,11 @@ class KotakChat:
         self.buffer.reset(Document(default, kursor))
         return self.app.run()
 
+    # Sebab kegagalan terakhir kirim_dari_luar, untuk ditampilkan ke pengguna.
+    # Ada karena satu-satunya gejala jalur ini rusak adalah KESUNYIAN: perintah
+    # terbaca di layar, lalu tak terjadi apa-apa.
+    galat_kirim = ""
+
     def kirim_dari_luar(self, teks: str) -> bool:
         """Kirim `teks` seolah diketik lalu di-Enter, DARI THREAD LAIN.
 
@@ -996,23 +1001,30 @@ class KotakChat:
         app = self.app
         try:
             if not app.is_running:
-                return False
+                return False          # giliran sedang jalan -> pakai antrean
             loop = app.loop
-        except Exception:  # noqa: BLE001 - aplikasi sedang dibongkar
+        except Exception as exc:  # noqa: BLE001 - aplikasi sedang dibongkar
+            self.galat_kirim = f"kotak tak bisa dibaca: {exc}"
             return False
         if loop is None:
+            self.galat_kirim = "kotak sedang menunggu tapi belum punya loop"
             return False
 
         def _kirim() -> None:
+            # KEGAGALAN DI SINI TAK BOLEH SENYAP. Ia berjalan di dalam loop
+            # prompt_toolkit, jadi lemparannya tak sampai ke pemanggil —
+            # gejalanya persis "perintahnya terbaca tapi tak terjadi apa-apa".
             try:
                 self.buffer.reset(Document(teks, len(teks)))
                 app.exit(result=teks)
-            except Exception:  # noqa: BLE001 - keburu ditutup pengguna
-                pass
+            except Exception as exc:  # noqa: BLE001
+                self.galat_kirim = f"kotak menolak isian: {exc}"
+                log.debug("kirim_dari_luar gagal di dalam loop", exc_info=True)
 
         try:
             loop.call_soon_threadsafe(_kirim)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            self.galat_kirim = f"loop kotak menolak: {exc}"
             return False
         return True
 
@@ -3110,11 +3122,23 @@ def main(resume: bool = False) -> None:
         # memblokir thread utama; antrean saja takkan pernah terbaca). Kalau
         # giliran sedang berjalan, ia masuk antrean seperti ketikan biasa dan
         # disisipkan di batas langkah berikutnya.
+        kotak_chat.galat_kirim = ""
         if kotak_chat.kirim_dari_luar(teks):
             return
         with antre_lock:
             prompt_queue.append(teks)
-        console.print("  [dim]— disisipkan ke giliran yang sedang berjalan[/dim]")
+        # DUA keadaan yang sangat berbeda, dan dulu keduanya diberi kalimat yang
+        # sama — padahal yang kedua berarti perintahnya MENGENDAP sampai
+        # pengguna menekan Enter, hal yang justru tak ia lakukan saat bicara.
+        if kotak_chat.galat_kirim:
+            console.print(
+                f"  [yellow]⚠ perintah suara tak bisa masuk ke kotak "
+                f"({_esc(kotak_chat.galat_kirim)}).[/yellow]\n"
+                "  [dim]Ia menunggu di antrean — tekan Enter untuk "
+                "menjalankannya.[/dim]")
+        else:
+            console.print("  [dim]— disisipkan ke giliran yang sedang "
+                          "berjalan[/dim]")
 
     def _voice_kabar(pesan: str) -> None:
         console.print(f"  [dim]🎙 {_esc(pesan)}[/dim]")
@@ -3155,6 +3179,10 @@ def main(resume: bool = False) -> None:
                               f"  [dim]{_esc(alasan)}[/dim]\n")
                 return
             voice_state["pendengar"] = p
+            # Nada NAIK. Di thread sendiri: bunyinya ±0,25 detik dan tak boleh
+            # menahan keterangan di bawah ini.
+            threading.Thread(target=_dengar.bunyi, args=(True,),
+                             daemon=True).start()
             nama = _dengar.nama_mikrofon() or "mikrofon bawaan"
             console.print(
                 f"  [#9fc93c]● mikrofon AKTIF[/] [dim]— {_esc(nama)}[/]\n"
