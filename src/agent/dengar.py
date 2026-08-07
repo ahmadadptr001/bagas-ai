@@ -512,11 +512,18 @@ class Pendengar:
     saat pengguna masih bicara."""
 
     def __init__(self, on_perintah: Callable[[str], None],
-                 on_kabar: Callable[[str], None] | None = None,
+                 on_kabar: Callable[..., None] | None = None,
                  on_dengar: Callable[[str, bool], None] | None = None,
                  maks_rekam: float = MAKS_REKAM) -> None:
         self.on_perintah = on_perintah
-        self.on_kabar = on_kabar or (lambda _m: None)
+        # on_kabar(pesan, batal=False). Penanda `batal` ada karena TAMPILANNYA
+        # memperlakukan pembatalan berbeda dari kabar lain: cuma pembatalan
+        # yang dicetak (permintaan pengguna — sisanya membuat layar penuh teks
+        # yang tak menambah apa-apa). Penandanya dipasang DI SINI, di tempat
+        # kejadiannya, bukan ditebak dari bunyi kalimatnya di sisi tampilan:
+        # tebakan begitu putus diam-diam begitu kalimatnya diperhalus, dan yang
+        # hilang justru satu-satunya kabar yang masih ingin dilihat.
+        self.on_kabar = on_kabar or (lambda _m, **_k: None)
         # on_dengar(teks, sedang_merekam) -> ditampilkan sebagai "yang terdengar"
         self.on_dengar = on_dengar or (lambda _t, _m: None)
         self.perakit = Perakit(maks_rekam)
@@ -675,7 +682,7 @@ class Pendengar:
             if self.perakit.kedaluwarsa():
                 self.on_kabar(
                     f"perintah suara dibatalkan — {MAKS_REKAM:.0f} detik "
-                    "habis dan kata `lakukan` tak terdengar")
+                    "habis dan kata `lakukan` tak terdengar", batal=True)
 
     @staticmethod
     def _bagasai_bicara() -> bool:
@@ -800,7 +807,7 @@ class Pendengar:
             # "dikirim" tak pernah tertukar walau layarnya tak dilihat.
             threading.Thread(target=bunyi, args=("batal",), daemon=True).start()
             self.on_kabar("rekaman DIBATALKAN, tak ada yang dikirim — sebut "
-                          "namaku lagi untuk perintah baru")
+                          "namaku lagi untuk perintah baru", batal=True)
             return
         # Selain itu tak ada yang perlu dilakukan di sini: perintahnya ditutup
         # oleh BERHENTINYA suara, bukan oleh kata apa pun (lihat

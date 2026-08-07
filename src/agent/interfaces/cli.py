@@ -3176,7 +3176,20 @@ def main(resume: bool = False) -> None:
             console.print("  [dim]— disisipkan ke giliran yang sedang "
                           "berjalan[/dim]")
 
-    def _voice_kabar(pesan: str) -> None:
+    def _voice_kabar(pesan: str, batal: bool = False) -> None:
+        """Kabar dari pendengar. HANYA pembatalan yang sampai ke layar.
+
+        Sisanya (pengenalan gagal, mikrofon berhenti) dulu ikut dicetak, dan
+        di pemakaian sehari-hari barisan itu cuma menumpuk di atas kotak chat
+        tanpa mengubah apa pun yang bisa dikerjakan pengguna — mubazir, kata
+        yang punya layarnya. Pembatalan lain ceritanya: ia berarti kalimat yang
+        baru saja diucapkan TIDAK jadi dikirim, dan itu wajib diketahui.
+
+        Mikrofon yang mati tetap terbaca tanpa baris ini — penanda 🎙 di bar
+        status ikut hilang begitu pendengarnya berhenti, dan /voice tetap
+        menyebutkan alasannya."""
+        if not batal:
+            return
         console.print(f"  [dim]🎙 {_esc(pesan)}[/dim]")
 
     # TRANSKRIP TIAP UCAPAN TIDAK DITAMPILKAN. Ia sempat ada dan berguna saat
