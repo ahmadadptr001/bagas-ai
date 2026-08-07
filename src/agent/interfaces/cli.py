@@ -3153,14 +3153,26 @@ def main(resume: bool = False) -> None:
         teks = (teks or "").strip()
         if not teks:
             return
-        console.print(f"\n  [#fcc048]🎙 ❯[/] [bold #ffffff]{_esc(teks)}[/]")
         # Kotak idle sedang menunggu -> teksnya dimasukkan ke sana (kotak itu
         # memblokir thread utama; antrean saja takkan pernah terbaca). Kalau
         # giliran sedang berjalan, ia masuk antrean seperti ketikan biasa dan
         # disisipkan di batas langkah berikutnya.
         kotak_chat.galat_kirim = ""
+        # GEMANYA TIDAK DICETAK DI SINI untuk jalur kotak idle. Kotak itu
+        # mengembalikan teksnya ke gelung utama, yang memang sudah menggemakan
+        # setiap pesan — jadi mencetaknya lebih dulu berarti kalimat yang sama
+        # muncul DUA KALI berturut-turut, sekali ber-🎙 dan sekali polos.
+        # Dilaporkan pengguna lewat tangkapan layar.
+        #
+        # Yang dikirim ke sana cuma penandanya: gelung utama memakainya untuk
+        # memberi 🎙 pada gemanya sendiri. Dipasang SEBELUM kirim, sebab
+        # kotaknya bisa menjawab lebih dulu daripada baris berikutnya di sini.
+        voice_state["terucap"] = teks
         if kotak_chat.kirim_dari_luar(teks):
             return
+        voice_state.pop("terucap", None)
+        # Jalur antrean tak punya gema lain — di sini ia satu-satunya.
+        console.print(f"\n  [#fcc048]🎙 ❯[/] [bold #ffffff]{_esc(teks)}[/]")
         with antre_lock:
             prompt_queue.append(teks)
         # DUA keadaan yang sangat berbeda, dan dulu keduanya diberi kalimat yang
@@ -4461,7 +4473,12 @@ def main(resume: bool = False) -> None:
                 # antar-giliran: satu-satunya baris yang harus bisa ditemukan
                 # seketika saat menggulung riwayat panjang, jadi ia diberi
                 # kontras tertinggi di layar.
-                console.print(f"  [bold #fcc048]❯[/] "
+                # Perintah yang DIUCAPKAN ditandai di gema ini juga, bukan
+                # dicetak sendiri sebelum masuk kotak (lihat _voice_masuk).
+                # pop() dipakai, bukan get(): penandanya berlaku sekali pakai,
+                # supaya ketikan berikutnya tak ikut dikira ucapan.
+                lisan = voice_state.pop("terucap", None) == raw.strip()
+                console.print(f"  [bold #fcc048]{'🎙 ❯' if lisan else '❯'}[/] "
                               f"[bold #ffffff]{_esc(raw.strip())}[/]")
         text = raw.strip()
         if not text:
