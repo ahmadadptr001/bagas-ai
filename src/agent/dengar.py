@@ -78,7 +78,7 @@ import queue
 import re
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -370,20 +370,107 @@ _MAKS_UCAPAN = 15.0     # satu POTONGAN kirim ke pengenal (bukan batas
                         # supaya yang terdengar muncul di layar sambil
                         # pengguna masih bicara, bukan menunggu 30 detik.
 _KALIBRASI = 0.7        # lama mengukur derau ruangan sebelum mulai
-# Ambang terendah. DITURUNKAN dari 180 setelah keluhan "mic-nya rada tuli".
-# Sebabnya terukur: derau ruangan di laptop pengguna cuma 0,5 (mikrofon
-# ber-gain rendah), sementara ambangnya dipatok 180 — 360 kali lipat derau,
-# jadi suara bicara yang wajar tak pernah melewatinya dan seluruh ucapan
-# dibuang sebelum sempat dikenali.
+
+
+# --- SEBERAPA JAUH MIKROFON BOLEH MENDENGAR --------------------------------
+# Permintaan pengguna: "mic-nya bisa dijangkau walau dari jarak agak jauh,
+# misal sambil rebahan atau dari ruang tengah ke depan pintu kamar."
 #
-# Yang benar: ambang mengikuti DERAU, bukan angka mati. Angka di bawah ini cuma
-# lantai pengaman supaya mikrofon yang benar-benar sunyi tak menganggap desis
-# elektroniknya sendiri sebagai ucapan.
-_LANTAI = 25.0
-# Berapa kali derau ruangan harus dilampaui. Dinaikkan dari 3,5 karena
-# lantainya turun jauh: di ruangan berisik, kelipatan inilah yang menjaga
-# supaya kipas/AC tak terus-menerus dikira orang bicara.
-_KALI_DERAU = 6.0
+# Yang menghalanginya bukan volume, melainkan AMBANG. Rumus lamanya satu baris,
+# `max(derau * 6, 25)`, dan dua pengukuran di laptop yang sama menunjukkan
+# kenapa satu angka tak pernah cukup:
+#
+#   dulu   derau  0,5  -> ambang  25   (lantainya yang menentukan)
+#   kini   derau 57    -> ambang 343   (pengalinya yang menentukan)
+#
+# Suara dari seberang ruangan tiba sekitar 60-150 di mikrofon ini. Di angka 343
+# ia tak pernah lewat sekali pun — dan itu persis keluhannya. Menaikkan pengali
+# akan mematikan mikrofon ber-derau tinggi; menurunkannya akan membuat mikrofon
+# ber-derau rendah mendengar desisnya sendiri. Jadi yang dipakai BUKAN satu
+# angka, melainkan tiga hal sekaligus:
+#
+#   1. PROFIL JANGKAUAN. Jarak bicara itu pilihan pengguna, bukan sesuatu yang
+#      bisa ditebak dari derau. Karena itu ia disetel, bukan dihitung.
+#   2. DERAU RAMAI (persentil 90), bukan cuma derau tengah (persentil 50). Di
+#      ruangan berdengung keduanya sama; di ruangan dengan kipas/ketikan yang
+#      menyentak, p90 jauh di atas p50 — dan sentakan itulah yang salah dikira
+#      ucapan kalau ambangnya cuma mengikuti p50.
+#   3. HISTERESIS. Satu ambang untuk MEMULAI ucapan, ambang lebih rendah untuk
+#      MENERUSKANNYA. Dari jauh, tengah kata kerap melorot di bawah ambang;
+#      dengan satu ambang saja kalimatnya tercacah jadi potongan sependek suku
+#      kata, dan potongan sependek itu paling sering gagal dikenali.
+class Jangkauan(NamedTuple):
+    kali_derau: float   # ambang MULAI = derau tengah x ini ...
+    kali_ramai: float   # ... atau derau ramai (p90) x ini — ambil yang terbesar
+    lanjut: float       # ambang LANJUT = ambang mulai x ini (histeresis)
+    lantai: float       # ambang terendah mutlak
+    awalan: int         # blok yang disimpan SEBELUM ambang terlampaui
+
+
+JANGKAUAN: dict[str, Jangkauan] = {
+    # Mikrofon nempel di depan muka. Bar tinggi: obrolan orang lain di ruangan
+    # yang sama tak ikut terkirim.
+    "dekat":  Jangkauan(8.0, 2.4, 0.60, 30.0, 5),
+    # Duduk di depan laptop, tangan di keyboard.
+    "normal": Jangkauan(6.0, 1.8, 0.55, 25.0, 6),
+    # Rebahan, atau dari ruangan sebelah. Pengalinya turun ke 2,6 — sekitar
+    # +8 dB di atas derau, yang memang segitu sisa tenaga suara sesudah
+    # menyeberangi ruangan. Awalannya digandakan jadi 12 blok (±0,8 detik)
+    # sebab dari jauh suku kata pertama ("ba-" pada "bagas") jauh lebih pelan
+    # dari sisanya, dan tanpa awalan sepanjang itu namanya sampai terpotong.
+    "jauh":   Jangkauan(2.6, 1.25, 0.45, 12.0, 12),
+}
+# BAWAANNYA "jauh", atas permintaan pengguna. Ongkosnya jujur dan ada: bar yang
+# lebih rendah berarti lebih banyak potongan derau ikut dikirim ke pengenal
+# suara. Yang TIDAK ia rusak adalah ketepatan — potongan yang tak memuat nama
+# bagas-ai dibuang oleh Perakit, jadi yang bertambah cuma lalu lintas jaringan,
+# bukan salah perintah. Turunkan lewat `/voice dekat` atau VOICE_JANGKAUAN
+# di .env bila mikrofonmu jadi terlalu sering "mendengar" kipas.
+_BAWAAN = "jauh"
+
+
+def _nama_jangkauan() -> str:
+    """Jangkauan pilihan pengguna dari .env (VOICE_JANGKAUAN)."""
+    try:
+        from . import config
+        nama = (getattr(config, "VOICE_JANGKAUAN", "") or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        nama = ""
+    return nama if nama in JANGKAUAN else _BAWAAN
+
+
+def profil(nama: str | None = None) -> Jangkauan:
+    """Profil jangkauan bernama; nama tak dikenal -> bawaan."""
+    kunci = (str(nama).strip().lower() if nama else _nama_jangkauan())
+    return JANGKAUAN.get(kunci, JANGKAUAN[_BAWAAN])
+
+
+def _persentil(urut: list[float], p: float) -> float:
+    """Persentil dari daftar yang SUDAH terurut ([] -> 0)."""
+    if not urut:
+        return 0.0
+    return urut[min(len(urut) - 1, int(len(urut) * p))]
+
+
+def hitung_ambang(contoh: list[float],
+                  jang: Jangkauan) -> tuple[float, float, float, float]:
+    """(derau, derau_ramai, ambang_mulai, ambang_lanjut) dari contoh derau.
+
+    Dipisah dari mikrofonnya supaya bisa diuji dengan angka saja — dan supaya
+    `/voice jangkau` menghitung ambang dengan rumus yang PERSIS SAMA dengan
+    yang dipakai saat mendengarkan sungguhan. Dua rumus yang mirip-tapi-beda
+    adalah cara terpelan untuk membuat alat ukur berbohong."""
+    urut = sorted(contoh)
+    derau = _persentil(urut, 0.5)
+    ramai = _persentil(urut, 0.9)
+    mulai = max(derau * jang.kali_derau, ramai * jang.kali_ramai, jang.lantai)
+    # Ambang lanjut tak boleh tenggelam DI BAWAH derau ruangan: kalau itu
+    # terjadi, ucapan tak pernah dianggap selesai dan perintahnya menggantung
+    # sampai batas 30 detik.
+    lanjut = max(mulai * jang.lanjut, derau * 1.15, jang.lantai * 0.5)
+    return derau, ramai, mulai, lanjut
+
+
 # UCAPAN TIDAK DIKERASKAN — dan itu keputusan yang DIUKUR, bukan kelalaian.
 #
 # Menaikkan volume sebelum mengirim ke pengenal terdengar masuk akal untuk
@@ -514,7 +601,8 @@ class Pendengar:
     def __init__(self, on_perintah: Callable[[str], None],
                  on_kabar: Callable[..., None] | None = None,
                  on_dengar: Callable[[str, bool], None] | None = None,
-                 maks_rekam: float = MAKS_REKAM) -> None:
+                 maks_rekam: float = MAKS_REKAM,
+                 jangkauan: str | None = None) -> None:
         self.on_perintah = on_perintah
         # on_kabar(pesan, batal=False). Penanda `batal` ada karena TAMPILANNYA
         # memperlakukan pembatalan berbeda dari kabar lain: cuma pembatalan
@@ -527,10 +615,20 @@ class Pendengar:
         # on_dengar(teks, sedang_merekam) -> ditampilkan sebagai "yang terdengar"
         self.on_dengar = on_dengar or (lambda _t, _m: None)
         self.perakit = Perakit(maks_rekam)
+        # Seberapa jauh boleh mendengar. Disimpan NAMANYA juga, bukan cuma
+        # angkanya: bar status & `/voice` menyebutnya, dan "jauh" jauh lebih
+        # bisa ditindaklanjuti daripada "ambang 148".
+        self.jangkauan = (str(jangkauan).strip().lower()
+                          if jangkauan else _nama_jangkauan())
+        self.profil = profil(self.jangkauan)
         # Hasil kalibrasi derau ruangan — ditampilkan ke pengguna supaya
         # "mikrofonnya tuli" bisa dijawab angka, bukan dugaan.
         self.derau = 0.0
+        self.derau_ramai = 0.0
         self.ambang = 0.0
+        # Ambang untuk MENERUSKAN ucapan yang sudah berjalan (histeresis).
+        # Selalu lebih rendah dari `ambang`; lihat Jangkauan.
+        self.ambang_lanjut = 0.0
         self._stop = threading.Event()
         # Sampai kapan blok audio DIBUANG (selagi ketukan penanda berbunyi).
         # Tanpa ini, bunyi bagas-ai sendiri ikut terekam lalu dikirim ke
@@ -612,15 +710,17 @@ class Pendengar:
         while time.time() < habis and not self._stop.is_set():
             data, _ = stream.read(BLOK)
             contoh.append(_rms(data))
-        derau = sorted(contoh)[len(contoh) // 2] if contoh else 0.0
-        ambang = max(derau * _KALI_DERAU, _LANTAI)
-        self.derau, self.ambang = derau, ambang
-        log.debug("derau ruangan %.0f -> ambang %.0f", derau, ambang)
+        derau, ramai, ambang, ambang_lanjut = hitung_ambang(contoh, self.profil)
+        self.derau, self.derau_ramai = derau, ramai
+        self.ambang, self.ambang_lanjut = ambang, ambang_lanjut
+        log.debug("jangkauan %s: derau %.0f (ramai %.0f) -> ambang %.0f/%.0f",
+                  self.jangkauan, derau, ramai, ambang, ambang_lanjut)
 
         potongan: list[Any] = []
         # Sedikit rekaman SEBELUM ambang terlampaui ikut disimpan: suku kata
         # pertama selalu lebih pelan dari sisanya, dan tanpa ini "bagas" kerap
-        # sampai sebagai "gas".
+        # sampai sebagai "gas". Panjangnya mengikuti jangkauan — dari jauh
+        # selisih pelan-keras itu jauh lebih lebar.
         awalan: list[Any] = []
         sunyi = 0.0
         mulai = 0.0
@@ -650,7 +750,18 @@ class Pendengar:
                 potongan = []
                 self._sunyi_sejak = time.time()
                 continue
-            keras = _rms(data) > ambang
+            # HISTERESIS. Bar TINGGI untuk memulai ucapan, bar RENDAH untuk
+            # meneruskannya — `potongan` yang tak kosong berarti pembicara
+            # sedang di tengah kalimat.
+            #
+            # Ini yang membuat jarak jauh bisa bekerja. Dari seberang ruangan
+            # tenaga suara turun drastis di tengah kata, jadi dengan satu
+            # ambang saja kalimatnya tercacah jadi kepingan sependek suku kata
+            # — dan kepingan sependek itu hampir selalu gagal dikenali, lalu
+            # namanya hilang tanpa jejak. Ambang tingginya tetap dipakai di
+            # SELA ucapan, supaya derau ruangan tak menahan hitungan diam yang
+            # menutup perintah.
+            keras = _rms(data) > (ambang_lanjut if potongan else ambang)
             lama_blok = BLOK / LAJU
             # Penanda "sejak kapan sunyi" — dasar penutup perintah. Diukur dari
             # SUARA, bukan dari teks: teksnya datang terlambat lewat jaringan.
@@ -661,7 +772,7 @@ class Pendengar:
             self._periksa_selesai()
             if not potongan:
                 awalan.append(data.copy())
-                if len(awalan) > 5:
+                if len(awalan) > self.profil.awalan:
                     awalan.pop(0)
                 if keras:
                     potongan = awalan + [data.copy()]
@@ -849,3 +960,70 @@ def dengar_sekali(detik: float = 5.0) -> tuple[str, float]:
     except Exception:  # noqa: BLE001
         teks = ""
     return teks, puncak
+
+
+def ukur(detik: float = 6.0, kalibrasi: float = 1.2,
+         jangkauan: str | None = None) -> dict[str, Any]:
+    """Ukur apakah suara DARI TEMPATMU BERDIRI sampai ke mikrofon.
+
+    Dipakai `/voice jangkau`. Alasannya sederhana: "mic-nya kurang jauh" tak
+    bisa dijawab dari kursi tempat kodenya ditulis — jaraknya, ruangannya, dan
+    mikrofonnya cuma ada di rumah pengguna. Jadi yang disediakan bukan tebakan
+    ambang yang lebih baik, melainkan cara MENGUKURNYA dari titik yang
+    sebenarnya dipakai.
+
+    Urutannya: diam dulu (kalibrasi derau), lalu pengguna bicara. Ambangnya
+    dihitung dengan hitung_ambang() yang sama persis dengan yang dipakai
+    mendengarkan sungguhan — alat ukur yang punya rumus sendiri cuma
+    memindahkan letak salahnya."""
+    import numpy as np
+    import sounddevice as sd
+    import speech_recognition as sr
+
+    jang = profil(jangkauan)
+    sunyi: list[float] = []
+    blok: list[Any] = []
+    tingkat: list[float] = []
+    with sd.InputStream(samplerate=LAJU, channels=1, dtype="int16",
+                        blocksize=BLOK) as stream:
+        habis = time.time() + kalibrasi
+        while time.time() < habis:
+            data, _ = stream.read(BLOK)
+            sunyi.append(_rms(data))
+        habis = time.time() + detik
+        while time.time() < habis:
+            data, _ = stream.read(BLOK)
+            blok.append(data.copy())
+            tingkat.append(_rms(data))
+
+    derau, ramai, ambang, ambang_lanjut = hitung_ambang(sunyi, jang)
+    urut = sorted(tingkat)
+    # Puncak dipakai untuk "apakah SEMPAT lewat", p90 untuk "apakah lewat
+    # DENGAN ENAK". Satu dentuman yang kebetulan tinggi tak berarti kalimatnya
+    # akan tertangkap; p90 mewakili tenaga bicara yang sesungguhnya.
+    hasil: dict[str, Any] = {
+        "jangkauan": (str(jangkauan).strip().lower() if jangkauan
+                      else _nama_jangkauan()),
+        "derau": derau, "derau_ramai": ramai,
+        "ambang": ambang, "ambang_lanjut": ambang_lanjut,
+        "puncak": urut[-1] if urut else 0.0,
+        "suara_p90": _persentil(urut, 0.9),
+        "teks": "",
+    }
+    # Jangkauan TERKECIL yang masih menangkap suara dari titik ini. Itulah
+    # angka yang benar-benar ingin diketahui pengguna — bukan ambangnya,
+    # melainkan setelan mana yang harus dipilih.
+    hasil["saran"] = ""
+    for nama in ("dekat", "normal", "jauh"):
+        _, _, amb, _ = hitung_ambang(sunyi, JANGKAUAN[nama])
+        if hasil["suara_p90"] > amb:
+            hasil["saran"] = nama
+            break
+    if blok:
+        try:
+            hasil["teks"] = sr.Recognizer().recognize_google(
+                sr.AudioData(np.concatenate(blok).tobytes(), LAJU, 2),
+                language="id-ID")
+        except Exception:  # noqa: BLE001
+            pass
+    return hasil

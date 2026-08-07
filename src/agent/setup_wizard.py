@@ -23,6 +23,7 @@ from . import config
 _ENV_ORDER = [
     "CHAT_MODEL",
     "CONNECTOR_BROWSER_CHANNEL",
+    "VOICE_JANGKAUAN",
     "TELEGRAM_BOT_TOKEN",
     "MAX_TOOL_ITERATIONS",
     "ALLOW_CODE_EXEC",
@@ -39,6 +40,12 @@ _ENV_KOMENTAR = {
         "# Playwright (paling sering diblok situs - hindari).",
         "# Yang diminta belum terpasang? Browser asli lain dipakai otomatis.",
     ],
+    "VOICE_JANGKAUAN": [
+        "# Seberapa jauh mikrofon /voice boleh mendengar: dekat, normal, jauh.",
+        "# 'jauh' cukup untuk memberi perintah sambil rebahan atau dari",
+        "# ruangan sebelah; turunkan bila kipas/AC mulai dikira bicara.",
+        "# Ukur dari tempat dudukmu sendiri: /voice jangkau",
+    ],
 }
 
 _DEFAULTS = {
@@ -49,6 +56,7 @@ _DEFAULTS = {
     # bawaannya pernah berubah (chrome -> brave) lewat pembaruan, dan pemasangan
     # yang tak menuliskannya ikut berpindah browser tanpa pernah diberitahu.
     "CONNECTOR_BROWSER_CHANNEL": "brave",
+    "VOICE_JANGKAUAN": "jauh",
     "MAX_TOOL_ITERATIONS": "8",
     "ALLOW_CODE_EXEC": "true",
     "CODE_EXEC_TIMEOUT": "30",

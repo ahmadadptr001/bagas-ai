@@ -198,7 +198,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("mode", "mode kerja situs: buat gambar/video, dll"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
-    ("voice", "mikrofon: sebut \"bagas ai …\" lalu diam sejenak (on/off/tes)"),
+    ("voice", "mikrofon: sebut \"bagas ai …\" lalu diam sejenak "
+              "(on/off/tes/jangkau/dekat|normal|jauh)"),
     ("compact", "simpan riwayat percakapan ke berkas memory"),
     ("send-compact", "kirim berkas memory terakhir ke percakapan sekarang"),
     ("add-dir", "tambah folder konteks"),
@@ -3249,7 +3250,8 @@ def main(resume: bool = False) -> None:
             if pendengar is not None and pendengar.aktif:
                 console.print("  [dim]mikrofon sudah menyala.[/dim]\n")
                 return
-            p = _dengar.Pendengar(_voice_masuk, _voice_kabar)
+            p = _dengar.Pendengar(_voice_masuk, _voice_kabar,
+                                  jangkauan=voice_state.get("jangkauan"))
             alasan = p.mulai()
             if alasan:
                 console.print(f"  [yellow]⚠ mikrofon tak bisa dinyalakan:[/]\n"
@@ -3268,8 +3270,9 @@ def main(resume: bool = False) -> None:
                 for _ in range(30):
                     if p.ambang:
                         console.print(
-                            f"  [dim]🎙 derau ruangan {p.derau:.1f} → ambang "
-                            f"bicara {p.ambang:.0f}[/dim]")
+                            f"  [dim]🎙 jangkauan {p.jangkauan} · derau "
+                            f"{p.derau:.0f} → ambang {p.ambang:.0f}"
+                            f" (lanjut {p.ambang_lanjut:.0f})[/dim]")
                         return
                     time.sleep(0.1)
 
@@ -3289,6 +3292,100 @@ def main(resume: bool = False) -> None:
                 "hitungannya. Ucapkan[/] [#fcc048]\"batalkan\"[/] [dim]untuk "
                 "membuang rekaman yang sedang berjalan. Satu perintah maksimal "
                 f"{_dengar.MAKS_REKAM:.0f} detik.[/dim]\n")
+            return
+
+        if pilihan in _dengar.JANGKAUAN:
+            # Jaraknya beda tiap ruangan & tiap posisi duduk, jadi sakelarnya
+            # harus bisa diputar SEKARANG — bukan lewat menyunting .env lalu
+            # menjalankan ulang seluruh sesi. Yang di .env tetap jadi bawaan
+            # sesi berikutnya (VOICE_JANGKAUAN).
+            voice_state["jangkauan"] = pilihan
+            j = _dengar.profil(pilihan)
+            console.print(f"  [#9fc93c]● jangkauan mikrofon: "
+                          f"{pilihan.upper()}[/] [dim]— ambang "
+                          f"{j.kali_derau:g}× derau ruangan[/]")
+            if pendengar is not None and pendengar.aktif:
+                # Ambangnya dihitung sekali saat kalibrasi, jadi perubahan
+                # baru berlaku sesudah mikrofonnya dinyalakan ulang. Dikerjakan
+                # di sini, bukan disuruh ke pengguna: setelan yang tampak
+                # berubah tapi belum bekerja adalah kebohongan kecil yang
+                # mahal untuk ditelusuri.
+                pendengar.berhenti()
+                voice_state["pendengar"] = None
+                console.print("  [dim]mikrofon dinyalakan ulang agar ambangnya "
+                              "dihitung ulang…[/dim]")
+                show_voice("on")
+            else:
+                console.print("  [dim]berlaku saat[/] [#fcc048]/voice on[/]"
+                              "[dim]. Permanen: tulis[/] "
+                              f"[#fcc048]VOICE_JANGKAUAN={pilihan}[/] "
+                              "[dim]di ~/.bagasai/.env[/]\n")
+            return
+
+        if pilihan in ("jangkau", "jarak", "jangkauan"):
+            ok, alasan = _dengar.siap()
+            if not ok:
+                console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]\n")
+                return
+            # SATU-SATUNYA jawaban jujur untuk "kejauhan nggak dari sini?".
+            # Jarak, bentuk ruangan, dan mikrofonnya cuma ada di rumah
+            # pengguna; ambang mana pun yang dipilih dari sini tetap tebakan
+            # sampai diukur dari titik yang benar-benar dipakai.
+            console.print(
+                "\n  [bold #fcc048]🎙 Ukur jangkauan[/]\n"
+                "  [dim]1. pergilah ke tempat kamu biasa memberi perintah "
+                "(kasur / ruang tengah)[/]\n"
+                "  [dim]2. DIAM dulu 1 detik — derau ruangan diukur[/]\n"
+                "  [dim]3. lalu bicara 6 detik dengan suara sewajarnya, mis.[/]"
+                " [#fcc048]\"bagas ai tolong buka main titik py\"[/]\n")
+            console.print("  [dim]mulai… diam sebentar[/]")
+            try:
+                h = _dengar.ukur(6.0)
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [red]✖ gagal merekam:[/red] {exc}\n")
+                return
+            sampai = h["suara_p90"] > h["ambang"]
+            console.print(
+                f"\n  [dim]derau ruangan   :[/] {h['derau']:.0f}"
+                f"  [dim](saat ramai {h['derau_ramai']:.0f})[/]\n"
+                f"  [dim]suaramu dari sana:[/] {h['suara_p90']:.0f}"
+                f"  [dim](puncak {h['puncak']:.0f})[/]\n"
+                f"  [dim]ambang '{h['jangkauan']}' :[/] {h['ambang']:.0f}"
+                f"  [dim](lanjut {h['ambang_lanjut']:.0f})[/]")
+            if sampai:
+                console.print(f"  [#9fc93c]✓ sampai[/] [dim]— suaramu "
+                              f"{h['suara_p90'] / max(h['ambang'], 1):.1f}× di "
+                              "atas ambang dari titik itu.[/]")
+            elif h["saran"]:
+                console.print(
+                    f"  [yellow]✖ belum sampai[/] [dim]di jangkauan "
+                    f"'{h['jangkauan']}'.[/] [#9fc93c]Pakai[/] "
+                    f"[#fcc048]/voice {h['saran']}[/][dim] — di situ suaramu "
+                    "lewat.[/]")
+            else:
+                # Bahkan profil paling longgar pun tak menangkapnya. Yang
+                # tersisa di luar kendali bagas-ai: penguat mikrofon Windows,
+                # dan "peredam bising" bawaan Realtek yang memang dirancang
+                # MEMBUANG suara jauh.
+                console.print(
+                    "  [yellow]✖ tak terjangkau bahkan di setelan paling "
+                    "longgar.[/]\n"
+                    "  [dim]Sisanya di luar bagas-ai — dua yang paling sering "
+                    "jadi sebabnya:[/]\n"
+                    "  [dim]  · Pengaturan Suara → mikrofon → naikkan volume "
+                    "& 'Microphone Boost'[/]\n"
+                    "  [dim]  · matikan 'Audio enhancements' / peredam bising "
+                    "Realtek — peredam itu memang dibuat MEMBUANG suara "
+                    "jauh[/]\n"
+                    "  [dim]  · atau pakai HP-mu sebagai mikrofon (AudioRelay "
+                    "sudah terpasang di laptop ini) lalu taruh di ruangan "
+                    "itu[/]")
+            if h["teks"]:
+                console.print(f"  [#9fc93c]✓ terdengar:[/] "
+                              f"[#f2e3cc]{_esc(h['teks'])}[/]\n")
+            else:
+                console.print("  [dim]tak ada kata yang dikenali dari rekaman "
+                              "itu.[/dim]\n")
             return
 
         if pilihan in ("tes", "test", "coba"):
@@ -3312,14 +3409,16 @@ def main(resume: bool = False) -> None:
             # 180 sementara mikrofon pengguna ber-gain rendah (derau 0,5), jadi
             # suaranya tak pernah lewat — dan tak ada satu angka pun di layar
             # yang bisa menunjukkannya.
+            lantai = _dengar.profil(voice_state.get("jangkauan")).lantai
             console.print(
                 f"  [dim]tingkat suara tertinggi: {puncak:.0f}   "
-                f"ambang bicara: ±{_dengar._LANTAI:.0f} (mengikuti derau "
-                f"ruangan)[/dim]"
+                f"ambang bicara: ≥{lantai:.0f} (mengikuti derau ruangan — "
+                f"ukur dari tempat dudukmu dengan[/dim] [#fcc048]/voice "
+                f"jangkau[/][dim])[/dim]"
                 + ("\n  [yellow]mikrofonnya nyaris tak menangkap apa-apa[/]"
                    "[dim] — periksa mikrofon yang dipilih Windows, atau "
                    "naikkan volumenya di Pengaturan Suara.[/dim]"
-                   if puncak < _dengar._LANTAI else ""))
+                   if puncak < lantai else ""))
             if teks:
                 console.print(f"  [#9fc93c]✓ terdengar:[/] "
                               f"[#f2e3cc]{_esc(teks)}[/]\n")
@@ -3335,6 +3434,12 @@ def main(resume: bool = False) -> None:
         console.print("  [bold #fcc048]🎙 Perintah suara[/] "
                       f"[dim]— {'AKTIF' if aktif else 'MATI'}[/]")
         console.print(f"  [dim]mikrofon :[/] {_esc(_dengar.nama_mikrofon() or '-')}")
+        jnama = voice_state.get("jangkauan") or _dengar._nama_jangkauan()
+        console.print(
+            f"  [dim]jangkauan:[/] [#fcc048]{jnama}[/]"
+            + (f"  [dim](derau {pendengar.derau:.0f} → ambang "
+               f"{pendengar.ambang:.0f})[/]" if aktif and pendengar.ambang
+               else "  [dim](dekat / normal / jauh)[/]"))
         if not ok:
             console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]")
         console.print("  [dim]cara pakai:[/] sebut [#fcc048]\"bagas ai\"[/] "
@@ -3342,7 +3447,9 @@ def main(resume: bool = False) -> None:
                       "[dim]· buang dengan[/] [#fcc048]\"batalkan\"[/]")
         console.print("  [dim]yang dikirim hanya yang terucap SESUDAH "
                       "namaku.[/dim]")
-        console.print("  [dim]/voice on · /voice off · /voice tes[/dim]\n")
+        console.print("  [dim]/voice on · off · tes ·[/] [#fcc048]jangkau[/]"
+                      "[dim] (ukur dari tempat dudukmu) ·[/] "
+                      "[#fcc048]dekat|normal|jauh[/]\n")
 
     def show_mic(arg: str = "") -> None:
         """/mic — kabar AI dibacakan pengeras suara; on/off/tes.

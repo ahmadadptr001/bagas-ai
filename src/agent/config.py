@@ -235,6 +235,18 @@ KONTEKS_MAKS_BYTES: int = int(
 # situs (chat.z.ai: 10) yang juga dipakai screenshot pratinjau.
 KONTEKS_MAKS_BAGIAN: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BAGIAN", "8"))
 
+# --- /voice: seberapa jauh mikrofon boleh mendengar ---
+# "dekat" | "normal" | "jauh". Bawaannya JAUH: cukup untuk memberi perintah
+# sambil rebahan atau dari ruangan sebelah, bukan cuma dari depan laptop.
+#
+# Yang disetel ini AMBANG, bukan volume — lihat dengar.JANGKAUAN untuk angkanya
+# beserta alasan tiap angka. Ongkos "jauh" itu nyata tapi terbatas: lebih
+# banyak potongan derau ikut dikirim ke pengenal suara, sementara ketepatannya
+# tak berubah (yang tak memuat nama bagas-ai dibuang sebelum jadi perintah).
+# Turun ke "normal"/"dekat" bila mikrofonmu jadi terlalu sering menyangka kipas
+# sedang bicara. Ukur dulu dari tempatmu duduk: `/voice jangkau`.
+VOICE_JANGKAUAN: str = os.getenv("VOICE_JANGKAUAN", "jauh").strip().lower()
+
 # Bunyi penanda "tugas selesai" pilihan sendiri (path ke berkas WAV). Kosong =
 # pakai bawaan di ~/.bagasai/suara/ (lihat tanda.py). Cara lain tanpa menyentuh
 # .env: taruh berkasnya di ~/.bagasai/suara/selesai-punyaku.wav.

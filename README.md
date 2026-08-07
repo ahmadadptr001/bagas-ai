@@ -129,6 +129,7 @@ Disimpan di `~/.bagasai/.env`.
 |---|---|
 | `CHAT_MODEL` | Model chat default. Ganti kapan pun lewat `/model`. |
 | `CONNECTOR_BROWSER_CHANNEL` | Browser yang dipakai connector: `brave` (default), `chrome`, `chrome-beta`, `msedge`. Kalau yang diminta belum terpasang, browser asli lain dipakai otomatis. Tiap browser punya profil login sendiri, jadi berganti berarti login ulang. |
+| `VOICE_JANGKAUAN` | Seberapa jauh mikrofon `/voice` boleh mendengar: `jauh` (default — bisa dari kasur / ruangan sebelah), `normal`, `dekat`. Ukur dari tempat dudukmu sendiri lewat `/voice jangkau`. |
 | `VISION_MODEL` | Model untuk analisis gambar. |
 | `TELEGRAM_BOT_TOKEN` | Token bot untuk mode `telegram`. |
 | `RETRY_MAX_SECONDS` | Berapa lama bertahan mencoba ulang saat kena rate-limit (default 300). |
