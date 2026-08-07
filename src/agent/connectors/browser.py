@@ -19,6 +19,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import queue
 import shutil
 import subprocess
@@ -485,6 +486,46 @@ def forget_profile(service: str) -> bool:
 _MENUMPANG: set[str] = set()
 
 
+def _exe_browser(channel: str) -> str | None:
+    """Jalur chrome.exe / msedge.exe di mesin ini, atau None bila tak ketemu.
+
+    Dibutuhkan sejak Chrome diluncurkan SENDIRI (lihat _luncur_sendiri):
+    Playwright yang biasanya tahu di mana browser channel dipasang, dan
+    pengetahuan itu tak diekspos ke API Python. Registry ditanya lebih dulu
+    karena ia benar (mengikuti pemasangan di mana pun), jalur baku cuma
+    cadangan."""
+    if sys.platform != "win32" or not channel:
+        return None
+    nama = {"chrome": "chrome.exe", "chrome-beta": "chrome.exe",
+            "msedge": "msedge.exe"}.get(channel)
+    if not nama:
+        return None
+    try:
+        import winreg
+        for akar in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(
+                        akar,
+                        r"SOFTWARE\Microsoft\Windows\CurrentVersion"
+                        rf"\App Paths\{nama}") as k:
+                    jalur = winreg.QueryValue(k, None)
+                if jalur and Path(jalur).exists():
+                    return jalur
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001 - registry tak bisa dibaca: pakai jalur baku
+        pass
+    merek = "Google\\Chrome" if nama == "chrome.exe" else "Microsoft\\Edge"
+    for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        akar = os.environ.get(env)
+        if not akar:
+            continue
+        p = Path(akar) / merek / "Application" / nama
+        if p.exists():
+            return str(p)
+    return None
+
+
 def _kill_profile_browsers(service: str | None = None) -> None:
     """Bunuh proses Chrome/Chromium yang memakai folder profil connector.
 
@@ -669,6 +710,10 @@ class BrowserHub:
         # Bedanya penting saat menutup: yang menumpang hanya boleh menutup TAB
         # miliknya sendiri, tak boleh menutup jendela milik terminal sebelah.
         self._dipinjam: set[str] = set()
+        # service -> proses Chrome yang KITA luncurkan sendiri (lihat
+        # _luncur_sendiri). Playwright tak mengenalnya, jadi kitalah yang
+        # bertanggung jawab menutupnya.
+        self._proses: dict[str, Any] = {}
         # True bila sebuah job MACET melewati timeout -> hub ini tak bisa
         # dipercaya lagi (thread-nya mungkin menggantung); hub() akan
         # menggantinya dengan hub baru + membunuh Chrome profil yang tersisa.
@@ -981,6 +1026,19 @@ class BrowserHub:
             ctx.close()
         except Exception:  # noqa: BLE001
             pass
+        # Chrome yang KITA jalankan sendiri tak dimiliki Playwright: menutup
+        # context-nya cuma memutus sambungan CDP, prosesnya tetap hidup dan
+        # tetap memegang kunci profil. Ditutup lewat perintah dulu (supaya
+        # Chrome berakhir bersih & tak menawarkan "Restore pages?"), baru
+        # prosesnya dipastikan benar-benar berakhir.
+        if service in self._proses:
+            try:
+                br = ctx.browser
+                if br is not None:
+                    br.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._matikan_proses(service)
 
     def close_all(self) -> None:
         """Tutup RAPI semua context (HARUS di thread hub). Dipakai saat keluar
@@ -1097,6 +1155,74 @@ class BrowserHub:
                         and not config.CONNECTOR_SHOW)
         except Exception:  # noqa: BLE001
             sembunyi = False
+        # Bendera yang WAJAR untuk Chrome mana pun. Sengaja sesedikit mungkin:
+        # tiap bendera tambahan adalah satu hal lagi yang membedakan jendela ini
+        # dari Chrome yang dibuka manusia.
+        bendera = [
+            "--start-maximized",
+            # Jangan pernah menawarkan/memulihkan tab sesi sebelumnya —
+            # connector selalu membuka halaman chat sendiri.
+            "--hide-crash-restore-bubble",
+            "--disable-session-crashed-bubble",
+            "--no-first-run",
+            "--no-default-browser-check",
+            # Jendela connector disembunyikan setelah login; flag ini mencegah
+            # Chrome menahan/throttle render saat jendela tak terlihat, agar
+            # token jawaban tetap masuk ke DOM & terbaca realtime.
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+        ]
+        porta = self._porta_bebas()
+        if sembunyi:
+            # Ditaruh di koordinat yang tak terlihat di monitor mana pun, tapi
+            # ukurannya tetap wajar supaya situs merender seperti biasa (layout
+            # responsif situs chat berubah di jendela sempit).
+            #
+            # --start-maximized MEMBATALKAN posisi itu: Chrome memaksimalkan
+            # jendelanya ke layar utama, jadi ia muncul persis di tengah.
+            sx, sy = posisi_sembunyi()
+            bendera = [b for b in bendera if b != "--start-maximized"]
+            bendera += [f"--window-position={sx},{sy}", "--window-size=1280,900"]
+        channel = config.CONNECTOR_BROWSER_CHANNEL
+
+        def _catat_porta(ctx: Any) -> Any:
+            # Porta remote-debugging: inilah yang membuat terminal BERIKUTNYA
+            # bisa menumpang alih-alih membunuh jendela ini. Diumumkan selalu,
+            # bukan hanya saat dibutuhkan — pemakainya datang belakangan dan tak
+            # bisa meminta jendela yang sudah terlanjur jalan untuk membukanya.
+            if service:
+                try:
+                    f = self._berkas_porta(service)
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_text(str(porta), encoding="utf-8")
+                except OSError:
+                    pass          # gagal mencatat = cuma kehilangan berbagi
+            return ctx
+
+        # JALUR UTAMA: Chrome dijalankan SENDIRI, lalu disambung lewat porta.
+        #
+        # Bukan soal selera. TERUKUR — 42 argumen identik, yang berbeda hanya
+        # cara menyambung:
+        #     Playwright + --remote-debugging-pipe -> navigator.webdriver True
+        #     argumen sama, lewat porta            -> navigator.webdriver False
+        #
+        # Jadi PIPA itulah yang menyalakan penanda otomasi, bukan
+        # --enable-automation, bukan Chromium, bukan headless. Selama ini kita
+        # menutupinya dengan --disable-blink-features=AutomationControlled —
+        # tambal sulam yang justru membuat Chrome memasang pita kuning "unsupported
+        # command-line flag", sehingga butuh akal-akalan lagi untuk
+        # menyembunyikannya. Lewat porta, penandanya mati dengan sendirinya dan
+        # tak ada satu pun bendera anti-deteksi yang perlu dibawa.
+        ctx = self._luncur_sendiri(user_data_dir, headless, porta, bendera,
+                                   channel, service)
+        if ctx is not None:
+            return _catat_porta(ctx)
+
+        # CADANGAN: cara lama. Dipakai bila chrome.exe tak ketemu (channel
+        # kosong / browsernya tak terpasang) atau peluncuran sendiri gagal.
+        # Di sini pipa tak terhindarkan, jadi penandanya harus ditutup lagi.
+        log.info("peluncuran mandiri tak tersedia — kembali ke Playwright")
         opts = dict(
             user_data_dir=user_data_dir,
             headless=headless,
@@ -1126,41 +1252,9 @@ class BrowserHub:
             # Dinyalakan: satu bendera ganjil berkurang, dan pengamanan
             # prosesnya kembali seperti Chrome biasa.
             chromium_sandbox=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--start-maximized",
-                # Jangan pernah menawarkan/memulihkan tab sesi sebelumnya —
-                # connector selalu membuka halaman chat sendiri.
-                "--hide-crash-restore-bubble",
-                "--disable-session-crashed-bubble",
-                "--no-first-run",
-                "--no-default-browser-check",
-                # Jendela connector di-MINIMIZE setelah login; flag ini mencegah
-                # Chrome menahan/throttle render saat jendela tersembunyi, agar
-                # token jawaban tetap masuk ke DOM & terbaca realtime.
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
-            ],
+            args=bendera + ["--disable-blink-features=AutomationControlled",
+                            f"--remote-debugging-port={porta}"],
         )
-        # Porta remote-debugging: inilah yang membuat terminal BERIKUTNYA bisa
-        # menumpang alih-alih membunuh jendela ini. Diumumkan selalu, bukan
-        # hanya saat dibutuhkan — pemakainya datang belakangan dan tak bisa
-        # meminta jendela yang sudah terlanjur jalan untuk membukanya.
-        porta = self._porta_bebas()
-        opts["args"].append(f"--remote-debugging-port={porta}")
-        if sembunyi:
-            # Ditaruh di koordinat yang mustahil terlihat di monitor mana pun,
-            # dan ukurannya tetap wajar supaya situs merender seperti biasa
-            # (layout responsif situs chat berubah di jendela sempit).
-            sx, sy = posisi_sembunyi()
-            opts["args"] += [f"--window-position={sx},{sy}",
-                             "--window-size=1280,900"]
-            # --start-maximized MEMBATALKAN posisi di atas: Chrome memaksimalkan
-            # jendelanya ke layar utama, jadi ia muncul persis di tengah.
-            opts["args"] = [a for a in opts["args"]
-                            if a != "--start-maximized"]
-        channel = config.CONNECTOR_BROWSER_CHANNEL
 
         def _try() -> Any:
             if channel:
@@ -1171,16 +1265,6 @@ class BrowserHub:
                 except Exception:  # noqa: BLE001 - Chrome tak ada -> Chromium bawaan
                     pass
             return self._pw.chromium.launch_persistent_context(**opts)
-
-        def _catat_porta(ctx: Any) -> Any:
-            if service:
-                try:
-                    f = self._berkas_porta(service)
-                    f.parent.mkdir(parents=True, exist_ok=True)
-                    f.write_text(str(porta), encoding="utf-8")
-                except OSError:
-                    pass          # gagal mencatat = cuma kehilangan berbagi
-            return ctx
 
         try:
             return _catat_porta(_try())
@@ -1199,6 +1283,97 @@ class BrowserHub:
             import time as _t
             _t.sleep(1.0)  # beri OS waktu melepas kunci profil
             return _catat_porta(_try())
+
+    def _luncur_sendiri(self, user_data_dir: str, headless: bool, porta: int,
+                        bendera: list[str], channel: str,
+                        service: str | None) -> Any:
+        """Jalankan Chrome sendiri lalu sambung lewat porta debug.
+
+        Kembali None bila tak bisa — pemanggil lalu memakai cara lama. Setiap
+        kegagalan di sini HARUS berujung None, bukan pengecualian: ini jalur
+        yang boleh tak tersedia, bukan jalur yang boleh menggagalkan sesi."""
+        exe = _exe_browser(channel)
+        if not exe:
+            return None
+        args = [exe, f"--remote-debugging-port={porta}",
+                f"--user-data-dir={user_data_dir}"] + bendera
+        if headless:
+            args.append("--headless=new")
+        args.append("about:blank")
+        try:
+            proc = subprocess.Popen(
+                args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL)
+        except OSError as e:
+            log.info("gagal menjalankan %s sendiri: %s", exe, e)
+            return None
+        ctx = self._tunggu_porta(porta, proc)
+        if ctx is None:
+            # Chrome menyala tapi porta tak pernah menjawab (atau ia langsung
+            # mati karena profilnya terkunci). Jangan tinggalkan prosesnya
+            # menggantung: pemanggil akan mencoba cara lain pada profil yang
+            # sama, dan dua Chrome atas satu profil pasti bentrok.
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        if service:
+            self._proses[service] = proc
+        log.info("Chrome dijalankan sendiri untuk %s (porta %s)",
+                 service or "?", porta)
+        return ctx
+
+    def _tunggu_porta(self, porta: int, proc: Any,
+                      batas: float = 30.0) -> Any:
+        """Tunggu porta debug siap, lalu sambung. None bila tak kunjung siap.
+
+        Kesiapan ditanyakan lewat /json/version, bukan sekadar "porta terbuka":
+        Chrome membuka soketnya sebelum benar-benar siap melayani, dan
+        connect_over_cdp yang datang terlalu cepat gagal dengan galat yang
+        menyesatkan."""
+        import urllib.request
+        tenggat = time.time() + batas
+        siap = False
+        while time.time() < tenggat:
+            if proc.poll() is not None:
+                return None       # Chrome mati sebelum sempat siap
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{porta}/json/version", timeout=1):
+                    siap = True
+                    break
+            except Exception:  # noqa: BLE001 - belum siap: coba lagi
+                time.sleep(0.2)
+        if not siap:
+            return None
+        try:
+            browser = self._pw.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{porta}", timeout=15000)
+        except Exception as e:  # noqa: BLE001
+            log.info("porta %s siap tapi tak bisa disambung: %s", porta, e)
+            return None
+        try:
+            return browser.contexts[0] if browser.contexts else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _matikan_proses(self, service: str) -> None:
+        """Pastikan Chrome yang KITA jalankan untuk service ini benar-benar
+        berakhir. Aman dipanggil untuk service yang tak punya proses sendiri."""
+        proc = self._proses.pop(service, None)
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                for _ in range(30):        # ~3 detik, cukup untuk keluar rapi
+                    if proc.poll() is not None:
+                        return
+                    time.sleep(0.1)
+                proc.kill()
+        except Exception:  # noqa: BLE001 - sudah mati / tak bisa disentuh
+            pass
 
 
 _HUB: BrowserHub | None = None
