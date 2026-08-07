@@ -886,7 +886,25 @@ class BrowserHub:
             # yang start berbarengan) -> tetap wajib tab sendiri.
             page = ctx.new_page()
         else:
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            # TAB BARU, lalu tab bawaan DIBUANG — bukan sekadar kerapian.
+            #
+            # Chrome memasang pita kuning "You are using an unsupported
+            # command-line flag: ..." pada tab yang ADA SAAT ia start, dan
+            # hanya di situ. Tab yang dibuka sesudahnya bersih. Karena
+            # connector toh selalu menavigasi sendiri ke halaman chat, tab
+            # bawaan itu tak ada gunanya — dan membuangnya menghapus pitanya
+            # tanpa perlu melepas satu pun bendera.
+            #
+            # Urutannya WAJIB begini: buka dulu, baru tutup yang lama. Menutup
+            # halaman terakhir sebuah persistent context ikut menutup
+            # browsernya.
+            lama = list(ctx.pages)
+            page = ctx.new_page()
+            for p in lama:
+                try:
+                    p.close()
+                except Exception:  # noqa: BLE001 - sudah tertutup sendiri
+                    pass
         self._ctx[service] = (ctx, page)
         return page
 
@@ -1101,6 +1119,13 @@ class BrowserHub:
             # `--disable-blink-features=AutomationControlled` di bawah tetap
             # dipertahankan: itu saklar LAIN, yang mematikan navigator.webdriver.
             ignore_default_args=["--enable-automation"],
+            # Playwright mematikan sandbox Chrome kecuali diminta tegas
+            # (`if (options.chromiumSandbox !== true) push("--no-sandbox")`).
+            # Chrome asli milik pengguna TIDAK pernah jalan begitu, dan
+            # --no-sandbox termasuk bendera yang diprotes Chrome sendiri.
+            # Dinyalakan: satu bendera ganjil berkurang, dan pengamanan
+            # prosesnya kembali seperti Chrome biasa.
+            chromium_sandbox=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--start-maximized",
