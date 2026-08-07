@@ -1083,6 +1083,24 @@ class BrowserHub:
             user_data_dir=user_data_dir,
             headless=headless,
             no_viewport=True,  # ikuti ukuran jendela asli (lebih natural)
+            # SATU-SATUNYA cara membuang "--enable-automation".
+            #
+            # Bendera itu TIDAK ditulis di sini — Playwright sendiri yang
+            # menyelipkannya ke setiap peluncuran chromium (lihat
+            # chromiumSwitches.js: `assistantMode ? "" : "--enable-automation"`),
+            # jadi menghapusnya dari daftar `args` di bawah tak ada gunanya;
+            # ia harus dibuang lewat ignore_default_args.
+            #
+            # Dia yang memasang pita kuning "Chrome is being controlled by
+            # automated test software" di atas halaman, dan dia pula yang
+            # menyalakan penanda otomasi di dalam browser — yang dibaca mesin
+            # penilai risiko seperti Aliyun Captcha milik chat.z.ai. Playwright
+            # membuangnya persis begini untuk mode "assistant"-nya, yaitu mode
+            # yang memang dipakai menyetir situs konsumen sungguhan.
+            #
+            # `--disable-blink-features=AutomationControlled` di bawah tetap
+            # dipertahankan: itu saklar LAIN, yang mematikan navigator.webdriver.
+            ignore_default_args=["--enable-automation"],
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--start-maximized",
