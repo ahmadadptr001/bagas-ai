@@ -26,7 +26,7 @@ from typing import Any, Callable
 from .. import config
 from .browser import (
     BrowserError, WebBusyError, WebChatRusakError, WebKonteksPenuhError,
-    WebLampiranPenuhError, WebLimitError, hub, profile_dir,
+    WebLampiranPenuhError, WebLimitError, hub, nama_browser, profile_dir,
     set_windows_visible,
 )
 
@@ -844,6 +844,7 @@ class WebConnector:
         self,
         *,
         on_status: StatusCb | None = None,
+        on_notice: Callable[[str], None] | None = None,
         cancel_event: Any = None,
     ) -> bool:
         """Hubungkan ke situs — dipanggil SAAT MODEL DIPILIH (/model), bukan saat
@@ -852,7 +853,7 @@ class WebConnector:
 
         Return True bila proses login baru saja dilakukan (False = sesi lama)."""
         return hub().submit(
-            lambda h: self._connect_on_hub(h, on_status, cancel_event),
+            lambda h: self._connect_on_hub(h, on_status, on_notice, cancel_event),
             timeout=self.login_timeout + 90,
         )
 
@@ -1014,9 +1015,15 @@ class WebConnector:
 
     # ---- internal (berjalan DI thread hub) ----
     def _connect_on_hub(
-        self, h: Any, on_status: StatusCb | None, cancel_event: Any
+        self, h: Any, on_status: StatusCb | None,
+        on_notice: Callable[[str], None] | None, cancel_event: Any
     ) -> bool:
         from .. import llm  # impor tunda: hindari siklus impor
+
+        # Tanpa baris ini _kabar tetap None di seluruh jalur /model, sehingga
+        # permintaan sign-in cuma punya satu saluran — yang justru saluran
+        # yang meringkasnya jadi satu kata.
+        self._kabar = on_notice
 
         def status(msg: str) -> None:
             if on_status:
@@ -2128,6 +2135,25 @@ class WebConnector:
     # berkedip). Diisi send(); lihat catatan di sana.
     _kabar: Any = None
 
+    def _lapor(self, status: Any, pesan: str) -> None:
+        """Sampaikan ke terminal lewat DUA saluran sekaligus.
+
+        Kabar dicetak permanen ke riwayat terminal — itu yang benar-benar
+        dibaca pengguna. Status cuma menghidupkan baris fase di footer, dan
+        kalimat panjang di situ diringkas jadi satu kata; mengandalkannya saja
+        berarti pemberitahuannya tak pernah sampai.
+
+        Dipakai untuk peristiwa yang menuntut pengguna BERTINDAK — captcha dan
+        permintaan login. Keduanya sama: giliran berhenti sampai ada tangan
+        manusia, jadi yang paling mahal di sini adalah kabar yang terlewat."""
+        for saluran in (self._kabar, status):
+            if not saluran:
+                continue
+            try:
+                saluran(pesan)
+            except Exception:  # noqa: BLE001 - kabar tak boleh menjatuhkan giliran
+                pass
+
     def _submit(self, page: Any, inp: Any) -> None:
         """Kirim pesan, dan PASTIKAN benar-benar terkirim.
 
@@ -2539,19 +2565,7 @@ class WebConnector:
             return False
 
         def lapor(m: str) -> None:
-            """Sampaikan ke terminal lewat DUA saluran sekaligus.
-
-            Kabar dicetak permanen ke riwayat terminal — itu yang benar-benar
-            dibaca pengguna. Status cuma menghidupkan baris fase di footer, dan
-            kalimat panjang di situ diringkas jadi satu kata; mengandalkannya
-            saja berarti pemberitahuannya tak pernah sampai."""
-            for saluran in (self._kabar, status):
-                if not saluran:
-                    continue
-                try:
-                    saluran(m)
-                except Exception:  # noqa: BLE001
-                    pass
+            self._lapor(status, m)
 
         singkat = " ".join(pesan.split())[:70]
         lapor(f"⚠ {self.label} meminta VERIFIKASI KEAMANAN (captcha): "
@@ -2824,7 +2838,7 @@ class WebConnector:
         # membunuhnya dulu). Tanpa kabar apa pun di sini, terminal terlihat diam
         # tanpa sebab dan tanpa jendela yang muncul — persis kesan "programnya
         # tak melakukan apa-apa".
-        status("menyiapkan jendela Chrome…")
+        status(f"menyiapkan jendela {nama_browser()}…")
         page = h.page_for(self.service, headless=False)
         status("menunggu halaman siap…")
         # Sudah di percakapan aktif & login? Lanjutkan (jangan buka chat baru) —
@@ -2853,9 +2867,19 @@ class WebConnector:
         if not self._chat_ready(page, self._NAV_READY_MS, check_cancel):
             # BELUM login -> jendela harus TERLIHAT supaya pengguna bisa sign-in.
             self._foreground(page)
-            status(
-                "🔐 Silakan SIGN-IN di jendela Chrome yang terbuka "
-                "(email/Google + kode/CAPTCHA). Aku tunggu sampai selesai…"
+            # DUA SALURAN, bukan cuma status. Pelajaran yang sudah ditulis di
+            # _intip_captcha tapi tak pernah sampai ke sini: baris fase di
+            # footer MERINGKAS kalimat panjang jadi satu kata — permintaan
+            # sign-in ini menyusut jadi "menunggu login" (lihat _web_phase), dan
+            # tak ada satu pun kata yang memberi tahu bahwa ADA JENDELA yang
+            # harus disentuh. Dilaporkan pengguna sebagai "kok tak ada
+            # pemberitahuan kalau harus login".
+            self._lapor(
+                status,
+                f"🔐 {self.label} belum login. Jendela {nama_browser()} sudah "
+                "kubuka — silakan sign-in di sana (email/Google + kode/"
+                "CAPTCHA). Aku tunggu sampai selesai, tak usah apa-apakan "
+                "terminal ini."
             )
             self._wait_login(page, check_cancel)
             status("login berhasil ✓ — browser lanjut di latar, kerja di terminal")
@@ -2909,14 +2933,15 @@ class WebConnector:
             raise BrowserError(f"gagal membuka {dest}: {exc}") from exc
 
     def _wait_login(self, page: Any, check_cancel: Callable[[], None]) -> None:
-        """Tunggu pengguna BENAR-BENAR menyelesaikan sign-in di jendela Chrome."""
+        """Tunggu pengguna BENAR-BENAR menyelesaikan sign-in di jendela browser."""
         deadline = time.time() + self.login_timeout
         while time.time() < deadline:
             check_cancel()
             try:
                 if page.is_closed():
                     raise BrowserError(
-                        "jendela Chrome ditutup sebelum login selesai. "
+                        f"jendela {nama_browser()} ditutup sebelum login "
+                        "selesai. "
                         "Pilih ulang modelnya untuk mencoba lagi."
                     )
             except BrowserError:
@@ -2929,7 +2954,8 @@ class WebConnector:
                 page.wait_for_timeout(1000)
             except Exception:  # noqa: BLE001 - page mati saat menunggu
                 raise BrowserError(
-                    "jendela Chrome tertutup saat menunggu login. Coba lagi."
+                    f"jendela {nama_browser()} tertutup saat menunggu "
+                    "login. Coba lagi."
                 )
         raise BrowserError(
             "login tidak selesai dalam waktu yang ditentukan. Coba lagi."

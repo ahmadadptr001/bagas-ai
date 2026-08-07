@@ -64,8 +64,35 @@ log = logging.getLogger(__name__)
 
 
 def profile_dir(service: str) -> "Path":
-    """Folder profil login persisten milik sebuah service."""
-    return _PROFILE_ROOT / service
+    """Folder profil login persisten milik sebuah service, PER BROWSER.
+
+    Nama browsernya WAJIB ikut. Dulu tidak, dan begitu browser bawaan berpindah
+    (chrome -> brave) Brave langsung diarahkan ke folder yang sudah diisi
+    Chrome. Dua akibatnya, keduanya buruk:
+
+      - Profil Chromium bukan barang yang bisa dititipkan antar-merek. Local
+        State, Preferences, dan penjaga versinya berbeda; browser yang lebih
+        tua menolak, yang lebih baru menulisi.
+      - Yang lebih terasa: "sudah pernah login?" ditebak dari folder profil yang
+        TIDAK kosong (lihat _launch). Karena foldernya berisi punya Chrome,
+        Brave dianggap sudah pernah login — jendelanya lahir di luar layar lalu
+        disembunyikan, padahal pengguna belum pernah sign-in di sana. Tak ada
+        jendela yang muncul, tak ada yang bisa diklik. Persis yang dilaporkan.
+
+    Yang dipakai browser yang BENAR-BENAR terbuka, bukan yang tertulis di
+    setelan. Keduanya bisa berbeda (browser yang diminta belum terpasang), dan
+    memakai nama yang tertulis berarti salah ketik satu huruf menciptakan
+    profil kosong tersendiri — pengguna login di situ, memperbaiki ketikannya,
+    lalu mendapati sesinya lenyap.
+
+    Chrome (dan channel kosong) sengaja TETAP di jalur lama tanpa akhiran:
+    memindahkannya berarti membuang sesi login yang sudah ada."""
+    minta = (config.CONNECTOR_BROWSER_CHANNEL or "").strip().lower()
+    _, ch = _pilih_exe(minta)
+    ch = ch or minta
+    if ch in ("", "chrome"):
+        return _PROFILE_ROOT / service
+    return _PROFILE_ROOT / f"{service}@{ch}"
 
 
 def _ps_profile_query(target: "Path") -> str:
@@ -562,6 +589,26 @@ def _exe_browser(channel: str) -> str | None:
     return None
 
 
+_SUDAH_DIPERINGATKAN: set[str] = set()
+
+# channel -> nama yang PANTAS DISEBUT ke pengguna.
+_NAMA_BROWSER = {
+    "brave": "Brave", "chrome": "Chrome", "chrome-beta": "Chrome Beta",
+    "msedge": "Edge",
+}
+
+
+def nama_browser() -> str:
+    """Nama browser yang BENAR-BENAR akan terbuka, untuk dikatakan ke pengguna.
+
+    Bukan sekadar membaca setelan. Kalau yang diminta belum terpasang, yang
+    muncul di layar browser LAIN — dan menyuruh orang mencari "jendela Brave"
+    yang tak pernah ada adalah cara paling rapi untuk membuatnya menyerah."""
+    minta = (config.CONNECTOR_BROWSER_CHANNEL or "").strip().lower()
+    _, dipakai = _pilih_exe(minta)
+    return _NAMA_BROWSER.get(dipakai or minta, "browser")
+
+
 def _pilih_exe(channel: str) -> tuple[str | None, str]:
     """(jalur exe, channel yang benar-benar dipakai) — atau (None, "").
 
@@ -575,7 +622,11 @@ def _pilih_exe(channel: str) -> tuple[str | None, str]:
     # CONNECTOR_BROWSER_CHANNEL=brve berperilaku persis seperti setelan yang
     # benar — cadangannya mengambil alih, browsernya jalan, dan tak ada satu
     # pun tanda bahwa yang diminta pengguna tak pernah dibaca.
-    if channel not in _BROWSER_KENAL:
+    if channel not in _BROWSER_KENAL and channel not in _SUDAH_DIPERINGATKAN:
+        # Sekali saja per nilai. Fungsi ini dipanggil tiap kali browser dicari
+        # DAN tiap kali namanya perlu disebut ke pengguna; memperingatkan di
+        # tiap panggilan mengubah satu salah ketik jadi banjir log.
+        _SUDAH_DIPERINGATKAN.add(channel)
         log.warning(
             "CONNECTOR_BROWSER_CHANNEL=%r tak dikenal — yang dikenali: %s. "
             "Untuk sementara dipakai browser lain yang terpasang.",
@@ -620,7 +671,7 @@ def _kill_profile_browsers(service: str | None = None) -> None:
                  ", ".join(sorted(_MENUMPANG)))
         return
     try:
-        target = _PROFILE_ROOT / service if service else _PROFILE_ROOT
+        target = profile_dir(service) if service else _PROFILE_ROOT
         # Jendela yang tercatat tersembunyi ikut dilupakan — prosesnya mati,
         # handle-nya tak berlaku lagi.
         if service:
@@ -960,7 +1011,7 @@ class BrowserHub:
             if not menumpang:
                 _kill_profile_browsers(service)
 
-        prof = _PROFILE_ROOT / service
+        prof = profile_dir(service)
         prof.mkdir(parents=True, exist_ok=True)
         # Profil sedang DIPEGANG proses lain. Dua kemungkinan yang dulu tak
         # dibedakan sama sekali:
@@ -1143,7 +1194,7 @@ class BrowserHub:
     # yang perlu ditebak.
     @staticmethod
     def _berkas_porta(service: str) -> Path:
-        return _PROFILE_ROOT / service / ".bagasai-cdp-port"
+        return profile_dir(service) / ".bagasai-cdp-port"
 
     @staticmethod
     def _porta_bebas() -> int:

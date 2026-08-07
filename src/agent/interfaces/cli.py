@@ -2129,6 +2129,13 @@ def main(resume: bool = False) -> None:
             try:
                 result["login"] = connectors.get_connector(spec.connector).connect(
                     on_status=lambda m: state.__setitem__("status", m),
+                    # Permintaan sign-in DICETAK, bukan cuma dikedipkan di
+                    # baris status: Live di bawah bersifat transient, jadi
+                    # apa pun yang cuma lewat status akan lenyap tanpa bekas
+                    # begitu penantiannya selesai. console.print saat Live
+                    # aktif mendarat di atas region hidup itu — permanen.
+                    on_notice=lambda m: console.print(
+                        f"\n  [bold #fcc048]{_esc(m)}[/]\n"),
                     cancel_event=cancel_event,
                 )
             except BaseException as exc:  # noqa: BLE001
@@ -2391,6 +2398,14 @@ def main(resume: bool = False) -> None:
             if "VERIFIKASI KEAMANAN" in msg or "captcha" in msg.lower():
                 _commit([_KOSONG, Text.from_markup(
                     f"  [bold #f0603c]🔒 {_esc(msg)}[/]"), _KOSONG])
+                return
+            # LOGIN: sekelas captcha — giliran berhenti sampai ada tangan
+            # manusia di jendela browser. Tanpa cabang sendiri ia jatuh ke
+            # label "naik kelas otomatis"/"anti-macet" di bawah, yang sama
+            # sekali bukan artinya.
+            if "belum login" in msg.lower() or "sign-in" in msg.lower():
+                _commit([_KOSONG, Text.from_markup(
+                    f"  [bold #fcc048]{_esc(msg)}[/]"), _KOSONG])
                 return
             if "disisipkan" in msg:
                 _commit([Text.from_markup(
