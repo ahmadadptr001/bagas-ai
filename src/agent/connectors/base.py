@@ -17,6 +17,7 @@ berikutnya otomatis. Semua aksi Playwright dijalankan di thread hub (browser.py)
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 from pathlib import Path
@@ -1074,12 +1075,11 @@ class WebConnector:
             self._focus_input(inp)
         counts_before = self._msg_counts(page)
         text_before = self._read_last_message(page)
+        self._gerakkan_mouse(page, inp)
         if self._editor_kaya(inp):
             self._ketik_contenteditable(page, inp, prompt)
         else:
-            # Batas waktu eksplisit: kotak sudah dipastikan bisa diisi di atas,
-            # jadi tak perlu menunggu 30 detik bawaan Playwright lagi.
-            inp.fill(prompt, timeout=10000)
+            self._ketik_textarea(page, inp, prompt)
         self._submit(page, inp)
 
         # --- tunggu jawaban MULAI (streaming muncul / jumlah pesan bertambah) ---
@@ -1976,6 +1976,99 @@ class WebConnector:
         except Exception:  # noqa: BLE001 - elemen lepas -> perlakukan sbg biasa
             return False
 
+    # MENGETIK YANG MENINGGALKAN JEJAK MANUSIA.
+    #
+    # Selama ini seluruh prompt mendarat lewat Input.insertText (atau .fill()),
+    # yang TIDAK menghasilkan satu pun keydown/keypress/keyup. Ribuan karakter
+    # muncul tanpa sekali pun tombol ditekan, tanpa penunjuk mouse pernah
+    # bergerak — bagi mesin penilai risiko seperti Aliyun Captcha milik
+    # chat.z.ai, itu pola yang tak mungkin datang dari orang.
+    #
+    # Yang dikerjakan sekarang: beberapa karakter PERTAMA diketik dengan tombol
+    # sungguhan dan jeda yang tak seragam, sisanya baru disisipkan sekaligus.
+    # Bentuknya jadi seperti orang yang mengetik sebentar lalu menempel — hal
+    # yang sehari-hari terjadi — dan biayanya tetap sekitar satu detik, bukan
+    # bermenit-menit seperti kalau seluruh prompt diketik huruf demi huruf.
+    _KETIK_AWALAN = 16          # jumlah karakter yang diketik betulan
+    _KETIK_JEDA = (35, 110)     # milidetik antar tombol, diacak di rentang ini
+    # Karakter yang MEMBUKA MENU di komposer situs chat: "/" perintah cepat,
+    # "@" sebutan, dan baris baru yang justru MENGIRIM pesannya sebelum utuh.
+    # Awalan dipotong sebelum karakter-karakter ini, jadi prompt yang diawali
+    # salah satunya cukup disisipkan seperti dulu.
+    _KETIK_PANTANG = "\n\r/@"
+
+    def _awalan_diketik(self, prompt: str) -> str:
+        """Bagian depan prompt yang AMAN diketik dengan tombol sungguhan."""
+        awalan = prompt[:self._KETIK_AWALAN]
+        for i, c in enumerate(awalan):
+            if c in self._KETIK_PANTANG:
+                return awalan[:i]
+        return awalan
+
+    def _gerakkan_mouse(self, page: Any, inp: Any) -> None:
+        """Bawa penunjuk mouse ke kotak input dengan gerakan bertahap.
+
+        Ini gerakan NYATA (Input.dispatchMouseEvent), bukan event yang
+        di-dispatch dari JavaScript, jadi halaman melihatnya sebagai isTrusted.
+        Sengaja hanya bergerak, tak menekan: fokus sudah diurus _focus_input
+        yang sudah teruji, dan klik sungguhan memang gagal saat jendelanya
+        tersembunyi (lihat _click_element). Gerakan tak punya masalah itu —
+        ia tak perlu hit-test."""
+        try:
+            kotak = inp.bounding_box(timeout=1500)
+        except Exception:  # noqa: BLE001 - elemen lepas: bukan hal fatal
+            return
+        if not kotak or kotak.get("width", 0) <= 0:
+            return
+        x = kotak["x"] + kotak["width"] * random.uniform(0.2, 0.7)
+        y = kotak["y"] + kotak["height"] * random.uniform(0.3, 0.7)
+        try:
+            page.mouse.move(x, y, steps=random.randint(8, 20))
+        except Exception:  # noqa: BLE001 - jejak tambahan, bukan keharusan
+            pass
+
+    def _tulis(self, page: Any, prompt: str) -> str:
+        """Tulis prompt ke kotak yang sedang fokus; kembalikan awalan yang
+        benar-benar diketik dengan tombol (bisa "")."""
+        awalan = self._awalan_diketik(prompt)
+        for c in awalan:
+            page.keyboard.type(c)
+            page.wait_for_timeout(random.uniform(*self._KETIK_JEDA))
+        sisa = prompt[len(awalan):]
+        if sisa:
+            page.keyboard.insert_text(sisa)
+        return awalan
+
+    @staticmethod
+    def _cuma_awalan(isi: str, awalan: str, prompt: str) -> bool:
+        """Yang mendarat CUMA awalan ketikan tangan — sisanya tak masuk.
+
+        Kegagalan setengah jalan ini tak ada sebelum prompt dipecah dua, dan
+        ia berbahaya justru karena kotaknya TIDAK kosong: pemeriksaan lama
+        yang cuma bertanya "ada isinya?" akan meluluskannya, lalu prompt
+        terkirim terpotong tanpa ada yang menyadari."""
+        return bool(awalan) and len(prompt) > len(awalan) \
+            and isi.strip() == awalan.strip()
+
+    def _ketik_textarea(self, page: Any, inp: Any, prompt: str) -> None:
+        """Isi <textarea> biasa, dengan awalan yang diketik sungguhan.
+
+        Cadangannya .fill() — persis jalur lama. Jadi kalau cara baru ini
+        gagal di situs mana pun, hasil terburuknya sama dengan sebelumnya,
+        bukan pesan yang tak terkirim."""
+        try:
+            inp.fill("", timeout=10000)
+            awalan = self._tulis(page, prompt)
+            page.wait_for_timeout(120)
+            isi = self._input_text(inp)
+            if isi and not self._cuma_awalan(isi, awalan, prompt):
+                return
+        except Exception:  # noqa: BLE001 - jatuh ke cara lama di bawah
+            pass
+        # Batas waktu eksplisit: kotak sudah dipastikan bisa diisi oleh
+        # pemanggil, jadi tak perlu menunggu 30 detik bawaan Playwright lagi.
+        inp.fill(prompt, timeout=10000)
+
     def _ketik_contenteditable(self, page: Any, inp: Any, prompt: str) -> None:
         """Ketik ke editor contenteditable & PASTIKAN teksnya benar-benar masuk.
 
@@ -1995,10 +2088,16 @@ class WebConnector:
                 self._click_element(inp)
                 page.wait_for_timeout(150)
             self._taruh_caret(inp)
-            page.keyboard.insert_text(prompt)
+            awalan = self._tulis(page, prompt)
             page.wait_for_timeout(150)
-            if self._input_text(inp):
+            isi = self._input_text(inp)
+            if isi and not self._cuma_awalan(isi, awalan, prompt):
                 return
+            if isi:
+                # Awalan terlanjur mendarat tapi sisanya tidak. Kotak WAJIB
+                # disapu sebelum diulang — kalau tidak, percobaan kedua
+                # menempel di belakang ketikan tadi dan prompt jadi dobel.
+                self._kosongkan_kotak(page, inp)
             # Kotak yang tak terbaca karena JENDELANYA SUDAH TAK ADA jangan
             # dilaporkan sebagai "editor menolak pengetikan" — sebabnya beda,
             # dan yang ini bisa dipulihkan sendiri dengan membuka sesi lagi.
