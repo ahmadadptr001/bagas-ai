@@ -22,16 +22,33 @@ from . import config
 # Urutan penulisan key di file .env (agar rapi & mudah dibaca manusia).
 _ENV_ORDER = [
     "CHAT_MODEL",
+    "CONNECTOR_BROWSER_CHANNEL",
     "TELEGRAM_BOT_TOKEN",
     "MAX_TOOL_ITERATIONS",
     "ALLOW_CODE_EXEC",
     "CODE_EXEC_TIMEOUT",
 ]
 
+# Keterangan yang ditulis TEPAT DI ATAS key-nya di .env. Setelan yang tak
+# pernah muncul di berkasnya sama saja dengan setelan yang tak ada: pengguna
+# tak bisa mengganti apa yang tak ia ketahui keberadaannya.
+_ENV_KOMENTAR = {
+    "CONNECTOR_BROWSER_CHANNEL": [
+        "# Browser yang dipakai connector. Pilihan: brave, chrome,",
+        "# chrome-beta, msedge. Kosongkan untuk memaksa Chromium bawaan",
+        "# Playwright (paling sering diblok situs - hindari).",
+        "# Yang diminta belum terpasang? Browser asli lain dipakai otomatis.",
+    ],
+}
+
 _DEFAULTS = {
     # Ikut models._DITUNDA: menulis model yang ditunda ke .env pemasangan baru
     # berarti tiap sesi dimulai dengan pemetaan-ulang diam-diam.
     "CHAT_MODEL": "web/glm",
+    # Ditulis TEGAS ke .env, bukan dibiarkan mengandalkan bawaan di config.py:
+    # bawaannya pernah berubah (chrome -> brave) lewat pembaruan, dan pemasangan
+    # yang tak menuliskannya ikut berpindah browser tanpa pernah diberitahu.
+    "CONNECTOR_BROWSER_CHANNEL": "brave",
     "MAX_TOOL_ITERATIONS": "8",
     "ALLOW_CODE_EXEC": "true",
     "CODE_EXEC_TIMEOUT": "30",
@@ -54,11 +71,14 @@ def _write_env(path: Path, data: dict[str, str]) -> None:
     lines = [
         "# Konfigurasi bagas-ai — dibuat oleh 'bagas-ai login'.",
         "# Tidak ada API key: semua model bagas-ai lewat browser (login sekali",
-        "# di jendela Chrome). TELEGRAM_BOT_TOKEN hanya perlu bila memakai bot.",
+        "# di jendela browsernya). TELEGRAM_BOT_TOKEN hanya perlu bila memakai",
+        "# bot. Berkas ini boleh disunting tangan.",
         "",
     ]
     for k in _ENV_ORDER:
         if k in data and data[k] != "":
+            for baris in _ENV_KOMENTAR.get(k, []):
+                lines.append(baris)
             lines.append(f"{k}={data[k]}")
     for k, v in data.items():  # simpan key lain yang mungkin ditambahkan manual
         if k not in _ENV_ORDER:

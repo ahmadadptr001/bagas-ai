@@ -492,6 +492,15 @@ def forget_profile(service: str) -> bool:
 _MENUMPANG: set[str] = set()
 
 
+# Browser yang bisa diminta lewat CONNECTOR_BROWSER_CHANNEL di .env.
+# channel -> (nama exe, folder pemasangan di bawah Program Files/LocalAppData)
+_BROWSER_KENAL = {
+    "brave": ("brave.exe", r"BraveSoftware\Brave-Browser"),
+    "chrome": ("chrome.exe", r"Google\Chrome"),
+    "chrome-beta": ("chrome.exe", r"Google\Chrome Beta"),
+    "msedge": ("msedge.exe", r"Microsoft\Edge"),
+}
+
 # Channel yang dikenal Playwright sendiri. Di luar ini, browsernya harus
 # ditunjuk lewat executable_path (lihat _launch._try).
 _CHANNEL_PLAYWRIGHT = {
@@ -514,16 +523,9 @@ def _exe_browser(channel: str) -> str | None:
     membedakan keduanya, bukan nama berkasnya."""
     if sys.platform != "win32" or not channel:
         return None
-    # channel -> (nama exe, folder pemasangan di bawah Program Files/LocalAppData)
-    kenal = {
-        "brave": ("brave.exe", r"BraveSoftware\Brave-Browser"),
-        "chrome": ("chrome.exe", r"Google\Chrome"),
-        "chrome-beta": ("chrome.exe", r"Google\Chrome Beta"),
-        "msedge": ("msedge.exe", r"Microsoft\Edge"),
-    }
-    if channel not in kenal:
+    if channel not in _BROWSER_KENAL:
         return None
-    nama, merek = kenal[channel]
+    nama, merek = _BROWSER_KENAL[channel]
     # Brave lazim dipasang PER PENGGUNA (di LocalAppData) dan tak menulis
     # App Paths sama sekali, jadi LocalAppData di daftar ini bukan sekadar
     # kelengkapan — bagi Brave, di situlah ia biasanya satu-satunya ketemu.
@@ -569,6 +571,15 @@ def _pilih_exe(channel: str) -> tuple[str | None, str]:
     Brave belum sempat dipasang di mesin ini."""
     if not channel:
         return None, ""
+    # SALAH KETIK DI .env TAK BOLEH SENYAP. Tanpa baris ini,
+    # CONNECTOR_BROWSER_CHANNEL=brve berperilaku persis seperti setelan yang
+    # benar — cadangannya mengambil alih, browsernya jalan, dan tak ada satu
+    # pun tanda bahwa yang diminta pengguna tak pernah dibaca.
+    if channel not in _BROWSER_KENAL:
+        log.warning(
+            "CONNECTOR_BROWSER_CHANNEL=%r tak dikenal — yang dikenali: %s. "
+            "Untuk sementara dipakai browser lain yang terpasang.",
+            channel, ", ".join(sorted(_BROWSER_KENAL)))
     urutan = [channel] + [c for c in ("brave", "chrome", "msedge")
                           if c != channel]
     for c in urutan:
