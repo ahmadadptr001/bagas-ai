@@ -2400,6 +2400,11 @@ class WebConnector:
     # terbuka. Captcha muncul mendadak di tengah giliran, jadi harus DIINTIP
     # berkala, bukan ditunggu sampai menyerah.
     _CAPTCHA_PERIKSA = 5.0
+    # Berapa kali penolakan "verification failed" ditunggu sebelum menyerah.
+    # Dua kali sudah cukup untuk membedakan salah geser (sekali, lalu berhasil)
+    # dari sesi yang ditolak (selalu gagal); tiga memberi satu kesempatan lagi
+    # tanpa menyandera pengguna sampai lima menit.
+    _CAPTCHA_MAKS_GAGAL = 3
 
     def _intip_captcha(self, page: Any, status: Any = None,
                        check_cancel: Any = None) -> bool:
@@ -2468,11 +2473,42 @@ class WebConnector:
               "sekarang. Aku menunggu di sini (maksimal "
               f"{self._CAPTCHA_TUNGGU / 60:.0f} menit; Ctrl+C untuk batal).")
         batas = time.time() + self._CAPTCHA_TUNGGU
+        gagal, gagal_dilapor = 0, False
+        terlihat_gagal = False
         while time.time() < batas:
             if check_cancel:
                 check_cancel()
             page.wait_for_timeout(1000)
-            if not self.detect_captcha(page):
+            kini = self.detect_captcha(page)
+            # "Verification failed" yang BERULANG bukan soal tekaan yang meleset.
+            # Kotak geser menilai lebih dari letak potongannya; kalau ditolak
+            # terus padahal pengguna sudah menaruhnya dengan benar, yang ditolak
+            # SESINYA. Menyuruh orang mencoba lagi sampai lima menit habis itu
+            # membuang waktunya untuk sesuatu yang tak akan berubah.
+            if kini and re.search(r"(?i)verification\s+failed|verifikasi\s+gagal"
+                                  r"|请重试|验证失败", kini):
+                if not terlihat_gagal:
+                    gagal += 1
+                    terlihat_gagal = True
+                if gagal >= 2 and not gagal_dilapor:
+                    gagal_dilapor = True
+                    lapor(f"⚠ {self.label} menjawab \"verification failed\" "
+                          "berulang kali. Kalau potongannya sudah kamu taruh "
+                          "dengan benar, yang rusak bukan gesermu — kotak "
+                          "verifikasi situs ini memang bisa gagal terus.")
+                if gagal >= self._CAPTCHA_MAKS_GAGAL:
+                    self._background(page)
+                    raise BrowserError(
+                        f"kotak verifikasi {self.label} menolak "
+                        f"{gagal}x berturut-turut. TERUJI oleh pengguna: ini "
+                        "juga terjadi di Chrome biasa tanpa bagas-ai sama "
+                        "sekali, jadi kerusakannya di situsnya — mengulang "
+                        "geseran tak akan menolong. Pindah model dulu dengan "
+                        "/model (mis. web/kimi atau web/qwen), atau coba lagi "
+                        "nanti.")
+            elif kini:
+                terlihat_gagal = False
+            if not kini:
                 # Beri jeda sebentar: sebagian situs menutup kotaknya lebih dulu
                 # baru melanjutkan permintaan yang tertahan.
                 page.wait_for_timeout(1200)
