@@ -77,8 +77,14 @@ def _ps_profile_query(target: "Path") -> str:
     # -like memakai backslash secara LITERAL. Jangan meng-escape (menggandakan)
     # backslash — polanya jadi tak pernah cocok.
     marker = str(target).replace("'", "")
+    # Nama prosesnya TAK BOLEH dipatok "chrome": browsernya bisa diganti lewat
+    # CONNECTOR_BROWSER_CHANNEL, dan brave.exe maupun msedge.exe tak
+    # mengandung "chrom" sama sekali. Saringan nama di sini cuma penyaring
+    # murah; yang benar-benar menentukan tetap jalur profil di bawahnya, dan
+    # jalur itu milik kita sendiri sehingga tak mungkin salah tangkap.
     return (
-        "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%'\" | "
+        "Get-CimInstance Win32_Process -Filter \"Name like '%chrom%' "
+        "or Name like '%brave%' or Name like '%edge%'\" | "
         "Where-Object { $_.CommandLine -like '*" + marker + "*' }"
     )
 
@@ -486,36 +492,41 @@ def forget_profile(service: str) -> bool:
 _MENUMPANG: set[str] = set()
 
 
+# Channel yang dikenal Playwright sendiri. Di luar ini, browsernya harus
+# ditunjuk lewat executable_path (lihat _launch._try).
+_CHANNEL_PLAYWRIGHT = {
+    "chrome", "chrome-beta", "chrome-dev", "chrome-canary",
+    "msedge", "msedge-beta", "msedge-dev", "msedge-canary", "chromium",
+}
+
+
 def _exe_browser(channel: str) -> str | None:
     """Jalur chrome.exe / msedge.exe di mesin ini, atau None bila tak ketemu.
 
-    Dibutuhkan sejak Chrome diluncurkan SENDIRI (lihat _luncur_sendiri):
-    Playwright yang biasanya tahu di mana browser channel dipasang, dan
-    pengetahuan itu tak diekspos ke API Python. Registry ditanya lebih dulu
-    karena ia benar (mengikuti pemasangan di mana pun), jalur baku cuma
-    cadangan."""
+    Dibutuhkan sejak browsernya dijalankan SENDIRI (lihat _luncur_sendiri):
+    Playwright yang biasanya tahu di mana tiap channel dipasang, dan
+    pengetahuan itu tak diekspos ke API Python.
+
+    Folder pemasangan dicari LEBIH DULU, registry cuma cadangan. Urutan
+    sebaliknya salah, dan salahnya diam-diam: App Paths dikunci per NAMA EXE,
+    sedangkan chrome dan chrome-beta sama-sama bernama chrome.exe — jadi
+    channel beta akan menjawab jalur Chrome stabil dengan yakin. Folder yang
+    membedakan keduanya, bukan nama berkasnya."""
     if sys.platform != "win32" or not channel:
         return None
-    nama = {"chrome": "chrome.exe", "chrome-beta": "chrome.exe",
-            "msedge": "msedge.exe"}.get(channel)
-    if not nama:
+    # channel -> (nama exe, folder pemasangan di bawah Program Files/LocalAppData)
+    kenal = {
+        "brave": ("brave.exe", r"BraveSoftware\Brave-Browser"),
+        "chrome": ("chrome.exe", r"Google\Chrome"),
+        "chrome-beta": ("chrome.exe", r"Google\Chrome Beta"),
+        "msedge": ("msedge.exe", r"Microsoft\Edge"),
+    }
+    if channel not in kenal:
         return None
-    try:
-        import winreg
-        for akar in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            try:
-                with winreg.OpenKey(
-                        akar,
-                        r"SOFTWARE\Microsoft\Windows\CurrentVersion"
-                        rf"\App Paths\{nama}") as k:
-                    jalur = winreg.QueryValue(k, None)
-                if jalur and Path(jalur).exists():
-                    return jalur
-            except OSError:
-                continue
-    except Exception:  # noqa: BLE001 - registry tak bisa dibaca: pakai jalur baku
-        pass
-    merek = "Google\\Chrome" if nama == "chrome.exe" else "Microsoft\\Edge"
+    nama, merek = kenal[channel]
+    # Brave lazim dipasang PER PENGGUNA (di LocalAppData) dan tak menulis
+    # App Paths sama sekali, jadi LocalAppData di daftar ini bukan sekadar
+    # kelengkapan — bagi Brave, di situlah ia biasanya satu-satunya ketemu.
     for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
         akar = os.environ.get(env)
         if not akar:
@@ -523,7 +534,50 @@ def _exe_browser(channel: str) -> str | None:
         p = Path(akar) / merek / "Application" / nama
         if p.exists():
             return str(p)
+    # Tak ada di tempat bakunya — mungkin dipasang di lokasi tak lazim. Di
+    # sinilah registry berguna; risiko salah-channel tak berlaku lagi karena
+    # jalur bakunya sudah dicoba dan meleset.
+    try:
+        import winreg
+        for akar_reg in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(
+                        akar_reg,
+                        r"SOFTWARE\Microsoft\Windows\CurrentVersion"
+                        rf"\App Paths\{nama}") as k:
+                    jalur = winreg.QueryValue(k, None)
+                # Jawabannya WAJIB berada di bawah folder merek yang diminta.
+                # Tanpa syarat ini, meminta chrome-beta yang tak terpasang
+                # dijawab jalur Chrome STABIL dengan penuh percaya diri —
+                # keduanya bernama chrome.exe, dan App Paths cuma tahu nama.
+                if (jalur and Path(jalur).exists()
+                        and merek.split("\\")[-1].lower() in jalur.lower()):
+                    return jalur
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001 - registry tak terbaca: menyerah dengan None
+        pass
     return None
+
+
+def _pilih_exe(channel: str) -> tuple[str | None, str]:
+    """(jalur exe, channel yang benar-benar dipakai) — atau (None, "").
+
+    Bila browser yang diminta tak terpasang, browser ASLI lain dicoba dulu.
+    Menyerah ke Chromium bundel Playwright adalah pilihan TERBURUK — ia yang
+    paling sering diblok — jadi ia tak boleh kebagian giliran hanya karena
+    Brave belum sempat dipasang di mesin ini."""
+    if not channel:
+        return None, ""
+    urutan = [channel] + [c for c in ("brave", "chrome", "msedge")
+                          if c != channel]
+    for c in urutan:
+        exe = _exe_browser(c)
+        if exe:
+            if c != channel:
+                log.info("browser %s tak terpasang — memakai %s", channel, c)
+            return exe, c
+    return None, ""
 
 
 def _kill_profile_browsers(service: str | None = None) -> None:
@@ -1257,13 +1311,27 @@ class BrowserHub:
         )
 
         def _try() -> Any:
-            if channel:
+            # Playwright cuma mengenal channel bawaannya. Brave bukan salah
+            # satunya — kalau namanya diteruskan begitu saja, peluncurannya
+            # gagal lalu diam-diam jatuh ke Chromium bundel, yaitu browser yang
+            # TIDAK diminta pengguna. Karena itu browser di luar daftar itu
+            # ditunjuk lewat jalur exe-nya.
+            if channel in _CHANNEL_PLAYWRIGHT:
                 try:
                     return self._pw.chromium.launch_persistent_context(
                         channel=channel, **opts
                     )
-                except Exception:  # noqa: BLE001 - Chrome tak ada -> Chromium bawaan
+                except Exception:  # noqa: BLE001 - tak terpasang -> Chromium bawaan
                     pass
+            elif channel:
+                exe, _ = _pilih_exe(channel)
+                if exe:
+                    try:
+                        return self._pw.chromium.launch_persistent_context(
+                            executable_path=exe, **opts
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             return self._pw.chromium.launch_persistent_context(**opts)
 
         try:
@@ -1292,7 +1360,7 @@ class BrowserHub:
         Kembali None bila tak bisa — pemanggil lalu memakai cara lama. Setiap
         kegagalan di sini HARUS berujung None, bukan pengecualian: ini jalur
         yang boleh tak tersedia, bukan jalur yang boleh menggagalkan sesi."""
-        exe = _exe_browser(channel)
+        exe, _ = _pilih_exe(channel)
         if not exe:
             return None
         args = [exe, f"--remote-debugging-port={porta}",

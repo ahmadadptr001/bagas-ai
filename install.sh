@@ -89,6 +89,30 @@ else
   warn "Gagal mengunduh Chromium — jalankan nanti: $PY -m playwright install chromium"
 fi
 
+# --- 3c. Brave: browser yang DIPAKAI sehari-hari ---
+# Chromium di atas cuma jaring pengaman terakhir. Yang dijalankan connector
+# adalah browser ASLI yang terpasang di mesin ini, dan bawaannya Brave
+# (CONNECTOR_BROWSER_CHANNEL). Chromium bundel Playwright paling sering diblok
+# situs, jadi ia tak boleh jadi pilihan sehari-hari.
+#
+# TIDAK dipasang diam-diam di sini. Di Linux, memasang browser berarti
+# menambah repo APT/RPM pihak ketiga ke sistem — perubahan yang terlalu besar
+# untuk dikerjakan tanpa ditanya. Yang dilakukan cuma memeriksa & menunjukkan
+# perintahnya. bagas-ai tetap jalan tanpanya: ia memakai Chrome/Chromium yang
+# sudah ada (lihat _pilih_exe).
+step "Memeriksa browser Brave"
+if command -v brave-browser >/dev/null 2>&1 \
+   || command -v brave >/dev/null 2>&1 \
+   || [ -x "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" ]; then
+  ok "Brave sudah ada"
+else
+  warn "Brave belum terpasang - bagas-ai akan memakai Chrome/Chromium."
+  case "$(uname -s)" in
+    Darwin) echo "      Pasang Brave: brew install --cask brave-browser" ;;
+    *)      echo "      Pasang Brave: https://brave.com/linux/" ;;
+  esac
+fi
+
 # --- 4. Pastikan direktori bin/Scripts ada di PATH ---
 step "Memeriksa PATH"
 # Cari lokasi executable yang BENAR-BENAR terpasang (lebih andal daripada

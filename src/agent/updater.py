@@ -726,6 +726,41 @@ def _pasang_langsung(repo: Path) -> dict:
         shutil.rmtree(singgah, ignore_errors=True)
 
 
+def _kabar_browser() -> str:
+    """Keterangan singkat browser yang akan dipakai — "" bila tak ada kabar.
+
+    Pembaruan bisa MENGGANTI browser bawaan (itu yang terjadi saat bawaannya
+    pindah ke Brave). Pengguna yang belum memasangnya tak boleh mengetahuinya
+    dari gejala: yang jalan diam-diam browser lain, dan kalau tak satu pun
+    browser asli ada, Chromium bundel — yang paling sering diblok situs.
+
+    Sengaja TIDAK memasang apa pun. Memasang browser di tengah `update` adalah
+    perubahan sistem yang tak diminta; yang pantas dilakukan di sini cuma
+    mengatakannya, lengkap dengan perintahnya."""
+    try:
+        from . import config as _cfg
+        from .connectors.browser import _pilih_exe
+        diminta = (_cfg.CONNECTOR_BROWSER_CHANNEL or "").strip()
+        if not diminta:
+            return ""
+        exe, dipakai = _pilih_exe(diminta)
+        if dipakai == diminta:
+            return ""
+        if exe:
+            return (f"browser bawaan sekarang {diminta}, tapi ia belum "
+                    f"terpasang — untuk sementara dipakai {dipakai}. "
+                    f"Pasang {diminta}: winget install --id Brave.Brave -e"
+                    if diminta == "brave" else
+                    f"browser bawaan {diminta} belum terpasang — "
+                    f"dipakai {dipakai}.")
+        return (f"tak ada browser asli yang terpasang ({diminta} pun tidak), "
+                "jadi bagas-ai jatuh ke Chromium bawaan Playwright — itu yang "
+                "paling sering diblok situs. Pasang Brave atau Chrome.")
+    except Exception:  # noqa: BLE001 - kabar tambahan, jangan gagalkan update
+        log.debug("pemeriksaan browser gagal", exc_info=True)
+        return ""
+
+
 def _reinstall(repo: Path) -> dict:
     """Pasang ulang dari `repo`, mempertahankan cara pasang asli (--user, editable)."""
     editable = _is_editable(repo)
@@ -1003,6 +1038,11 @@ def apply(force: bool = True) -> dict:
         log.debug("unduh aset penanda gagal", exc_info=True)
     return {
         "status": "updated",
+        # Browser yang akan benar-benar dipakai sesudah pembaruan ini. Ikut
+        # dilaporkan karena bawaannya bisa BERUBAH lewat pembaruan (mis. ke
+        # Brave) — dan pengguna yang belum memasangnya berhak tahu bahwa yang
+        # jalan nanti bukan browser yang tertulis di setelan.
+        "browser": _kabar_browser(),
         "pull": pull_out,
         # Instalasi editable: kode aktif langsung dari repo -> git pull SUDAH
         # meng-update meski pip gagal menimpa .exe yang terkunci.

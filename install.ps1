@@ -88,6 +88,38 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "      $Py -m playwright install chromium" -ForegroundColor DarkGray
 }
 
+# --- 3c. Brave: browser yang DIPAKAI sehari-hari ---
+# Chromium di atas cuma jaring pengaman terakhir. Yang dijalankan connector
+# adalah browser ASLI yang terpasang di mesin ini, dan bawaannya Brave
+# (CONNECTOR_BROWSER_CHANNEL). Chromium bundel Playwright paling sering
+# diblok situs, jadi ia tak boleh jadi pilihan sehari-hari.
+Step "Memeriksa browser Brave"
+$BravePaths = @(
+    (Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\Application\brave.exe'),
+    (Join-Path $env:ProgramFiles 'BraveSoftware\Brave-Browser\Application\brave.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'BraveSoftware\Brave-Browser\Application\brave.exe')
+)
+$Brave = $BravePaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if ($Brave) {
+    Ok "Brave sudah ada"
+} else {
+    $Winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($Winget) {
+        Write-Host "      memasang Brave lewat winget..." -ForegroundColor DarkGray
+        & winget install --id Brave.Brave -e --silent `
+            --accept-package-agreements --accept-source-agreements
+        $Brave = $BravePaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+        if ($Brave) { Ok "Brave terpasang" }
+    }
+    if (-not $Brave) {
+        # TIDAK menggagalkan pemasangan. bagas-ai tetap jalan: kalau Brave tak
+        # ada, ia memakai Chrome atau Edge yang terpasang (lihat _pilih_exe).
+        Write-Host "  ! Brave belum terpasang - bagas-ai akan memakai Chrome/Edge." -ForegroundColor Yellow
+        Write-Host "      Pasang Brave nanti: winget install --id Brave.Brave -e" -ForegroundColor DarkGray
+        Write-Host "      atau unduh di https://brave.com/download/" -ForegroundColor DarkGray
+    }
+}
+
 # --- 4. Pastikan folder Scripts ada di PATH (user) ---
 # Cari lokasi .exe yang BENAR-BENAR terpasang (penting untuk Python Store yang
 # menaruh script di folder tak terduga), bukan sekadar menebak dari getuserbase.

@@ -160,11 +160,20 @@ CONNECTOR_HEADLESS: bool = _get_bool("CONNECTOR_HEADLESS", False)
 # akhirnya di terminal. Tiap connector juga bisa meminta ini sendiri lewat
 # atribut `show_window` (Kimi memakainya secara bawaan).
 CONNECTOR_SHOW: bool = _get_bool("CONNECTOR_SHOW", False)
-# Pakai Google CHROME asli (channel="chrome") alih-alih Chromium bawaan Playwright
-# — lebih jarang terdeteksi/di-blok oleh Cloudflare & lebih familiar.
-# Bila Chrome tak terpasang, otomatis fallback ke Chromium bawaan. Kosongkan
-# ("") untuk memaksa Chromium bawaan.
-CONNECTOR_BROWSER_CHANNEL: str = os.getenv("CONNECTOR_BROWSER_CHANNEL", "chrome").strip()
+# Browser yang dipakai connector: browser ASLI yang terpasang di mesin ini,
+# bukan Chromium bawaan Playwright — Chromium bundel lebih sering diblok
+# Cloudflare. Nilai yang dikenali: "brave", "chrome", "chrome-beta", "msedge".
+# Bila yang diminta tak terpasang, otomatis jatuh ke Chromium bawaan.
+# Kosongkan ("") untuk memaksa Chromium bawaan.
+#
+# Bawaannya BRAVE, atas permintaan pengguna. Catatan jujur yang menyertainya
+# (TERUKUR, bukan dugaan): Brave lebih mudah dikenali situs daripada Chrome,
+# bukan lebih sulit. Ia mengumumkan dirinya lewat `navigator.brave` dan
+# userAgentData.brands, lalu MEMALSUKAN hardwareConcurrency (16 -> 2) dan
+# deviceMemory (16 -> 4) sementara WebGL-nya tetap membocorkan GPU aslinya.
+# Ketidakcocokan seperti itu persis yang dicari mesin penilai risiko. Ganti ke
+# "chrome" lewat .env bila captcha jadi lebih sering.
+CONNECTOR_BROWSER_CHANNEL: str = os.getenv("CONNECTOR_BROWSER_CHANNEL", "brave").strip()
 # Tiap sesi bagas-ai membuat SATU percakapan baru di situs AI web, jadi lama-lama
 # menumpuk. Batas ini menyimpan hanya N percakapan TERBARU yang dibuat bagas-ai;
 # sisanya dihapus otomatis. HANYA menyentuh chat buatan bagas-ai (tercatat di
