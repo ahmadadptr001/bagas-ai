@@ -16,6 +16,7 @@ import datetime as _dt
 import json
 import logging
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -1056,6 +1057,11 @@ class Agent:
         self.tokens_last = Usage()
         self.tokens_live = 0  # nilai token realtime untuk tampilan
 
+        # Kunci global per-agent: cegah dua giliran berjalan bersamaan pada Agent
+        # yang sama (berbagi self.memory). Saat bot Telegram berbagi agent dengan
+        # CLI, kunci ini menserialkan pesan dari kedua antarmuka.
+        self._run_lock = threading.Lock()
+
         # Connector web: apakah konteks laptop/proyek sudah dikirim ke sesi web
         # ini (dikirim SEKALI sbg preamble pesan pertama; AI web ingat sepanjang chat).
         self._web_ctx_sent = False
@@ -1763,23 +1769,24 @@ class Agent:
         hitung-mundur sisa waktu di footer.
         Bila `cancel_event` diset di tengah jalan, melempar llm.Cancelled.
         """
-        # Kelompok checkpoint baru per giliran: undo_changes memulihkan tepat
-        # satu giliran, bukan campuran beberapa giliran.
-        from .tools import checkpoint as _checkpoint
-        _checkpoint.begin_turn()
-        # Rencana giliran LAMA dibuang di sini. Rencana hanya bermakna selama
-        # tugasnya berlangsung; membiarkannya hidup ke giliran berikutnya bikin
-        # model melanjutkan daftar langkah milik permintaan yang sudah lewat.
-        from .tools import plan_tool as _plan
-        _plan.reset()
-        return self._run_connector(
-            user_input, cancel_event=cancel_event,
-            on_status=on_status, on_token=on_token,
-            on_tool=on_tool, on_message=on_message,
-            on_tool_result=on_tool_result, on_notice=on_notice,
-            on_retry=on_retry, attachments=attachments,
-            ambil_sisipan=ambil_sisipan, on_tim=on_tim, on_padat=on_padat,
-        )
+        with self._run_lock:
+            # Kelompok checkpoint baru per giliran: undo_changes memulihkan tepat
+            # satu giliran, bukan campuran beberapa giliran.
+            from .tools import checkpoint as _checkpoint
+            _checkpoint.begin_turn()
+            # Rencana giliran LAMA dibuang di sini. Rencana hanya bermakna selama
+            # tugasnya berlangsung; membiarkannya hidup ke giliran berikutnya bikin
+            # model melanjutkan daftar langkah milik permintaan yang sudah lewat.
+            from .tools import plan_tool as _plan
+            _plan.reset()
+            return self._run_connector(
+                user_input, cancel_event=cancel_event,
+                on_status=on_status, on_token=on_token,
+                on_tool=on_tool, on_message=on_message,
+                on_tool_result=on_tool_result, on_notice=on_notice,
+                on_retry=on_retry, attachments=attachments,
+                ambil_sisipan=ambil_sisipan, on_tim=on_tim, on_padat=on_padat,
+            )
 
     # --- pemulihan saat situsnya bermasalah -------------------------------
     def _pulihkan_chat_rusak(self, exc, user_text, on_status, on_notice) -> str:

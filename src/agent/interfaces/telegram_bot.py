@@ -87,7 +87,15 @@ def _inject_telegram_context(agent: Agent) -> None:
     agent._tg_prompt_set = True   # type: ignore[attr-defined]
 
 
+_shared_agent: Agent | None = None
+
+
 def _get_agent(chat_id: int) -> Agent:
+    # Bot dijalankan dari CLI (agent dibagikan): pakai agent itu untuk semua chat.
+    # Satu agent = satu sesi percakapan, jadi pesan dari Telegram melanjutkan yang
+    # ada di terminal.
+    if _shared_agent is not None:
+        return _shared_agent
     if chat_id not in _agents:
         if len(_agents) >= _MAX_AGENTS:
             oldest = next(iter(_agents))
@@ -187,8 +195,18 @@ async def _run_with_typing(update: Update, context: ContextTypes.DEFAULT_TYPE,
             pass
 
 
-def build_application(on_event: OnEvent | None = None) -> Application:
-    """Rakit Application Telegram lengkap dengan handler + izin + pemantauan CLI."""
+def build_application(on_event: OnEvent | None = None, agent: Agent | None = None) -> Application:
+    """Rakit Application Telegram lengkap dengan handler + izin + pemantauan CLI.
+
+    Jika `agent` diberikan (dari CLI), bot akan MEMAKAI agent tersebut untuk semua
+    chat yang diizinkan — sehingga percakapan Telegram melanjutkan sesi terminal.
+    Jika tidak, bot berdiri sendiri dan membuat agent per chat seperti biasa."""
+    global _shared_agent
+    _shared_agent = agent
+    # Kunci global: serialkan semua agent.run. Bot berdiri sendiri memakai kunci
+    # per-chat (lihat _locks), tapi saat agent DIBAGIKAN dari CLI, seluruh chat
+    # Telegram berbagi memori yang sama — harus bergiliran agar tak rusak.
+    tg_lock = asyncio.Lock()
 
     def emit(kind: str, text: str) -> None:
         if on_event:
@@ -402,22 +420,23 @@ def build_application(on_event: OnEvent | None = None) -> Application:
                 finally:
                     interaction.reset_context_handler(tok)
 
-        reply = await _run_with_typing(update, context, _run, update.message.text)
-        emit("out", reply)
-        if status_msg is not None:   # rapikan pesan status jadi ringkasan langkah
-            try:
-                if steps_log:
-                    done = "\n".join(steps_log[-12:])
-                    await context.bot.edit_message_text(
-                        done[:_TG_LIMIT], chat_id=cid,
-                        message_id=status_msg.message_id)
-                else:
-                    # Chat murni tanpa langkah: hapus bubble status agar tak jadi
-                    # sampah "✓ selesai" di atas tiap jawaban.
-                    await context.bot.delete_message(cid, status_msg.message_id)
-            except Exception:
-                pass
-        await _reply_long(update, reply)
+        async with tg_lock:
+            reply = await _run_with_typing(update, context, _run, update.message.text)
+            emit("out", reply)
+            if status_msg is not None:   # rapikan pesan status jadi ringkasan langkah
+                try:
+                    if steps_log:
+                        done = "\n".join(steps_log[-12:])
+                        await context.bot.edit_message_text(
+                            done[:_TG_LIMIT], chat_id=cid,
+                            message_id=status_msg.message_id)
+                    else:
+                        # Chat murni tanpa langkah: hapus bubble status agar tak jadi
+                        # sampah "✓ selesai" di atas tiap jawaban.
+                        await context.bot.delete_message(cid, status_msg.message_id)
+                except Exception:
+                    pass
+            await _reply_long(update, reply)
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
@@ -588,14 +607,14 @@ class TelegramService:
         self.running = False
         self.error: Exception | None = None
 
-    def start(self, on_event: OnEvent | None = None) -> bool:
+    def start(self, on_event: OnEvent | None = None, agent: Agent | None = None) -> bool:
         if self.running:
             return True
         if not config.TELEGRAM_BOT_TOKEN:
             self.error = RuntimeError("TELEGRAM_BOT_TOKEN belum diisi di .env")
             return False
         self.error = None
-        self._thread = threading.Thread(target=self._run, args=(on_event,),
+        self._thread = threading.Thread(target=self._run, args=(on_event, agent),
                                         daemon=True)
         self._thread.start()
         for _ in range(120):  # tunggu ~12s hingga jalan / gagal (jaringan lambat)
@@ -608,11 +627,11 @@ class TelegramService:
         """Thread masih hidup (mungkin masih proses menyala) walau belum 'running'."""
         return bool(self._thread and self._thread.is_alive())
 
-    def _run(self, on_event: OnEvent | None) -> None:
+    def _run(self, on_event: OnEvent | None, agent: Agent | None = None) -> None:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
-            self._app = build_application(on_event)
+            self._app = build_application(on_event, agent)
             self._stop = self._loop.create_future()
             self._loop.run_until_complete(self._serve())
         except Exception as e:  # noqa: BLE001

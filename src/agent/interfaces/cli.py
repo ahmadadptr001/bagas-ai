@@ -4361,7 +4361,7 @@ def main(resume: bool = False) -> None:
         try:
             from .telegram_bot import TelegramService  # lazy: hindari impor berat
             svc = TelegramService()
-            ok = svc.start(on_event=_tg_event)
+            ok = svc.start(on_event=_tg_event, agent=agent)
         except Exception as e:  # noqa: BLE001
             console.print(f"  [red]✖ gagal:[/] {e}\n")
             return
