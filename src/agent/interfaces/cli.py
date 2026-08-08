@@ -4630,8 +4630,8 @@ def main(resume: bool = False) -> None:
         git_branch, git_changed = _git_info()
         if git_branch:
             bagian["git"] = f"{sep}<git>🌿 {git_branch}</git>"
-        if git_changed:
-            bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>"
+        # if git_changed:
+        #     bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>"
         lebar = _lebar_kotak()
         # Aturan penyusutan dipakai BERSAMA dengan bar versi rich (_bar_status),
         # supaya bentuknya tak berubah saat giliran mulai/selesai.
