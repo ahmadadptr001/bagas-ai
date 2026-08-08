@@ -33,6 +33,13 @@ from ..core import Agent
 # Ekstensi gambar yang otomatis DIKIRIM sebagai foto (bukan teks/data URI).
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 
+
+def _sanitize(text: str) -> str:
+    """Buang karakter surrogate tak valid yang menyebabkan error encoding UTF-8."""
+    if not text:
+        return text
+    return text.encode("utf-8", "replace").decode("utf-8")
+
 # Kata fase per-tool untuk progres yang tampil di Telegram (mirror dari CLI).
 _PHASE_ID = {
     "write_file": "menulis", "delete_file": "menghapus", "read_file": "membaca",
@@ -134,7 +141,7 @@ def _find_images(text: str) -> list[Path]:
 
 async def _reply_long(bot, chat_id: int, text: str) -> None:
     """Kirim balasan; pecah di batas BARIS bila panjang, kirim GAMBAR sebagai foto."""
-    text = (text or "(kosong)").strip() or "(kosong)"
+    text = _sanitize((text or "(kosong)").strip() or "(kosong)")
     # Jangan pernah membuang data URI mentah ke chat (tak berguna & sangat panjang).
     text = re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=\s]{50,}",
                   "[gambar dikirim sebagai foto]", text)
@@ -387,6 +394,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
             _render_status()                                       # dan di BOT
 
         def _tg_on_message(msg: str) -> None:
+            msg = _sanitize(msg)
             emit("out", msg)
             try:
                 asyncio.run_coroutine_threadsafe(
