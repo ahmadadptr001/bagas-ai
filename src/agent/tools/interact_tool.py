@@ -30,3 +30,23 @@ def ask_user(question: str, options: list[str], multiple: bool = False) -> str:
     if not options:
         return "[error] ask_user butuh minimal satu opsi."
     return interaction.ask_choice(question, list(options), bool(multiple))
+
+
+@tool
+def ask_user_telegram(question: str, options: list[str], multiple: bool = False) -> str:
+    """Tanyakan klarifikasi ke pengguna lewat TOMBOL INLINE Telegram saat instruksi ambigu atau ada beberapa pendekatan yang sama-sama masuk akal, DARIPADA menebak. Kembalikan jawaban pengguna. Tool ini KHUSUS sesi Telegram — pertanyaan dikirim sebagai tombol inline ke chat Telegram, dan bot menunggu jawaban pengguna di sana. JANGAN pakai ask_user (itu untuk terminal).
+
+    question: pertanyaan yang jelas & spesifik.
+    options: 2-6 pilihan konkret yang bisa dibandingkan. Sebutkan
+        konsekuensinya dalam beberapa kata, mis. "Halaman sendiri
+        /karya/[id] (URL bisa dibagikan)".
+        Setiap opsi akan menjadi SATU TOMBOL INLINE di chat Telegram.
+    multiple: bentuk menunya.
+        false (bawaan) = SATU jawaban. Tombol INLINE — saling MENIADAKAN.
+        true = BOLEH BANYAK. Daftar bernomor dikirim sebagai teks;
+            pengguna membalas dengan nomor (pisah koma) atau ketik jawaban.
+        Uji cepatnya: kalau memilih dua sekaligus MASUK AKAL, pakai true.
+    """
+    if not options:
+        return "[error] ask_user_telegram butuh minimal satu opsi."
+    return interaction.ask_choice(question, list(options), bool(multiple))

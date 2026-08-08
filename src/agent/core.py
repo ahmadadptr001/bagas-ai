@@ -2501,15 +2501,16 @@ class Agent:
                 if (not calls and not force_final and janji < 2
                         and _tanya_tanpa_ask_user(reply)):
                     janji += 1
+                    _ask = "ask_user_telegram" if interaction._ctx_handler.get() is not None else "ask_user"
                     reply = _send(
                         "[SISTEM] Kamu bertanya lewat teks biasa. Pertanyaan "
                         "itu TIDAK sampai ke pengguna sebagai pertanyaan — "
                         "pesan tanpa blok kuperlakukan sebagai jawaban akhir, "
                         "jadi gilirannya habis dan pertanyaanmu tak akan "
-                        "dijawab.\nUlangi lewat ask_user, dengan 2-6 opsi "
+                        f"dijawab.\nUlangi lewat {_ask}, dengan 2-6 opsi "
                         "konkret yang bisa dibandingkan (sebutkan konsekuensi "
                         "tiap opsi dalam beberapa kata):\n[[TOOL]]\n```json\n"
-                        '{"tool": "ask_user", "args": {"question": "...", '
+                        f'{{"tool": "{_ask}", "args": {{"question": "...", '
                         '"options": ["...", "..."]}}\n```\n[[/TOOL]]')
                     continue
 

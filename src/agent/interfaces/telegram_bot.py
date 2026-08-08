@@ -58,10 +58,33 @@ _pending: dict[int, dict] = {}   # {chat_id: {"q":Queue,"options":[...], "questi
 _locks: dict[int, threading.Lock] = {}
 _TG_LIMIT = 4000  # < 4096 batas karakter/pesan Telegram
 
+_TELEGRAM_CONTEXT = (
+    "\n\n# Sesi Telegram\n"
+    "Percakapan ini berlangsung lewat BOT TELEGRAM — bukan terminal.\n"
+    "- Saat perlu bertanya/klarifikasi ke pengguna, pakai "
+    "`ask_user_telegram` (BUKAN `ask_user`). "
+    "Tool ini mengirim pertanyaan dengan TOMBOL INLINE ke chat Telegram, "
+    "lalu menunggu jawaban pengguna di sana.\n"
+    "- Di terminal, tak ada menu interaktif — cukup menunggu jawaban "
+    "dari Telegram.\n"
+    "- Format jawaban tetap sama: teks biasa atau pilihan dari tombol."
+)
+
 OnEvent = Callable[[str, str], None]  # (kind, text): 'in'|'out'|'perm'|'info'|'error'
 
 
 _MAX_AGENTS = 50  # batas Agent serentak; lebih → eviksi tertua (FIFO)
+
+
+def _inject_telegram_context(agent: Agent) -> None:
+    """Suntikkan konteks Telegram ke system prompt agar AI tahu harus pakai
+    ask_user_telegram (tombol inline), bukan ask_user (terminal)."""
+    if getattr(agent, "_tg_prompt_set", False):
+        return
+    current = agent.memory.messages[0].get("content", "")
+    if "# Sesi Telegram" not in current:
+        agent.memory.set_system(current + _TELEGRAM_CONTEXT)
+    agent._tg_prompt_set = True   # type: ignore[attr-defined]
 
 
 def _get_agent(chat_id: int) -> Agent:
@@ -303,6 +326,7 @@ def build_application(on_event: OnEvent | None = None) -> Application:
             return
         emit("in", f"{_name(update)}: {update.message.text}")
         agent = _get_agent(cid)
+        _inject_telegram_context(agent)
         loop = asyncio.get_running_loop()
         handler = make_choice_handler(cid, context.bot, loop)
 
@@ -411,6 +435,7 @@ def build_application(on_event: OnEvent | None = None) -> Application:
             # yang sedang berjalan dan bahkan menindaklanjuti dengan tool —
             # sementara panggilan VLM sekali-pakai hanya bisa mendeskripsikan.
             agent = _get_agent(update.effective_chat.id)
+            _inject_telegram_context(agent)
             reply = await _run_with_typing(
                 update, context,
                 lambda teks: agent.run(teks, attachments=[str(path)]),

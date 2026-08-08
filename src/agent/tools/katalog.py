@@ -40,7 +40,7 @@ INTI: tuple[str, ...] = (
     # internet
     "web_search", "fetch_url",
     # ke pengguna & alur kerja
-    "ask_user", "plan", "plan_step", "remember", "undo_changes",
+    "ask_user", "ask_user_telegram", "plan", "plan_step", "remember", "undo_changes",
     # pintu ke sisanya
     "list_tools",
 )
