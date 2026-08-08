@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -548,6 +548,45 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
         body = "\n".join(f"• {f}" for f in facts) or "(kosong)"
         await _reply_long(update, "🧠 Memory jangka panjang:\n" + body)
 
+    async def cmd_dirs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await _guard(update):
+            return
+        from .. import workspace
+        dirs = workspace.list_dirs()
+        body = "\n".join(f"• {d}" for d in dirs) or "(kosong)"
+        await update.message.reply_text(f"📂 Folder konteks aktif:\n{body}")
+
+    async def cmd_add_dir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await _guard(update):
+            return
+        if not context.args:
+            await update.message.reply_text("Penggunaan: /add-dir <path>")
+            return
+        from .. import workspace
+        try:
+            p = workspace.add(" ".join(context.args))
+            await update.message.reply_text(f"✓ Ditambahkan: {p}")
+        except Exception as e:  # noqa: BLE001
+            await update.message.reply_text(f"✖ gagal: {e}")
+
+    async def cmd_rm_dir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await _guard(update):
+            return
+        if not context.args:
+            await update.message.reply_text("Penggunaan: /rm-dir <path>")
+            return
+        from .. import workspace
+        try:
+            ok = workspace.remove(" ".join(context.args))
+            await update.message.reply_text("✓ Dihapus" if ok else "✖ tak ditemukan")
+        except Exception as e:  # noqa: BLE001
+            await update.message.reply_text(f"✖ gagal: {e}")
+
+    async def _terminal_only(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await _guard(update):
+            return
+        await update.message.reply_text("⚠️ Fitur ini hanya bisa dijalankan dari terminal.")
+
     async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Semua penekanan TOMBOL: jawaban ask_user, pilih model, pilih effort."""
         cq = update.callback_query
@@ -612,17 +651,60 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
 
     # concurrent_updates(True): WAJIB agar balasan pengguna atas pertanyaan agent
     # bisa diproses SELAGI handler pemicu masih menunggu (kalau tidak -> deadlock).
+    async def _post_init(app: Application) -> None:
+        await app.bot.set_my_commands([
+            BotCommand("menu", "menu interaktif"),
+            BotCommand("model", "pilih model + saran"),
+            BotCommand("effort", "mode berpikir"),
+            BotCommand("mode", "mode kerja situs"),
+            BotCommand("tim", "24 spesialis meninjau"),
+            BotCommand("mic", "suara AI (on/off/tes)"),
+            BotCommand("voice", "mikrofon (on/off/tes)"),
+            BotCommand("compact", "simpan riwayat"),
+            BotCommand("send-compact", "kirim berkas memory"),
+            BotCommand("add-dir", "tambah folder konteks"),
+            BotCommand("dirs", "folder konteks aktif"),
+            BotCommand("rm-dir", "hapus folder konteks"),
+            BotCommand("new", "mulai sesi baru"),
+            BotCommand("delete", "hapus sesi"),
+            BotCommand("reset", "kosongkan riwayat"),
+            BotCommand("clear", "bersihkan layar"),
+            BotCommand("web", "kelola sesi AI web"),
+            BotCommand("bot", "hidup/matikan bot Telegram"),
+            BotCommand("browser", "ganti browser"),
+            BotCommand("status", "model, effort, folder, token"),
+            BotCommand("scan", "segarkan peta proyek"),
+            BotCommand("memory", "memori jangka panjang"),
+            BotCommand("help", "bantuan"),
+        ])
+
     app = (Application.builder()
            .token(config.TELEGRAM_BOT_TOKEN)
            .concurrent_updates(True)
+           .post_init(_post_init)
            .build())
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("menu", cmd_help))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("delete", _terminal_only))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("effort", cmd_effort))
     app.add_handler(CommandHandler("browser", cmd_browser))
+    app.add_handler(CommandHandler("mode", _terminal_only))
+    app.add_handler(CommandHandler("tim", _terminal_only))
+    app.add_handler(CommandHandler("mic", _terminal_only))
+    app.add_handler(CommandHandler("voice", _terminal_only))
+    app.add_handler(CommandHandler("compact", _terminal_only))
+    app.add_handler(CommandHandler("send-compact", _terminal_only))
+    app.add_handler(CommandHandler("add-dir", cmd_add_dir))
+    app.add_handler(CommandHandler("dirs", cmd_dirs))
+    app.add_handler(CommandHandler("rm-dir", cmd_rm_dir))
+    app.add_handler(CommandHandler("clear", _terminal_only))
+    app.add_handler(CommandHandler("web", _terminal_only))
+    app.add_handler(CommandHandler("bot", _terminal_only))
+    app.add_handler(CommandHandler("permissions-bot", _terminal_only))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("memory", cmd_memory))
