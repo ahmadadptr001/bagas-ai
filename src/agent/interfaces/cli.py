@@ -4419,6 +4419,16 @@ def main(resume: bool = False) -> None:
     # ini akan menelan Enter milik menu sugesti di atas.
     @kb.add("enter", filter=~has_completions)
     def _kirim(event):
+        # Abaikan Enter yang datang tepat setelah tempelan. Beberapa terminal
+        # (mis. Windows Terminal) memecah tempelan di baris kosong dan
+        # menyisipkan Enter sebagai event terpisah, yang tanpa ini langsung
+        # mengirim pesan setengah jadi. 0.1 detik cukup untuk menelan seluruh
+        # deretan Enter dari tempelan, tapi tak sampai menelan Enter yang
+        # sengaja ditekan pengguna sesudah membaca hasil tempelannya.
+        import time as _time
+        terakhir = getattr(event.app, "_tempel_terakhir", 0.0)
+        if terakhir and (_time.monotonic() - terakhir) < 0.1:
+            return
         event.current_buffer.validate_and_handle()
 
     # Ctrl+C / Ctrl+D: disediakan sendiri karena Application biasa (tak seperti
@@ -4446,14 +4456,16 @@ def main(resume: bool = False) -> None:
         if not data:
             return
         simpanan = _tempelan.simpanan()
+        import time as _time
         if simpanan.perlu_diringkas(data):
             event.current_buffer.insert_text(simpanan.simpan(data))
-            return
-        # Tempelan pendek disisipkan apa adanya. Baris-barunya diganti spasi:
-        # kotak ini satu baris (multiline=False), jadi baris-baru di dalamnya
-        # tak pernah terlihat sebagai baris baru — ia cuma jadi celah aneh di
-        # tengah kalimat.
-        event.current_buffer.insert_text(" ".join(data.split("\n")))
+        else:
+            # Tempelan pendek disisipkan apa adanya. Baris-barunya diganti spasi:
+            # kotak ini satu baris (multiline=False), jadi baris-baru di dalamnya
+            # tak pernah terlihat sebagai baris baru — ia cuma jadi celah aneh di
+            # tengah kalimat.
+            event.current_buffer.insert_text(" ".join(data.split("\n")))
+        event.app._tempel_terakhir = _time.monotonic()
 
     @kb.add("c-d")
     def _eof_ketik(event):
