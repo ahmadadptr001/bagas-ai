@@ -2296,9 +2296,8 @@ def main(resume: bool = False) -> None:
         except (KeyboardInterrupt, EOFError):
             return
         if sel == "__new__":
-            agent.start_new_web_chat()
-            console.print("  [dim]→ percakapan web BARU akan dibuat saat kamu "
-                          "mengirim pesan pertama.[/dim]")
+            agent.start_new_web_chat(immediate=True)
+            console.print("  [dim]→ percakapan web baru dibuka di browser.[/dim]")
             return
         agent.use_web_chat(sel)
         title = next((r.get("title") for r in rows if r.get("id") == sel), sel)
@@ -4287,7 +4286,7 @@ def main(resume: bool = False) -> None:
             _save_total()  # persist kontribusi sesi lama ke total global
             session = Session.create()
             agent = Agent(session=session)
-            agent.start_new_web_chat()
+            agent.start_new_web_chat(immediate=True)
             grand["base"] = prefs.get_total_tokens()  # sesi baru mulai dari total
             console.clear()
             show_logo()

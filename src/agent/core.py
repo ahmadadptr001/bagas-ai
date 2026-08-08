@@ -1181,8 +1181,12 @@ class Agent:
         # besar berarti memadatkan percakapan yang mungkin masih lega.
         self._web_chars = 0
 
-    def start_new_web_chat(self) -> None:
-        """Lupakan kaitan chat web -> giliran berikutnya membuat chat BARU."""
+    def start_new_web_chat(self, *, immediate: bool = False) -> None:
+        """Lupakan kaitan chat web -> giliran berikutnya membuat chat BARU.
+
+        `immediate=True` langsung membuka percakapan baru di browser saat ini
+        juga — dipakai saat /new di terminal. Tanpa itu, browser baru pindah
+        ke chat baru saat pesan berikutnya dikirim (dipakai reset, dll)."""
         self._web_chat_id = ""
         self._web_ctx_sent = False
         self._web_chars = 0
@@ -1191,6 +1195,14 @@ class Agent:
             svc = self.model_spec.connector
             if svc and svc in getattr(self.session, "web_chats", {}):
                 self.session.web_chats.pop(svc, None)
+
+        if immediate and self.model_spec.is_web():
+            from . import connectors
+            try:
+                conn = connectors.get_connector(self.model_spec.connector)
+                conn.open_new_chat()
+            except Exception:
+                pass  # /new tetap berhasil di sisi agent bila browser bermasalah
 
     def _link_web_chat(self, chat_id: str) -> None:
         """Catat chat web ini sebagai milik sesi terminal saat ini (1 sesi

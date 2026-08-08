@@ -857,6 +857,41 @@ class WebConnector:
             timeout=self.login_timeout + 90,
         )
 
+    def open_new_chat(
+        self,
+        *,
+        on_status: StatusCb | None = None,
+        on_notice: Callable[[str], None] | None = None,
+        cancel_event: Any = None,
+    ) -> bool:
+        """Buka percakapan BARU di browser SEKARANG — dipanggil saat /new.
+
+        Berbeda dengan start_new_web_chat() di core.py yang cuma melupakan ID
+        chat lama (browser baru pindah saat pesan berikutnya dikirim), method
+        ini langsung menyuruh tab browser membuka chat baru lewat tombol situs
+        atau navigasi URL, jadi layar pengguna langsung berpindah saat /new
+        dijalankan."""
+        from .. import llm  # impor tunda: hindari siklus impor
+
+        self._kabar = on_notice
+
+        def status(msg: str) -> None:
+            if on_status:
+                on_status(msg)
+
+        def check_cancel() -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise llm.Cancelled()
+
+        status(f"membuka percakapan baru di {self.label}…")
+
+        def _open_on_hub(h: Any) -> bool:
+            _, did_login = self._acquire_ready_page(
+                h, status, check_cancel, force_new_chat=True)
+            return did_login
+
+        return hub().submit(_open_on_hub, timeout=self.login_timeout + 90)
+
     def send(
         self,
         prompt: str,
