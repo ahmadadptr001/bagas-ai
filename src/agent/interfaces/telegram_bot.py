@@ -455,7 +455,16 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
         emit("in", f"{_name(update)}: [foto] {caption}")
         photo = update.message.photo[-1]
         tg_file = await photo.get_file()
-        async with tg_lock:
+        with _antre_lock:
+            if cid in _sedang_jalan:
+                _antrean.setdefault(cid, []).append(f"[foto] {caption}")
+                try:
+                    await context.bot.send_message(cid, "➕ foto ditambahkan ke antrean")
+                except Exception:
+                    pass
+                return
+        _sedang_jalan.add(cid)
+        try:
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "image.jpg"
                 await tg_file.download_to_drive(str(path))
@@ -473,10 +482,12 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
                     reply = await _run_with_typing(
                         update, context,
                         lambda teks: agent.run(teks, attachments=[str(path)],
-                                               on_message=_tg_on_message),
+                                               on_message=lambda c: emit("out", c)),
                         caption)
                 finally:
                     interaction.reset_context_handler(tok)
+        finally:
+            _sedang_jalan.discard(cid)
         emit("out", reply)
         await _reply_long(context.bot, cid, reply)
 
