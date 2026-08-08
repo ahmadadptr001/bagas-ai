@@ -670,10 +670,10 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
             BotCommand("mic", "suara AI (on/off/tes)"),
             BotCommand("voice", "mikrofon (on/off/tes)"),
             BotCommand("compact", "simpan riwayat"),
-            BotCommand("send-compact", "kirim berkas memory"),
-            BotCommand("add-dir", "tambah folder konteks"),
+            BotCommand("send_compact", "kirim berkas memory"),
+            BotCommand("add_dir", "tambah folder konteks"),
             BotCommand("dirs", "folder konteks aktif"),
-            BotCommand("rm-dir", "hapus folder konteks"),
+            BotCommand("rm_dir", "hapus folder konteks"),
             BotCommand("new", "mulai sesi baru"),
             BotCommand("delete", "hapus sesi"),
             BotCommand("reset", "kosongkan riwayat"),
@@ -684,6 +684,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
             BotCommand("status", "model, effort, folder, token"),
             BotCommand("scan", "segarkan peta proyek"),
             BotCommand("memory", "memori jangka panjang"),
+            BotCommand("permissions_bot", "atur izin"),
             BotCommand("help", "bantuan"),
         ])
 
@@ -706,14 +707,14 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
     app.add_handler(CommandHandler("mic", _terminal_only))
     app.add_handler(CommandHandler("voice", _terminal_only))
     app.add_handler(CommandHandler("compact", _terminal_only))
-    app.add_handler(CommandHandler("send-compact", _terminal_only))
-    app.add_handler(CommandHandler("add-dir", cmd_add_dir))
+    app.add_handler(CommandHandler("send_compact", _terminal_only))
+    app.add_handler(CommandHandler("add_dir", cmd_add_dir))
     app.add_handler(CommandHandler("dirs", cmd_dirs))
-    app.add_handler(CommandHandler("rm-dir", cmd_rm_dir))
+    app.add_handler(CommandHandler("rm_dir", cmd_rm_dir))
     app.add_handler(CommandHandler("clear", _terminal_only))
     app.add_handler(CommandHandler("web", _terminal_only))
     app.add_handler(CommandHandler("bot", _terminal_only))
-    app.add_handler(CommandHandler("permissions-bot", _terminal_only))
+    app.add_handler(CommandHandler("permissions_bot", _terminal_only))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("memory", cmd_memory))
