@@ -384,6 +384,14 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
             steps_log.append(f"⏳ {_PHASE_ID.get(name, name)} · {lbl}")
             _render_status()                                       # dan di BOT
 
+        def _tg_on_message(msg: str) -> None:
+            emit("out", msg)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    context.bot.send_message(cid, msg), loop)
+            except Exception:
+                pass
+
         def _tg_on_result(name: str, result: str) -> None:
             failed = (result or "").strip().startswith(("[GAGAL", "[error]"))
             # Cari MUNDUR baris langkah yang masih ⏳ (baris lain, mis. "⚡ naik
@@ -415,7 +423,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
 
                     return agent.run(txt, on_tool=_tg_on_tool,
                                      on_tool_result=_tg_on_result,
-                                     on_message=lambda c: emit("out", c),
+                                     on_message=_tg_on_message,
                                      on_notice=_notice)
                 finally:
                     interaction.reset_context_handler(tok)
@@ -462,7 +470,8 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
                 try:
                     reply = await _run_with_typing(
                         update, context,
-                        lambda teks: agent.run(teks, attachments=[str(path)]),
+                        lambda teks: agent.run(teks, attachments=[str(path)],
+                                               on_message=_tg_on_message),
                         caption)
                 finally:
                     interaction.reset_context_handler(tok)
