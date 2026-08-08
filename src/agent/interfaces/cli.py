@@ -781,8 +781,8 @@ _BG_BAR = "#1a120b"
 # yang sama persis, jadi aturan yang berbeda akan terlihat sebagai layar yang
 # melompat tiap kali giliran mulai atau selesai.
 _TINGKAT_BAR: tuple[tuple[str, ...], ...] = (
-    # ("merek", "model", "git", "ubah", "perintah", "ctrlc"),
-    # ("merek", "model", "git", "ubah", "perintah"),
+    ("merek", "model", "git", "ubah", "perintah", "ctrlc"),
+    ("merek", "model", "git", "ubah", "perintah"),
     ("merek", "model", "git",  "perintah", "ctrlc"),
     ("merek", "model", "git",  "perintah"),
     ("merek", "model", "git", "perintah"),
@@ -874,8 +874,7 @@ def _bar_status(agent: Agent, total: int) -> Text:
     git_branch, git_changed = _git_info()
     if git_branch:
         teks["git"] = f"{SEP}🌿 {git_branch}"
-    if git_changed:
-        teks["ubah"] = f"{SEP}📝 {git_changed}"
+    teks["ubah"] = f"{SEP}📝 {git_changed}" if git_changed else ""
     ada = _bagian_bar(console.width, lambda b: Text(teks[b]).cell_len + 1)
 
     bar = Text(style=f"on {_BG_BAR}")
@@ -892,7 +891,7 @@ def _bar_status(agent: Agent, total: int) -> Text:
         bar.append(SEP, style="#4a3826")
         bar.append("🌿 ", style="#9fc93c")
         bar.append(git_branch, style="#9fc93c")
-    if "ubah" in ada:
+    if "ubah" in ada and git_changed:
         bar.append(SEP, style="#4a3826")
         bar.append(f"📝 {git_changed}", style="#f7d488")
     # Segmen "sesi" DIHAPUS atas permintaan pengguna: token sesi sudah
@@ -4632,8 +4631,7 @@ def main(resume: bool = False) -> None:
         git_branch, git_changed = _git_info()
         if git_branch:
             bagian["git"] = f"{sep}<git>🌿 {git_branch}</git>"
-        if git_changed:
-            bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>"
+        bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>" if git_changed else ""
         lebar = _lebar_kotak()
         # Aturan penyusutan dipakai BERSAMA dengan bar versi rich (_bar_status),
         # supaya bentuknya tak berubah saat giliran mulai/selesai.
