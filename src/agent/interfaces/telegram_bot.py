@@ -132,7 +132,7 @@ def _find_images(text: str) -> list[Path]:
     return out[:5]
 
 
-async def _reply_long(update: Update, text: str) -> None:
+async def _reply_long(bot, chat_id: int, text: str) -> None:
     """Kirim balasan; pecah di batas BARIS bila panjang, kirim GAMBAR sebagai foto."""
     text = (text or "(kosong)").strip() or "(kosong)"
     # Jangan pernah membuang data URI mentah ke chat (tak berguna & sangat panjang).
@@ -154,13 +154,13 @@ async def _reply_long(update: Update, text: str) -> None:
         chunks.append(remaining[:cut])
         remaining = remaining[cut:].lstrip("\n")
     for i, chunk in enumerate(chunks):
-        await update.message.reply_text(chunk)
+        await bot.send_message(chat_id, chunk)
         if i < len(chunks) - 1:
             await asyncio.sleep(0.3)  # jeda antar pesan — cegah flood
     for p in imgs:  # kirim file gambar yang disebut sebagai FOTO
         try:
             with open(p, "rb") as fh:
-                await update.message.reply_photo(fh, caption=p.name)
+                await bot.send_photo(chat_id, fh, caption=p.name)
         except Exception:
             pass
 
@@ -206,7 +206,9 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
     # Kunci global: serialkan semua agent.run. Bot berdiri sendiri memakai kunci
     # per-chat (lihat _locks), tapi saat agent DIBAGIKAN dari CLI, seluruh chat
     # Telegram berbagi memori yang sama — harus bergiliran agar tak rusak.
-    tg_lock = asyncio.Lock()
+    _sedang_jalan: set[int] = set()
+    _antrean: dict[int, list[str]] = {}
+    _antre_lock = threading.Lock()
 
     def emit(kind: str, text: str) -> None:
         if on_event:
@@ -444,7 +446,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
                         await context.bot.delete_message(cid, status_msg.message_id)
                 except Exception:
                     pass
-            await _reply_long(update, reply)
+            await _reply_long(context.bot, cid, reply)
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
@@ -476,7 +478,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
                 finally:
                     interaction.reset_context_handler(tok)
         emit("out", reply)
-        await _reply_long(update, reply)
+        await _reply_long(context.bot, cid, reply)
 
     async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
@@ -555,7 +557,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
             return
         facts = longmem.all_facts()
         body = "\n".join(f"• {f}" for f in facts) or "(kosong)"
-        await _reply_long(update, "🧠 Memory jangka panjang:\n" + body)
+        await _reply_long(context.bot, update.effective_chat.id, "🧠 Memory jangka panjang:\n" + body)
 
     async def cmd_dirs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
