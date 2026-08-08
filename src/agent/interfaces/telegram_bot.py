@@ -416,13 +416,14 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
 
         lock = _locks.setdefault(cid, threading.Lock())
 
-        def _run(txt: str) -> str:
-            # Serialkan tugas per chat: cegah dua agent.run bersamaan pada Agent
-            # yang sama (berbagi memory). Jawaban atas pertanyaan TIDAK lewat sini
-            # (ditangani lebih dulu di on_text), jadi tak ikut terkunci.
+        def _ambil_sisipan() -> list[str]:
+            with _antre_lock:
+                if _antrean.get(cid):
+                    return [_antrean[cid].pop(0)]
+            return []
+
+        def _run(txt: str, ambil_sisipan=None) -> str:
             with lock:
-                # Pasang handler ask_user Telegram di KONTEKS thread ini (disalin
-                # oleh asyncio.to_thread) -> pertanyaan muncul di Telegram, bukan CLI.
                 tok = interaction.set_context_handler(handler)
                 try:
                     def _notice(msg: str) -> None:
@@ -432,17 +433,28 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
                         steps_log.append(f"{label}: {msg}")
                         _render_status()
 
-                    return agent.run(txt, on_tool=_tg_on_tool,
-                                     on_tool_result=_tg_on_result,
-                                     on_message=_tg_on_message,
-                                     on_notice=_notice)
+                    kwargs = dict(on_tool=_tg_on_tool, on_tool_result=_tg_on_result,
+                                  on_message=_tg_on_message, on_notice=_notice)
+                    if ambil_sisipan:
+                        kwargs["ambil_sisipan"] = ambil_sisipan
+                    return agent.run(txt, **kwargs)
                 finally:
                     interaction.reset_context_handler(tok)
 
-        async with tg_lock:
-            reply = await _run_with_typing(update, context, _run, update.message.text)
+        with _antre_lock:
+            if cid in _sedang_jalan:
+                _antrean.setdefault(cid, []).append(update.message.text)
+                try:
+                    await context.bot.send_message(cid, "➕ ditambahkan ke antrean")
+                except Exception:
+                    pass
+                return
+
+        _sedang_jalan.add(cid)
+        try:
+            reply = await _run_with_typing(update, context, _run, update.message.text, _ambil_sisipan)
             emit("out", reply)
-            if status_msg is not None:   # rapikan pesan status jadi ringkasan langkah
+            if status_msg is not None:
                 try:
                     if steps_log:
                         done = "\n".join(steps_log[-12:])
@@ -450,12 +462,26 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
                             done[:_TG_LIMIT], chat_id=cid,
                             message_id=status_msg.message_id)
                     else:
-                        # Chat murni tanpa langkah: hapus bubble status agar tak jadi
-                        # sampah "✓ selesai" di atas tiap jawaban.
                         await context.bot.delete_message(cid, status_msg.message_id)
                 except Exception:
                     pass
             await _reply_long(context.bot, cid, reply)
+
+            while True:
+                with _antre_lock:
+                    if not _antrean.get(cid):
+                        break
+                    nxt = _antrean[cid].pop(0)
+                emit("in", f"{_name(update)} (dari antrean): {nxt}")
+                try:
+                    await context.bot.send_message(cid, f"▶ Mengerjakan dari antrean:\n{nxt}")
+                except Exception:
+                    pass
+                reply = await _run_with_typing(update, context, _run, nxt, _ambil_sisipan)
+                emit("out", reply)
+                await _reply_long(context.bot, cid, reply)
+        finally:
+            _sedang_jalan.discard(cid)
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
