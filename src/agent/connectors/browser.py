@@ -926,15 +926,30 @@ class BrowserHub:
         # biarkan thread mati — layani tiap job dengan galat yang jelas dan tandai
         # hub POISONED agar hub() menggantinya dengan hub baru di pemakaian
         # berikutnya (peluncuran driver yang segar sering berhasil).
+        # Bungkam warning node driver (mis. "(node:7680) [DEP0169]
+        # DeprecationWarning") yang tertulis MENTAH ke stderr terminal: satu
+        # baris liar yang menyela saat rich.Live menggambar menggeser kursor
+        # dan membekukan frame lama di scrollback — gejala "kotak chat
+        # tertinggal" di giliran pertama. NODE_NO_WARNINGS dibaca node dari
+        # env saat proses driver diluncurkan, jadi dipasang hanya di sekitar
+        # start lalu dikembalikan.
+        _prev_nw = os.environ.get("NODE_NO_WARNINGS")
+        os.environ["NODE_NO_WARNINGS"] = "1"
         pw = None
         galat: BaseException | None = None
-        for percobaan in range(3):
-            try:
-                pw = sync_playwright().start()
-                break
-            except BaseException as exc:  # noqa: BLE001
-                galat = exc
-                time.sleep(0.8 * (percobaan + 1))
+        try:
+            for percobaan in range(3):
+                try:
+                    pw = sync_playwright().start()
+                    break
+                except BaseException as exc:  # noqa: BLE001
+                    galat = exc
+                    time.sleep(0.8 * (percobaan + 1))
+        finally:
+            if _prev_nw is None:
+                os.environ.pop("NODE_NO_WARNINGS", None)
+            else:
+                os.environ["NODE_NO_WARNINGS"] = _prev_nw
 
         if pw is None:
             self.poisoned = True

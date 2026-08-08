@@ -1845,7 +1845,7 @@ def main(resume: bool = False) -> None:
                 # WAJIB di-escape: teks pengguna yang memuat '[i]' / '[red]'
                 # (lazim di kode, mis. arr[i]) akan ditafsirkan rich sebagai
                 # markup — teks berubah gaya & kurungnya hilang saat replay.
-                console.print(f"\n  [bold #fcc048]❯[/] [bold #ffffff]{_esc(content)}[/]")
+                console.print(f"\n  [on #2b2b2b bold #ffffff] {_esc(content)} [/]")
             elif role == "assistant" and content:
                 console.print("\n  [bold #fc9018]🤖 bagas-ai[/]")
                 console.print(Padding(_md(content), (1, 3, 0, 3)))
@@ -2599,7 +2599,7 @@ def main(resume: bool = False) -> None:
                     # (Gema kedua saat prompt ini benar-benar dikerjakan
                     # sengaja tak ada — lihat gelung utama.)
                     _commit([_oneline(Text.from_markup(
-                        f"  [bold #fcc048]❯[/] [bold #ffffff]{_esc(teks)}[/]"))])
+                        f"  [on #2b2b2b bold #ffffff] {_esc(teks)} [/]"))])
                     # Perintah menunggu; tanpa keterangan ini ia tampak
                     # "terkirim tapi tak terjadi apa-apa" sampai giliran usai.
                     if _perintah(teks):
@@ -3188,7 +3188,7 @@ def main(resume: bool = False) -> None:
             return
         voice_state.pop("terucap", None)
         # Jalur antrean tak punya gema lain — di sini ia satu-satunya.
-        console.print(f"\n  [#fcc048]🎙 ❯[/] [bold #ffffff]{_esc(teks)}[/]")
+        console.print(f"\n  [on #2b2b2b bold #ffffff] 🎙 {_esc(teks)} [/]")
         with antre_lock:
             prompt_queue.append(teks)
         # DUA keadaan yang sangat berbeda, dan dulu keduanya diberi kalimat yang
@@ -4600,8 +4600,8 @@ def main(resume: bool = False) -> None:
                 # pop() dipakai, bukan get(): penandanya berlaku sekali pakai,
                 # supaya ketikan berikutnya tak ikut dikira ucapan.
                 lisan = voice_state.pop("terucap", None) == raw.strip()
-                console.print(f"  [bold #fcc048]{'🎙 ❯' if lisan else '❯'}[/] "
-                              f"[bold #ffffff]{_esc(raw.strip())}[/]")
+                prefix = "🎙 " if lisan else ""
+                console.print(f"  [on #2b2b2b bold #ffffff] {prefix}{_esc(raw.strip())} [/]")
         text = raw.strip()
         if not text:
             continue
