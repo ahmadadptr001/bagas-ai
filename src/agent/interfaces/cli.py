@@ -25,6 +25,14 @@ try:  # keyboard non-blocking (Windows): ketikan-selama-giliran & Ctrl+C
 except ImportError:  # pragma: no cover - non-Windows
     _msvcrt = None
 
+# Penanda byte Ctrl+Backspace = hapus kata.
+# Di ConPTY/WT & terminal VT: Backspace polos = '\x7f', Ctrl+Backspace = '\x08'.
+# Di console klasik: kebalikannya — '\x08' = Backspace polos.
+# Konvensi: '\x08' = hapus kata di SEMUA platform, sama persis dengan
+# _DATA_KATA KotakChat (lihat ~baris 4538). Di console klasik (langka)
+# Backspace polos akan menghapus kata —Ctrl+W tetap tersedia sebagai jalan.
+_DATA_KATA_MSVCRT = "\x08"
+
 for _s in (sys.stdout, sys.stderr):
     try:
         _s.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
@@ -2696,12 +2704,15 @@ def main(resume: bool = False) -> None:
                             f"selesai menjawab[/dim]"))])
                 return True
             if ch in ("\x08", "\x7f"):             # Backspace / Ctrl+Backspace
-                # KEDUANYA hapus 1 HURUF. Arah byte-nya tak bisa dipercaya:
-                # msvcrt klasik bilang polos='\x08' & Ctrl='\x7f', tapi ConPTY
-                # (Windows Terminal) TERBUKTI mengirim '\x7f' untuk Backspace
-                # POLOS (regresi v1.0.42 di jalur prompt_toolkit). Salah tebak
-                # di sini berarti Backspace polos menghapus sekata — merusak.
-                _hapus_sebelum()
+                # KotakChat (prompt_toolkit) sudah membuktikan bahwa di
+                # ConPTY/WT & terminal VT, '\x08' = Ctrl+Backspace (hapus kata)
+                # dan '\x7f' = Backspace polos (hapus huruf). Console klasik
+                # membalik — konvensi global: '\x08' = hapus kata (lihat
+                # _DATA_KATA_MSVCRT & _DATA_KATA KotakChat).
+                if ch == _DATA_KATA_MSVCRT:
+                    _hapus_kata()
+                else:
+                    _hapus_sebelum()
                 return True
             if ch in ("\x00", "\xe0"):             # prefix tombol khusus msvcrt
                 # Tombol navigasi datang BERPASANGAN: prefix ini lalu scancode.
@@ -2726,6 +2737,17 @@ def main(resume: bool = False) -> None:
                 return True
             if ch == "\x17":                        # Ctrl+W -> hapus satu kata
                 _hapus_kata()
+                return True
+            if ch == "\x15":                        # Ctrl+U -> hapus ke awal baris
+                p = typing_state["pos"]
+                typing_state["buf"] = typing_state["buf"][p:]
+                typing_state["pos"] = 0
+                _sinkron()
+                return True
+            if ch == "\x0b":                        # Ctrl+K -> hapus ke akhir baris
+                p = typing_state["pos"]
+                typing_state["buf"] = typing_state["buf"][:p]
+                _sinkron()
                 return True
             if ch >= " ":                          # karakter tercetak
                 p = typing_state["pos"]
