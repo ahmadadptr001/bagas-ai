@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from . import config, konteks, llm, models, prefs, prompts
+from . import config, interaction, konteks, llm, models, prefs, prompts
 from . import tim as _tim
 from .memory import Memory
 from .session import Session
