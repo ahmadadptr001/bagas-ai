@@ -48,14 +48,14 @@ class ModelSpec:
 
 
 # MODEL YANG SEDANG DITUNDA — atas permintaan pengguna. Yang boleh dipakai
-# sekarang: GLM, Qwen, dan Kimi. Entri lain SENGAJA TIDAK DIHAPUS:
+# sekarang: GLM dan Qwen. Entri lain SENGAJA TIDAK DIHAPUS:
 # connector-nya utuh, ujinya utuh, profil login-nya utuh. Yang berubah cuma
 # satu — ia tak bisa dipilih. Menghidupkannya kembali = keluarkan aliasnya
 # dari himpunan ini, tanpa menyentuh kode lain.
 #
 # Sengaja daftar ALIAS yang ditunda, bukan daftar yang aktif: menambah model
 # baru kelak tak boleh diam-diam ikut terkunci hanya karena lupa didaftarkan.
-_DITUNDA = {"gemini-web", "dola-web"}
+_DITUNDA = {"gemini-web", "dola-web", "kimi-web"}
 
 # Alias pendek -> spesifikasi. Urutan menentukan nomor pada /model.
 MODELS: dict[str, ModelSpec] = {
