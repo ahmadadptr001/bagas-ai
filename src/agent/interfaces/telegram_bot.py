@@ -460,6 +460,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
             return
+        cid = update.effective_chat.id
         caption = update.message.caption or "Deskripsikan gambar ini secara detail."
         emit("in", f"{_name(update)}: [foto] {caption}")
         photo = update.message.photo[-1]
@@ -493,12 +494,12 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
                         lambda teks: agent.run(teks, attachments=[str(path)],
                                                on_message=lambda c: emit("out", c)),
                         caption)
+                    emit("out", reply)
+                    await _reply_long(context.bot, cid, reply)
                 finally:
                     interaction.reset_context_handler(tok)
         finally:
             _sedang_jalan.discard(cid)
-        emit("out", reply)
-        await _reply_long(context.bot, cid, reply)
 
     async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
