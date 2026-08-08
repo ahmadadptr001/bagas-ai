@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -780,8 +781,9 @@ _BG_BAR = "#1a120b"
 # yang sama persis, jadi aturan yang berbeda akan terlihat sebagai layar yang
 # melompat tiap kali giliran mulai atau selesai.
 _TINGKAT_BAR: tuple[tuple[str, ...], ...] = (
-    ("merek", "model", "sesi", "perintah", "ctrlc"),
-    ("merek", "model", "sesi", "perintah"),
+    ("merek", "model", "git", "ubah", "perintah", "ctrlc"),
+    ("merek", "model", "git", "ubah", "perintah"),
+    ("merek", "model", "git", "perintah"),
     ("merek", "model", "perintah"),
     ("model", "perintah"),
     ("model", "exit"),
@@ -800,6 +802,56 @@ def _bagian_bar(lebar: int, ukur) -> tuple[str, ...]:
     return _TINGKAT_BAR[-1]
 
 
+def _git_info() -> tuple[str, int]:
+    """(branch, berkas_berubah) dari repo di folder proyek — di-cache 5 detik.
+
+    Dipanggil tiap frame render, jadi harus murah: git dijalankan paling
+    sering sekali per 5 detik, sisanya dibaca dari cache."""
+    now = time.time()
+    if now - _git_info._t < 5.0:          # cache masih segar
+        return _git_info._v              # type: ignore[attr-defined]
+    _git_info._t = now
+    try:
+        r = config.PROJECT_ROOT
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, cwd=r,
+        ).stdout.strip()
+        if not branch:
+            _git_info._v = ("", 0)
+            return _git_info._v
+        count = 0
+        out = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True, cwd=r,
+        ).stdout.strip()
+        if out:
+            count = len(out.splitlines())
+        # Staged tapi belum commit juga dihitung.
+        out2 = subprocess.run(
+            ["git", "diff", "--staged", "--name-only", "HEAD"],
+            capture_output=True, text=True, cwd=r,
+        ).stdout.strip()
+        if out2:
+            staged = set(out2.splitlines()) - set(out.splitlines())
+            count += len(staged)
+        # Untracked files.
+        out3 = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, cwd=r,
+        ).stdout.strip()
+        if out3:
+            count += len(out3.splitlines())
+        _git_info._v = (branch, count)
+    except (OSError, FileNotFoundError):
+        _git_info._v = ("", 0)
+    return _git_info._v
+
+
+_git_info._t = 0.0     # type: ignore[attr-defined]
+_git_info._v = ("", 0) # type: ignore[attr-defined]
+
+
 def _bar_status(agent: Agent, total: int) -> Text:
     """Satu baris: ⬢ bagas-ai · model · token sesi ……… /menu · /exit.
 
@@ -813,11 +865,15 @@ def _bar_status(agent: Agent, total: int) -> Text:
     teks = {
         "merek": " ⬢ bagas-ai",
         "model": f"{SEP}{'🌐' if spec.is_web else '🤖'} {spec.label}",
-        "sesi": f"{SEP}⚡ {_fmt(s.total)} sesi",
         "perintah": "/menu · /exit",
         "ctrlc": " atau ctrl+c",
         "exit": "/exit",
     }
+    git_branch, git_changed = _git_info()
+    if git_branch:
+        teks["git"] = f"{SEP}🌿 {git_branch}"
+    if git_changed:
+        teks["ubah"] = f"{SEP}📝 {git_changed}"
     ada = _bagian_bar(console.width, lambda b: Text(teks[b]).cell_len + 1)
 
     bar = Text(style=f"on {_BG_BAR}")
@@ -830,10 +886,15 @@ def _bar_status(agent: Agent, total: int) -> Text:
             bar.append(" ")
         bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
         bar.append(spec.label, style="bold #fc9018")
-    if "sesi" in ada:
+    if "git" in ada:
         bar.append(SEP, style="#4a3826")
-        bar.append(f"⚡ {_fmt(s.total)}", style="#f7d488")
-        bar.append(" sesi", style="#a89078")
+        bar.append("🌿 ", style="#9fc93c")
+        bar.append(git_branch, style="#9fc93c")
+    if "ubah" in ada:
+        bar.append(SEP, style="#4a3826")
+        bar.append(f"📝 {git_changed}", style="#f7d488")
+    # Segmen "sesi" DIHAPUS atas permintaan pengguna: token sesi sudah
+    # ditampilkan di baris status live (⚡ X sesi), tak perlu duplikat di footer.
 
     # Perintah didorong ke tepi KANAN, bukan disambung dengan pemisah:
     # perintah bukan bagian dari deretan keterangan di kiri — ia hal lain, dan
@@ -1050,7 +1111,7 @@ class KotakChat:
 # SEBELUM file disentuh. Dulu hanya write_file, sehingga perubahan lewat
 # edit_file/append_file lolos tanpa bisa ditinjau — padahal justru edit_file yang
 # dianjurkan untuk file besar, jadi tanpa ini kebanyakan perubahan jadi tak terlihat.
-_TOOL_DIFF = ("write_file", "edit_file", "append_file")
+_TOOL_DIFF = ("write_file", "edit_file", "edit_files", "append_file")
 
 # SEMUA tool yang mengubah isi disk. Dipakai ringkasan giliran ("N file") dan
 # pemicu penyegaran peta proyek. Dulu hanya write_file/delete_file — giliran
@@ -1343,7 +1404,7 @@ class Status:
         self.tool: str | None = None
         self.phase = "berpikir"
         self.step = 0
-        self.disp = 0.0
+        self.disp = float(agent.tokens_session.total)
         self.retry_until = 0.0
         self.retry_msg = ""
         self.cancelling = False
@@ -1433,7 +1494,7 @@ class Status:
             t.append("     Ctrl+C batal", style="dim italic")
             return _oneline(t)
 
-        target = float(self.agent.tokens_live)
+        target = float(self.agent.tokens_session.total + self.agent.tokens_live)
         self.disp += (target - self.disp) * 0.30  # easing -> angka mengalir
         if abs(target - self.disp) < 1:
             self.disp = target
@@ -1444,7 +1505,7 @@ class Status:
         t.append("   ")
         t.append_text(Text.from_markup(dot))
         t.append(f"  ⚡ {_fmt(int(self.disp))}", style="#f7d488")
-        t.append(" token", style="dim")
+        t.append(" sesi", style="dim")
         if self.tool:
             t.append("   ")
             t.append_text(Text.from_markup(dot))
@@ -1524,7 +1585,7 @@ class TurnView:
         self.phase = "berpikir"
         self.tool: str | None = None
         self.tool_label = ""           # label langkah berjalan (tampil di footer)
-        self.disp = 0.0
+        self.disp = float(agent.tokens_session.total)
         self.phase_since = self.start   # kapan fase SEKARANG mulai
         # BAR ETA & PRATINJAU ALIRAN JAWABAN DIHAPUS (permintaan pengguna).
         #
@@ -1697,7 +1758,7 @@ class TurnView:
             return _oneline(Text.from_markup(
                 f"  [bold #f7d488]{frame}[/] [#f7d488]layanan sibuk — menunggu lalu "
                 f"melanjutkan[/] [bold #fca830]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]"))
-        target = float(self.agent.tokens_live)
+        target = float(self.agent.tokens_session.total + self.agent.tokens_live)
         self.disp += (target - self.disp) * 0.30
         if abs(target - self.disp) < 1:
             self.disp = target
@@ -1716,7 +1777,7 @@ class TurnView:
         status = _oneline(Text.from_markup(
             f"  [bold #fcc048]{frame}[/] [#fcc048]{self.phase}[/]   [dim]·[/]   "
             f"[#fc9018]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f7d488]⚡ {tok}[/] "
-            f"[dim]token[/]{extra}"
+            f"[dim]sesi[/]{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
         rows = [status]
         # Ketikannya sendiri tampil di KOTAK CHAT (lihat _kotak_ketikan), bukan
@@ -1883,8 +1944,11 @@ def main(resume: bool = False) -> None:
         prefs.set_total_tokens(grand["base"] + agent.tokens_session.total)
 
     def _total_global() -> int:
-        """Angka "🔋 total" di bar status — sama persis saat idle & saat sibuk."""
-        return grand["base"] + agent.tokens_session.total
+        """Angka "🔋 total" di bar status — sama persis saat idle & saat sibuk.
+
+        tokens_live ditambahkan supaya bar status juga mutlak real-time selama
+        giliran berjalan, bukan hanya melompat di akhir giliran."""
+        return grand["base"] + agent.tokens_session.total + agent.tokens_live
 
     status_obj = Status(agent, total=_total_global)
 
@@ -2004,7 +2068,19 @@ def main(resume: bool = False) -> None:
         cur_step.update(n=step_ctr["n"], name=name, args=args, start=time.time())
         p = args.get("path") if isinstance(args, dict) else None
         # Diff/preview substantif ditampilkan SEBELUM aksi (konten inti perubahan).
-        if name in _TOOL_DIFF and p:
+        if name == "edit_files":
+            # edit_files membawa DAFTAR suntingan — tampilkan diff tiap
+            # suntingan berurutan sesuai file-nya, sama seperti edit_file satuan.
+            for e in (args.get("edits") or []):
+                if not isinstance(e, dict):
+                    continue
+                ep = e.get("path", "")
+                if not ep:
+                    continue
+                old, new, exists = _isi_sebelum_sesudah("edit_file", ep, e)
+                if not (exists and old == new):
+                    _print_diff(ep, old, new, is_new=not exists)
+        elif name in _TOOL_DIFF and p:
             old, new, exists = _isi_sebelum_sesudah(name, p, args)
             # old == new pada file yang sudah ada = tulisan itu akan DITOLAK
             # tool-nya (potongan/penyusutan drastis) atau memang tanpa efek —
@@ -2323,7 +2399,19 @@ def main(resume: bool = False) -> None:
             # Diff tulis/hapus dicetak (otomatis di ATAS region live) sbg konteks
             # perubahan, lalu menjadi bagian riwayat terminal.
             p = args.get("path") if isinstance(args, dict) else None
-            if name in _TOOL_DIFF and p:
+            if name == "edit_files":
+                # edit_files membawa DAFTAR suntingan — tampilkan diff tiap
+                # suntingan berurutan sesuai file-nya.
+                for e in (args.get("edits") or []):
+                    if not isinstance(e, dict):
+                        continue
+                    ep = e.get("path", "")
+                    if not ep:
+                        continue
+                    old, new, exists = _isi_sebelum_sesudah("edit_file", ep, e)
+                    if not (exists and old == new):
+                        _print_diff(ep, old, new, is_new=not exists)
+            elif name in _TOOL_DIFF and p:
                 # WAJIB lewat _isi_sebelum_sesudah: untuk edit_file/append_file
                 # isi barunya BUKAN args["content"] (edit_file pakai old_text/
                 # new_text). Menyalin content mentah membuat `new` kosong pada
@@ -2941,6 +3029,16 @@ def main(resume: bool = False) -> None:
                               (1, 3, 0, 3)))
 
     # --- aksi menu (inquirer) ---
+    def _warn_glm_vpn() -> None:
+        """Peringatan VPN bila model yang dipilih adalah GLM (chat.z.ai)."""
+        if agent.model_spec.connector != "glm":
+            return
+        console.print(
+            "  [bold #fca830]⚠ GLM (chat.z.ai) memerlukan VPN aktif[/] "
+            "[dim]— disarankan [bold]Cloudflare WARP[/].[/]\n"
+            "  [dim]Model ini sering bermasalah; jika error berulang "
+            "di terminal, coba ganti server VPN.[/]\n")
+
     def pick_model() -> str | None:
         """Menu pilih model. Return ID model SEBELUMNYA bila yang dipilih adalah
         connector web (pemanggil lalu menjalankan _connect_web), selain itu None."""
@@ -2971,6 +3069,7 @@ def main(resume: bool = False) -> None:
             prev = agent.model
             console.print(f"[green]✓ Model: {agent.set_model(sel)}[/green] "
                           f"[dim]({agent.model})[/dim]")
+            _warn_glm_vpn()
             if agent.model_spec.is_web:
                 return prev
         except (KeyboardInterrupt, EOFError):
@@ -4485,6 +4584,8 @@ def main(resume: bool = False) -> None:
         "model": "#fc9018 bold",
         "eff": "#ffd9a0",
         "sesi": "#f7d488",
+        "git": "#9fc93c",
+        "ubah": "#f7d488",
         "total": "#9fc93c",
         "cmd": "#ffb861",
         "exit": "#f0603c",
@@ -4521,18 +4622,22 @@ def main(resume: bool = False) -> None:
                    else f"{sep}<sesi>🎙 dengar</sesi>")
         bagian = {
             "merek": " <brand>⬢ bagas-ai</brand>",
-            "model": f"{sep}{kind} <model>{spec.label}</model>{eff}",
-            "sesi": f"{sep}<sesi>⚡ {_fmt(s.total)}</sesi> <muted>sesi</muted>{mik}",
+            "model": f"{sep}{kind} <model>{spec.label}</model>{eff}{mik}",
             "perintah": "<cmd>/menu</cmd> <muted>·</muted> ",
             "ctrlc": " <muted>atau ctrl+c</muted>",
             "exit": "<exit>/exit</exit>",
         }
+        git_branch, git_changed = _git_info()
+        if git_branch:
+            bagian["git"] = f"{sep}<git>🌿 {git_branch}</git>"
+        if git_changed:
+            bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>"
         lebar = _lebar_kotak()
         # Aturan penyusutan dipakai BERSAMA dengan bar versi rich (_bar_status),
         # supaya bentuknya tak berubah saat giliran mulai/selesai.
         ada = _bagian_bar(lebar, lambda b: _panjang_tampak(bagian[b]) + 1)
 
-        kiri = "".join(bagian[b] for b in ("merek", "model", "sesi") if b in ada)
+        kiri = "".join(bagian[b] for b in ("merek", "model", "git", "ubah") if b in ada)
         if not kiri.startswith(" "):     # tanpa merek, pemisah di depan dibuang
             kiri = " " + kiri.lstrip().removeprefix("<sep>│</sep>").lstrip()
         kanan = (bagian["perintah"] if "perintah" in ada else "") \
@@ -4640,6 +4745,7 @@ def main(resume: bool = False) -> None:
                     except ValueError as e:
                         console.print(f"[red]{e}[/red]")
                     else:
+                        _warn_glm_vpn()
                         # Model connector web: CONNECT sekarang juga (login sekali
                         # bila belum pernah; sudah pernah -> langsung ke sesi chat).
                         if agent.model_spec.is_web:

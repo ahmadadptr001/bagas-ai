@@ -2895,7 +2895,7 @@ class Agent:
         # bukan hanya jawaban akhir, supaya angkanya mencerminkan biaya nyata.
         self.tokens_last.add_raw(prompt_chars // 4, reply_chars // 4)
         self.tokens_session.add_raw(prompt_chars // 4, reply_chars // 4)
-        self.tokens_live = self.tokens_last.total
+        self.tokens_live = 0  # reset: tokens_session sudah termasuk giliran ini
         self._persist()
         return answer
 
