@@ -4287,6 +4287,7 @@ def main(resume: bool = False) -> None:
             _save_total()  # persist kontribusi sesi lama ke total global
             session = Session.create()
             agent = Agent(session=session)
+            agent.start_new_web_chat()
             grand["base"] = prefs.get_total_tokens()  # sesi baru mulai dari total
             console.clear()
             show_logo()

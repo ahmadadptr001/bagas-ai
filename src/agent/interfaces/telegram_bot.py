@@ -334,7 +334,8 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
         if not await _guard(update):
             return
         _agents.pop(update.effective_chat.id, None)
-        _get_agent(update.effective_chat.id)
+        agent = _get_agent(update.effective_chat.id)
+        agent.start_new_web_chat()
         await update.message.reply_text("(sesi baru dimulai)")
 
     async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
