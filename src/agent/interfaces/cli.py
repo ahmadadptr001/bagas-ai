@@ -781,8 +781,10 @@ _BG_BAR = "#1a120b"
 # yang sama persis, jadi aturan yang berbeda akan terlihat sebagai layar yang
 # melompat tiap kali giliran mulai atau selesai.
 _TINGKAT_BAR: tuple[tuple[str, ...], ...] = (
-    ("merek", "model", "git", "ubah", "perintah", "ctrlc"),
-    ("merek", "model", "git", "ubah", "perintah"),
+    # ("merek", "model", "git", "ubah", "perintah", "ctrlc"),
+    # ("merek", "model", "git", "ubah", "perintah"),
+    ("merek", "model", "git",  "perintah", "ctrlc"),
+    ("merek", "model", "git",  "perintah"),
     ("merek", "model", "git", "perintah"),
     ("merek", "model", "perintah"),
     ("model", "perintah"),
@@ -4630,8 +4632,8 @@ def main(resume: bool = False) -> None:
         git_branch, git_changed = _git_info()
         if git_branch:
             bagian["git"] = f"{sep}<git>🌿 {git_branch}</git>"
-        # if git_changed:
-        #     bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>"
+        if git_changed:
+            bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>"
         lebar = _lebar_kotak()
         # Aturan penyusutan dipakai BERSAMA dengan bar versi rich (_bar_status),
         # supaya bentuknya tak berubah saat giliran mulai/selesai.
