@@ -61,8 +61,15 @@ _TG_LIMIT = 4000  # < 4096 batas karakter/pesan Telegram
 OnEvent = Callable[[str, str], None]  # (kind, text): 'in'|'out'|'perm'|'info'|'error'
 
 
+_MAX_AGENTS = 50  # batas Agent serentak; lebih → eviksi tertua (FIFO)
+
+
 def _get_agent(chat_id: int) -> Agent:
     if chat_id not in _agents:
+        if len(_agents) >= _MAX_AGENTS:
+            oldest = next(iter(_agents))
+            del _agents[oldest]
+            _locks.pop(oldest, None)
         _agents[chat_id] = Agent()
     return _agents[chat_id]
 
@@ -95,14 +102,30 @@ def _find_images(text: str) -> list[Path]:
 
 
 async def _reply_long(update: Update, text: str) -> None:
-    """Kirim balasan; pecah bila panjang, dan kirim GAMBAR sebagai foto asli."""
+    """Kirim balasan; pecah di batas BARIS bila panjang, kirim GAMBAR sebagai foto."""
     text = (text or "(kosong)").strip() or "(kosong)"
     # Jangan pernah membuang data URI mentah ke chat (tak berguna & sangat panjang).
     text = re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=\s]{50,}",
                   "[gambar dikirim sebagai foto]", text)
     imgs = _find_images(text)
-    for i in range(0, len(text), _TG_LIMIT):
-        await update.message.reply_text(text[i:i + _TG_LIMIT])
+    # Pecah di batas baris (bukan tengah kata/kode/markdown).
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= _TG_LIMIT:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, _TG_LIMIT + 1)
+        if cut <= 0:
+            cut = remaining.rfind(" ", 0, _TG_LIMIT + 1)
+        if cut <= 0:
+            cut = _TG_LIMIT
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    for i, chunk in enumerate(chunks):
+        await update.message.reply_text(chunk)
+        if i < len(chunks) - 1:
+            await asyncio.sleep(0.3)  # jeda antar pesan — cegah flood
     for p in imgs:  # kirim file gambar yang disebut sebagai FOTO
         try:
             with open(p, "rb") as fh:
@@ -438,10 +461,11 @@ def build_application(on_event: OnEvent | None = None) -> Application:
         if not await _guard(update):
             return
         agent = _get_agent(update.effective_chat.id)
+        total_str = f"{agent.tokens_session.total:,}".replace(",", ".")
         await update.message.reply_text(
             f"⬢ bagas-ai\n🌐 Model: {agent.model_spec.label} (via browser)\n"
             f"📁 Folder: {config.PROJECT_ROOT}\n"
-            f"⚡ Token sesi: {agent.tokens_session.total:,}".replace(",", "."))
+            f"⚡ Token sesi: {total_str}")
 
     async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
@@ -492,7 +516,13 @@ def build_application(on_event: OnEvent | None = None) -> Application:
         if data.startswith("model:"):
             try:
                 label = agent.set_model(data.split(":", 1)[1])
-                await cq.edit_message_text(f"✓ Model: {label}")
+                msg = f"✓ Model: {label}"
+                if agent.model_spec.connector == "glm":
+                    msg += ("\n\n⚠ GLM (chat.z.ai) memerlukan VPN aktif "
+                            "— disarankan Cloudflare WARP.\n"
+                            "Model ini sering bermasalah; jika error berulang, "
+                            "coba ganti server VPN.")
+                await cq.edit_message_text(msg)
                 emit("info", f"model diganti lewat Telegram -> {label}")
             except Exception as e:  # noqa: BLE001
                 await cq.edit_message_text(f"✖ gagal: {e}")
