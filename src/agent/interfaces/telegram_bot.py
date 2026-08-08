@@ -501,6 +501,20 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
             "situsnya, jadi harus dari terminal: ketik /effort di sesi bagas-ai "
             "pada laptop.")
 
+    async def cmd_browser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await _guard(update):
+            return
+        pilihan = [
+            ("brave", "Brave"), ("chrome", "Chrome"),
+            ("msedge", "Microsoft Edge"), ("chrome-beta", "Chrome Beta"),
+        ]
+        aktif = (config.CONNECTOR_BROWSER_CHANNEL or "").strip().lower()
+        rows = []
+        for key, nama in pilihan:
+            mark = "● " if key == aktif else ""
+            rows.append([InlineKeyboardButton(f"{mark}{nama}", callback_data=f"browser:{key}")])
+        await update.message.reply_text("🌐 Pilih browser:", reply_markup=InlineKeyboardMarkup(rows))
+
     async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _guard(update):
             return
@@ -570,6 +584,22 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
                 emit("info", f"model diganti lewat Telegram -> {label}")
             except Exception as e:  # noqa: BLE001
                 await cq.edit_message_text(f"✖ gagal: {e}")
+        if data.startswith("browser:"):
+            pilihan_nama = {
+                "brave": "Brave", "chrome": "Chrome",
+                "msedge": "Microsoft Edge", "chrome-beta": "Chrome Beta",
+            }
+            key = data.split(":", 1)[1]
+            from ..setup_wizard import _read_env, _write_env
+            env_path = config.ENV_FILE
+            env_data = _read_env(env_path)
+            env_data["CONNECTOR_BROWSER_CHANNEL"] = key
+            _write_env(env_path, env_data)
+            config.CONNECTOR_BROWSER_CHANNEL = key
+            nama = pilihan_nama.get(key, key)
+            await cq.edit_message_text(
+                f"✓ Browser: {nama}\n\nℹ Mulai ulang bagas-ai untuk menerapkan.")
+            emit("info", f"browser diganti lewat Telegram -> {nama}")
         # Cabang "effort:" DIHAPUS bersama menunya — tombolnya tak pernah lagi
         # dikirim, dan set_effort sudah tak ada di Agent.
 
@@ -585,6 +615,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("effort", cmd_effort))
+    app.add_handler(CommandHandler("browser", cmd_browser))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("memory", cmd_memory))

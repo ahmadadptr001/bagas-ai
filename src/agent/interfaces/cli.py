@@ -211,6 +211,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("reset", "kosongkan riwayat"),
     ("clear", "bersihkan layar"),
     ("web", "kelola sesi AI web (hapus chat menumpuk / logout)"),
+    ("browser", "ganti browser (brave/chrome/dll)"),
     ("bot", "hidup/matikan bot Telegram di sesi ini"),
     ("permissions-bot", "atur izin siapa yang boleh kontrol via Telegram"),
     ("review", "cari bug & kesalahan sistem di seluruh proyek"),
@@ -3085,6 +3086,36 @@ def main(resume: bool = False) -> None:
         jalur yang tersisa adalah pick_web_option."""
         pick_web_option()
 
+    def pick_browser() -> None:
+        """Ganti browser yang dipakai connector (CONNECTOR_BROWSER_CHANNEL)."""
+        from ..setup_wizard import _read_env, _write_env
+        pilihan = [
+            ("brave", "Brave"),
+            ("chrome", "Chrome"),
+            ("msedge", "Microsoft Edge"),
+            ("chrome-beta", "Chrome Beta"),
+        ]
+        aktif = (config.CONNECTOR_BROWSER_CHANNEL or "").strip().lower()
+        items = [f"{nama}{' (aktif)' if key == aktif else ''}"
+                 for key, nama in pilihan]
+        try:
+            sel = ui.select("Pilih browser:", items).value
+        except (KeyboardInterrupt, EOFError):
+            return
+        # Pengguna memilih nama, cari key-nya:
+        for key, nama in pilihan:
+            if sel.startswith(nama):
+                if key == aktif:
+                    return
+                env_path = config.ENV_FILE
+                data = _read_env(env_path)
+                data["CONNECTOR_BROWSER_CHANNEL"] = key
+                _write_env(env_path, data)
+                config.CONNECTOR_BROWSER_CHANNEL = key
+                console.print(f"[green]✓ Browser: {nama}[/green]\n"
+                              "[dim]Mulai ulang bagas-ai untuk menerapkan.[/]")
+                return
+
     def pick_web_option() -> None:
         """/effort untuk model web: pilih tombol di UI situs (varian model /
         mode berpikir) lalu program yang mengekliknya di browser."""
@@ -4244,6 +4275,8 @@ def main(resume: bool = False) -> None:
             _with_console(pick_effort)
         elif action == "web":
             _with_console(manage_web_sessions)
+        elif action == "browser":
+            _with_console(pick_browser)
         elif action == "dirs":
             show_dirs()
         elif action == "delete":
