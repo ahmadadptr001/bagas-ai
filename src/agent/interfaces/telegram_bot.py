@@ -774,6 +774,17 @@ class TelegramService:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+
+            # Windows (ProactorEventLoop) sering melempar ConnectionAbortedError
+            # (WinError 10053) ke callback saat koneksi socket ditutup paksa
+            # (mis. saat bot dimatikan). Ini noise tak fatal — telan diam-diam.
+            def _handle_exc(loop, context):
+                exc = context.get("exception")
+                if isinstance(exc, ConnectionAbortedError):
+                    return
+                loop.default_exception_handler(context)
+
+            self._loop.set_exception_handler(_handle_exc)
             self._app = build_application(on_event, agent)
             self._stop = self._loop.create_future()
             self._loop.run_until_complete(self._serve())
