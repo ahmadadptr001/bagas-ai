@@ -26,12 +26,26 @@ except ImportError:  # pragma: no cover - non-Windows
     _msvcrt = None
 
 # Penanda byte Ctrl+Backspace = hapus kata.
-# Di ConPTY/WT & terminal VT: Backspace polos = '\x7f', Ctrl+Backspace = '\x08'.
-# Di console klasik: kebalikannya — '\x08' = Backspace polos.
-# Konvensi: '\x08' = hapus kata di SEMUA platform, sama persis dengan
-# _DATA_KATA KotakChat (lihat ~baris 4538). Di console klasik (langka)
-# Backspace polos akan menghapus kata —Ctrl+W tetap tersedia sebagai jalan.
-_DATA_KATA_MSVCRT = "\x08"
+# msvcrt & prompt_toolkit memakai API input BERBEDA — byte yang diterima
+# untuk tombol sama bisa lain. prompt_toolkit (ReadConsoleInputW) di ConPTY
+# melaporkan Backspace polos='\x7f' & Ctrl+BS='\x08', tapi msvcrt (getwch)
+# di console klasik melaporkan kebalikannya: polos='\x08' & Ctrl='\x7f'.
+# Deteksi lewat GetConsoleMode: ENABLE_VIRTUAL_TERMINAL_INPUT (0x0200)
+# menyala di ConPTY/VT, mati di console klasik.
+if _msvcrt is not None:
+    try:
+        import ctypes as _ctypes
+        _con_mode = _ctypes.wintypes.DWORD()
+        _ctypes.windll.kernel32.GetConsoleMode(
+            _ctypes.windll.kernel32.GetStdHandle(-10),
+            _ctypes.byref(_con_mode),
+        )
+        # ConPTY/VT aktif? '\x08' = Ctrl+Backspace. Klasik? '\x7f' = Ctrl+BS.
+        _DATA_KATA_MSVCRT = "\x08" if _con_mode.value & 0x0200 else "\x7f"
+    except Exception:  # noqa: BLE001
+        _DATA_KATA_MSVCRT = "\x7f"  # gagal deteksi -> anggap klasik
+else:
+    _DATA_KATA_MSVCRT = "\x08"   # VT (Linux/mac): '\x08' = Ctrl+Backspace
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -2704,11 +2718,8 @@ def main(resume: bool = False) -> None:
                             f"selesai menjawab[/dim]"))])
                 return True
             if ch in ("\x08", "\x7f"):             # Backspace / Ctrl+Backspace
-                # KotakChat (prompt_toolkit) sudah membuktikan bahwa di
-                # ConPTY/WT & terminal VT, '\x08' = Ctrl+Backspace (hapus kata)
-                # dan '\x7f' = Backspace polos (hapus huruf). Console klasik
-                # membalik — konvensi global: '\x08' = hapus kata (lihat
-                # _DATA_KATA_MSVCRT & _DATA_KATA KotakChat).
+                # _DATA_KATA_MSVCRT ditentukan lewat GetConsoleMode di atas:
+                # ConPTY/VT -> '\x08' = Ctrl+Backspace, klasik -> '\x7f'.
                 if ch == _DATA_KATA_MSVCRT:
                     _hapus_kata()
                 else:
