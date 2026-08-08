@@ -1196,7 +1196,7 @@ class Agent:
             if svc and svc in getattr(self.session, "web_chats", {}):
                 self.session.web_chats.pop(svc, None)
 
-        if immediate and self.model_spec.is_web():
+        if immediate and self.model_spec.is_web:
             from . import connectors
             try:
                 conn = connectors.get_connector(self.model_spec.connector)
