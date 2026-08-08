@@ -872,8 +872,7 @@ def _bar_status(agent: Agent, total: int) -> Text:
         "exit": "/exit",
     }
     git_branch, git_changed = _git_info()
-    if git_branch:
-        teks["git"] = f"{SEP}🌿 {git_branch}"
+    teks["git"] = f"{SEP}🌿 {git_branch}" if git_branch else ""
     teks["ubah"] = f"{SEP}📝 {git_changed}" if git_changed else ""
     ada = _bagian_bar(console.width, lambda b: Text(teks[b]).cell_len + 1)
 
@@ -887,7 +886,7 @@ def _bar_status(agent: Agent, total: int) -> Text:
             bar.append(" ")
         bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
         bar.append(spec.label, style="bold #fc9018")
-    if "git" in ada:
+    if "git" in ada and git_branch:
         bar.append(SEP, style="#4a3826")
         bar.append("🌿 ", style="#9fc93c")
         bar.append(git_branch, style="#9fc93c")
@@ -4629,8 +4628,7 @@ def main(resume: bool = False) -> None:
             "exit": "<exit>/exit</exit>",
         }
         git_branch, git_changed = _git_info()
-        if git_branch:
-            bagian["git"] = f"{sep}<git>🌿 {git_branch}</git>"
+        bagian["git"] = f"{sep}<git>🌿 {git_branch}</git>" if git_branch else ""
         bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>" if git_changed else ""
         lebar = _lebar_kotak()
         # Aturan penyusutan dipakai BERSAMA dengan bar versi rich (_bar_status),
