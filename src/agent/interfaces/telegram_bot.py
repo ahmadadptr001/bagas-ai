@@ -448,6 +448,7 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "image.jpg"
             await tg_file.download_to_drive(str(path))
+        async with tg_lock:
             # Foto DILAMPIRKAN ke percakapan web milik sesi ini, bukan dikirim ke
             # model vision terpisah seperti dulu. Bedanya nyata: gambar masuk ke
             # percakapan yang SAMA, jadi AI web bisa mengaitkannya dengan tugas
@@ -455,10 +456,16 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
             # sementara panggilan VLM sekali-pakai hanya bisa mendeskripsikan.
             agent = _get_agent(update.effective_chat.id)
             _inject_telegram_context(agent)
-            reply = await _run_with_typing(
-                update, context,
-                lambda teks: agent.run(teks, attachments=[str(path)]),
-                caption)
+            loop = asyncio.get_running_loop()
+            handler = make_choice_handler(update.effective_chat.id, context.bot, loop)
+            tok = interaction.set_context_handler(handler)
+            try:
+                reply = await _run_with_typing(
+                    update, context,
+                    lambda teks: agent.run(teks, attachments=[str(path)]),
+                    caption)
+            finally:
+                interaction.reset_context_handler(tok)
         emit("out", reply)
         await _reply_long(update, reply)
 

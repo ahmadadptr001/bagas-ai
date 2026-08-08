@@ -3102,9 +3102,11 @@ def main(resume: bool = False) -> None:
             sel = ui.select("Pilih browser:", items).value
         except (KeyboardInterrupt, EOFError):
             return
-        # Pengguna memilih nama, cari key-nya:
+        # Pengguna memilih nama, cari key-nya. startswith tak cukup: "Chrome"
+        # akan cocok lebih dulu dengan "Chrome Beta". Cocokkan persis atau
+        # ikuti suffix " (aktif)".
         for key, nama in pilihan:
-            if sel.startswith(nama):
+            if sel == nama or sel.startswith(nama + " ("):
                 if key == aktif:
                     return
                 env_path = config.ENV_FILE
