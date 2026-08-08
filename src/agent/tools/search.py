@@ -426,3 +426,97 @@ def search_text(query: str, pattern: str = "", regex: bool = False,
                      "Coba potongan kata yang lebih pendek, atau cari nama "
                      "berkasnya dengan glob_files.")
     return "\n".join(pesan)
+
+
+@tool
+def search_multi_text(queries: list[str], pattern: str = "", regex: bool = False,
+                      max_results: int = 30, context: int = -1) -> str:
+    """Cari BEBERAPA teks sekaligus di seluruh berkas proyek.
+
+    Sama seperti search_text tapi menerima daftar query — setiap berkas hanya
+    dibaca sekali, jauh lebih cepat daripada memanggil search_text berulang.
+    Hasil dikelompokkan per query, masing-masing dengan format yang sama.
+
+    queries: daftar teks yang dicari (maks 5, kosong/blank diabaikan).
+    pattern: batasi ke berkas tertentu, mis. '*.py' (kosong = semua).
+    regex: true bila semua query adalah regex.
+    max_results: batas jumlah baris hasil per query (default 30).
+    context: baris sekitar tiap kecocokan. -1 = otomatis, 0 = ringkas.
+    """
+    if not queries:
+        return "[error] queries kosong."
+    if len(queries) > 5:
+        return "[error] maksimal 5 query sekaligus."
+
+    # Kompilasi regex tiap query.
+    rxs: list[tuple[str, re.Pattern]] = []
+    for q in queries:
+        q = q.strip()
+        if not q:
+            continue
+        try:
+            rx = re.compile(q if regex else re.escape(q), re.IGNORECASE)
+        except re.error:  # regex rusak -> teks biasa
+            rx = re.compile(re.escape(q), re.IGNORECASE)
+        rxs.append((q, rx))
+
+    if not rxs:
+        return "[error] semua query kosong."
+
+    lolos = _penyaring(pattern)
+
+    # Pindai SEKALI: setiap berkas dibaca sekali, lalu dicocokkan ke
+    # semua query. Hasil dipisah per query.
+    hasil: dict[str, list[tuple[str, list[tuple[int, str]], str]]] = \
+        {q: [] for q, _ in rxs}
+    total_per_q: dict[str, int] = {q: 0 for q, _ in rxs}
+    terpotong_q: set[str] = set()
+    selesai_q: set[str] = set()  # query yang sudah cap max_results
+
+    for p in _telusuri(ROOT):
+        if not lolos(p):
+            continue
+        teks = _isi(p)
+        if teks is None:
+            continue
+        rel = _rel(p)
+        for q, rx in rxs:
+            if q in selesai_q:
+                continue
+            if not rx.search(teks):
+                continue
+            baris_cocok: list[tuple[int, str]] = []
+            for i, baris in enumerate(teks.split("\n"), 1):
+                if rx.search(baris):
+                    baris_cocok.append((i, baris))
+                    if len(baris_cocok) >= _MAKS_PER_BERKAS:
+                        terpotong_q.add(q)
+                        break
+            if not baris_cocok:
+                continue
+            hasil[q].append((rel, baris_cocok, teks))
+            total_per_q[q] += len(baris_cocok)
+            if total_per_q[q] >= max_results:
+                terpotong_q.add(q)
+                selesai_q.add(q)
+        if len(selesai_q) == len(rxs):
+            break  # semua query sudah penuh
+
+    # Susun output per query.
+    bagian: list[str] = []
+    for q, rx in rxs:
+        temuan = hasil[q]
+        terpotong = q in terpotong_q
+        pdef = None if regex else _pola_definisi(q)
+
+        if temuan:
+            n_cocok = total_per_q[q]
+            konteks = context
+            if konteks < 0:
+                konteks = 2 if n_cocok <= 12 else 0
+            bagian.append(_susun(temuan, konteks, pdef, terpotong, q, max_results))
+        else:
+            lingkup = f" pada berkas '{pattern}'" if pattern else ""
+            bagian.append(f"Tidak ditemukan '{q}'{lingkup}.")
+
+    return "\n\n".join(bagian)

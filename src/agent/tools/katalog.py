@@ -29,7 +29,7 @@ INTI: tuple[str, ...] = (
     "read_file", "read_files", "write_file", "edit_file", "edit_files",
     "append_file", "delete_file", "list_dir", "make_dir",
     # mencari di proyek
-    "search_text", "glob_files",
+    "search_text", "search_multi_text", "glob_files",
     # menjalankan
     "run_command", "run_python", "run_command_bg", "bg_output", "bg_send",
     # memastikan hasil
