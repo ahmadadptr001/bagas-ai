@@ -1575,7 +1575,10 @@ class Status:
         plan_rows = _panel_plan()
         if plan_rows:
             rows.extend(plan_rows)
-        rows.append(_KOSONG)
+            # Panel plan menempel langsung ke kotak chat
+            # — bingkai ╰─╯ dan ╭─╮ bersentuhan, tak perlu napas.
+        else:
+            rows.append(_KOSONG)
         rows.extend(_kotak_chat())
         rows.append(_bar_status(self.agent, self.total()))
         return Group(*rows)
@@ -1869,8 +1872,10 @@ class TurnView:
         plan_rows = _panel_plan()
         if plan_rows:
             rows.extend(plan_rows)
-        # Satu baris kosong di atas kotak chat — lihat _KOSONG.
-        rows.append(_KOSONG)
+            # Panel plan menempel langsung ke kotak ketikan
+            # — bingkai ╰─╯ dan ╭─╮ bersentuhan, tak perlu napas.
+        else:
+            rows.append(_KOSONG)
         rows.extend(self._kotak_ketikan())
         rows.append(_bar_status(self.agent, self.total()))
         return Group(*rows)
