@@ -1977,7 +1977,7 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
         "[#ffb861]/model[/] [dim]ganti model[/dim]   "
         "[#f0603c]/exit[/] [dim]keluar[/dim]"
     )
-    body = Group(_logo_content(), Text(), head, Text(), grid, Rule(style="#3a2a1a"), hint)
+    body = Group(_logo_content(), Rule(style="#3a2a1a"), head, grid, Rule(style="#3a2a1a"), hint)
     return Panel(body, border_style="#fcc048", box=box.ROUNDED, padding=(1, 2))
 
 
