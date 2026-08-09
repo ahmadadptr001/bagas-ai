@@ -1341,11 +1341,10 @@ def _print_delete(path: str, content: str, limit: int = 80) -> None:
     console.print(Group(*rows))
 
 
-def show_logo() -> None:
-    """Wordmark modern: figlet bergradasi + garis aksen gradasi + tagline bersih
-    (tanpa doodle ASCII)."""
-    m = " " * _LPAD  # indent kiri agar tidak mepet
-    console.print()
+def _logo_content() -> Group:
+    """Figlet bergradasi + garis aksen + tagline sebagai Group (tanpa print).
+    Dipakai oleh _banner() untuk menyatukan logo & info dalam satu Panel."""
+    m = " " * _LPAD
     if Figlet is not None:
         try:
             art = Figlet(font="ansi_shadow").renderText("bagas-ai")
@@ -1355,26 +1354,35 @@ def show_logo() -> None:
     else:
         lines = ["b a g a s - a i"]
     width = max((len(ln) for ln in lines), default=24)
-    # Terminal lebih sempit dari seni figlet? wrap bikin logo jadi sampah —
-    # jatuh ke wordmark teks biasa yang selalu muat.
     if width + _LPAD > console.width:
         lines = ["b a g a s - a i"]
         width = len(lines[0])
+    logo_lines = []
     for i, ln in enumerate(lines):
         t = Text(m + ln, style=f"bold {_GRAD[min(i, len(_GRAD) - 1)]}")
         t.no_wrap = True
-        console.print(t)
-    # Garis aksen gradasi di bawah wordmark (aksen modern pengganti doodle).
+        logo_lines.append(t)
+    # Garis aksen gradasi
     seg = max(12, min(width, 56))
     per = max(1, seg // len(_GRAD))
     bar = Text(m)
     for col in _GRAD:
         bar.append("━" * per, style=col)
-    console.print(bar)
+    logo_lines.append(bar)
+    # Tagline
     sub = Text(m)
     sub.append("AI agent serbaguna", style="bold #f2e3cc")
     sub.append("  ·  terminal · telegram · multitasking", style="dim")
-    console.print(_oneline(sub))
+    logo_lines.append(_oneline(sub))
+    return Group(*logo_lines)
+
+
+def show_logo() -> None:
+    """Feedback cepat saat startup — wordmark singkat.
+    Figlet penuh + info akan tampil di Panel _banner() setelah setup selesai."""
+    console.print()
+    t = Text(" " * _LPAD + "⬢ bagas-ai", style="bold #fcc048")
+    console.print(t)
 
 
 # ---------------------------------------------------------------------------
@@ -1969,9 +1977,8 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
         "[#ffb861]/model[/] [dim]ganti model[/dim]   "
         "[#f0603c]/exit[/] [dim]keluar[/dim]"
     )
-    body = Group(head, Text(), grid, Rule(style="#3a2a1a"), hint)
-    return Panel(body, border_style="#fcc048", box=box.ROUNDED, padding=(1, 2),
-                 title="[bold #fcc048]⬢ bagas-ai[/]", title_align="left")
+    body = Group(_logo_content(), Text(), head, Text(), grid, Rule(style="#3a2a1a"), hint)
+    return Panel(body, border_style="#fcc048", box=box.ROUNDED, padding=(1, 2))
 
 
 # ---------------------------------------------------------------------------
