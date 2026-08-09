@@ -1848,9 +1848,9 @@ class TurnView:
         hidup (spinner, tips, kalimat AI, panel rencana) tumbuh ke ATAS, bukan
         menyelip di antara keduanya.
 
-        Panel rencana dibaca LANGSUNG dari state plan_tool setiap frame, jadi
-        centang otomatis muncul begitu plan_step() memajukan langkah, tanpa
-        perlu mekanisme notifikasi. Tinggi region bertambah saat plan aktif
+        Panel rencana dibaca via plan_tool.get_state() tiap frame, jadi
+        centang otomatis muncul begitu plan_step() mengubah flag completed[i]
+        dari False ke True, tanpa perlu mekanisme notifikasi. Tinggi region bertambah saat plan aktif
         (maks ~16 baris: 12 langkah + bingkai), tetap aman di layar standar.
 
         Semua baris _oneline anti-wrap -> lebar stabil, tak pernah menimpa
