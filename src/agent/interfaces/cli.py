@@ -70,6 +70,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu  # noqa: E402
 from prompt_toolkit.patch_stdout import patch_stdout  # noqa: E402
 from prompt_toolkit.styles import Style as PTStyle  # noqa: E402
 from rich import box  # noqa: E402
+from rich.align import Align  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
 from rich.live import Live  # noqa: E402
 from rich.markdown import Markdown  # noqa: E402
@@ -1343,8 +1344,8 @@ def _print_delete(path: str, content: str, limit: int = 80) -> None:
 
 def _logo_content() -> Group:
     """Figlet bergradasi + garis aksen + tagline sebagai Group (tanpa print).
-    Dipakai oleh _banner() untuk menyatukan logo & info dalam satu Panel."""
-    m = " " * _LPAD
+    Dipakai oleh _banner() untuk menyatukan logo & info dalam satu Panel.
+    Tak pakai indent _LPAD — Align.center() yang mengatur posisi."""
     if Figlet is not None:
         try:
             art = Figlet(font="ansi_shadow").renderText("bagas-ai")
@@ -1354,23 +1355,23 @@ def _logo_content() -> Group:
     else:
         lines = ["b a g a s - a i"]
     width = max((len(ln) for ln in lines), default=24)
-    if width + _LPAD > console.width:
+    if width > console.width:
         lines = ["b a g a s - a i"]
         width = len(lines[0])
     logo_lines = []
     for i, ln in enumerate(lines):
-        t = Text(m + ln, style=f"bold {_GRAD[min(i, len(_GRAD) - 1)]}")
+        t = Text(ln, style=f"bold {_GRAD[min(i, len(_GRAD) - 1)]}")
         t.no_wrap = True
         logo_lines.append(t)
     # Garis aksen gradasi
     seg = max(12, min(width, 56))
     per = max(1, seg // len(_GRAD))
-    bar = Text(m)
+    bar = Text()
     for col in _GRAD:
         bar.append("━" * per, style=col)
     logo_lines.append(bar)
     # Tagline
-    sub = Text(m)
+    sub = Text()
     sub.append("AI agent serbaguna", style="bold #f2e3cc")
     sub.append("  ·  terminal · telegram · multitasking", style="dim")
     logo_lines.append(_oneline(sub))
@@ -1945,39 +1946,14 @@ class TurnView:
 # Komponen tampilan
 # ---------------------------------------------------------------------------
 def _banner(agent: Agent, resumed: bool) -> Panel:
-    spec = agent.model_spec
-    # Seluruh model berbasis browser, jadi penanda jenis lama (reasoning /
-    # multimodal / chat) tak lagi membedakan apa pun. Yang berguna sekarang:
-    # menegaskan bahwa model ini berjalan lewat browser.
-    kind = "🌐 via browser"
-    # Kolom label rata kanan (abu) + nilai berwarna -> sejajar & profesional.
-    grid = Table.grid(padding=(0, 2))
-    grid.add_column(justify="right", style="#a89078", min_width=7)
-    grid.add_column(overflow="fold")
-    eff = (f"   [#a89078]·[/]   [#ffd9a0]◇ {agent.effort}[/]"
-           if agent.effort else "")
-    tag = "dilanjutkan" if resumed else "sesi baru"
-    grid.add_row("Model", f"[bold #fc9018]{spec.label}[/]   [dim]{kind}[/]{eff}")
-    grid.add_row("Folder", f"[#9fc93c]{config.PROJECT_ROOT}[/]")
-    grid.add_row("Sesi", f"[#f7d488]{agent.session.id}[/]   [dim]· {tag}[/]")
-    # Mode lewati-izin TIDAK boleh senyap: selama ini aktif, bagas-ai boleh
-    # menulis & menghapus di folder mana pun tanpa satu pun konfirmasi, jadi
-    # keadaannya harus terbaca sekali lihat.
-    if permissions.skip_aktif():
-        grid.add_row("Izin", "[bold #f0603c]⚠ --skip-permissions[/]   "
-                             "[dim]akses ke SEMUA folder tanpa konfirmasi[/]")
-
-    head = Text.assemble(
-        ("● ", "bold #9fc93c"), ("siap", "bold #9fc93c"),
-        ("   dimana pun, dari terminal ini", "dim italic"),
-    )
+    """Panel pembuka: logo di tengah + hint singkat."""
     hint = Text.from_markup(
         "[dim]ketik pesan untuk mengobrol[/dim]   "
         "[#ffb861]/menu[/] [dim]menu[/dim]   "
         "[#ffb861]/model[/] [dim]ganti model[/dim]   "
         "[#f0603c]/exit[/] [dim]keluar[/dim]"
     )
-    body = Group(_logo_content(), Rule(style="#3a2a1a"), head, grid, Rule(style="#3a2a1a"), hint)
+    body = Group(Align.center(_logo_content()), Rule(style="#3a2a1a"), Align.center(hint))
     return Panel(body, border_style="#fcc048", box=box.ROUNDED, padding=(1, 2))
 
 
