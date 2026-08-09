@@ -535,7 +535,7 @@ _KEPALA_KONTEKS = (
     "==========\n\n"
 )
 
-_BAD_ESCAPE_RE = re.compile(r'\\(?![\\/"bfnrtu]|u[0-9a-fA-F]{4})')
+_BAD_ESCAPE_RE = re.compile(r'(?<!\\)\\(?![\\/"bfnrtu]|u[0-9a-fA-F]{4})')
 
 
 # Artefak PERENDERAN yang membuat JSON tak sah. Situs menata blok kode dengan
