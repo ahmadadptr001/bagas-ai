@@ -44,6 +44,12 @@ def _popen(args, *, shell: bool, stdin_pipe: bool = False) -> subprocess.Popen:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,   # gabung stderr ke stdout
         text=True,
+        # Tanpa ini Python pakai encoding default sistem (cp1252 di Windows),
+        # padahal proses anak (npm/git/node) menghasilkan UTF-8. Akibatnya
+        # UnicodeDecodeError di thread pembaca subprocess. errors="replace"
+        # memastikan byte yang benar-benar bukan UTF-8 tidak pernah crash.
+        encoding="utf-8",
+        errors="replace",
         shell=shell,
     )
     if os.name == "nt":

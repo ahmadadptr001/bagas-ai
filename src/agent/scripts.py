@@ -68,6 +68,8 @@ def run(name: str, args: str = "") -> str:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=config.CODE_EXEC_TIMEOUT,
             cwd=str(config.PROJECT_ROOT),
         )

@@ -29,8 +29,19 @@ _lock = threading.Lock()
 # Rencana giliran BERJALAN. Sengaja di memori proses, bukan di disk: rencana
 # hanya bermakna selama tugasnya berlangsung, dan rencana basi dari sesi kemarin
 # yang muncul kembali justru menyesatkan.
-_state: dict = {"steps": [], "current": 0}
+_state: dict = {"steps": [], "current": 0, "completed": []}
 _MAKS_LANGKAH = 12
+
+
+def get_state() -> dict:
+    """Snapshot rencana saat ini (steps, current, completed).
+    Thread-safe; dipakai oleh _panel_plan() dan antarmuka lain."""
+    with _lock:
+        return {
+            "steps": list(_state["steps"]),
+            "current": _state["current"],
+            "completed": list(_state["completed"]),
+        }
 
 
 def reset() -> None:
@@ -38,6 +49,7 @@ def reset() -> None:
     with _lock:
         _state["steps"] = []
         _state["current"] = 0
+        _state["completed"] = []
 
 
 def render() -> str:
@@ -45,11 +57,12 @@ def render() -> str:
     with _lock:
         steps = list(_state["steps"])
         cur = _state["current"]
+        completed = list(_state["completed"])
     if not steps:
         return ""
     baris = []
     for i, s in enumerate(steps, 1):
-        if i < cur:
+        if completed[i - 1]:
             baris.append(f"  ✓ {s}")
         elif i == cur:
             baris.append(f"  ▸ {s}   ← sedang dikerjakan")
@@ -75,6 +88,7 @@ def plan(steps: list, current: int = 1) -> str:
     with _lock:
         _state["steps"] = bersih
         _state["current"] = max(1, min(int(current or 1), len(bersih)))
+        _state["completed"] = [i + 1 < _state["current"] for i in range(len(bersih))]
     return ("Rencana dicatat & ditampilkan ke pengguna:\n" + render()
             + "\n\nLanjutkan langkah yang bertanda ▸. Tandai kemajuan dengan "
               "plan_step(nomor) — jangan memanggil plan lagi kecuali "
@@ -95,6 +109,10 @@ def plan_step(current: int, note: str = "") -> str:
             return ("[error] belum ada rencana. Panggil plan(steps=[...]) "
                     "lebih dulu, atau kerjakan langsung bila tugasnya sederhana.")
         _state["current"] = max(1, min(int(current or 1), n + 1))
+        # Setiap langkah sebelum current → completed = True.
+        # Flag eksplisit ini yang dibaca _panel_plan() tiap frame,
+        # jadi centang otomatis muncul begitu plan_step() dipanggil.
+        _state["completed"] = [i + 1 < _state["current"] for i in range(n)]
         selesai = _state["current"] > n
     teks = render()
     if selesai:

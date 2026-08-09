@@ -746,9 +746,10 @@ def _panel_plan() -> list:
     """Panel rencana tugas yang dipasang tetap di atas kotak chat.
 
     Hanya tampil saat ada rencana aktif (plan() sudah dipanggil, belum di-reset
-    oleh giliran berikutnya). Dibaca LANGSUNG dari state plan_tool setiap frame
+    oleh giliran berikutnya). Dibaca via plan_tool.get_state() tiap frame
     Live (~100ms), jadi selalu sinkron: centang otomatis muncul begitu
-    plan_step() memajukan langkah, tanpa perlu mekanisme notifikasi.
+    plan_step() mengubah flag completed[i] dari False ke True,
+    tanpa perlu mekanisme notifikasi.
 
     Dirender sebagai blok berbingkai tipis dengan lebar sama persis kotak chat
     (_lebar_kotak), supaya keduanya terasa satu kolom yang padu. Bila layar
@@ -756,9 +757,10 @@ def _panel_plan() -> list:
     kotak chat & bar status tak boleh terdorong keluar layar (render rich.Live
     kacau bila regionnya lebih tinggi dari layar)."""
     from ..tools import plan_tool
-    with plan_tool._lock:
-        steps = list(plan_tool._state["steps"])
-        cur = plan_tool._state["current"]
+    snap = plan_tool.get_state()
+    steps = snap["steps"]
+    cur = snap["current"]
+    completed = snap["completed"]
     if not steps:
         return []
     lebar = _lebar_kotak()
@@ -766,7 +768,7 @@ def _panel_plan() -> list:
         return []  # terminal terlalu sempit
 
     n = len(steps)
-    selesai = max(0, min(cur - 1, n))
+    selesai = sum(completed)
 
     # Layar terlalu pendek: ringkas jadi satu baris. Anggaran 10 baris =
     # footer spinner + tips + dua baris kosong + kotak chat + bar status.
@@ -813,8 +815,8 @@ def _panel_plan() -> list:
     # Body: satu baris per langkah, dengan ikon status
     for i, s in enumerate(steps, 1):
         isi = Text()
-        if i < cur:
-            # Selesai: centang hijau + teks redup (sudah lewat).
+        if completed[i - 1]:
+            # Selesai: centang hijau + teks redup (flag completed=True).
             isi.append("✓ ", style="bold #9fc93c")
             isi.append(s, style="#a89078")
         elif i == cur:
@@ -1572,7 +1574,6 @@ class Status:
         # seperti mode mengalir, supaya rencana terlihat apa pun mode tampilnya.
         plan_rows = _panel_plan()
         if plan_rows:
-            rows.append(_KOSONG)
             rows.extend(plan_rows)
         rows.append(_KOSONG)
         rows.extend(_kotak_chat())
@@ -1867,7 +1868,6 @@ class TurnView:
         # tercentang saat plan_step() memajukan langkah.
         plan_rows = _panel_plan()
         if plan_rows:
-            rows.append(_KOSONG)
             rows.extend(plan_rows)
         # Satu baris kosong di atas kotak chat — lihat _KOSONG.
         rows.append(_KOSONG)

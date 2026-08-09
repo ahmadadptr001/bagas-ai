@@ -1107,6 +1107,7 @@ def suara_tersedia() -> list[str]:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True, text=True, timeout=25,
+            encoding="utf-8", errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception:  # noqa: BLE001
         return []
