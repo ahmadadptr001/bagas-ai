@@ -36,7 +36,8 @@ INTI: tuple[str, ...] = (
     "validate_project", "run_tests", "project_info", "web_preview",
     "take_screenshot",
     # riwayat kode
-    "git_status", "git_diff", "git_log",
+    "git_status", "git_diff", "git_log", "git_commit",
+    "git_stash", "git_blame",
     # internet
     "web_search", "fetch_url",
     # ke pengguna & alur kerja
@@ -61,6 +62,7 @@ LAIN: dict[str, tuple[str, ...]] = {
     "memori": ("list_memory", "forget"),
     "proses": ("bg_stop", "bg_list"),
     "git": ("git_show",),
+    "pro": ("find_todos", "code_metrics", "diagnose", "bookmark", "changelog"),
 }
 
 # Petunjuk khusus per kategori — dulu tinggal di pesan pembuka dan dibaca setiap

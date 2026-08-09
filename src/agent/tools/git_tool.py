@@ -172,3 +172,138 @@ def git_show(ref: str = "HEAD", path: str = "", stat_only: bool = False) -> str:
     if not ok:
         return keluar
     return _potong(keluar)
+
+
+@tool
+def git_commit(message: str = "", all_changes: bool = False) -> str:
+    """Buat commit dengan DIFF PREVIEW ke pengguna sebelum menyetujui.
+
+    Tanpa tool ini, AI musti memakai run_command(\"git commit\") yang MENYENTUH
+    repo tanpa menampilkan diff dulu — melanggar prinsip tinjau-dulu. Tool ini
+    menampilkan staged diff stat sebagai pratinjau sebelum commit dibuat.
+
+    message: pesan commit. Kosong = git buka editor (tak disarankan).
+    all_changes: true = stage semua perubahan dulu (git add -A) sebelum commit.
+        false = hanya commit yang sudah di-stage.
+    """
+    ok, status = _git("status", "--porcelain=v1")
+    if not ok:
+        return status
+    if not status.strip():
+        return "tak ada perubahan untuk di-commit."
+    if all_changes:
+        ok, out = _git("add", "-A")
+        if not ok:
+            return f"gagal git add -A: {out}"
+    ok, diff = _git("diff", "--cached", "--stat")
+    if not ok:
+        return diff
+    if not diff.strip():
+        return ("tak ada perubahan yang di-stage. Panggil git add dulu, "
+                "atau set all_changes=True.")
+    args = ["commit"]
+    if message.strip():
+        args += ["-m", message.strip()]
+    ok, out = _git(*args)
+    if not ok:
+        return out
+    ok, summary = _git("log", "-1", "--no-color", "--oneline")
+    return f"{summary.strip()}\n\nStaged diff yang dicommit:\n{diff.strip()}"
+
+
+@tool
+def git_stash(action: str = "list", message: str = "", index: int = 0) -> str:
+    """Kelola git stash: simpan/kembalikan/lihat/hapus perubahan sementara.
+
+    action: \"push\" = simpan perubahan sekarang, \"pop\" = kembalikan & hapus
+        stash terakhir, \"apply\" = kembalikan tanpa hapus, \"list\" = daftar
+        semua stash, \"show\" = lihat isi stash tertentu, \"drop\" = hapus
+        stash tertentu, \"clear\" = hapus semua stash.
+    message: pesan stash (hanya untuk action=\"push\").
+    index: nomor stash (0 = terbaru, hanya untuk show/drop/apply/pop).
+    """
+    action = (action or "list").strip().lower()
+    idx = max(0, int(index or 0))
+
+    if action == "push":
+        ok, stat = _git("diff", "--stat")
+        if not ok:
+            return stat
+        if not stat.strip():
+            return "tak ada perubahan untuk di-stash."
+        args = ["stash", "push"]
+        if message.strip():
+            args += ["-m", message.strip()]
+        ok, out = _git(*args)
+        if not ok:
+            return out
+        return f"{out.strip()}\n\nDiff yang di-stash:\n{stat.strip()}"
+
+    if action == "pop":
+        target = f"stash@{{{idx}}}"
+        ok, out = _git("stash", "pop", target)
+        if not ok:
+            if "CONFLICT" in out:
+                return (f"stash pop KONFLIK:\n{out.strip()}\n\n"
+                        "Selesaikan manual, lalu git_stash drop "
+                        f"index={idx} bila sudah tak perlu.")
+            return out
+        return out.strip() or f"stash@{{{idx}}} berhasil di-pop."
+
+    if action == "apply":
+        target = f"stash@{{{idx}}}"
+        ok, out = _git("stash", "apply", target)
+        if not ok:
+            if "CONFLICT" in out:
+                return f"stash apply KONFLIK:\n{out.strip()}\n\nStash tetap ada."
+            return out
+        return out.strip() or f"stash@{{{idx}}} berhasil di-apply."
+
+    if action == "list":
+        ok, out = _git("stash", "list")
+        if not ok:
+            return out
+        return _potong(out, 50) if out.strip() else "tak ada stash."
+
+    if action == "show":
+        ok, out = _git("stash", "show", "-p", f"stash@{{{idx}}}")
+        if not ok:
+            return out
+        return _potong(out)
+
+    if action == "drop":
+        ok, out = _git("stash", "drop", f"stash@{{{idx}}}")
+        if not ok:
+            return out
+        return out.strip() or f"stash@{{{idx}}} dihapus."
+
+    if action == "clear":
+        ok, out = _git("stash", "clear")
+        if not ok:
+            return out
+        return "semua stash dihapus."
+
+    return (f"aksi '{action}' tak dikenal. Yang tersedia: "
+            "push, pop, apply, list, show, drop, clear.")
+
+
+@tool
+def git_blame(path: str = "", start_line: int = 0, end_line: int = 0) -> str:
+    """Lihat siapa menulis tiap baris — penting untuk code review dan memahami
+    konteks historis perubahan. Menunjukkan penulis, waktu, dan hash commit
+    per baris.
+
+    path: berkas yang dilihat (WAJIB).
+    start_line: baris awal (1-based, 0 = dari awal file).
+    end_line: baris akhir (1-based, 0 = sampai akhir file).
+    """
+    if not (path or "").strip():
+        return "[error] path wajib diisi."
+    args = ["blame"]
+    if start_line > 0 and end_line >= start_line:
+        args.append(f"-L{int(start_line)},{int(end_line)}")
+    args.append(path.strip())
+    ok, out = _git(*args)
+    if not ok:
+        return out
+    return _potong(out)

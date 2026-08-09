@@ -15,6 +15,7 @@ from . import interact_tool  # noqa: F401,E402
 from . import screen  # noqa: F401,E402
 from . import search  # noqa: F401,E402
 from . import extras  # noqa: F401,E402
+from . import pro  # noqa: F401,E402
 from . import validate  # noqa: F401,E402
 from . import checkpoint  # noqa: F401,E402
 from . import web_preview  # noqa: F401,E402
