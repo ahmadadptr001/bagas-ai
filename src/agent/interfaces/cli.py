@@ -742,6 +742,96 @@ def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
     return out
 
 
+def _panel_plan() -> list:
+    """Panel rencana tugas yang dipasang tetap di atas kotak chat.
+
+    Hanya tampil saat ada rencana aktif (plan() sudah dipanggil, belum di-reset
+    oleh giliran berikutnya). Dibaca LANGSUNG dari state plan_tool setiap frame
+    Live (~100ms), jadi selalu sinkron: centang otomatis muncul begitu
+    plan_step() memajukan langkah, tanpa perlu mekanisme notifikasi.
+
+    Dirender sebagai blok berbingkai tipis dengan lebar sama persis kotak chat
+    (_lebar_kotak), supaya keduanya terasa satu kolom yang padu. Bila layar
+    terlalu pendek untuk memuatnya, panel runtuh jadi SATU baris ringkas —
+    kotak chat & bar status tak boleh terdorong keluar layar (render rich.Live
+    kacau bila regionnya lebih tinggi dari layar)."""
+    from ..tools import plan_tool
+    with plan_tool._lock:
+        steps = list(plan_tool._state["steps"])
+        cur = plan_tool._state["current"]
+    if not steps:
+        return []
+    lebar = _lebar_kotak()
+    if lebar < 24:
+        return []  # terminal terlalu sempit
+
+    n = len(steps)
+    selesai = max(0, min(cur - 1, n))
+
+    # Layar terlalu pendek: ringkas jadi satu baris. Anggaran 10 baris =
+    # footer spinner + tips + dua baris kosong + kotak chat + bar status.
+    # Tanpa ambang minimum: region live TAK BOLEH lebih tinggi dari layar,
+    # berapa pun kecilnya layar (render rich.Live kacau bila itu terjadi).
+    if n + 4 > console.height - 10:
+        ringkas = Text()
+        ringkas.append("  ◈ ", style="bold #fcc048")
+        ringkas.append(f"rencana {selesai}/{n}", style="#f7d488")
+        if 1 <= cur <= n:
+            ringkas.append(f"  ▸ {steps[cur - 1]}", style="#f2e3cc")
+        return [_oneline(ringkas)]
+
+    tepi = "#4a3826"
+
+    def dibingkai(isi: Text) -> Text:
+        """Tepi kiri/kanan + padding kanan sehingga baris selebar `lebar` persis.
+        Isi dipotong lebih dulu — tanpa ini, judul yang panjang mendorong tepi
+        kanan keluar layar dan bingkainya patah."""
+        isi.truncate(lebar - 4, overflow="ellipsis")
+        b = Text()
+        b.append("│ ", style=tepi)
+        b.append(isi)
+        pad = (lebar - 1) - b.cell_len
+        if pad > 0:
+            b.append(" " * pad)
+        b.append("│", style=tepi)
+        return _oneline(b)
+
+    out = [_oneline(Text("╭" + "─" * (lebar - 2) + "╮", style=tepi))]
+
+    # Header: judul + counter langkah selesai. Pakai "◈" alih-alih emoji —
+    # lebarnya pasti 1 kolom di semua terminal, jadi tepi kanan bingkai kotak
+    # ini tetap lurus (lebar emoji bisa tak sepakat antara rich & terminal).
+    header = Text()
+    header.append("◈ ", style="bold #fcc048")
+    header.append("rencana", style="bold #f2e3cc")
+    header.append(f"  ·  {selesai}/{n} selesai", style="dim #a89078")
+    out.append(dibingkai(header))
+
+    # Separator tipis
+    out.append(_oneline(Text("├" + "─" * (lebar - 2) + "┤", style=tepi)))
+
+    # Body: satu baris per langkah, dengan ikon status
+    for i, s in enumerate(steps, 1):
+        isi = Text()
+        if i < cur:
+            # Selesai: centang hijau + teks redup (sudah lewat).
+            isi.append("✓ ", style="bold #9fc93c")
+            isi.append(s, style="#a89078")
+        elif i == cur:
+            # Sedang dikerjakan: panah kuning + teks terang.
+            isi.append("▸ ", style="bold #fcc048")
+            isi.append(s, style="#f2e3cc")
+        else:
+            # Belum: titik redup + teks redup.
+            isi.append("· ", style="#7a5c3a")
+            isi.append(s, style="#7a5c3a")
+        out.append(dibingkai(isi))
+
+    # Garis bawah
+    out.append(_oneline(Text("╰" + "─" * (lebar - 2) + "╯", style=tepi)))
+    return out
+
+
 # --- memaku tampilan ke DASAR LAYAR ----------------------------------------
 #
 # Saat idle tak ada yang perlu dilakukan: prompt_toolkit selalu memberi aplikasi
@@ -1477,12 +1567,17 @@ class Status:
         Rupa kotaknya sama persis dengan kotak idle — kosong, tanpa teks ajakan
         apa pun. Kotak chat cuma SATU, jadi ia tak boleh berganti wajah hanya
         karena AI sedang sibuk."""
-        return Group(
-            self._baris_status(),
-            _KOSONG,
-            *_kotak_chat(),
-            _bar_status(self.agent, self.total()),
-        )
+        rows = [self._baris_status(), _KOSONG]
+        # Panel rencana (bila ada) — menempel di atas kotak chat, SAMA PERSIS
+        # seperti mode mengalir, supaya rencana terlihat apa pun mode tampilnya.
+        plan_rows = _panel_plan()
+        if plan_rows:
+            rows.append(_KOSONG)
+            rows.extend(plan_rows)
+        rows.append(_KOSONG)
+        rows.extend(_kotak_chat())
+        rows.append(_bar_status(self.agent, self.total()))
+        return Group(*rows)
 
     def _baris_status(self) -> Text:
         el = time.time() - self.start
@@ -1576,10 +1671,12 @@ class TurnView:
 
     SEMUA konten (narasi, langkah, diff, jawaban) dicetak STATIS ke scrollback
     begitu tersedia — tidak ada yang dirender di region tetap yang
-    menimpa/menutupi apa pun. Yang hidup (rich.Live) cuma empat baris di paling
-    bawah: spinner status, tips, KOTAK CHAT, lalu BAR STATUS. Tingginya kecil &
-    tetap (tiap baris _oneline anti-wrap), jadi ia tak pernah lebih tinggi dari
-    layar dan tak pernah menutupi ketikan pengguna maupun diff — akar bug
+    menimpa/menutupi apa pun. Yang hidup (rich.Live) cuma baris-baris di paling
+    bawah: spinner status, tips, PANEL RENCANA (bila ada), KOTAK CHAT, lalu BAR
+    STATUS. Tingginya kecil & tetap (tiap baris _oneline anti-wrap; panel
+    rencana runtuh jadi satu baris bila layar tak cukup), jadi ia tak pernah
+    lebih tinggi dari layar dan tak pernah menutupi ketikan pengguna maupun
+    diff — akar bug
     "kotak animasi menimpa input" pada desain lama yang menaruh langkah +
     pratinjau di region live.
 
@@ -1741,17 +1838,23 @@ class TurnView:
 
     def __rich__(self):
         """Region live, dari atas ke bawah: kalimat yang sedang ditulis AI ·
-        spinner + tips · KOTAK CHAT · BAR STATUS.
+        spinner + tips · PANEL RENCANA (bila ada) · KOTAK CHAT · BAR STATUS.
 
-        Dua yang terakhir urutannya HARAM ditukar atau dilewati: kotak chat
-        menempel persis di atas bar status, sama seperti saat idle. Itulah yang
-        membuat tempat mengetik terasa satu benda yang tak pernah pindah —
-        segala yang hidup (spinner, tips, kalimat AI) tumbuh ke ATAS, bukan
+        Tiga yang terakhir urutannya HARAM ditukar atau dilewati: panel rencana
+        (bila aktif) menempel tepat di atas kotak chat, dan kotak chat menempel
+        persis di atas bar status, sama seperti saat idle. Itulah yang membuat
+        tempat mengetik terasa satu benda yang tak pernah pindah — segala yang
+        hidup (spinner, tips, kalimat AI, panel rencana) tumbuh ke ATAS, bukan
         menyelip di antara keduanya.
 
-        Semua baris _oneline anti-wrap -> tinggi kecil & stabil, selalu muat di
-        layar, tak pernah menimpa konten yang sudah tercetak. Saat done, region
-        dikosongkan: semuanya sudah berada di scrollback."""
+        Panel rencana dibaca LANGSUNG dari state plan_tool setiap frame, jadi
+        centang otomatis muncul begitu plan_step() memajukan langkah, tanpa
+        perlu mekanisme notifikasi. Tinggi region bertambah saat plan aktif
+        (maks ~16 baris: 12 langkah + bingkai), tetap aman di layar standar.
+
+        Semua baris _oneline anti-wrap -> lebar stabil, tak pernah menimpa
+        konten yang sudah tercetak. Saat done, region dikosongkan: semuanya
+        sudah berada di scrollback."""
         if self.done:
             return Text("")
         rows = []
@@ -1760,7 +1863,13 @@ class TurnView:
             rows.extend(footer.renderables)
         else:
             rows.append(footer)
-        # Satu baris kosong di atas & di bawah kotak chat — lihat _KOSONG.
+        # Panel rencana (bila ada) — menempel di atas kotak chat, otomatis
+        # tercentang saat plan_step() memajukan langkah.
+        plan_rows = _panel_plan()
+        if plan_rows:
+            rows.append(_KOSONG)
+            rows.extend(plan_rows)
+        # Satu baris kosong di atas kotak chat — lihat _KOSONG.
         rows.append(_KOSONG)
         rows.extend(self._kotak_ketikan())
         rows.append(_bar_status(self.agent, self.total()))
