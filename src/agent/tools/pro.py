@@ -29,6 +29,7 @@ def find_todos(pattern: str = "", max_results: int = 80) -> str:
     pattern: batasi ke berkas tertentu, mis. '*.py' (kosong = semua).
     max_results: batas jumlah temuan (default 80).
     """
+    max_results = max(1, int(max_results or 80))
     _POLA = re.compile(
         r"\b(TODO|FIXME|HACK|NOTE|XXX|BUG|WARN|OPTIMIZE|REFACTOR)\b",
         re.IGNORECASE,
@@ -124,6 +125,7 @@ def code_metrics(pattern: str = "") -> str:
         return True
 
     stats: dict[str, dict] = {}  # ext -> {files, lines, defs, chars}
+    all_files: list[tuple[int, str]] = []
     for p in _telusuri(ROOT):
         if not _lolos(p):
             continue
@@ -138,6 +140,7 @@ def code_metrics(pattern: str = "") -> str:
         stats[ext]["lines"] += len(baris)
         stats[ext]["chars"] += len(teks)
         stats[ext]["defs"] += sum(1 for b in baris if _POLA_DEF.search(b))
+        all_files.append((len(baris), _rel(p)))
 
     if not stats:
         return "tak ada berkas ditemukan."
@@ -158,15 +161,8 @@ def code_metrics(pattern: str = "") -> str:
     if len(items) > 25:
         out.append(f"  … {len(items) - 25} ekstensi lagi")
 
-    # Top file terbesar
-    all_files: list[tuple[int, str]] = []
-    for p in _telusuri(ROOT):
-        if not _lolos(p):
-            continue
-        teks = _isi(p)
-        if teks is None:
-            continue
-        all_files.append((len(teks.split("\n")), _rel(p)))
+    # Top file terbesar — dikumpulkan pada lintasan statistik di atas;
+    # membaca ulang seluruh proyek dua kali hanya untuk ini terlalu mahal.
     all_files.sort(reverse=True)
     out.append(f"\nBerkas terbesar:")
     for n, rel in all_files[:5]:
@@ -309,13 +305,14 @@ def bookmark(action: str = "list", name: str = "", path: str = "", line: int = 0
             return "[error] nama bookmark wajib diisi."
         if not path.strip():
             return "[error] path wajib diisi."
+        nline = max(1, int(line or 1))
         project_bms[name.strip()] = {
-            "path": path.strip(), "line": max(1, int(line or 1)),
+            "path": path.strip(), "line": nline,
             "time": time.strftime("%Y-%m-%d %H:%M"),
         }
         data[key] = project_bms
         _save(data)
-        return f"bookmark '{name.strip()}' disimpan: {path.strip()}:{line}"
+        return f"bookmark '{name.strip()}' disimpan: {path.strip()}:{nline}"
 
     if action == "list":
         if not project_bms:
@@ -369,7 +366,8 @@ def changelog(since_tag: str = "", limit: int = 50) -> str:
     args = ["log", f"-{n}", "--no-color", "--date=short",
             "--pretty=format:%h  %ad  %an  %s"]
     if since_tag.strip():
-        args = ["log", f"{since_tag.strip()}..HEAD", "--no-color",
+        # -{n} ikut dibawa: dulunya limit hanya terpakai saat tanpa tag.
+        args = ["log", f"{since_tag.strip()}..HEAD", f"-{n}", "--no-color",
                 "--date=short", "--pretty=format:%h  %ad  %an  %s"]
 
     ok, out = _git(*args)
@@ -384,8 +382,10 @@ def changelog(since_tag: str = "", limit: int = 50) -> str:
     baris = out.strip().splitlines()
     per_tanggal: dict[str, list[str]] = {}
     for b in baris:
-        # format: hash  date  author  subject
-        bagian = b.split(None, 3)
+        # format: hash  date  author  subject. Pecah pada DUA spasi, bukan
+        # sembarang whitespace: nama penulis bisa memuat spasi tunggal, dan
+        # split(None) akan memotong namanya jadi dua bagian.
+        bagian = b.split("  ", 3)
         if len(bagian) >= 4:
             tgl = bagian[1]
             entri = f"  {bagian[0]}  {bagian[3]}  ({bagian[2]})"

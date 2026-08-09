@@ -3131,7 +3131,7 @@ def main(resume: bool = False) -> None:
         items = [f"{nama}{' (aktif)' if key == aktif else ''}"
                  for key, nama in pilihan]
         try:
-            sel = ui.select("Pilih browser:", items).value
+            sel = inquirer.select(message="Pilih browser:", choices=items).execute()
         except (KeyboardInterrupt, EOFError):
             return
         # Pengguna memilih nama, cari key-nya. startswith tak cukup: "Chrome"

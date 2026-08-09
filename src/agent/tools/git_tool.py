@@ -182,10 +182,14 @@ def git_commit(message: str = "", all_changes: bool = False) -> str:
     repo tanpa menampilkan diff dulu — melanggar prinsip tinjau-dulu. Tool ini
     menampilkan staged diff stat sebagai pratinjau sebelum commit dibuat.
 
-    message: pesan commit. Kosong = git buka editor (tak disarankan).
+    message: pesan commit (WAJIB — pesan kosong ditolak supaya git tak
+        mencoba membuka editor yang menggantung di sini).
     all_changes: true = stage semua perubahan dulu (git add -A) sebelum commit.
         false = hanya commit yang sudah di-stage.
     """
+    if not message.strip():
+        return ("[error] pesan commit wajib diisi — tanpa pesan git akan "
+                "mencoba membuka editor, dan itu menggantung di sini.")
     ok, status = _git("status", "--porcelain=v1")
     if not ok:
         return status
@@ -226,7 +230,10 @@ def git_stash(action: str = "list", message: str = "", index: int = 0) -> str:
     idx = max(0, int(index or 0))
 
     if action == "push":
-        ok, stat = _git("diff", "--stat")
+        # Bandingkan dengan HEAD, bukan diff worktree polos: diff polos
+        # buta terhadap perubahan yang sudah di-stage, sehingga stash
+        # dilaporkan kosong padahal git stash push mau menyimpannya.
+        ok, stat = _git("diff", "--stat", "HEAD")
         if not ok:
             return stat
         if not stat.strip():
@@ -300,8 +307,15 @@ def git_blame(path: str = "", start_line: int = 0, end_line: int = 0) -> str:
     if not (path or "").strip():
         return "[error] path wajib diisi."
     args = ["blame"]
+    # -L punya tiga bentuk: "mulai,akhir", "mulai," (sampai EOF), dan
+    # "1,akhir". Dulunya hanya bentuk pertama yang terpakai, jadi meminta
+    # "dari baris N sampai akhir" diam-diam menyalahkan seluruh file.
     if start_line > 0 and end_line >= start_line:
         args.append(f"-L{int(start_line)},{int(end_line)}")
+    elif start_line > 0:
+        args.append(f"-L{int(start_line)},")
+    elif end_line > 0:
+        args.append(f"-L1,{int(end_line)}")
     args.append(path.strip())
     ok, out = _git(*args)
     if not ok:
