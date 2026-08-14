@@ -2883,11 +2883,39 @@ def main(resume: bool = False) -> None:
                             worker_thread.join(timeout=0.1)
                         elif _msvcrt is not None:
                             if _msvcrt.kbhit():
-                                ch = _msvcrt.getwch()
-                                if ch == "\x03":              # Ctrl+C
-                                    raise KeyboardInterrupt
+                                # Kumpulkan seluruh karakter yang menunggu di buffer
+                                # console. Tempelan menghasilkan rentetan panjang;
+                                # jika dibaca satu per satu, baris-baru di dalamnya
+                                # memecahnya jadi banyak pesan terpisah dan membengkakkan
+                                # layar karena tak sempat diringkas.
+                                rentetan = []
+                                while _msvcrt.kbhit():
+                                    rentetan.append(_msvcrt.getwch())
+                                teks_mentah = "".join(rentetan)
+
+                                # Karakter extended (panah, dll) datang berpasangan
+                                # dengan \x00/\xe0 -> proses per karakter seperti biasa.
+                                if len(teks_mentah) == 1 or "\x00" in teks_mentah or "\xe0" in teks_mentah:
+                                    for ch in teks_mentah:
+                                        if ch == "\x03":
+                                            raise KeyboardInterrupt
+                                        _ketik(ch)
                                 else:
-                                    _ketik(ch)
+                                    # Tempelan: ganti baris-baru jadi spasi karena kotak
+                                    # ini satu baris. Jika panjang, ringkas jadi penanda.
+                                    simpanan = _tempelan.simpanan()
+                                    kirim = teks_mentah.endswith(("\r", "\n"))
+                                    bersih = teks_mentah.replace("\r", " ").replace("\n", " ").rstrip()
+                                    if simpanan.perlu_diringkas(bersih):
+                                        bersih = simpanan.simpan(bersih)
+                                    if bersih:
+                                        p = typing_state["pos"]
+                                        buf = typing_state["buf"]
+                                        typing_state["buf"] = buf[:p] + bersih + buf[p:]
+                                        typing_state["pos"] = p + len(bersih)
+                                        _sinkron()
+                                    if kirim:
+                                        _ketik("\r")
                             else:
                                 time.sleep(0.03)
                         else:
