@@ -1,0 +1,3 @@
+[flake8]
+exclude = build,.githooks,src/bagasai.egg-info
+max-line-length = 100

@@ -12,6 +12,7 @@ satu pun teks di layar yang membahas antrean.
 """
 from __future__ import annotations
 
+from collections import deque
 import difflib
 import re
 import subprocess
@@ -320,12 +321,11 @@ def _update_notice() -> None:
             n = cache.get("behind", "?")
             local, remote = cache.get("local", ""), cache.get("remote", "")
             ver = f" ({local} → {remote})" if local and remote else ""
-            pout(
+            _tambah_konten([Padding(Text.from_markup(
                 f"[#f7d488]⬆ Pembaruan bagas-ai tersedia[/] "
                 f"[dim]— {n} commit lebih baru{ver} (pemasangan otomatis "
-                f"gagal).[/dim]  Ketik [#ffb861]/update[/] untuk mencoba lagi.",
-                bottom=0,
-            )
+                f"gagal).[/dim]  Ketik [#ffb861]/update[/] untuk mencoba lagi."),
+                (0, _LPAD, 0, _LPAD))])
         # Segarkan cache di thread latar; startup berikutnya otomatis
         # MEMASANG pembaruan yang ditemukan (paksa, tanpa tanya).
         updater.background_refresh(min_interval=1800)
@@ -580,6 +580,161 @@ def _lebar_kotak() -> int:
 # ada: kotak dan bar status satu kesatuan yang menempel di dasar layar, jadi
 # celah di antara keduanya justru memutus kesatuan itu.
 _KOSONG = Text("")
+
+
+# --- konten percakapan: tumpukan bawah yang menempel ke dasar layar ---------
+#
+# SEMUA konten percakapan (logo pembuka, gema perintah, narasi, langkah,
+# jawaban) ditampung di buffer ini — BUKAN dicetak ke scrollback. Region bawah
+# (rich.Live saat giliran berjalan, layout prompt_toolkit saat idle) merender
+# baris-baris TERAKHIR buffer ini tepat di atas panel rencana / kotak chat.
+# Karena konten ikut di-render ulang, ia ikut menempel ke dasar layar dan ikut
+# berpindah saat terminal diubah ukurannya — inilah yang membedakannya dari
+# scrollback, yang tak bisa digeser dan karena itu "menjauh" dari kotak setiap
+# kali terminal dinaikkan.
+#
+# Batas baris (_KONTEN_MAKS) mengunci memori: baris tertua dibuang begitu
+# lewat, dan yang dibuang tak bisa digulung lagi — konsekuensi desain ini.
+_KONTEN: deque[list[Text]] = deque()
+_KONTEN_MAKS = 2000
+_KONTEN_KUNCI = threading.Lock()
+
+
+def _tambah_konten(renderables) -> None:
+    """Render `renderables` SEKALI lalu simpan sebagai satu blok konten.
+
+    Dipanggil dari thread worker maupun thread utama (karena itu di bawah
+    kunci). Render dilakukan di SINI, bukan tiap frame Live, supaya region
+    tetap murah: blok tersimpan sebagai baris Text siap-pakai."""
+    if not renderables:
+        return
+    try:
+        baris = console.render_lines(Group(*renderables))
+    except Exception:  # noqa: BLE001 - render gagal: jangan jatuhkan app
+        return
+    blok = []
+    for seg_baris in baris:
+        t = Text()
+        for seg in seg_baris:
+            if seg.text:
+                t.append(seg.text, style=seg.style)
+        t.no_wrap = True
+        t.overflow = "ellipsis"
+        blok.append(t)
+    if not blok:
+        return
+    with _KONTEN_KUNCI:
+        _KONTEN.append(blok)
+        total = sum(len(b) for b in _KONTEN)
+        while total > _KONTEN_MAKS:
+            total -= len(_KONTEN.popleft())
+
+
+def _reset_konten() -> None:
+    """Kosongkan buffer konten — dipakai /new dan /clear (layar mulai baru)."""
+    with _KONTEN_KUNCI:
+        _KONTEN.clear()
+
+
+def _baris_konten(limit: int) -> list[Text]:
+    """`limit` baris TERAKHIR konten; baris terbaru di ujung daftar.
+
+    Berjalan dari blok TERBARU ke belakang, menempelkan ekor tiap blok di
+    DEPAN hasil — urutan tua→baru tetap terjaga baik di dalam blok maupun
+    antar-blok."""
+    if limit <= 0:
+        return []
+    with _KONTEN_KUNCI:
+        if not _KONTEN:
+            return []
+        ambil: list[Text] = []
+        sisa = limit
+        for blok in reversed(_KONTEN):
+            if sisa <= 0:
+                break
+            ambil[0:0] = blok[-sisa:]
+            sisa -= len(blok)
+        return ambil
+
+
+def _pt_gaya(st) -> str:
+    """rich Style -> string gaya prompt_toolkit (untuk jendela idle)."""
+    bag = []
+    if st.bold:
+        bag.append("bold")
+    if st.italic:
+        bag.append("italic")
+    if st.dim:
+        bag.append("dim")
+    if st.underline:
+        bag.append("underline")
+    if st.strike:
+        bag.append("strike")
+    if st.blink:
+        bag.append("blink")
+    if st.reverse:
+        bag.append("reverse")
+    for awalan, w in (("fg", st.color), ("bg", st.bgcolor)):
+        if w is None or w.is_default:
+            continue
+        tc = w.get_truecolor()
+        if tc is not None:
+            bag.append(f"{awalan}:#{tc.red:02x}{tc.green:02x}{tc.blue:02x}")
+        elif w.name and w.name != "default":
+            bag.append(f"{awalan}:{w.name}")
+    return " ".join(bag)
+
+
+def _pt_dari_teks(t: Text) -> list[tuple[str, str]]:
+    """Satu baris rich Text -> formatted text prompt_toolkit."""
+    out = []
+    for seg in t.render(console):
+        if not seg.text:
+            continue
+        st = seg.style or Style.null()
+        out.append((_pt_gaya(st), seg.text))
+    return out
+
+
+def _konten_idle_pt() -> list[tuple[str, str]]:
+    """Konten untuk jendela idle prompt_toolkit, di atas panel rencana.
+
+    Dipanggil tiap render prompt_toolkit (termasuk saat resize), jadi tinggi
+    jendela selalu menyesuaikan layar dan isinya selalu yang terbaru. Apa pun
+    yang gagal di sini tak boleh menjatuhkan kotak input — dikembalikan kosong."""
+    try:
+        # Anggaran: napas 1 + kotak 3 + bar status 1 + aman 1; panel rencana
+        # digambar oleh jendela terpisah (_plan_idle_pt), jadi sisakan untuknya.
+        plan = _panel_plan()
+        isi = _baris_konten(max(0, console.height - 6 - len(plan)))
+        out: list[tuple[str, str]] = []
+        for i, t in enumerate(isi):
+            if i:
+                out.append(("", "\n"))
+            out.extend(_pt_dari_teks(t))
+        return out
+    except Exception:  # noqa: BLE001 - render gagal: jangan jatuhkan kotak
+        return []
+
+
+def _plan_idle_pt() -> list[tuple[str, str]]:
+    """Baris panel rencana untuk jendela idle (kosong bila tak ada rencana).
+
+    Jendela terpisah dari konten supaya panel rencana menempel LANGSUNG di
+    atas kotak chat — sama persis seperti region rich saat giliran berjalan
+    (bingkai ╰─╯ dan ╭─╮ bersentuhan)."""
+    try:
+        plan = _panel_plan()
+        if not plan:
+            return []
+        out: list[tuple[str, str]] = []
+        for i, t in enumerate(plan):
+            if i:
+                out.append(("", "\n"))
+            out.extend(_pt_dari_teks(t))
+        return out
+    except Exception:  # noqa: BLE001 - render gagal: jangan jatuhkan kotak
+        return []
 
 
 # --- menu pilihan untuk ask_user -------------------------------------------
@@ -869,14 +1024,28 @@ def _sisa_baris_bawah() -> int | None:
 
 
 def _ke_dasar_layar() -> None:
-    """Dorong kursor ke baris TERAKHIR layar memakai baris kosong.
+    """Dorong kursor ke baris TERAKHIR layar, kolom 0.
 
     Baris kosongnya jatuh di petak yang barusan ditinggalkan kotak idle (sudah
-    dihapus, jadi memang kosong), sehingga tak ada celah baru yang terlihat."""
+    dihapus, jadi memang kosong), sehingga tak ada celah baru yang terlihat.
+
+    KOLOM juga dikembalikan ke 0 — bukan cuma barisnya. Setelah region live
+    selesai digambar, kursor bisa tertinggal di kolom akhir baris terakhirnya
+    (posisi "pending wrap"), dan aplikasi prompt_toolkit inline (menu ask_user)
+    menggambar baris pertamanya PERSIS di posisi kursor itu: tanpa reset kolom,
+    tepi atas kotaknya mulai dari tengah layar dan tampak terpotong."""
     sisa = _sisa_baris_bawah()
-    if sisa and sisa > 1:
-        console.file.write("\n" * (sisa - 1))
-        console.file.flush()
+    if sisa is None:
+        return
+    if sisa > 1:
+        # \r\n: baris baru sekaligus kolom 0. (Di Windows, sys.stdout
+        # menambahkan \r sendiri pada \n, jadi ini menjadi \r\r\n — \r
+        # ekstra tak berbahaya, cuma mengulang "ke kolom 0".)
+        console.file.write("\r\n" * (sisa - 1))
+    else:
+        # Sudah di baris terbawah: cukup kembalikan kolomnya ke 0.
+        console.file.write("\r")
+    console.file.flush()
 
 
 # --- bar status permanen ---------------------------------------------------
@@ -1131,17 +1300,30 @@ class KotakChat:
             # _lebar_kotak), sejajar dengan bar status di bawahnya.
         return HSplit([
             # PENDORONG. Inilah yang memakukan kotak + bar ke DASAR LAYAR:
-            # prompt_toolkit selalu memberi aplikasi non-fullscreen setinggi
-            # sisa baris di bawah kursor (renderer: height = max(
-            # _min_available_height, …)), jadi ruang itu memang sudah ada —
-            # dulu saja seluruhnya menumpuk di atas sehingga kotaknya
-            # menggantung di tengah layar. Window lentur ini menelan sisa
-            # ruangnya, dan yang di bawahnya terdorong mentok ke bawah.
+            # prompt_toolkit memberi aplikasi non-fullscreen setinggi sisa
+            # baris di bawah kursor (renderer: height = max(
+            # _min_available_height, …)) dan menyegarkannya lagi tiap resize
+            # (polling terminal_size_polling_interval), jadi ruang itu memang
+            # sudah ada — dulu saja seluruhnya menumpuk di atas sehingga
+            # kotaknya menggantung di tengah layar. Window lentur ini menelan
+            # sisa ruangnya, dan yang di bawahnya terdorong mentok ke bawah.
             Window(),
+            # KONTEN PERCAKAPAN — ikut di dalam layout supaya ia menempel ke
+            # dasar bersama kotak & bar status (pendorong di atasnya yang
+            # mengatur), dan ikut berpindah saat terminal diubah ukurannya.
+            # FormattedTextControl dipanggil tiap render, jadi isinya selalu
+            # baris terbaru dari _KONTEN.
+            Window(FormattedTextControl(_konten_idle_pt), dont_extend_height=True,
+                   wrap_lines=False),
             # Satu baris napas di atas kotak — kembaran _KOSONG di sisi rich,
             # supaya jaraknya tak berubah sedikit pun saat giliran selesai dan
             # tampilannya berpindah tangan dari rich ke sini.
             Window(height=1),
+            # Panel rencana (bila ada) — jendela terpisah yang menempel
+            # langsung di atas kotak, sama seperti region rich (bila tak ada
+            # rencana, tingginya nol sehingga tak terlihat).
+            Window(FormattedTextControl(_plan_idle_pt), dont_extend_height=True,
+                   wrap_lines=False),
             kotak,
             # TANPA baris kosong di sini: bar status menempel langsung.
             Window(FormattedTextControl(self._status), height=1,
@@ -1160,6 +1342,7 @@ class KotakChat:
         n = len(default)
         kursor = n if posisi is None else max(0, min(int(posisi), n))
         self.buffer.reset(Document(default, kursor))
+        _ke_dasar_layar()
         return self.app.run()
 
     # Sebab kegagalan terakhir kirim_dari_luar, untuk ditampilkan ke pengguna.
@@ -1285,11 +1468,14 @@ def _isi_sebelum_sesudah(name: str, path: str, args: dict):
     return old, old, exists
 
 
-def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200) -> None:
+def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200,
+                ke_konten: bool = False) -> None:
     """Tampilan editor: header status + line-numbered diff (bg hijau/merah).
 
-    Seluruh diff dicetak SEKALI sebagai satu Group (statis, atomik) — mengalir
-    ke scrollback seperti output biasa, tak pernah disela/ditimpa footer live."""
+    Seluruh diff dicetak SEKALI sebagai satu Group (statis, atomik) — tak
+    pernah disela/ditimpa footer live. `ke_konten=True` mengarahkannya ke
+    tumpukan bawah (mode mengalir); tanpa itu ia mengalir ke scrollback
+    (mode klasik)."""
     icon, label = ("✨", "dibuat") if is_new else ("📝", "diubah")
     rows: list = [Text.from_markup(
         f"\n  [bold]{icon} [cyan]{_esc(path)}[/cyan][/bold] [dim]({label})[/dim]")]
@@ -1327,10 +1513,14 @@ def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200) -
             old_ln += 1
             new_ln += 1
         shown += 1
-    console.print(Group(*rows))
+    if ke_konten:
+        _tambah_konten(rows)
+    else:
+        console.print(Group(*rows))
 
 
-def _print_delete(path: str, content: str, limit: int = 80) -> None:
+def _print_delete(path: str, content: str, limit: int = 80,
+                  ke_konten: bool = False) -> None:
     rows: list = [Text.from_markup(
         f"\n  [bold]🗑 [cyan]{_esc(path)}[/cyan][/bold] [dim](dihapus)[/dim]")]
     warna = _pewarna(path, content)
@@ -1339,7 +1529,10 @@ def _print_delete(path: str, content: str, limit: int = 80) -> None:
             rows.append(Text("  ... (dipotong)", style="dim"))
             break
         rows.append(_row(str(i), "-", _ambil(warna, i) or line, _DEL))
-    console.print(Group(*rows))
+    if ke_konten:
+        _tambah_konten(rows)
+    else:
+        console.print(Group(*rows))
 
 
 def _logo_content() -> Group:
@@ -1873,18 +2066,28 @@ class TurnView:
         rows = []
         footer = self._footer()
         if isinstance(footer, Group):
-            rows.extend(footer.renderables)
+            footer_rows = list(footer.renderables)
         else:
-            rows.append(footer)
-        # Panel rencana (bila ada) — menempel di atas kotak chat, otomatis
-        # tercentang saat plan_step() memajukan langkah.
+            footer_rows = [footer]
+        # Urutan dari atas ke bawah: KONTEN -> BARIS STATUS (kegiatan/waktu/
+        # token/tool + tips) -> PANEL RENCANA -> KOTAK -> BAR. Baris status
+        # WAJIB di atas kotak chat, bahkan di atas panel rencana; konten
+        # percakapan mengalir di atasnya (baris terbaru di dasar blok, yang
+        # lama terdorong ke atas dan tergulung keluar layar). Semua bagian
+        # ikut menempel ke dasar karena region live di-render ulang.
         plan_rows = _panel_plan()
+        tinggi_status = len(footer_rows)
+        tetap = tinggi_status + len(plan_rows) + 3 + 1 + 2  # + kotak+bar+napas+aman
+        konten = _baris_konten(max(0, console.height - tetap))
+        if konten:
+            rows.extend(konten)
+        # Napas antara konten dan zona status di bawahnya.
+        rows.append(_KOSONG)
+        rows.extend(footer_rows)
         if plan_rows:
-            rows.extend(plan_rows)
             # Panel plan menempel langsung ke kotak ketikan
             # — bingkai ╰─╯ dan ╭─╮ bersentuhan, tak perlu napas.
-        else:
-            rows.append(_KOSONG)
+            rows.extend(plan_rows)
         rows.extend(self._kotak_ketikan())
         rows.append(_bar_status(self.agent, self.total()))
         return Group(*rows)
@@ -1962,9 +2165,6 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
 # ---------------------------------------------------------------------------
 def main(resume: bool = False) -> None:
     console.clear()
-    show_logo()          # tampil segera setelah preload -> pengguna tahu app hidup
-    console.print()
-
     # Persiapan cepat (deteksi OS, baca sesi, peta proyek). Bar loading BERTAHAP
     # sudah ditampilkan saat impor pustaka (di __main__._preload_with_bar) — fase
     # yang benar-benar lama. Sisa kerja di sini ringan; untuk pemindaian proyek
@@ -1995,10 +2195,10 @@ def main(resume: bool = False) -> None:
         _primed_map = projectindex.prime(config.PROJECT_ROOT)
     except Exception as _prime_exc:  # noqa: BLE001
         _primed_map = ""
-        console.print(
+        _tambah_konten([Text.from_markup(
             "  [yellow]⚠ peta proyek dilewati saat start[/] "
             f"[dim](instalasi tampaknya belum tuntas: {type(_prime_exc).__name__}). "
-            "Tutup bagas-ai lalu reinstall/`bagasai update` bila ini berulang.)[/]")
+            "Tutup bagas-ai lalu reinstall/`bagasai update` bila ini berulang.)[/]")])
 
     agent = Agent(session=session)   # instan: pakai peta cache / tanpa peta dulu
 
@@ -2013,40 +2213,47 @@ def main(resume: bool = False) -> None:
             pass
 
     threading.Thread(target=_bg_build_map, daemon=True).start()
-    # Pemanasan impor `openai` DIHAPUS bersama klien API — pustaka itu tak lagi
-    # dipakai sama sekali. (Padanannya untuk jalur browser sudah ada di tempat
-    # lain: sesi Playwright dihidupkan sekali lalu dipertahankan antar giliran.)
-    pout(_banner(agent, resumed), bottom=0)
+    # Logo + info startup masuk ke TUMPUKAN BAWAH (bukan dicetak di puncak layar
+    # yang kosong), jadi saat prompt pertama muncul, logo menempel tepat di atas
+    # kotak chat — bukan menggantung di atas ruang kosong yang lebar. Begitu
+    # percakapan bertambah, logo terdorong ke atas dan akhirnya tergulung keluar.
+    _tambah_konten([Padding(_banner(agent, resumed), (0, _LPAD, 0, _LPAD))])
     if resumed:
-        console.print(Padding(Rule("[dim]percakapan sebelumnya[/dim]",
-                                    style="#3a2a1a"), (1, 0, 0, 0)))
+        _tambah_konten([Padding(Rule("[dim]percakapan sebelumnya[/dim]",
+                                     style="#3a2a1a"), (1, 0, 0, 0))])
         for m in agent.memory.messages:
             role, content = m.get("role"), (m.get("content") or "")
             if role == "user":
                 # WAJIB di-escape: teks pengguna yang memuat '[i]' / '[red]'
                 # (lazim di kode, mis. arr[i]) akan ditafsirkan rich sebagai
                 # markup — teks berubah gaya & kurungnya hilang saat replay.
-                console.print(f"\n  [on #2b2b2b bold #ffffff] {_esc(content)} [/]")
+                _tambah_konten([Text.from_markup(
+                    f"\n  [on #2b2b2b bold #ffffff] {_esc(content)} [/]")])
             elif role == "assistant" and content:
-                console.print("\n  [bold #fc9018]🤖 bagas-ai[/]")
-                console.print(Padding(_md(content), (1, 3, 0, 3)))
-        console.print(Rule("[dim]lanjut di bawah[/dim]", style="#3a2a1a"))
+                _tambah_konten([
+                    Text.from_markup("\n  [bold #fc9018]🤖 bagas-ai[/]"),
+                    Padding(_md(content), (1, 3, 0, 3)),
+                ])
+        _tambah_konten([Padding(Rule("[dim]lanjut di bawah[/dim]",
+                                     style="#3a2a1a"), (1, 0, 0, 0))])
     if os_status in ("added", "updated"):
         verb = "terdeteksi & disimpan" if os_status == "added" else "diperbarui"
-        pout(f"[dim]🖥  OS {verb}: {osinfo.summary()} — perintah terminal akan "
-             f"disesuaikan.[/dim]", bottom=0)
+        _tambah_konten([Padding(Text.from_markup(
+            f"[dim]🖥  OS {verb}: {osinfo.summary()} — perintah terminal akan "
+            f"disesuaikan.[/dim]"), (0, _LPAD, 0, _LPAD))])
     # Peta proyek: dari cache instan (disegarkan di latar), atau sedang dibangun
     # pertama kali di latar — dua-duanya TANPA menunda prompt.
     _pn = _primed_map.count("\n- ")
     if _pn:
-        pout(f"[dim]🗺  peta proyek siap (~{_pn} file) — disegarkan di latar; "
-             f"ketik [/][#ffb861]/scan[/][dim] untuk paksa pindai ulang.[/]",
-             bottom=0)
+        _tambah_konten([Padding(Text.from_markup(
+            f"[dim]🗺  peta proyek siap (~{_pn} file) — disegarkan di latar; "
+            f"ketik [/][#ffb861]/scan[/][dim] untuk paksa pindai ulang.[/]"),
+            (0, _LPAD, 0, _LPAD))])
     else:
-        pout("[dim]🗺  peta proyek dibangun di latar — langsung ngetik aja, "
-             "tak perlu menunggu.[/dim]", bottom=0)
+        _tambah_konten([Padding(Text.from_markup(
+            "[dim]🗺  peta proyek dibangun di latar — langsung ngetik aja, "
+            "tak perlu menunggu.[/dim]"), (0, _LPAD, 0, _LPAD))])
     _update_notice()  # info bila versi usang (dari cache) + cek ulang di latar
-    console.print()
 
     live_holder: dict = {"live": None}
     tg_service: dict = {"svc": None}   # layanan bot Telegram di dalam sesi ini
@@ -2097,7 +2304,8 @@ def main(resume: bool = False) -> None:
     # berarti menghapus semuanya dulu.
     typing_state = {"buf": "", "pos": 0}
     # Mode tampilan giliran: True = tampilan mengalir dengan footer status hidup
-    # (langkah/diff/jawaban statis di scrollback); False = tampilan klasik.
+    # (langkah/diff/jawaban di tumpukan bawah yang menempel ke dasar layar);
+    # False = tampilan klasik (semua ke scrollback).
     tui_mode = {"on": True}
 
     def _step_label(name: str, args: dict) -> str:
@@ -2161,6 +2369,13 @@ def main(resume: bool = False) -> None:
         live = live_holder.get("live")
         if live:
             live.stop()
+        # Menu & isian bebas (ask_user) digambar sebagai MODAL di dasar layar,
+        # bukan di posisi kursor mana pun. Tumpukan yang membeku di atasnya
+        # (konten, baris status, panel rencana) tetap utuh dan terlihat DI
+        # ATAS modal — panel rencana tak pernah jatuh "di bawah" kotak
+        # input/footer. Tanpa ini, posisi kursor sisa live.stop() bisa
+        # membuat menu tampil melayang di tengah layar.
+        _ke_dasar_layar()
         try:
             answer = _tanya_pilihan(question, list(options), bool(multiple))
         except (KeyboardInterrupt, EOFError):
@@ -2169,6 +2384,13 @@ def main(resume: bool = False) -> None:
             input_paused["on"] = False
             _tg_flush()
         if live:
+            # Menu inquirer menggambar di atas area region, dan stop() dengan
+            # transient=False meninggalkan frame terakhir — tanpa tata ulang,
+            # region lanjutan bisa menggantung di tengah layar dengan sisa
+            # frame lama di atasnya. Bersihkan lalu paku ulang ke dasar.
+            if _sisa_baris_bawah() is not None:
+                console.clear()
+            _ke_dasar_layar()
             live.start()
         return answer
 
@@ -2493,14 +2715,16 @@ def main(resume: bool = False) -> None:
         cbs_alive = {"on": True}
 
         def _commit(renderables) -> None:
-            """Bekukan konten ke riwayat terminal (tercetak DI ATAS region live).
+            """Masukkan konten ke tumpukan bawah (region live) — BUKAN scrollback.
 
-            SEKALI print untuk seluruh batch (atomik): dicetak satu-satu memberi
-            celah bagi refresh live menyela di antara dua baris."""
+            Konten di-render sekali (di _tambah_konten) lalu ditampilkan di
+            region yang menempel ke dasar layar, supaya ia ikut berpindah saat
+            terminal diubah ukurannya (scrollback tak bisa digeser, region
+            bisa)."""
             if not cbs_alive["on"]:
                 return
             if renderables:
-                console.print(Group(*renderables))
+                _tambah_konten(renderables)
 
         view = TurnView(agent, commit=_commit, total=_total_global)
         ctr = {"n": 0}
@@ -2529,7 +2753,7 @@ def main(resume: bool = False) -> None:
                         continue
                     old, new, exists = _isi_sebelum_sesudah("edit_file", ep, e)
                     if not (exists and old == new):
-                        _print_diff(ep, old, new, is_new=not exists)
+                        _print_diff(ep, old, new, is_new=not exists, ke_konten=True)
             elif name in _TOOL_DIFF and p:
                 # WAJIB lewat _isi_sebelum_sesudah: untuk edit_file/append_file
                 # isi barunya BUKAN args["content"] (edit_file pakai old_text/
@@ -2540,11 +2764,11 @@ def main(resume: bool = False) -> None:
                 # old == new pada file yang sudah ada = akan DITOLAK / tanpa
                 # efek — jangan cetak header diff yang menyesatkan.
                 if not (exists and old == new):
-                    _print_diff(p, old, new, is_new=not exists)
+                    _print_diff(p, old, new, is_new=not exists, ke_konten=True)
             elif name == "delete_file" and p:
                 full = config.PROJECT_ROOT / p
                 content = full.read_text(encoding="utf-8", errors="replace") if full.exists() else ""
-                _print_delete(p, content)
+                _print_delete(p, content, ke_konten=True)
 
         def _on_result(name: str, result: str) -> None:
             if not cbs_alive["on"]:
@@ -2805,7 +3029,9 @@ def main(resume: bool = False) -> None:
                     # pesannya terkirim, bukan bagaimana ia disalurkan.
                     # (Gema kedua saat prompt ini benar-benar dikerjakan
                     # sengaja tak ada — lihat gelung utama.)
-                    _commit([_oneline(Text.from_markup(
+                    # Baris kosong DI ATAS gema: tanpa itu, gema menempel ke
+                    # konten sebelumnya (jawaban/baris langkah terakhir).
+                    _commit([_KOSONG, _oneline(Text.from_markup(
                         f"  [on #2b2b2b bold #ffffff] {_esc(teks)} [/]"))])
                     # Perintah menunggu; tanpa keterangan ini ia tampak
                     # "terkirim tapi tak terjadi apa-apa" sampai giliran usai.
@@ -2867,16 +3093,31 @@ def main(resume: bool = False) -> None:
             return False                            # kontrol lain (^R/^C dsb.)
 
         try:
-            # Jaring pengaman: kalau ada yang menggeser kursor sesudah gema
-            # (menu, notifikasi bot, layar dibersihkan), region hidup tetap
-            # mulai dari dasar layar. No-op bila kursornya memang sudah di sana.
             _ke_dasar_layar()
             with Live(view, console=console, refresh_per_second=12,
                       transient=False, vertical_overflow="visible") as live:
                 live_holder["live"] = live
                 worker_thread.start()
+                _last_size = console.size
                 while worker_thread.is_alive():
                     try:
+                        if console.size != _last_size:
+                            _last_size = console.size
+                            live.stop()
+                            # stop() dengan transient=False TIDAK menghapus
+                            # frame terakhir, dan region kini bisa setinggi
+                            # layar — tanpa bersihkan dulu, sisa frame lama
+                            # tertinggal sebagai baris hantu di atas region
+                            # yang digambar ulang. clear() = 2J: layar kosong,
+                            # scrollback tetap utuh (isi percakapan ada di
+                            # _KONTEN, bukan scrollback). Hanya dipakai bila
+                            # posisi kursor bisa ditanyakan — kalau tidak,
+                            # kursor yang ditaruh di puncak oleh clear() akan
+                            # membuat region menggantung di atas layar.
+                            if _sisa_baris_bawah() is not None:
+                                console.clear()
+                            _ke_dasar_layar()
+                            live.start()
                         if input_paused["on"]:
                             # ask_user sedang tampil -> JANGAN baca console;
                             # biarkan inquirer yang menerima seluruh ketikan.
@@ -2952,27 +3193,32 @@ def main(resume: bool = False) -> None:
         if isinstance(err, (KeyboardInterrupt, llm.Cancelled)) or (
                 interrupted and not ans and err is None):
             # Benar-benar terputus (tak ada jawaban yang sempat jadi).
-            console.print("\n  [yellow]◼ dibatalkan[/yellow]\n")
+            _tambah_konten([Text.from_markup("\n  [yellow]◼ dibatalkan[/yellow]\n")])
         # Cabang khusus rate-limit API DIHAPUS: batas pemakaian kini datang dari
         # SITUS AI web, dan itu sudah ditangani lebih baik di core sebagai
         # WebLimitError/WebBusyError — lengkap dengan kapan bisa dipakai lagi
         # dan ulang-otomatis. Sisanya jatuh ke cabang error umum di bawah.
         elif err is not None:
-            console.print(f"\n  [red]✖ error:[/red] {err}\n")
+            _tambah_konten([Text.from_markup(
+                f"\n  [red]✖ error:[/red] {_esc(str(err))}\n")])
         else:
-            # Jawaban dicetak SEBAGAI RIWAYAT biasa (di luar region live) supaya
-            # sepanjang apa pun tak bikin kedip dan terminal tetap bisa di-scroll.
-            # Ini juga menyelamatkan jawaban yang SELESAI tepat saat Ctrl+C ditekan
-            # (sudah tersimpan di memory — tampilkan, jangan dibuang).
+            # Jawaban ditambahkan ke TUMPUKAN BAWAH (di luar region live, yang
+            # menutup sesudah giliran) supaya ia ikut menempel ke dasar layar dan
+            # ikut berpindah saat terminal diubah ukurannya — bukan ke scrollback
+            # yang "menjauh" dari kotak. Yang SELESAI tepat saat Ctrl+C ditekan
+            # tetap tampil: sudah tersimpan di memory, jangan dibuang.
             if ans:
-                console.print()
+                blok: list = []
                 # Header bot cukup SEKALI per giliran — kalau narasi sudah
                 # menampilkannya, jawaban akhir tak perlu header kedua.
                 ada_header = not view._said
+                blok.append(_KOSONG)
                 if ada_header:
-                    console.print("  [bold #fc9018]🤖 bagas-ai[/]")
-                console.print(Padding(_md(ans),
-                                      (0 if ada_header else 1, 3, 0, 3)))
+                    blok.append(Text.from_markup("  [bold #fc9018]🤖 bagas-ai[/]"))
+                    blok.append(Padding(_md(ans), (0, 3, 0, 3)))
+                else:
+                    blok.append(Padding(_md(ans), (1, 3, 0, 3)))
+                _tambah_konten(blok)
                 # JAWABAN AKHIR ikut dibacakan. Dulu cuma narasi antar-langkah
                 # yang bersuara, dan itu membuat fiturnya tampak rusak pada
                 # giliran yang paling lazim: pertanyaan yang dijawab LANGSUNG
@@ -3024,8 +3270,8 @@ def main(resume: bool = False) -> None:
                     seg.append(f"[#f0603c]{n_fail} gagal[/]")
                 seg += [_fmt_elapsed(time.time() - view.start),
                         f"⚡ {_fmt(agent.tokens_last.total)} token"]
-                console.print(Padding(Text.from_markup(
-                    "[dim]" + " · ".join(seg) + "[/]"), (1, 3, 0, 3)))
+                _tambah_konten([Padding(Text.from_markup(
+                    "[dim]" + " · ".join(seg) + "[/]"), (1, 3, 0, 3))])
         _reindex_if_edited()
 
     def _reindex_if_edited() -> None:
@@ -3099,13 +3345,19 @@ def main(resume: bool = False) -> None:
         interrupted = False
         forced = False
         try:
-            _ke_dasar_layar()          # sama seperti mode mengalir — lihat di sana
+            _ke_dasar_layar()
             with Live(status_obj, console=console, refresh_per_second=12,
                       transient=True) as live:
                 live_holder["live"] = live
                 worker_thread.start()
+                _last_size = console.size
                 while worker_thread.is_alive():
                     try:
+                        if console.size != _last_size:
+                            _last_size = console.size
+                            live.stop()
+                            _ke_dasar_layar()
+                            live.start()
                         worker_thread.join(timeout=0.1)
                     except KeyboardInterrupt:
                         if not interrupted:
@@ -3477,21 +3729,23 @@ def main(resume: bool = False) -> None:
             return
         voice_state.pop("terucap", None)
         # Jalur antrean tak punya gema lain — di sini ia satu-satunya.
-        console.print(f"\n  [on #2b2b2b bold #ffffff] 🎙 {_esc(teks)} [/]")
+        _tambah_konten([Text.from_markup(
+            f"\n  [on #2b2b2b bold #ffffff] 🎙 {_esc(teks)} [/]")])
         with antre_lock:
             prompt_queue.append(teks)
         # DUA keadaan yang sangat berbeda, dan dulu keduanya diberi kalimat yang
         # sama — padahal yang kedua berarti perintahnya MENGENDAP sampai
         # pengguna menekan Enter, hal yang justru tak ia lakukan saat bicara.
         if kotak_chat.galat_kirim:
-            console.print(
+            _tambah_konten([Text.from_markup(
                 f"  [yellow]⚠ perintah suara tak bisa masuk ke kotak "
                 f"({_esc(kotak_chat.galat_kirim)}).[/yellow]\n"
                 "  [dim]Ia menunggu di antrean — tekan Enter untuk "
-                "menjalankannya.[/dim]")
+                "menjalankannya.[/dim]")])
         else:
-            console.print("  [dim]— disisipkan ke giliran yang sedang "
-                          "berjalan[/dim]")
+            _tambah_konten([Text.from_markup(
+                "  [dim]— disisipkan ke giliran yang sedang "
+                "berjalan[/dim]")])
 
     def _voice_kabar(pesan: str, batal: bool = False) -> None:
         """Kabar dari pendengar. HANYA pembatalan yang sampai ke layar.
@@ -4447,19 +4701,15 @@ def main(resume: bool = False) -> None:
             agent.start_new_web_chat(immediate=True)
             grand["base"] = prefs.get_total_tokens()  # sesi baru mulai dari total
             console.clear()
-            show_logo()
-            console.print()
-            pout(_banner(agent, False), bottom=0)
-            console.print()
+            _reset_konten()
+            _tambah_konten([Padding(_banner(agent, False), (0, _LPAD, 0, _LPAD))])
         elif action == "reset":
             agent.reset()
             console.print("[dim](riwayat dikosongkan)[/dim]")
         elif action == "clear":
             console.clear()
-            show_logo()
-            console.print()
-            pout(_banner(agent, False), bottom=0)
-            console.print()
+            _reset_konten()
+            _tambah_konten([Padding(_banner(agent, False), (0, _LPAD, 0, _LPAD))])
         elif action == "memory":
             facts = longmem.all_facts()
             pout(Panel("\n".join(f"• {f}" for f in facts) or "[dim]kosong[/dim]",
@@ -4888,15 +5138,12 @@ def main(resume: bool = False) -> None:
                 break
             except EOFError:
                 break
-            # Kotaknya menghilang begitu Enter ditekan (erase_when_done), jadi
-            # yang mengabadikan pesan ke riwayat adalah gema ini — bentuknya
-            # sama persis dengan gema pesan yang diantrekan.
-            #
-            # Didorong ke dasar layar SEBELUM gemanya, bukan sesudah: baris
-            # kosong pendorongnya lalu jatuh di petak bekas kotak yang barusan
-            # dihapus, jadi tak ada celah yang terlihat di bawah gema.
+            # Kotaknya menghilang begitu Enter ditekan (erase_when_done); yang
+            # mengabadikan pesan adalah gema ini — bentuknya sama persis dengan
+            # gema pesan yang diantrekan. Gema masuk ke TUMPUKAN BAWAH (bukan
+            # scrollback) supaya ia ikut menempel ke dasar layar; region
+            # giliran yang segera menyusul sudah merendernya.
             if raw.strip():
-                _ke_dasar_layar()
                 # PUTIH MURNI (#ffffff) & TEBAL, bukan `white` milik rich —
                 # `white` dipetakan ke warna 7 palet terminal, yang di banyak
                 # tema justru abu-abu. Pesan pengguna adalah penanda batas
@@ -4907,9 +5154,12 @@ def main(resume: bool = False) -> None:
                 # dicetak sendiri sebelum masuk kotak (lihat _voice_masuk).
                 # pop() dipakai, bukan get(): penandanya berlaku sekali pakai,
                 # supaya ketikan berikutnya tak ikut dikira ucapan.
+                # Baris kosong DI ATAS gema: jarak dari output giliran
+                # sebelumnya (jawaban/baris langkah terakhir).
                 lisan = voice_state.pop("terucap", None) == raw.strip()
                 prefix = "🎙 " if lisan else ""
-                console.print(f"  [on #2b2b2b bold #ffffff] {prefix}{_esc(raw.strip())} [/]")
+                _tambah_konten([_KOSONG, Text.from_markup(
+                    f"  [on #2b2b2b bold #ffffff] {prefix}{_esc(raw.strip())} [/]")])
         text = raw.strip()
         if not text:
             continue

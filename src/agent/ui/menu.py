@@ -28,13 +28,15 @@ from __future__ import annotations
 import sys
 from typing import Any, Callable, Iterable, Sequence
 
-from prompt_toolkit.application import Application
+from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import HSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.containers import HSplit, VSplit, Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.processors import PasswordProcessor
 from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.utils import get_cwidth
 
@@ -574,25 +576,114 @@ def confirm(message: str = "", default: bool = True, warna: str = KUNING,
 # ------------------------------------------------------- input teks & path
 def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
                  default: str = "", completer: Any = None) -> str:
-    """Kotak pertanyaan + satu baris input (memakai PromptSession).
+    """Kotak pertanyaan + baris input DI DALAM satu bingkai yang sama.
 
-    Line editing (Home/End/Ctrl+W/riwayat) diserahkan ke prompt_toolkit —
-    menulisnya sendiri berarti mengulang persoalan Backspace yang berbeda
-    antar-terminal, dan itu sudah pernah menghabiskan waktu di proyek ini."""
-    from prompt_toolkit import PromptSession
-
+    Dulu kotak dicetak dulu sebagai benda terpisah, lalu PromptSession
+    menggambar baris "❯" TERSENDIRI di bawah kotak — pengguna melihat input
+    "melayang" di luar kotak, seolah dua benda yang tak berhubungan. Kini baris
+    input menjadi baris bingkai itu sendiri: BufferControl disisipkan di antara
+    tepi atas (judul) dan tepi bawah (petunjuk), jadi mengetik terjadi di
+    dalam kotak. Line editing (Home/End/Ctrl+W/riwayat/autolengkap) tetap
+    ditangani prompt_toolkit lewat Buffer — menulisnya sendiri berarti mengulang
+    persoalan Backspace yang berbeda antar-terminal, dan itu sudah pernah
+    menghabiskan waktu di proyek ini."""
     if not _interaktif():
         raise KeyboardInterrupt
-    print_formatted_text(_kotak(message, [], hint, ORANYE))
-    sesi: Any = PromptSession()
+
+    buf = Buffer(completer=completer, complete_while_typing=bool(completer))
+    if default:
+        buf.text = str(default)
+
+    def _terima(_b: Buffer) -> None:
+        get_app().exit(result=_b.text)
+
+    buf.accept_handler = _terima
+
+    lebar = min(_lebar_terminal() - 2, _LEBAR_MAKS)
+    warna = ORANYE
+    judul_di_dalam = bool(message) and get_cwidth(message) > lebar - 8
+
+    def bagian_atas() -> FormattedText:
+        """Tepi atas: bingkai + judul + baris kosong (tempat input menyusul)."""
+        frag: list[tuple[str, str]] = []
+        kepala = "─" if judul_di_dalam or not message else f" {message} "
+        sisa = max(2, lebar - get_cwidth(kepala) - 2)
+        frag.append((warna, "╭─"))
+        frag.append((f"{warna} bold", kepala))
+        frag.append((warna, "─" * sisa))
+        frag.append(("", "\n"))
+        frag.append((warna, "│"))
+        if judul_di_dalam:
+            for t in _bungkus_teks(message, lebar - 5):
+                frag.append(("", "\n"))
+                frag.append((warna, "│  "))
+                frag.append((f"{TEKS} bold", t))
+        return FormattedText(frag)
+
+    def bagian_bawah() -> FormattedText:
+        """Tepi bawah: rel kosong + petunjuk + bingkai bawah."""
+        frag: list[tuple[str, str]] = []
+        # Baris pertama LANGSUNG rel "│" (tanpa \n awal): baris kosong di
+        # antara baris input dan petunjuk harus tetap memakai rel kiri,
+        # persis seperti _kotak — kalau tidak, bingkainya putus di situ.
+        frag.append((warna, "│"))
+        if hint:
+            frag.append(("", "\n"))
+            frag.append((warna, "│  "))
+            frag.append((REDUP, _potong(hint, lebar - 4)))
+        frag.append(("", "\n"))
+        frag.append((warna, "╰" + "─" * (lebar - 1)))
+        return FormattedText(frag)
+
+    # "│  ❯ " = rel kiri kotak + penanda input; teks ketikan di sebelahnya.
+    # LEBARNYA DIKUNCI: tanpa ini, jendela penanda ikut "fleksibel" di dalam
+    # VSplit dan membagi lebar kotak 50:50 dengan jendela buffer — input lalu
+    # melompat ke TENGAH kotak, bukan di kiri setelah "❯".
+    teks_penanda = [(warna, "│  "), (f"{EMAS} bold", "❯ ")]
+    penanda = FormattedTextControl(lambda: teks_penanda, show_cursor=False)
+
+    # Rahasia: tampilkan ••• alih-alih huruf aslinya (PasswordProcessor),
+    # sama seperti is_password=True milik PromptSession dulu.
+    prosesor = [PasswordProcessor(char="•")] if rahasia else []
+    isi_input = BufferControl(
+        buffer=buf, focusable=True, input_processors=prosesor,
+        include_default_input_processors=True)
+
+    window_input = Window(isi_input, height=1, wrap_lines=False)
+
+    kb = KeyBindings()
+
+    @kb.add("c-c")
+    def _batal(e):
+        e.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
+    @kb.add("enter")
+    @kb.add("c-j")
+    def _kirim(e):
+        e.current_buffer.validate_and_handle()
+
+    app: Application = Application(
+        layout=Layout(HSplit([
+            Window(FormattedTextControl(bagian_atas), dont_extend_height=True),
+            VSplit([
+                Window(penanda, dont_extend_height=True, wrap_lines=False,
+                       width=get_cwidth("│  ❯ ")),
+                window_input,
+            ]),
+            Window(FormattedTextControl(bagian_bawah), dont_extend_height=True),
+        ]), focused_element=window_input),
+        key_bindings=kb,
+        full_screen=False,
+        # Kotak dibiarkan tampil setelah dijawab (bukan erase_when_done):
+        # bingkai pertanyaan tetap terlihat sampai lapisan di atasnya
+        # menggambar ulang, sama seperti perilaku lama.
+        erase_when_done=False,
+        mouse_support=False,
+    )
     try:
-        return sesi.prompt(
-            FormattedText([(f"{EMAS} bold", "  ❯ ")]),
-            is_password=rahasia, default=default or "",
-            completer=completer, complete_while_typing=bool(completer),
-        )
-    except EOFError as exc:  # Ctrl+D -> setara batal
-        raise KeyboardInterrupt from exc
+        return app.run()
+    except KeyboardInterrupt:
+        raise
 
 
 def text(message: str = "", default: str = "", hint: str = "",

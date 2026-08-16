@@ -144,17 +144,24 @@ def _detect_checks(paths: str) -> list[tuple[str, str | list[str], bool, int]]:
     ada_py = (ROOT / "pyproject.toml").is_file() or (ROOT / "setup.py").is_file() \
         or any(ROOT.glob("*.py")) or any(ROOT.rglob("*.py"))
     if ada_py:
+        # Kompilasi (parse) berkas .py yang DISENTUH — cepat, tak menjalankan.
+        py_touched = [str(t) for t in touched if t.suffix.lower() in (".py", ".pyw")]
         if shutil.which("ruff"):
-            checks.append(("ruff check", ["ruff", "check", "."], False,
-                           _VAL_TIMEOUT))
+            if py_touched:
+                checks.append(("ruff check (berkas yang diubah)", ["ruff", "check", *py_touched], False,
+                               _VAL_TIMEOUT))
+            else:
+                checks.append(("ruff check", ["ruff", "check", "."], False,
+                               _VAL_TIMEOUT))
         elif shutil.which("flake8"):
-            checks.append(("flake8", ["flake8"], False, _VAL_TIMEOUT))
+            if py_touched:
+                checks.append(("flake8 (berkas yang diubah)", ["flake8", *py_touched], False, _VAL_TIMEOUT))
+            else:
+                checks.append(("flake8", ["flake8"], False, _VAL_TIMEOUT))
         # mypy hanya bila proyek memang mengonfigurasinya (kalau tidak, ribuan
         # galat tipe pihak-ketiga cuma bikin bising).
         if shutil.which("mypy") and _mypy_dikonfigurasi():
             checks.append(("mypy", ["mypy", "."], False, _VAL_TIMEOUT))
-        # Kompilasi (parse) berkas .py yang DISENTUH — cepat, tak menjalankan.
-        py_touched = [str(t) for t in touched if t.suffix.lower() in (".py", ".pyw")]
         if py_touched:
             checks.append(("py_compile (berkas yang diubah)",
                            ["python", "-m", "py_compile", *py_touched], False,
@@ -219,7 +226,7 @@ def _smoke_python(touched: list[Path]) -> list[tuple[str, str, bool]]:
             teks = t.read_text(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001 - tak terbaca: biar pemeriksa lain yang lapor
             continue
-        if "__main__" in teks:
+        if "__name__ == \"__main__\"" in teks and "from .." not in teks and "from ." not in teks:
             kandidat.append(t)
     hasil: list[tuple[str, str, bool]] = []
     for f in kandidat[:3]:  # dibatasi: smoke-run itu pelengkap, bukan test suite
