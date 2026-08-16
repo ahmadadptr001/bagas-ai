@@ -364,8 +364,11 @@ def _tool_tak_ada(name: str) -> str:
     pesan = f"[error] tool '{name}' tidak ditemukan."
     if mirip:
         return pesan + " Maksudmu: " + ", ".join(mirip) + "?"
-    return (pesan + " Panggil list_tools('<kategori>') untuk melihat tool yang "
-            "BENAR-BENAR ada sebelum mencoba nama lain — jangan menebak nama.")
+    # Jalan keluar DISEBUTKAN, bukan cuma menolak: model yang lupa nama tool
+    # bisa mencari lewat cari_tool (deskripsi kebutuhan) atau list_tools
+    # (kategori). Menebak nama lain setelah ditolak hanya membuang giliran.
+    return (pesan + " Cari tool yang benar dengan cari_tool('kebutuhanmu') "
+            "atau list_tools('<kategori>') — jangan menebak nama.")
 
 
 def execute(name: str, arguments: dict[str, Any]) -> str:
@@ -393,8 +396,18 @@ def execute(name: str, arguments: dict[str, Any]) -> str:
     token = _tool_aktif.set(name)
     try:
         result = tool_obj.run(**arguments)
-        return result if isinstance(result, str) else str(result)
+        result = result if isinstance(result, str) else str(result)
     except Exception as exc:  # noqa: BLE001 - laporkan error apa pun ke LLM
-        return f"[error] gagal menjalankan '{name}': {exc}"
+        result = f"[error] gagal menjalankan '{name}': {exc}"
     finally:
         _tool_aktif.reset(token)
+    # Worklog sesi: tiap tool call direkam (nama, argumen, hasil ringkas) supaya
+    # AI bisa mengingat apa yang barusan dilakukan lewat kerja_terakhir() TANPA
+    # membaca ulang berkas. Impor lazy: kerja.py mengimpor base, jadi memuatnya
+    # di sini menghindari siklus impor. Gagal merekam tak boleh menggagalkan tool.
+    try:
+        from .kerja import catat_otomatis
+        catat_otomatis(name, arguments, result)
+    except Exception:  # noqa: BLE001
+        pass
+    return result

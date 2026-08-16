@@ -40,10 +40,12 @@ INTI: tuple[str, ...] = (
     "git_stash", "git_blame",
     # internet
     "web_search", "fetch_url",
+    # konteks kerja & pengujian
+    "kerja_terakhir", "catat_kerja", "sasaran", "test_function",
     # ke pengguna & alur kerja
     "ask_user", "ask_user_telegram", "plan", "plan_step", "remember", "undo_changes",
     # pintu ke sisanya
-    "list_tools",
+    "cari_tool", "list_tools",
 )
 
 # Sisanya, dikelompokkan supaya bisa diminta per kebutuhan. Nama kategorinya
@@ -137,6 +139,84 @@ def ringkasan_kategori() -> str:
         for nama, isi in LAIN.items()
         if any(n in REGISTRY for n in isi)
     )
+
+
+# Kata tugas/isi umum yang BUKAN kata kunci pencarian tool. Dihilangkan supaya
+# "cara mengunduh gambar" tidak mencari kata 'cara'/'mengunduh' yang ada di
+# mana-mana, melainkan fokus ke 'unduh' & 'gambar'.
+_STOP_CARI = frozenset("""
+yang dan di ke dari untuk pada dengan agar supaya bisa dapat mau ingin harus
+sudah belum tidak ini itu ada adalah akan juga lalu maka atau jika kalau karena
+tapi namun saya aku kamu kita anda tolong buat bikin caranya bagaimana apa mana
+saja semua tool tools cara mau ingin pengen perlu butuh saya aku bisa tolong
+bantu bantuan the a an and of to for with in on at by is are was were can could
+would should have has had do does did need needs want wants please make create
+""".split())
+
+
+@tool
+def cari_tool(kebutuhan: str, jumlah: int = 5) -> str:
+    """Cari TOOL yang paling cocok untuk kebutuhanmu, dari SEMUA tool yang ada (inti & tambahan). Deskripsikan apa yang ingin kamu lakukan dengan kata-katamu sendiri — tool ini mencocokkannya dengan nama & deskripsi tiap tool, lalu mengembalikan yang paling relevan beserta NAMA PERSISnya. Pakai saat kamu ragu tool apa yang tersedia untuk suatu pekerjaan — jangan menebak nama tool dan jangan menyerah.
+
+    kebutuhan: apa yang ingin kamu lakukan, bebas kata-kata, mis. 'unduh gambar
+        dari internet', 'ubah video jadi gif', 'jalankan server di latar',
+        'baca beberapa file sekaligus', 'kirim notifikasi'.
+    jumlah: berapa hasil yang ditampilkan (default 5, maksimal 10).
+    """
+    import re as _re
+
+    toks = _re.findall(r"[a-z0-9_]+\b", (kebutuhan or "").lower())
+    kata = [t for t in toks if len(t) >= 3 and t not in _STOP_CARI]
+    if not kata:
+        return ("[error] kebutuhan terlalu umum. Sebut apa yang ingin kamu "
+                "lakukan dengan kata kunci, mis. 'unduh gambar', 'ubah video "
+                "jadi gif', 'jalankan server di latar'.")
+
+    # Bobot IDF: kata yang muncul di BANYAK tool (mis. 'file', 'buat') kurang
+    # informatif daripada kata langka (mis. 'zip', 'gif'). Tanpa ini, kebutuhan
+    # 'buat file zip' disamakan oleh 'file' yang ada di mana-mana dan tool yang
+    # tepat (zip_create) kalah peringkat oleh tool nama-abjad yang kebetulan
+    # memuat 'file'.
+    import math as _math
+
+    n_tool = max(1, len(REGISTRY))
+    df: dict[str, int] = {}
+    for nama, t in REGISTRY.items():
+        fn = t.schema.get("function", t.schema)
+        desc = (fn.get("description", "") or "").lower()
+        gabung = nama.lower() + " " + desc
+        for k in kata:
+            if k in gabung:
+                df[k] = df.get(k, 0) + 1
+    idf = {k: 1.0 + _math.log(n_tool / (1 + df.get(k, 0)))
+           for k in kata}
+
+    skor: list[tuple[float, str]] = []
+    for nama, t in REGISTRY.items():
+        fn = t.schema.get("function", t.schema)
+        deskripsi = (fn.get("description", "") or "").lower()
+        s = 0.0
+        for k in kata:
+            if k in nama.lower():
+                s += 4.0 * idf[k]      # nama tool memuat kata = hampir pasti cocok
+            elif k in deskripsi:
+                s += 2.0 * idf[k]      # hanya di deskripsi = relevan tapi tak langsung
+        if s:
+            skor.append((s, nama))
+    skor.sort(key=lambda x: (-x[0], x[1]))
+
+    n = max(1, min(int(jumlah), 10))
+    pilihan = skor[:n]
+    if not pilihan:
+        return (f"Tidak ada tool yang cocok dengan '{kebutuhan}'. Coba kata "
+                "kunci yang lebih spesifik, atau list_tools() untuk melihat "
+                "kategori yang tersedia.")
+    baris = [f"Tool paling cocok untuk '{kebutuhan}':"]
+    for _, nama in pilihan:
+        baris.append(baris_tool(nama))
+    baris.append("")
+    baris.append("Pakai NAMA PERSIS di atas saat memanggil [[TOOL]].")
+    return "\n".join(baris)
 
 
 @tool

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.1.75"
+version = "1.1.76"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,9 @@ dependencies = [
     "SpeechRecognition>=3.10.0",
     "ddgs>=6.0.0",
     "python-telegram-bot>=21.0",
+    # Server MCP (`bagas-ai mcp`) — sasaran tepat untuk AI. HANYA dipakai
+    # perintah itu; sisanya jalan tanpa paket ini.
+    "mcp>=1.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
     "python-dotenv>=1.0.0",

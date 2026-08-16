@@ -12,8 +12,8 @@ satu pun teks di layar yang membahas antrean.
 """
 from __future__ import annotations
 
-from collections import deque
 import difflib
+from collections import deque
 import re
 import subprocess
 import sys
@@ -582,30 +582,49 @@ def _lebar_kotak() -> int:
 _KOSONG = Text("")
 
 
-# --- konten percakapan: tumpukan bawah yang menempel ke dasar layar ---------
+# --- konten percakapan: tampung dulu, CETAK oleh thread utama -------------
 #
 # SEMUA konten percakapan (logo pembuka, gema perintah, narasi, langkah,
-# jawaban) ditampung di buffer ini — BUKAN dicetak ke scrollback. Region bawah
-# (rich.Live saat giliran berjalan, layout prompt_toolkit saat idle) merender
-# baris-baris TERAKHIR buffer ini tepat di atas panel rencana / kotak chat.
-# Karena konten ikut di-render ulang, ia ikut menempel ke dasar layar dan ikut
-# berpindah saat terminal diubah ukurannya — inilah yang membedakannya dari
-# scrollback, yang tak bisa digeser dan karena itu "menjauh" dari kotak setiap
-# kali terminal dinaikkan.
+# jawaban) menuju scrollback terminal biasa — sekali, permanen, dan bisa
+# digulir ke atas. Tapi TIDAK dicetak oleh pemanggilnya langsung: renderables
+# ditampung di buffer _KONTEN, dan thread UTAMA yang mencetaknya ke scrollback
+# (via _flush_konten) di titik-titik aman.
 #
-# Batas baris (_KONTEN_MAKS) mengunci memori: baris tertua dibuang begitu
-# lewat, dan yang dibuang tak bisa digulung lagi — konsekuensi desain ini.
+# Kenapa tidak langsung console.print dari worker? Rich Live menggambar ulang
+# region bawah tiap ~83ms lewat thread refresh-nya sendiri. Kalau worker
+# mencetak ke console di tengah-tengah itu, baris-baris region lama (kotak
+# chat, bar status) bisa tertinggal di scrollback — "jejak" yang terlihat
+# saat menggulir ke atas. Menampung dulu lalu mencetak dari thread utama
+# (yang tahu kapan Live sedang tidak menggambar) menghilangkan tabrakan itu.
+#
+# Batas baris (_KONTEN_MAKS) mengunci memori; baris tertua di-flush duluan
+# oleh _flush_konten sehingga jarang tercapai.
+#
+# _LIVE adalah referensi Live yang sedang aktif — diisi/dikosongkan oleh
+# process_stream/process_classic. "paused" menandai Live yang di-stop
+# SEMENTARA (menu ask_user tampil): saat itu TIDAK ada yang boleh mencetak
+# ke console (menu inquirer akan rusak), jadi buffer dibiarkan menumpuk.
+_LIVE: dict = {"live": None, "paused": False}
 _KONTEN: deque[list[Text]] = deque()
-_KONTEN_MAKS = 2000
+_KONTEN_MAKS = 4000
 _KONTEN_KUNCI = threading.Lock()
+# Jeda minimum antar-flush saat Live AKTIF (≤5x/dtk). Tiap flush memicu
+# redraw region penuh (render hook rich) — kalau menyala secepat loop
+# (30ms), redraw menumpuk di atas refresh berkala dan memperparah kedip.
+# Saat Live sudah tutup, flush langsung tanpa jeda.
+_FLUSH_JEDA = 0.2
+_FLUSH_TERAKHIR = 0.0
 
 
 def _tambah_konten(renderables) -> None:
-    """Render `renderables` SEKALI lalu simpan sebagai satu blok konten.
+    """Render `renderables` SEKALI; cetak langsung atau tampung.
 
     Dipanggil dari thread worker maupun thread utama (karena itu di bawah
-    kunci). Render dilakukan di SINI, bukan tiap frame Live, supaya region
-    tetap murah: blok tersimpan sebagai baris Text siap-pakai."""
+    kunci). Saat Live TIDAK aktif (startup / idle / sesudah giliran) langsung
+    dicetak ke scrollback — aman, tak ada region yang sedang digambar. Saat
+    Live AKTIF, renderables DITAMPUNG dan _flush_konten (thread utama) yang
+    mencetak di titik aman. Render dilakukan di SINI supaya blok tersimpan
+    sebagai baris Text siap-pakai."""
     if not renderables:
         return
     try:
@@ -623,6 +642,14 @@ def _tambah_konten(renderables) -> None:
         blok.append(t)
     if not blok:
         return
+    if _LIVE["live"] is None:
+        # Live TIDAK aktif (startup / idle / sesudah giliran): cetak langsung
+        # ke scrollback — aman, tidak ada region yang sedang digambar ulang.
+        try:
+            console.print(Group(*blok))
+        except Exception:  # noqa: BLE001 - print gagal: jangan jatuhkan app
+            pass
+        return
     with _KONTEN_KUNCI:
         _KONTEN.append(blok)
         total = sum(len(b) for b in _KONTEN)
@@ -630,31 +657,37 @@ def _tambah_konten(renderables) -> None:
             total -= len(_KONTEN.popleft())
 
 
-def _reset_konten() -> None:
-    """Kosongkan buffer konten — dipakai /new dan /clear (layar mulai baru)."""
-    with _KONTEN_KUNCI:
-        _KONTEN.clear()
+def _flush_konten() -> None:
+    """Cetak SEMUA konten tertampung ke scrollback, SATU KALI (atomik).
 
-
-def _baris_konten(limit: int) -> list[Text]:
-    """`limit` baris TERAKHIR konten; baris terbaru di ujung daftar.
-
-    Berjalan dari blok TERBARU ke belakang, menempelkan ekor tiap blok di
-    DEPAN hasil — urutan tua→baru tetap terjaga baik di dalam blok maupun
-    antar-blok."""
-    if limit <= 0:
-        return []
+    HANYA dipanggil dari thread utama, di titik aman: di dalam loop Live
+    (antar frame), sesudah Live tutup, dan sebelum/ sesudah kotak idle
+    bertanya. Menghabiskan buffer di bawah kunci yang sama supaya worker
+    yang sedang menambah tidak terpotong di tengah blok."""
     with _KONTEN_KUNCI:
         if not _KONTEN:
-            return []
-        ambil: list[Text] = []
-        sisa = limit
-        for blok in reversed(_KONTEN):
-            if sisa <= 0:
-                break
-            ambil[0:0] = blok[-sisa:]
-            sisa -= len(blok)
-        return ambil
+            return
+        # Live di-stop sementara (menu ask_user tampil): jangan cetak apa pun
+        # ke console — menu inquirer akan rusak. Biarkan tertampung; akan
+        # ter-flush begitu Live jalan lagi (atau tertutup).
+        if _LIVE["live"] is not None and _LIVE["paused"]:
+            return
+        if _LIVE["live"] is not None:
+            global _FLUSH_TERAKHIR
+            kini = time.time()
+            if kini - _FLUSH_TERAKHIR < _FLUSH_JEDA:
+                return
+            _FLUSH_TERAKHIR = kini
+        antri = list(_KONTEN)
+        _KONTEN.clear()
+    if not antri:
+        return
+    # Satu Group besar agar tercetak atomik: dicetak satu-satu memberi celah
+    # bagi refresh live menyela di antara dua blok.
+    try:
+        console.print(Group(*[t for b in antri for t in b]))
+    except Exception:  # noqa: BLE001 - print gagal: jangan jatuhkan app
+        pass
 
 
 def _pt_gaya(st) -> str:
@@ -694,27 +727,6 @@ def _pt_dari_teks(t: Text) -> list[tuple[str, str]]:
         st = seg.style or Style.null()
         out.append((_pt_gaya(st), seg.text))
     return out
-
-
-def _konten_idle_pt() -> list[tuple[str, str]]:
-    """Konten untuk jendela idle prompt_toolkit, di atas panel rencana.
-
-    Dipanggil tiap render prompt_toolkit (termasuk saat resize), jadi tinggi
-    jendela selalu menyesuaikan layar dan isinya selalu yang terbaru. Apa pun
-    yang gagal di sini tak boleh menjatuhkan kotak input — dikembalikan kosong."""
-    try:
-        # Anggaran: napas 1 + kotak 3 + bar status 1 + aman 1; panel rencana
-        # digambar oleh jendela terpisah (_plan_idle_pt), jadi sisakan untuknya.
-        plan = _panel_plan()
-        isi = _baris_konten(max(0, console.height - 6 - len(plan)))
-        out: list[tuple[str, str]] = []
-        for i, t in enumerate(isi):
-            if i:
-                out.append(("", "\n"))
-            out.extend(_pt_dari_teks(t))
-        return out
-    except Exception:  # noqa: BLE001 - render gagal: jangan jatuhkan kotak
-        return []
 
 
 def _plan_idle_pt() -> list[tuple[str, str]]:
@@ -1308,16 +1320,12 @@ class KotakChat:
             # kotaknya menggantung di tengah layar. Window lentur ini menelan
             # sisa ruangnya, dan yang di bawahnya terdorong mentok ke bawah.
             Window(),
-            # KONTEN PERCAKAPAN — ikut di dalam layout supaya ia menempel ke
-            # dasar bersama kotak & bar status (pendorong di atasnya yang
-            # mengatur), dan ikut berpindah saat terminal diubah ukurannya.
-            # FormattedTextControl dipanggil tiap render, jadi isinya selalu
-            # baris terbaru dari _KONTEN.
-            Window(FormattedTextControl(_konten_idle_pt), dont_extend_height=True,
-                   wrap_lines=False),
             # Satu baris napas di atas kotak — kembaran _KOSONG di sisi rich,
             # supaya jaraknya tak berubah sedikit pun saat giliran selesai dan
-            # tampilannya berpindah tangan dari rich ke sini.
+            # tampilannya berpindah tangan dari rich ke sini. (Konten
+            # percakapan TIDAK digambar di sini: ia mengalir ke scrollback
+            # oleh _tambah_konten, jadi jendela ini hanya panel rencana + kotak
+            # + bar — kecil, tak berkedip, dan riwayat tetap bisa digulir.)
             Window(height=1),
             # Panel rencana (bila ada) — jendela terpisah yang menempel
             # langsung di atas kotak, sama seperti region rich (bila tak ada
@@ -2069,19 +2077,14 @@ class TurnView:
             footer_rows = list(footer.renderables)
         else:
             footer_rows = [footer]
-        # Urutan dari atas ke bawah: KONTEN -> BARIS STATUS (kegiatan/waktu/
-        # token/tool + tips) -> PANEL RENCANA -> KOTAK -> BAR. Baris status
-        # WAJIB di atas kotak chat, bahkan di atas panel rencana; konten
-        # percakapan mengalir di atasnya (baris terbaru di dasar blok, yang
-        # lama terdorong ke atas dan tergulung keluar layar). Semua bagian
-        # ikut menempel ke dasar karena region live di-render ulang.
+        # Urutan dari atas ke bawah: BARIS STATUS (kegiatan/waktu/token/tool +
+        # tips) -> PANEL RENCANA -> KOTAK -> BAR. Konten percakapan TIDAK
+        # dirender di sini — ia dicetak ke scrollback oleh _tambah_konten,
+        # jadi region ini tetap kecil (tak berkedip) dan riwayat bisa digulir
+        # ke atas. Baris status WAJIB di atas kotak chat, bahkan di atas
+        # panel rencana; semua bagian menempel ke dasar karena region live
+        # di-render ulang.
         plan_rows = _panel_plan()
-        tinggi_status = len(footer_rows)
-        tetap = tinggi_status + len(plan_rows) + 3 + 1 + 2  # + kotak+bar+napas+aman
-        konten = _baris_konten(max(0, console.height - tetap))
-        if konten:
-            rows.extend(konten)
-        # Napas antara konten dan zona status di bawahnya.
         rows.append(_KOSONG)
         rows.extend(footer_rows)
         if plan_rows:
@@ -2255,7 +2258,11 @@ def main(resume: bool = False) -> None:
             "tak perlu menunggu.[/dim]"), (0, _LPAD, 0, _LPAD))])
     _update_notice()  # info bila versi usang (dari cache) + cek ulang di latar
 
-    live_holder: dict = {"live": None}
+    # State Live global (modul): diisi saat giliran berjalan (process_stream /
+    # process_classic) & menu ask_user; dipakai _tambah_konten/_flush_konten
+    # untuk memutuskan cetak-langsung vs tampung.
+    _LIVE["live"] = None
+    _LIVE["paused"] = False
     tg_service: dict = {"svc": None}   # layanan bot Telegram di dalam sesi ini
     # Pendengar mikrofon (/voice). SELALU mulai dari mati & tak disimpan ke
     # preferensi: mikrofon yang menyala sendiri di sesi berikutnya adalah
@@ -2366,8 +2373,12 @@ def main(resume: bool = False) -> None:
         menampilkan pertanyaannya di dalam kotak lalu meninggalkan satu baris
         ringkasan "✓ pertanyaan · jawaban" sesudah kotaknya hilang."""
         input_paused["on"] = True
-        live = live_holder.get("live")
+        live = _LIVE.get("live")
         if live:
+            # Tandai PAUSED dulu (sebelum stop): _flush_konten di loop Live
+            # harus tahu bahwa Live berhenti sementara, supaya tidak mencetak
+            # ke console saat menu inquirer sedang menggambar.
+            _LIVE["paused"] = True
             live.stop()
         # Menu & isian bebas (ask_user) digambar sebagai MODAL di dasar layar,
         # bukan di posisi kursor mana pun. Tumpukan yang membeku di atasnya
@@ -2392,6 +2403,10 @@ def main(resume: bool = False) -> None:
                 console.clear()
             _ke_dasar_layar()
             live.start()
+            # PAUSED dilepas SETELAH start: antara start() dan pelepasannya
+            # _flush_konten tetap menahan — print saat Live belum aktif lagi
+            # akan mendarat di posisi kursor dan merusak region.
+            _LIVE["paused"] = False
         return answer
 
     interaction.set_choice_handler(choice_handler)
@@ -2715,12 +2730,11 @@ def main(resume: bool = False) -> None:
         cbs_alive = {"on": True}
 
         def _commit(renderables) -> None:
-            """Masukkan konten ke tumpukan bawah (region live) — BUKAN scrollback.
+            """Cetak konten ke scrollback (via _tambah_konten) — bisa digulir.
 
-            Konten di-render sekali (di _tambah_konten) lalu ditampilkan di
-            region yang menempel ke dasar layar, supaya ia ikut berpindah saat
-            terminal diubah ukurannya (scrollback tak bisa digeser, region
-            bisa)."""
+            Konten TIDAK dirender di region live: region bawah hanya berisi
+            baris status + panel rencana + kotak + bar, jadi ia tetap kecil
+            (tak berkedip) dan riwayat percakapan bisa digulir ke atas."""
             if not cbs_alive["on"]:
                 return
             if renderables:
@@ -3094,30 +3108,31 @@ def main(resume: bool = False) -> None:
 
         try:
             _ke_dasar_layar()
-            with Live(view, console=console, refresh_per_second=12,
+            with Live(view, console=console, refresh_per_second=6,
                       transient=False, vertical_overflow="visible") as live:
-                live_holder["live"] = live
+                _LIVE["live"] = live
                 worker_thread.start()
                 _last_size = console.size
                 while worker_thread.is_alive():
                     try:
+                        # Cetak konten tertampung (thread utama, di titik aman
+                        # antar-frame) — worker TIDAK pernah mencetak sendiri.
+                        _flush_konten()
                         if console.size != _last_size:
                             _last_size = console.size
-                            live.stop()
-                            # stop() dengan transient=False TIDAK menghapus
-                            # frame terakhir, dan region kini bisa setinggi
-                            # layar — tanpa bersihkan dulu, sisa frame lama
-                            # tertinggal sebagai baris hantu di atas region
-                            # yang digambar ulang. clear() = 2J: layar kosong,
-                            # scrollback tetap utuh (isi percakapan ada di
-                            # _KONTEN, bukan scrollback). Hanya dipakai bila
-                            # posisi kursor bisa ditanyakan — kalau tidak,
-                            # kursor yang ditaruh di puncak oleh clear() akan
-                            # membuat region menggantung di atas layar.
-                            if _sisa_baris_bawah() is not None:
-                                console.clear()
-                            _ke_dasar_layar()
-                            live.start()
+                            # JANGAN stop/clear/start: clear() memadamkan
+                            # SELURUH layar tiap kali ukuran terdeteksi berubah
+                            # — itulah kilat "kedip-kedip" yang paling kentara.
+                            # Rich menggambar ulang region sendiri pada tiap
+                            # refresh (dengan ukuran baru), jadi cukup picu
+                            # refresh sekali; tanpa itu pun tick berikutnya
+                            # (≤167ms) merapikannya.
+                            # Live yang sedang di-STOP (menu ask_user tampil)
+                            # TIDAK boleh di-refresh: refresh() mencetak
+                            # Control() ke console dan akan merusak menu
+                            # inquirer — cukup catat ukuran barunya saja.
+                            if not _LIVE["paused"]:
+                                live.refresh()
                         if input_paused["on"]:
                             # ask_user sedang tampil -> JANGAN baca console;
                             # biarkan inquirer yang menerima seluruh ketikan.
@@ -3178,7 +3193,11 @@ def main(resume: bool = False) -> None:
             cancel_event.set()
         finally:
             cbs_alive["on"] = False   # worker yatim tak boleh mencetak lagi
-            live_holder["live"] = None
+            _LIVE["live"] = None
+            _LIVE["paused"] = False
+        # Sisa konten yang tertampung sebelum Live tutup (baris terakhir dari
+        # worker) dicetak di sini, saat Live sudah benar-benar berhenti.
+        _flush_konten()
         # Suara ikut berhenti begitu gilirannya berhenti — apa pun sebabnya.
         # Kabar yang masih mengantre saat itu sudah BASI: mendengar rencana
         # langkah yang tak pernah jadi dikerjakan lebih membingungkan daripada
@@ -3346,18 +3365,24 @@ def main(resume: bool = False) -> None:
         forced = False
         try:
             _ke_dasar_layar()
-            with Live(status_obj, console=console, refresh_per_second=12,
+            with Live(status_obj, console=console, refresh_per_second=6,
                       transient=True) as live:
-                live_holder["live"] = live
+                _LIVE["live"] = live
                 worker_thread.start()
                 _last_size = console.size
                 while worker_thread.is_alive():
                     try:
+                        # Konten tertampung (mis. gema suara) dicetak dari thread
+                        # utama, bukan dari worker yang bisa menabrak refresh Live.
+                        _flush_konten()
                         if console.size != _last_size:
                             _last_size = console.size
-                            live.stop()
-                            _ke_dasar_layar()
-                            live.start()
+                            # Sama seperti mode mengalir: tanpa stop/clear/start
+                            # — refresh cukup (rich merapikan region sendiri).
+                            # Tapi jangan saat Live di-stop (menu ask_user):
+                            # refresh() akan mencetak Control() ke console.
+                            if not _LIVE["paused"]:
+                                live.refresh()
                         worker_thread.join(timeout=0.1)
                     except KeyboardInterrupt:
                         if not interrupted:
@@ -3375,7 +3400,10 @@ def main(resume: bool = False) -> None:
             interrupted = True
             cancel_event.set()
         finally:
-            live_holder["live"] = None
+            _LIVE["live"] = None
+            _LIVE["paused"] = False
+        # Sisa konten tertampung (mis. gema suara) dicetak saat Live sudah tutup.
+        _flush_konten()
         # Giliran web yang dibatalkan: pastikan sesi browser tak tertinggal macet.
         if (interrupted or forced) and agent.model_spec.is_web:
             _reset_web_hub_if_stuck(worker_thread)
@@ -4701,14 +4729,12 @@ def main(resume: bool = False) -> None:
             agent.start_new_web_chat(immediate=True)
             grand["base"] = prefs.get_total_tokens()  # sesi baru mulai dari total
             console.clear()
-            _reset_konten()
             _tambah_konten([Padding(_banner(agent, False), (0, _LPAD, 0, _LPAD))])
         elif action == "reset":
             agent.reset()
             console.print("[dim](riwayat dikosongkan)[/dim]")
         elif action == "clear":
             console.clear()
-            _reset_konten()
             _tambah_konten([Padding(_banner(agent, False), (0, _LPAD, 0, _LPAD))])
         elif action == "memory":
             facts = longmem.all_facts()
@@ -4768,18 +4794,24 @@ def main(resume: bool = False) -> None:
             _tg_emit(k, t)
 
     def _tg_emit(kind: str, text: str) -> None:
+        # Lewat _tambah_konten: saat giliran berjalan (Live aktif) pesan ini
+        # DITAMPUNG lalu dicetak oleh thread utama — mencetak langsung dari
+        # thread bot di tengah refresh Live meninggalkan jejak yang sama
+        # dengan print dari worker.
         t = _esc(text or "")
         if kind == "in":
-            console.print(f"\n  [#fc9018]📲 Telegram ▸[/] [#f2e3cc]{t}[/]")
+            _tambah_konten([Text.from_markup(
+                f"\n  [#fc9018]📲 Telegram ▸[/] [#f2e3cc]{t}[/]")])
         elif kind == "out":
             snip = t if len(t) <= 600 else t[:600] + "…"
-            console.print(f"  [#9fc93c]  ↳ balasan:[/] [dim]{snip}[/]")
+            _tambah_konten([Text.from_markup(
+                f"  [#9fc93c]  ↳ balasan:[/] [dim]{snip}[/]")])
         elif kind == "perm":
-            console.print(f"\n  [#f7d488]🔔 {t}[/]")
+            _tambah_konten([Text.from_markup(f"\n  [#f7d488]🔔 {t}[/]")])
         elif kind == "error":
-            console.print(f"  [red]📲 error:[/] {t}")
+            _tambah_konten([Text.from_markup(f"  [red]📲 error:[/] {t}")])
         else:
-            console.print(f"  [dim]📲 {t}[/]")
+            _tambah_konten([Text.from_markup(f"  [dim]📲 {t}[/]")])
 
     def do_bot() -> None:
         svc = tg_service.get("svc")

@@ -9,6 +9,9 @@ python-dotenv>=1.0.0
 tenacity>=8.2.0
 pydantic>=2.0.0
 requests>=2.31.0
+# Server MCP (`bagas-ai mcp`) — sasaran tepat untuk AI. Hanya perintah itu
+# yang membutuhkannya.
+mcp>=1.0
 # Opsional: fitur CONNECTOR web-AI (/model kimi-web, qwen-web) — otomasi
 # browser ke kimi.com / chat.qwen.ai. Setelah install, jalankan sekali:
 #   playwright install chromium

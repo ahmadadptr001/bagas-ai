@@ -48,6 +48,7 @@ Penggunaan:
   bagas-ai update       Cek & terapkan pembaruan dari GitHub
   bagas-ai telegram     Jalankan bot Telegram
   bagas-ai api          Jalankan server API di http://localhost:8000
+  bagas-ai mcp          Jalankan server MCP (stdio) — sasaran tepat untuk AI
   bagas-ai setup        Sama dengan 'login'
   bagas-ai uninstall    Copot bagas-ai + HAPUS semua datanya (~/.bagasai)
   bagas-ai version      Tampilkan versi
@@ -457,6 +458,10 @@ def main() -> None:
         osinfo.sync_to_memory()
         osinfo.sync_hardware_to_memory()
         from .interfaces.api import main as run
+        run()
+        return
+    if mode in ("mcp", "mcp-server"):
+        from .mcp_server import main as run
         run()
         return
 

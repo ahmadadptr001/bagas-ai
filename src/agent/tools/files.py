@@ -16,6 +16,23 @@ from .checkpoint import snapshot as _snapshot
 
 ROOT = config.PROJECT_ROOT
 
+# Cache anti-baca-ulang: (path, start, end, outline, bernomor) -> sidik (mtime_ns, size).
+# Bila berkas dibaca lagi dengan lingkup yang sama dan isinya TIDAK berubah, isi
+# TIDAK dikirim ulang — AI disuruh memakai yang sudah ada di konteks. Sidik jari
+# mtime+size: mengubah file (write/edit) pasti mengubahnya, jadi bacaan sesudah
+# edit tetap segar. Sama sekali tidak membatasi: force=True atau lingkup berbeda
+# (start_line/end_line/outline lain) selalu membaca ulang.
+_BACA_CACHE: dict[tuple, tuple[int, int]] = {}
+_MAKS_CACHE = 400
+
+
+def _sidik_baca(target: Path) -> tuple[int, int] | None:
+    try:
+        st = target.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
 
 def _syntax_check(target: Path) -> str | None:
     """Cek sintaks RINGAN (hanya parsing, tak menjalankan) file kode yang baru ditulis.
@@ -234,8 +251,15 @@ def _sisa_kerangka(text: str, sudah: int, markdown: bool = False) -> str:
 
 @tool
 def read_file(path: str, start_line: int = 0, end_line: int = 0,
-              line_numbers: bool = False, outline: bool = False) -> str:
+              line_numbers: bool = False, outline: bool = False,
+              force: bool = False) -> str:
     """Baca isi sebuah file teks di dalam root project atau folder konteks (add-dir). Untuk file BESAR, mulailah dengan outline=true (peta semua definisi + nomor barisnya, hemat sekali), lalu baca bagian yang kamu butuh saja lewat start_line/end_line. Bila bacaan terpotong, kerangka sisanya ikut dikirim supaya kamu tak perlu menebak. NOMOR BARIS SELALU 1-BASED (baris pertama = baris 1) — saat pengguna menyebut "baris ke-N", verifikasi dengan start_line/end_line atau line_numbers=true, JANGAN menghitung sendiri dari 0.
+
+    ANTI BACA ULANG: bila berkas ini sudah dibaca sesi ini dengan lingkup yang
+    sama dan isinya TIDAK berubah, isi TIDAK dikirim ulang — kamu disuruh
+    memakai yang sudah ada di konteks (worklog `kerja_terakhir` juga mencatatnya).
+    Bacaan dengan lingkup berbeda (start_line/end_line/outline lain), atau
+    sesudah file diubah, selalu membaca ulang.
 
     path: relatif terhadap root project, atau path ABSOLUT untuk file di folder
     konteks tambahan.
@@ -247,11 +271,32 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0,
     outline: true = jangan kirim isinya, kirim PETA-nya saja (tiap class/def/
         function/heading beserta nomor barisnya). Pakai ini lebih dulu untuk
         berkas panjang yang belum kamu kenal.
+    force: true = baca ulang WALAU sudah dibaca & tak berubah. Hanya bila isi
+        sebelumnya benar-benar hilang dari konteks percakapan.
     """
     target = _safe_path(path)
     if not target.is_file():
         return f"File tidak ditemukan: {path}"
+
+    # Anti baca ulang: lingkup yang sama + isi tak berubah -> jangan kirim ulang.
+    sidik = _sidik_baca(target)
+    if not force and sidik is not None:
+        kunci = (str(target), int(start_line or 0), int(end_line or 0),
+                 bool(outline), bool(line_numbers))
+        if _BACA_CACHE.get(kunci) == sidik:
+            return (f"[SUDAH DIBACA] '{path}' tidak berubah sejak terakhir "
+                    "dibaca sesi ini — pakai isi yang sudah ada di konteks, "
+                    "JANGAN baca ulang.\nBila isi sebelumnya benar-benar hilang "
+                    "dari konteks, panggil read_file dengan force=True, atau "
+                    "minta lingkup berbeda (start_line/end_line).")
     text = target.read_text(encoding="utf-8", errors="replace")
+    # Rekam sidik jari untuk pembacaan BERIKUTNYA (anti baca ulang).
+    if sidik is not None:
+        kunci = (str(target), int(start_line or 0), int(end_line or 0),
+                 bool(outline), bool(line_numbers))
+        if len(_BACA_CACHE) >= _MAKS_CACHE:
+            _BACA_CACHE.clear()
+        _BACA_CACHE[kunci] = sidik
     try:
         s, e = int(start_line or 0), int(end_line or 0)
     except (TypeError, ValueError):
