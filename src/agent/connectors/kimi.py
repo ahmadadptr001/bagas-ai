@@ -1,6 +1,6 @@
-"""Connector kimi.com (web) — Kimi (Moonshot AI).
+"""Connector kimi.ai (web) — Kimi (Moonshot AI).
 
-Selektor di bawah DIPETAKAN LANGSUNG ke www.kimi.com pada sesi nyata yang sudah
+Selektor di bawah DIPETAKAN LANGSUNG ke www.kimi.ai pada sesi nyata yang sudah
 login: pesan uji dikirim, DOM-nya dibaca, jumlah elemen & perubahan kelas selama
 streaming DIUKUR, lalu hasil bacaan kode produksi dibandingkan dengan isi
 halaman. Yang belum terverifikasi ditandai eksplisit di komentarnya — jangan
@@ -24,12 +24,12 @@ from .browser import BrowserError
 class KimiConnector(WebConnector):
     service = "kimi"
     label = "Kimi (web)"
-    chat_url = "https://www.kimi.com/"
+    chat_url = "https://www.kimi.ai/"
     # DIVERIFIKASI live: URL percakapan berbentuk
-    #   https://www.kimi.com/chat/19f846c6-95e2-8d84-8000-09ac082f8780?chat_enter_method=home
+    #   https://www.kimi.ai/chat/19f846c6-95e2-8d84-8000-09ac082f8780?chat_enter_method=home
     # Pola di bawah membacanya utuh dan berhenti tepat sebelum `?` (tanda tanya
     # tak masuk kelas karakter), jadi lanjut-chat & --resume bekerja.
-    chat_url_template = "https://www.kimi.com/chat/{id}"
+    chat_url_template = "https://www.kimi.ai/chat/{id}"
     chat_id_pattern = r"/chat/([A-Za-z0-9_-]{8,})"
 
     # Jendela Kimi berjalan DI LATAR (tersembunyi) seperti connector lain: yang
@@ -173,26 +173,24 @@ class KimiConnector(WebConnector):
     )
 
     # --- lampiran (mis. screenshot untuk debug visual) ---
-    # DIPETAKAN dari klik manual pengguna:
-    #   .toolkit-trigger-btn  -> popover .toolkit-popover berisi LABEL.toolkit-item
-    #                            yang MEMBUNGKUS input[type=file].hidden-input
-    #   setelah file dipilih  -> pratinjau .image-thumbnail (ber-kelas .loading
-    #                            SELAMA unggahan berjalan)
-    # Input file BARU ADA di DOM sesudah tombol toolkit diklik, jadi
-    # set_input_files di awal tak akan menemukan apa pun (karena itu _upload
-    # di-override di bawah).
+    # DIPETAKAN dari DOM kimi.ai (2026-08-20, live):
+    #   .toolkit-trigger-btn  -> popover .n-popover berisi 4 item .toolkit-item:
+    #                            "Add files & photos" / "Plugins" / "Skills" /
+    #                            "Web search". Klik "Add files & photos" baru
+    #                            memicu pemilih berkas (file_chooser).
+    #   setelah file dipilih  -> kartu .file-card-container.normal.success
+    #                            (dulu .image-thumbnail — situs sudah berubah).
+    # Input file `input.hidden-input` ADA di DOM sesudah popover dibuka, tapi
+    # vis:false — set_input_files padanya BEROBOTAN: Kimi tidak memproses
+    # file yang diisi tanpa melalui alur "Add files & photos" → file_chooser.
+    # Karena itu _upload di-override di bawah untuk pakai alur yang benar.
     file_input_selector = "input.hidden-input, input[type='file']"
-    # Input file YANG SEBENARNYA milik komposer Kimi (di dalam popover toolkit).
-    # Dipisah dari file_input_selector yang longgar: keputusan "perlu buka
-    # popover?" HARUS berdasar input spesifik ini. Kalau memakai selektor longgar,
-    # sebuah <input type=file> basi/tersembunyi milik komponen lain membuat
-    # hitungannya > 0, popover tak pernah dibuka, lalu set_input_files mengenai
-    # input yang salah dan gambar DIAM-DIAM tak terlampir.
-    _INPUT_ASLI = "input.hidden-input"
-    # Kartu pratinjau yang SUDAH SELESAI diunggah — `:not(.loading)` penting:
-    # kartunya muncul seketika dengan kelas `loading`, dan mengirim saat itu
-    # berarti pesan berangkat sebelum gambarnya benar-benar terunggah.
-    attach_item_selector = ".image-thumbnail:not(.loading)"
+    # Item "Add files & photos" di popover toolkit — satu-satunya jalur upload
+    # yang berfungsi di kimi.ai sekarang.
+    _ITEM_ADD_FILES = '.toolkit-item:has-text("Add files")'
+    # Kartu pratinjau yang SUDAH SELESAI diunggah. `normal success` memastikan
+    # unggahan benar-benar tuntas (bukan error/loading).
+    attach_item_selector = ".file-card-container.normal.success"
 
     # Tombol pembuka popover lampiran.
     _BTN_TOOLKIT = ".toolkit-trigger-btn"
@@ -211,53 +209,10 @@ class KimiConnector(WebConnector):
     # Sengaja dijangkar pada kata "busy" bersama subjeknya (system/capacity/
     # server) supaya kalimat biasa yang memuat "busy" tak ikut tertangkap;
     # penjaga panjang di base (busy_max_chars) menutup sisanya.
-    #
-    # "Server exception, please try again later." ikut di sini, bukan di
-    # error_patterns: TERLIHAT di layar, spanduk itu muncul dua kali beruntun
-    # lalu KOMPOSERNYA ikut terkunci — Enter maupun tombol kirim tak
-    # berpengaruh. Sifatnya sementara persis seperti "system is busy", jadi
-    # perlakuannya harus sama: tunggu lalu kirim ulang sendiri, bukan
-    # menggagalkan giliran dengan tuduhan "komposer menolak Enter". Kata
-    # "exception" dijangkar pada "server" tepat di depannya supaya jawaban
-    # model soal exception di kode tak ikut tertangkap.
     busy_patterns = (
         r"\b(system|capacity|server|service)\s+is\s+(currently\s+)?busy\b",
-        r"\bserver\s+exception\b",
         r"\bsistem\s+sedang\s+sibuk\b",
         r"\bplease\s+wait\s+or\s+upgrade\b",
-    )
-
-    # PERCAKAPAN SUDAH KEPANJANGAN. Teks aslinya, terlihat berulang kali di
-    # sesi panjang:
-    #   "Your conversation with Kimi is getting too long.
-    #    Try starting a new session."
-    #
-    # Polanya dijangkar pada rangkaian kata yang KHAS pemberitahuan situs, bukan
-    # pada kata umum seperti "too long" saja — jawaban model sendiri sering
-    # membahas "file terlalu panjang" atau "konteks terlalu panjang", dan salah
-    # tangkap di sini berakibat mahal: satu chat sehat dibuang lalu seluruh
-    # konteks diringkas ulang tanpa perlu.
-    #
-    # Nama modelnya dibuat lentur ([\w\s.-]{0,20}) karena situs menuliskannya
-    # mengikuti model yang sedang dipakai (Kimi / Kimi K2 / K3), dan pemisah
-    # kalimatnya juga — sebagian tampilan memakai baris baru, bukan titik.
-    # BAHAYA YANG DIJAGA DI SINI: pemindaian membaca SELURUH halaman, dan
-    # halaman itu memuat pesan yang BAGAS-AI SENDIRI ketik — termasuk pengantar
-    # berkas ingatan (core._RUJUK_BERKAS) yang memang membicarakan percakapan
-    # panjang & pesan yang dipotong situs. Kalau polanya longgar, ia mencocoki
-    # tulisannya sendiri lalu memindahkan chat berulang-ulang tanpa sebab.
-    # Karena itu:
-    #   - tiap pola WAJIB memuat kata-kata yang khas milik SITUS, dan
-    #   - teks yang bagas-ai kirim sengaja ditulis agar tak mungkin cocok
-    #     (lihat catatan di core._RUJUK_BERKAS).
-    # Pola "try starting a new session" yang berdiri sendiri sengaja TIDAK
-    # dipakai: kalimat itu terlalu lumrah, dan model sendiri gampang
-    # menuliskannya sebagai saran.
-    context_full_patterns = (
-        r"(?i)conversation\s+with\s+[\w\s.-]{0,20}?is\s+getting\s+too\s+long",
-        r"(?i)too\s+long[\s\S]{0,60}?\bstart(ing)?\s+a\s+new\s+"
-        r"(session|conversation|chat)",
-        r"(?i)percakapan\s+\S+\s+dengan\s+[\w\s.-]{0,20}?terlalu\s+panjang",
     )
 
     # --- /effort: pemilih model + usaha berpikir ---
@@ -278,17 +233,11 @@ class KimiConnector(WebConnector):
     # Urutan penting: `.effort-option` didahulukan supaya "Standard"/"High"
     # mengenai pilihan di submenu, bukan `.effort-item` induknya yang teksnya
     # juga memuat nilai terpilih ("Thinking effort Standard").
-    # `.connect-item` = pilihan di submenu "Web search" (Auto/Off); ditaruh
-    # sebelum `.toolkit-item` supaya tingkat kedua tak salah mengenai item
-    # popover induknya.
     menu_item_selector = (".effort-option", ".effort-item", ".model-item",
-                          ".connect-item", ".toolkit-item")
+                          ".toolkit-item")
     web_model_button = _BTN_MODEL
     web_actions = (
-        # TERCACAH ulang dari menu yang dibuka sungguhan: pilihan cepatnya kini
-        # bernama "Instant" — "K2.6" sudah tak ada di daftar, dan /effort selalu
-        # gagal selama namanya masih yang lama.
-        ("Instant", ("Instant",), "obrolan cepat, balasan singkat", _BTN_MODEL),
+        ("K2.6", ("K2.6",), "obrolan cepat, balasan singkat", _BTN_MODEL),
         ("K3", ("K3",), "chat & agent, model andalan", _BTN_MODEL),
         ("K3 Swarm", ("K3 Swarm",),
          "pencarian masif & pemrosesan borongan", _BTN_MODEL),
@@ -298,75 +247,70 @@ class KimiConnector(WebConnector):
          "usaha berpikir tinggi", _BTN_MODEL),
     )
 
-    # --- /mode: alat yang mengubah CARA Kimi mengerjakan permintaan ---
-    # TERCACAH dari popover toolkit: isinya "Add files & photos", "Plugins",
-    # "Skills", "Web search". Hanya "Web search" yang benar-benar mode kerja —
-    # "Plugins"/"Skills" membuka daftar lain lagi (belum dipetakan), dan lampiran
-    # sudah punya jalurnya sendiri lewat perintah /file.
-    #
-    # "Web search" BUKAN sakelar sekali-tekan seperti dikira semula: ia membuka
-    # submenu berisi "Auto" dan "Off" (TERCACAH). Jadi jalurnya dua tingkat, dan
-    # mematikannya jadi pilihan tersendiri — bukan menekan tombol yang sama lagi.
-    web_modes = (
-        ("Web search: Auto", ("Web search", "Auto"),
-         "boleh membuka web saat perlu", _BTN_TOOLKIT),
-        ("Web search: Off", ("Web search", "Off"),
-         "tanpa akses web sama sekali", _BTN_TOOLKIT),
-    )
-
     def _upload(self, page: Any, paths: list[str]) -> None:
         """Lampirkan file, meniru persis yang dilakukan pengguna.
 
-        Urutannya (terekam dari klik manual): klik `.toolkit-trigger-btn` supaya
-        popover lampiran terbuka — DI SITULAH `input.hidden-input` muncul di DOM
-        — lalu isi input itu langsung.
+        Alur di kimi.ai (2026-08-20, live):
+          1. Klik `.toolkit-trigger-btn` → popover terbuka (4 item toolkit)
+          2. Klik "Add files & photos" → file_chooser muncul
+          3. Pilih file → kartu `.file-card-container.normal.success` muncul
 
-        Mengisi input lebih disukai daripada memancing dialog OS lewat
-        expect_file_chooser: tak ada jendela sistem yang bisa menggantung, dan
-        aman saat jendela browser berjalan tersembunyi di latar. Bila input tetap
-        tak muncul (situs berubah), barulah file chooser dicoba sebagai cadangan.
-
-        Keberhasilannya tidak dinilai di sini melainkan oleh _attach_files, yang
-        menunggu kartu `.image-thumbnail` selesai (tanpa kelas `loading`)."""
-        # Popover mungkin sudah terbuka dari percobaan sebelumnya; buka hanya
-        # bila input ASLI komposer memang belum ada. Sengaja memakai _INPUT_ASLI,
-        # BUKAN file_input_selector yang longgar — lihat komentar di atas.
-        if page.locator(self._INPUT_ASLI).count() == 0:
+        `set_input_files` pada `input.hidden-input` TIDAK BERFUNGSI di situs
+        sekarang: Kimi hanya memproses file yang masuk lewat alur pemilih
+        berkas sungguhan (file_chooser). Karena itu kita PAKSA lewat
+        file_chooser, bukan langsung mengisi input."""
+        # Buka popover bila belum terbuka. Tombol toolkit adalah TOGGLE —
+        # kalau sudah terbuka, mengkliknya lagi justru MENUTUP.
+        popover_open = page.locator('.toolkit-popover').count() > 0
+        if not popover_open:
             try:
                 self._click_element(page.locator(self._BTN_TOOLKIT).first)
                 page.wait_for_timeout(600)
-            except Exception:  # noqa: BLE001 - dinilai lewat percobaan di bawah
+            except Exception:  # noqa: BLE001
                 pass
 
-        # Isi input asli bila sudah muncul; kalau belum, baru jatuh ke selektor
-        # longgar sebagai cadangan.
+        # Klik "Add files & photos" → memicu file_chooser.
+        add_files_item = page.locator(self._ITEM_ADD_FILES)
+        try:
+            if add_files_item.count() and add_files_item.first.is_visible():
+                with page.expect_file_chooser(timeout=15000) as chooser:
+                    self._click_element(add_files_item.first)
+                chooser.value.set_files(paths)
+                return
+        except Exception:  # noqa: BLE001 - lanjut ke cadangan
+            try:
+                page.keyboard.press("Escape")
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Cadangan: set_input_files langsung (mungkin berfungsi di versi
+        # Kimi mendatang yang mengembalikan alur input langsung).
         for sel in (self._INPUT_ASLI, self.file_input_selector):
             try:
                 if page.locator(sel).count() == 0:
                     continue
                 page.set_input_files(sel, paths, timeout=8000)
-                # VERIFIKASI: set_input_files pada input yang salah/terlepas bisa
-                # "berhasil" tanpa benar-benar memuat file. Pastikan file memang
-                # masuk sebelum menganggap beres — kalau tidak, biarkan
-                # _attach_files (penantian thumbnail) yang menilai / coba cadangan.
                 loaded = page.evaluate(
                     "(s) => { const el = document.querySelector(s); "
                     "return el && el.files ? el.files.length : 0; }", sel)
                 if loaded:
                     return
-            except Exception:  # noqa: BLE001 - cadangan: dialog pemilih file
+            except Exception:  # noqa: BLE001
                 pass
 
+        # Cadangan terakhir: klik toolkit lagi (mungkin trigger file_chooser
+        # di versi situs tertentu).
         try:
-            with page.expect_file_chooser(timeout=15000) as chooser:
+            with page.expect_file_chooser(timeout=10000) as chooser:
                 self._click_element(page.locator(self._BTN_TOOLKIT).first)
             chooser.value.set_files(paths)
         except Exception as exc:  # noqa: BLE001
-            try:  # jangan tinggalkan popover menggantung menutupi komposer
+            try:
                 page.keyboard.press("Escape")
             except Exception:  # noqa: BLE001
                 pass
             raise BrowserError(
-                "gagal melampirkan file di Kimi — tombol toolkit atau input "
-                f"tersembunyi mungkin berubah (perbarui connectors/kimi.py): {exc}"
+                "gagal melampirkan file di Kimi — tombol 'Add files & photos' "
+                f"atau input tersembunyi mungkin berubah (perbarui connectors/"
+                f"kimi.py): {exc}"
             ) from exc

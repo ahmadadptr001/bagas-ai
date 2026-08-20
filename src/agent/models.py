@@ -55,7 +55,7 @@ class ModelSpec:
 #
 # Sengaja daftar ALIAS yang ditunda, bukan daftar yang aktif: menambah model
 # baru kelak tak boleh diam-diam ikut terkunci hanya karena lupa didaftarkan.
-_DITUNDA = {"dola-web", "kimi-web"}
+_DITUNDA = {"dola-web"}
 # _DITUNDA = {"gemini-web", "dola-web", "kimi-web"}
 
 # Alias pendek -> spesifikasi. Urutan menentukan nomor pada /model.
