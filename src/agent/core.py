@@ -1542,7 +1542,7 @@ class Agent:
             return ("Belum ada berkas ingatan yang tersimpan. Jalankan "
                     "`/compact` dulu di percakapan yang ingin kamu bawa.")
         conn = connectors.get_connector(self.model_spec.connector)
-        if not conn.supports_attachments():
+        if not conn.supports_context_files():
             return (f"{self.model_spec.label} belum mendukung unggah berkas, "
                     "jadi berkas memory tak bisa dikirim ke sana.")
 
@@ -2338,7 +2338,7 @@ class Agent:
                 # ±40 rb karakter jadi ±25 rb, dan yang tersisa cuma aturan
                 # main — bagian yang justru tak boleh sampai terpotong.
                 berkas_ctx = []
-                if (config.KONTEKS_BERKAS and conn.supports_attachments()
+                if (config.KONTEKS_BERKAS and conn.supports_context_files()
                         and not self._lampiran_mati):
                     # awalan "konteks": berkas pembuka milik bagas-ai sendiri,
                     # BUKAN ingatan pengguna — /send-compact tak boleh

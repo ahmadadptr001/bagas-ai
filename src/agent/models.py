@@ -60,6 +60,12 @@ _DITUNDA = {"dola-web"}
 
 # Alias pendek -> spesifikasi. Urutan menentukan nomor pada /model.
 MODELS: dict[str, ModelSpec] = {
+    "chatgpt-web": ModelSpec(
+        id="web/chatgpt",
+        label="ChatGPT (web)",
+        connector="chatgpt",
+        note="Via browser chatgpt.com — GPT-4o/4.1, kuat di coding & reasoning",
+    ),
     "kimi-web": ModelSpec(
         id="web/kimi",
         label="Kimi (web)",

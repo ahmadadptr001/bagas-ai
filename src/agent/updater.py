@@ -4,7 +4,7 @@ Kasus yang didukung:
 - Instalasi via installer yang meng-clone repo ke ~/.bagasai/src (install.sh /
   install.ps1 tanpa folder lokal): repo git sudah ada -> tinggal pull + reinstall.
 - Instalasi via installer DARI dalam folder proyek, atau `pip install` biasa
-  (salinan non-editable tanpa repo git penopang): auto-update DISIAPKAN dengan
+  (salinan non-editable tanpa repo git penopang): pembaruan DISIAPKAN dengan
   meng-clone repo ke ~/.bagasai/src, lalu reinstall dari sana.
 - Checkout pengembangan (editable): pull + reinstall editable.
 
@@ -50,7 +50,7 @@ def _pkg_path() -> Path | None:
 
 
 def _repo_dir() -> Path:
-    """Lokasi clone repo untuk auto-update (dibuat installer / oleh kita)."""
+    """Lokasi clone repo untuk pembaruan (dibuat installer / oleh kita)."""
     return config.CONFIG_HOME / "src"
 
 
@@ -278,7 +278,7 @@ def versions() -> dict:
 
 
 def clone_repo() -> dict:
-    """Clone repo ke ~/.bagasai/src untuk MENGAKTIFKAN auto-update.
+    """Clone repo ke ~/.bagasai/src untuk MENGAKTIFKAN pembaruan.
 
     Return {ok: bool, repo?: Path, cloned?: bool, status?, detail?}.
     """
@@ -328,7 +328,7 @@ def check() -> dict:
     repo = find_repo()
     if not repo:
         # Instalasi tanpa repo git penopang (salinan pip / installer dari folder).
-        # Auto-update BISA disiapkan dengan clone saat apply().
+        # Pembaruan BISA disiapkan dengan clone saat apply().
         if config.REPO_URL:
             return {
                 "status": "setup_needed",

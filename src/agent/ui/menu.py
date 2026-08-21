@@ -95,6 +95,30 @@ def _sebagai_choices(items: Iterable[Any]) -> list[Choice]:
 
 
 def _lebar_terminal() -> int:
+    """Lebar terminal LANGSUNG dari sumbernya, bukan var lingkungan.
+
+    shutil.get_terminal_size mengutamakan COLUMNS/LINES warisan shell; nilai
+    warisan itu bisa basi (terminal sudah diubah ukurannya, environ belum)
+    sehingga menu yang sedang tampil digambar dengan lebar lama sampai
+    ditutup. Tanyakan ke output prompt_toolkit yang sedang menggambar dulu,
+    lalu ke terminal lewat os.get_terminal_size — keduanya selalu segar."""
+    try:
+        from prompt_toolkit.application.current import get_app_or_none
+        app = get_app_or_none()
+        if app is not None and app.is_running:
+            kolom = app.output.get_size().columns
+            if kolom > 1:
+                return max(40, min(kolom - 1, 200))
+    except Exception:  # noqa: BLE001
+        pass
+    import os
+    for f in (sys.__stdout__, sys.stdout, sys.__stderr__):
+        try:
+            kolom = os.get_terminal_size(f.fileno()).columns
+            if kolom > 0:
+                return max(40, min(kolom, 200))
+        except Exception:  # noqa: BLE001
+            continue
     try:
         import shutil
         return max(40, min(shutil.get_terminal_size((80, 24)).columns, 200))
@@ -104,6 +128,8 @@ def _lebar_terminal() -> int:
 
 def _potong(teks: str, maks: int) -> str:
     """Potong teks berdasarkan LEBAR TAMPIL (emoji dihitung 2 kolom)."""
+    if maks <= 1:
+        return "…" if maks == 1 else ""
     if get_cwidth(teks) <= maks:
         return teks
     out = ""
@@ -123,6 +149,14 @@ def _potong(teks: str, maks: int) -> str:
 # tak pernah benar-benar teruji.
 paksa_interaktif = False
 
+# "KAKI" menu: baris-baris statis (kotak chat + bar status milik CLI) yang
+# dipasang DI BAGIAN BAWAH layout menu sendiri. Tanpa ini, app inline
+# prompt_toolkit mengisi ruang hingga dasar layar dan MENIMPA kotak chat —
+# menu terbuka, kotaknya lenyap. Dengan kaki, tumpukan bawah tetap tampak
+# selama menu apa pun terbuka; cli.py yang mengisinya lewat kaki_aktif
+# (None = menu berdiri sendiri, seperti di luar sesi chat).
+kaki_aktif: list[tuple[str, str]] | None = None
+
 
 def _interaktif() -> bool:
     """True bila terminalnya benar-benar bisa dipakai menggambar prompt."""
@@ -137,6 +171,8 @@ def _interaktif() -> bool:
 # ---------------------------------------------------------------- kerangka
 def _bungkus_teks(teks: str, lebar: int) -> list[str]:
     """Pecah teks jadi beberapa baris menurut LEBAR TAMPIL (bukan jumlah huruf)."""
+    if lebar <= 0:
+        lebar = 20
     baris: list[str] = []
     for asli in teks.splitlines() or [""]:
         kini, w = "", 0
@@ -144,13 +180,31 @@ def _bungkus_teks(teks: str, lebar: int) -> list[str]:
         # yang akan muncul sebagai spasi menggantung di ujung baris.
         for kata in asli.split():
             kw = get_cwidth(kata)
+            if kw > lebar:
+                if kini:
+                    baris.append(kini)
+                    kini, w = "", 0
+                potongan = ""
+                pw = 0
+                for ch in kata:
+                    cw = get_cwidth(ch)
+                    if pw + cw > lebar:
+                        baris.append(potongan)
+                        potongan, pw = ch, cw
+                    else:
+                        potongan += ch
+                        pw += cw
+                if potongan:
+                    kini, w = potongan, pw
+                continue
             if kini and w + 1 + kw > lebar:
                 baris.append(kini)
                 kini, w = kata, kw
             else:
                 kini = f"{kini} {kata}" if kini else kata
                 w += (1 + kw) if kini != kata else kw
-        baris.append(kini)
+        if kini:
+            baris.append(kini)
     return baris or [""]
 
 
@@ -187,11 +241,27 @@ def _kotak(judul: str, isi: list[list[tuple[str, str]]], footer: str,
     return FormattedText(frag)
 
 
-def _jalankan(bangun: Callable[[], FormattedText], kb: KeyBindings) -> Any:
-    """Jalankan satu Application inline (tidak layar-penuh) sampai app.exit()."""
-    ctrl = FormattedTextControl(bangun, focusable=True, show_cursor=False)
+def _jalankan(bangun: Callable[[], FormattedText], kb: KeyBindings,
+              kaki: list[tuple[str, str]] | None = None) -> Any:
+    """Jalankan satu Application inline (tidak layar-penuh) sampai app.exit().
+
+    `kaki` = baris statis yang dipaku di DASAR layout (kotak chat + bar
+    status milik CLI). Aplikasi inline mengisi ruang sampai dasar layar;
+    tanpa penopang, baris-baris itu ditimpa spasi kosong — kotak chat
+    lenyap selama menu terbuka. Pendorong di atas kaki menjaga kaki tetap
+    menempel dasar berapa pun tinggi menu/terminalnya."""
+    if kaki is None:
+        kaki = kaki_aktif
+    lapisan: list = [Window(FormattedTextControl(bangun, focusable=True,
+                                                 show_cursor=False),
+                            dont_extend_height=True)]
+    if kaki:
+        lapisan.append(Window())          # pendorong: kaki selalu di dasar
+        lapisan.append(Window(
+            FormattedTextControl(lambda: kaki),
+            dont_extend_height=True, wrap_lines=False))
     app: Application = Application(
-        layout=Layout(HSplit([Window(ctrl, dont_extend_height=True)])),
+        layout=Layout(HSplit(lapisan)),
         key_bindings=kb,
         full_screen=False,
         # Prompt-nya HILANG sesudah dijawab, lalu diganti satu baris ringkasan —
@@ -575,20 +645,20 @@ def confirm(message: str = "", default: bool = True, warna: str = KUNING,
 
 # ------------------------------------------------------- input teks & path
 def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
-                 default: str = "", completer: Any = None) -> str:
-    """Kotak pertanyaan + baris input DI DALAM satu bingkai yang sama.
+                 default: str = "", completer: Any = None,
+                 ringkas: bool = True,
+                 kaki: list[tuple[str, str]] | None = None) -> str:
+    """Prompt satu-baris berbingkai (dipakai text/secret/filepath).
 
-    Dulu kotak dicetak dulu sebagai benda terpisah, lalu PromptSession
-    menggambar baris "❯" TERSENDIRI di bawah kotak — pengguna melihat input
-    "melayang" di luar kotak, seolah dua benda yang tak berhubungan. Kini baris
-    input menjadi baris bingkai itu sendiri: BufferControl disisipkan di antara
-    tepi atas (judul) dan tepi bawah (petunjuk), jadi mengetik terjadi di
-    dalam kotak. Line editing (Home/End/Ctrl+W/riwayat/autolengkap) tetap
-    ditangani prompt_toolkit lewat Buffer — menulisnya sendiri berarti mengulang
-    persoalan Backspace yang berbeda antar-terminal, dan itu sudah pernah
-    menghabiskan waktu di proyek ini."""
+    `kaki` = tumpukan bawah milik CLI (kotak chat + bar status) supaya ia
+    tak tertimpa app inline ini — lihat kaki_aktif."""
+    if kaki is None:
+        kaki = kaki_aktif
     if not _interaktif():
-        raise KeyboardInterrupt
+        try:
+            return input(f"{message}: ") if not rahasia else getpass.getpass(f"{message}: ")
+        except (EOFError, KeyboardInterrupt):
+            return default
 
     buf = Buffer(completer=completer, complete_while_typing=bool(completer))
     if default:
@@ -654,7 +724,7 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
     kb = KeyBindings()
 
     @kb.add("c-c")
-    def _batal(e):
+    def _batal_cb(e):
         e.app.exit(exception=KeyboardInterrupt, style="class:aborting")
 
     @kb.add("enter")
@@ -662,43 +732,51 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
     def _kirim(e):
         e.current_buffer.validate_and_handle()
 
+    lapisan: list = [
+        Window(FormattedTextControl(bagian_atas), dont_extend_height=True),
+        VSplit([
+            Window(penanda, dont_extend_height=True, wrap_lines=False,
+                   width=get_cwidth("│  ❯ ")),
+            window_input,
+        ]),
+        Window(FormattedTextControl(bagian_bawah), dont_extend_height=True),
+    ]
+    if kaki:
+        lapisan.append(Window())          # pendorong: kaki menempel dasar
+        lapisan.append(Window(
+            FormattedTextControl(lambda: kaki),
+            dont_extend_height=True, wrap_lines=False))
     app: Application = Application(
-        layout=Layout(HSplit([
-            Window(FormattedTextControl(bagian_atas), dont_extend_height=True),
-            VSplit([
-                Window(penanda, dont_extend_height=True, wrap_lines=False,
-                       width=get_cwidth("│  ❯ ")),
-                window_input,
-            ]),
-            Window(FormattedTextControl(bagian_bawah), dont_extend_height=True),
-        ]), focused_element=window_input),
+        layout=Layout(HSplit(lapisan), focused_element=window_input),
         key_bindings=kb,
         full_screen=False,
-        # Kotak dibiarkan tampil setelah dijawab (bukan erase_when_done):
-        # bingkai pertanyaan tetap terlihat sampai lapisan di atasnya
-        # menggambar ulang, sama seperti perilaku lama.
-        erase_when_done=False,
+        erase_when_done=True,
         mouse_support=False,
     )
     try:
-        return app.run()
+        hasil = app.run()
     except KeyboardInterrupt:
+        if ringkas:
+            _batal(message)
         raise
+    if ringkas:
+        _ringkas(message, "••••••" if rahasia else (hasil or "(kosong)"))
+    return hasil
 
 
 def text(message: str = "", default: str = "", hint: str = "",
-         **_lain: Any) -> str:
+         ringkas: bool = True, **_lain: Any) -> str:
     return _prompt_teks(message, hint or "⏎ kirim  ·  Ctrl+C batal",
-                        default=str(default or ""))
+                        default=str(default or ""), ringkas=ringkas)
 
 
-def secret(message: str = "", **_lain: Any) -> str:
+def secret(message: str = "", ringkas: bool = True, **_lain: Any) -> str:
     return _prompt_teks(message, "ketikan disembunyikan  ·  Ctrl+C batal",
-                        rahasia=True)
+                        rahasia=True, ringkas=ringkas)
 
 
 def filepath(message: str = "", only_directories: bool = False,
-             hint: str = "", **_lain: Any) -> str:
+             hint: str = "", ringkas: bool = True, **_lain: Any) -> str:
     from prompt_toolkit.completion import PathCompleter
 
     return _prompt_teks(
@@ -706,6 +784,7 @@ def filepath(message: str = "", only_directories: bool = False,
         hint or "Tab autolengkap  ·  ⏎ pilih  ·  Ctrl+C batal",
         completer=PathCompleter(only_directories=bool(only_directories),
                                 expanduser=True),
+        ringkas=ringkas,
     )
 
 

@@ -102,7 +102,7 @@ def _parse_ids(raw: str) -> set[int]:
 # pengirim PERTAMA otomatis jadi pemilik (dan diberi tahu ID-nya untuk disimpan).
 TELEGRAM_ALLOWED_IDS: set[int] = _parse_ids(os.getenv("TELEGRAM_ALLOWED_IDS", ""))
 
-# --- Auto-update (samakan dengan installer install.sh/install.ps1) ---
+# --- Pembaruan manual (samakan dengan installer install.sh/install.ps1) ---
 # Dipakai `bagas-ai update` untuk menyiapkan/menarik pembaruan dari GitHub, bahkan
 # bila instalasi berupa salinan (pip install biasa) tanpa repo git penopang.
 REPO_URL: str = os.getenv(

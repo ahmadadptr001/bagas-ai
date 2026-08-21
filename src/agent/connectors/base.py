@@ -109,7 +109,17 @@ JS_FIND_TEXT = r"""
 JS_ATTACH_COUNT = r"""
 (args) => {
   if (args.card) {
-    try { return document.querySelectorAll(args.card).length; }
+    try {
+      const cards = Array.isArray(args.card) ? args.card : [args.card];
+      for (const sel of cards) {
+        if (!sel) continue;
+        try {
+          const n = document.querySelectorAll(sel).length;
+          if (n > 0) return n;
+        } catch (e) {}
+      }
+      return 0;
+    }
     catch (e) { return 0; }
   }
   const box = document.querySelector(args.input);
@@ -1406,7 +1416,7 @@ class WebConnector:
         """Kandidat selector ITEM MENU, urut dari yang paling spesifik."""
         return self._as_selectors(self.menu_item_selector)
 
-    def _open_menu(self, page: Any, opener: str) -> bool:
+    def _open_menu(self, page: Any, opener: str | tuple[str, ...]) -> bool:
         """Klik tombol pembuka lalu TUNGGU item menunya muncul.
 
         Jeda tetap tidak cukup: tepat setelah jawaban selesai, UI situs kadang
@@ -1421,14 +1431,18 @@ class WebConnector:
         # "menu tak mau terbuka" yang muncul hilang-timbul.
         batas = time.time() + 6.0
         btn = None
+        selectors = self._as_selectors(opener)
         while time.time() < batas:
-            try:
-                kandidat = page.query_selector(opener)
-                if kandidat is not None and kandidat.is_visible():
-                    btn = kandidat
-                    break
-            except Exception:  # noqa: BLE001 - DOM sedang transisi
-                pass
+            for sel in selectors:
+                try:
+                    kandidat = page.query_selector(sel)
+                    if kandidat is not None and kandidat.is_visible():
+                        btn = kandidat
+                        break
+                except Exception:  # noqa: BLE001 - DOM sedang transisi
+                    pass
+            if btn is not None:
+                break
             page.wait_for_timeout(250)
         if btn is None:
             return False
@@ -1881,6 +1895,15 @@ class WebConnector:
         """True bila situs ini bisa menerima lampiran file dari bagas-ai."""
         return bool(self.file_input_selector)
 
+    def supports_context_files(self) -> bool:
+        """True bila situs ini mendukung unggahan berkas konteks proyek (.txt).
+
+        Situs yang membatasi unggahan dokumen pada akun biasa (mis. ChatGPT Web)
+        mengembalikan False agar konteks dikirim langsung sebagai teks tanpa
+        risiko kegagalan/penundaan unggah berkas.
+        """
+        return self.supports_attachments()
+
     def _attach_files(self, page: Any, paths: list[str],
                       check_cancel: Callable[[], None]) -> None:
         """Unggah file ke komposer & TUNGGU sampai pratinjaunya muncul.
@@ -1930,15 +1953,21 @@ class WebConnector:
         if not self.attach_clear_selector:
             return 0
         lepas = 0
+        selectors = self._as_selectors(self.attach_clear_selector)
         for _ in range(batas):
-            try:
-                loc = page.locator(self.attach_clear_selector)
-                if not loc.count():
-                    break
-                self._click_element(loc.first, timeout=4000)
-                lepas += 1
-                page.wait_for_timeout(350)
-            except Exception:  # noqa: BLE001 - kartu keburu hilang/DOM berubah
+            ditemukan = False
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel)
+                    if loc.count():
+                        self._click_element(loc.first, timeout=4000)
+                        lepas += 1
+                        ditemukan = True
+                        page.wait_for_timeout(350)
+                        break
+                except Exception:  # noqa: BLE001 - kartu keburu hilang/DOM berubah
+                    continue
+            if not ditemukan:
                 break
         return lepas
 
@@ -2189,6 +2218,19 @@ class WebConnector:
             except Exception:  # noqa: BLE001 - kabar tak boleh menjatuhkan giliran
                 pass
 
+    def _send_button(self, page: Any) -> Any:
+        """Locator tombol kirim (kandidat pertama yang ada). None bila tak ada."""
+        if not self.send_button_selector:
+            return None
+        for sel in self._as_selectors(self.send_button_selector):
+            try:
+                loc = page.locator(sel).first
+                if loc.count():
+                    return loc
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
     def _submit(self, page: Any, inp: Any) -> None:
         """Kirim pesan, dan PASTIKAN benar-benar terkirim.
 
@@ -2209,6 +2251,14 @@ class WebConnector:
             # Enter pada tik yang sama bisa mengirim keadaan yang belum sinkron.
             page.wait_for_timeout(200)
         page.keyboard.press(self.submit_key)
+        # Coba klik tombol kirim juga bila langsung tersedia (penting untuk editor
+        # ProseMirror multi-baris di mana Enter menyisipkan newline).
+        btn = self._send_button(page)
+        if btn is not None:
+            try:
+                self._click_element(btn)
+            except Exception:  # noqa: BLE001
+                pass
         if not self.send_button_selector:
             return
         # Diperiksa DULU baru menunggu: pada jalur normal (Enter memang bekerja)
@@ -2228,8 +2278,8 @@ class WebConnector:
         # putaran sebelum dinyatakan gagal dengan pesan yang jelas.
         for putaran in range(3):
             try:
-                btn = page.locator(self.send_button_selector).first
-                if btn.count():
+                btn = self._send_button(page)
+                if btn is not None:
                     self._click_element(btn)
             except Exception:  # noqa: BLE001 - dinilai lewat isi kotak di bawah
                 pass
@@ -2251,8 +2301,8 @@ class WebConnector:
             if self._sudah_terkirim(page, inp, counts0, url0):
                 return
             try:
-                btn = page.locator(self.send_button_selector).first
-                if btn.count():
+                btn = self._send_button(page)
+                if btn is not None:
                     self._click_element(btn)
             except Exception:  # noqa: BLE001
                 pass
@@ -2285,8 +2335,8 @@ class WebConnector:
             if self._sudah_terkirim(page, inp, counts0, url0):
                 return
             try:
-                btn = page.locator(self.send_button_selector).first
-                if btn.count():
+                btn = self._send_button(page)
+                if btn is not None:
                     self._click_element(btn)
             except Exception:  # noqa: BLE001
                 pass
@@ -2458,8 +2508,23 @@ class WebConnector:
 
         Situs yang input file-nya BARU DIBUAT saat menu lampiran dibuka
         meng-override ini (lihat KimiConnector) — di situs seperti itu
-        set_input_files pada input yang sudah ada tak berpengaruh apa pun."""
-        page.set_input_files(self.file_input_selector, paths)
+        set_input_files pada input yang sudah ada tak berpengaruh apa pun.
+
+        Selector boleh string MAUPUN tuple: set_input_files hanya menerima
+        satu string, jadi tuple dipecah dan kandidat pertama yang benar-benar
+        ada di komposer yang dipakai. Tanpa ini, connector bertipe tuple
+        gagal total dengan 'expected string, got object'."""
+        for sel in self._as_selectors(self.file_input_selector):
+            try:
+                if page.locator(sel).count():
+                    page.set_input_files(sel, paths)
+                    return
+            except BrowserError:
+                raise
+            except Exception:  # noqa: BLE001 - coba kandidat berikutnya
+                continue
+        raise BrowserError(
+            f"input file tak ditemukan di komposer {self.label}")
 
     def _attach_count(self, page: Any) -> int:
         """Jumlah kartu/pratinjau lampiran yang sudah menempel di komposer."""
@@ -2916,7 +2981,20 @@ class WebConnector:
                 "CAPTCHA). Aku tunggu sampai selesai, tak usah apa-apakan "
                 "terminal ini."
             )
-            self._wait_login(page, check_cancel)
+            try:
+                self._wait_login(page, check_cancel)
+            except BaseException:
+                # JANGAN WARISI ZOMBIE. Kegagalan di sini (timeout, batal,
+                # jendela ditutup) selama ini meninggalkan browser hidup
+                # memegang kunci profil; percobaan berikutnya lalu MENUMPANGI
+                # mayat itu lewat CDP dan menggantung pada keadaan yang tak
+                # jelas. Tutup konteksnya sekarang, biarkan percobaan
+                # berikutnya meluncur bersih.
+                try:
+                    h.drop(self.service)
+                except Exception:  # noqa: BLE001 - browsernya mungkin sudah mati
+                    pass
+                raise
             status("login berhasil ✓ — browser lanjut di latar, kerja di terminal")
             did_login = True
         # Sesudah login, BUKAN sebelumnya: selama pengguna sign-in, jendelanya
@@ -3011,18 +3089,29 @@ class WebConnector:
         if not self.logged_out_selector:
             return False
         try:
-            return page.query_selector(self.logged_out_selector) is not None
+            for sel in self._as_selectors(self.logged_out_selector):
+                if page.query_selector(sel) is not None:
+                    return True
+            return False
         except Exception:  # noqa: BLE001
             return False
 
     def _looks_logged_in(self, page: Any) -> bool:
         """True bila ada BUKTI POSITIF sesi sudah login (mis. tombol profil).
         Connector yang tak menyebutkan penandanya dianggap tak berpendapat —
-        True, sehingga perilakunya persis seperti sebelum bukti positif ada."""
+        True, sehingga perilakunya persis seperti sebelum bukti positif ada.
+
+        Menerima string ber-koma MAUPUN tuple: query_selector hanya menerima
+        satu string, jadi tuple harus dipecah satu per satu. Tanpa ini,
+        connector yang mendefinisikan tuple diam-diam menganggap SEMUA
+        keadaan sebagai belum-login (TypeError tertelan except)."""
         if not self.logged_in_selector:
             return True
         try:
-            return page.query_selector(self.logged_in_selector) is not None
+            for sel in self._as_selectors(self.logged_in_selector):
+                if page.query_selector(sel) is not None:
+                    return True
+            return False
         except Exception:  # noqa: BLE001
             return False
 

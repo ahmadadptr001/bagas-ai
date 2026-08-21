@@ -294,72 +294,6 @@ def _cmd_add_dir(args: list[str]) -> None:
         print("    bagas-ai akan memahami & bisa mengaksesnya di sesi berikutnya.")
 
 
-def _enforce_update() -> None:
-    """PAKSA pasang pembaruan sebelum chat bila cek terakhir menemukannya.
-
-    Instan saat tidak ada pembaruan: hanya membaca cache hasil cek latar
-    (tanpa jaringan), jadi startup tetap cepat. Bila cache bilang ada
-    pembaruan, update dipasang otomatis (tanpa tanya) lalu bagas-ai
-    dimulai ulang dengan versi baru.
-    """
-    from . import updater
-
-    try:
-        cache = updater.read_cache()
-    except Exception:
-        return
-    st = cache.get("status")
-    if st not in ("update_available", "stale_install"):
-        return
-
-    if st == "stale_install":
-        # Repo mutakhir tapi paket yang dijalankan tertinggal — tak terlihat
-        # oleh pemeriksaan versi mana pun yang cuma membaca angka.
-        print("⬆ Paket bagas-ai yang terpasang tertinggal dari repo — "
-              "dipasang ulang dulu…")
-        for b in (cache.get("beda") or [])[:5]:
-            print("   • " + str(b))
-    else:
-        local, remote = cache.get("local", "?"), cache.get("remote", "?")
-        print(f"⬆ Pembaruan bagas-ai tersedia ({local} → {remote}) — "
-              f"dipasang otomatis dulu…")
-        for line in (cache.get("log") or "").splitlines()[:5]:
-            print("   • " + line)
-    try:
-        out = updater.apply()
-    except KeyboardInterrupt:
-        print("\n✖ Update dibatalkan — bagas-ai butuh versi terbaru. Jalankan lagi ya.")
-        sys.exit(1)
-    except Exception as exc:  # noqa: BLE001
-        print(f"⚠ Gagal memasang pembaruan: {exc}")
-        print("  Lanjut pakai versi sekarang; coba `bagas-ai update` nanti.\n")
-        return
-
-    # `verified`, bukan `reinstalled`: memulai ulang hanya masuk akal bila kode
-    # barunya BENAR-BENAR sudah mendarat. Proses ini masih memegang modul lama
-    # di memori, jadi exec ulang itulah yang mengaktifkannya.
-    if out.get("status") == "updated" and out.get("verified"):
-        print("✓ bagas-ai diperbarui — memulai ulang…\n")
-        import subprocess
-        rc = subprocess.call(
-            [sys.executable, "-m", __package__ or "agent", *sys.argv[1:]])
-        sys.exit(rc)
-    if out.get("status") == "updated":
-        # Sisa kasus yang benar-benar tak bisa dipasang sekarang. Sejak kode
-        # bisa disalin langsung ke site-packages, jalur ini jarang terpakai.
-        print("⚠ Kode terbaru sudah ditarik, tapi pemasangannya belum tuntas.")
-        if out.get("note"):
-            print("  " + out["note"])
-        for b in (out.get("diff") or [])[:5]:
-            print("  • " + str(b))
-        print("  Lanjut pakai versi sekarang.\n")
-        return
-    # Gagal (jaringan/git) -> jangan kunci pengguna dari AI-nya; beri tahu & lanjut.
-    print(f"⚠ Gagal memasang pembaruan ({out.get('status')}): "
-          f"{out.get('detail', '')}")
-    print("  Lanjut pakai versi sekarang; coba `bagas-ai update` nanti.\n")
-
-
 # _need_key() DIHAPUS: bagas-ai tak lagi punya kredensial wajib. Model dipilih
 # lewat /model lalu login dilakukan SEKALI di jendela browser, jadi tak ada lagi
 # gerbang "isi API key dulu" sebelum chat/telegram/api boleh dijalankan.
@@ -369,7 +303,10 @@ def _preload_with_bar() -> None:
     """Bar loading BERTAHAP saat memuat pustaka berat — fase paling lambat (~1 dtk)
     dari startup. Tiap pustaka diimpor satu per satu sambil bar terisi bertahap,
     lalu impor CLI jadi instan (semua sudah ter-cache)."""
+    if not sys.stdout or not sys.stdout.isatty():
+        return
     import importlib
+    import shutil
     pkg = __package__ or "agent"
     steps = [
         ("tampilan (rich)", "rich.console"),
@@ -383,7 +320,8 @@ def _preload_with_bar() -> None:
         ("antarmuka", f"{pkg}.interfaces.cli"),
     ]
     total = len(steps)
-    w = 22
+    cols = max(40, min(shutil.get_terminal_size((80, 24)).columns, 120))
+    w = 22 if cols >= 70 else 12
     for i, (label, mod) in enumerate(steps, 1):
         try:
             importlib.import_module(mod)
@@ -392,14 +330,15 @@ def _preload_with_bar() -> None:
         filled = round(w * i / total)
         bar = "█" * filled + "░" * (w - filled)
         try:
-            sys.stdout.write(
-                f"\r  ⬢ bagas-ai  memuat  {bar}  {round(100 * i / total):3d}%"
-                f"  {label:<18}")
+            txt = f"  ⬢ bagas-ai  memuat  {bar}  {round(100 * i / total):3d}%  {label:<18}"
+            if len(txt) > cols - 1:
+                txt = txt[:cols - 2] + "…"
+            sys.stdout.write(f"\r{txt:<{cols - 1}}")
             sys.stdout.flush()
         except Exception:
             pass
     try:
-        sys.stdout.write("\r" + " " * 74 + "\r")  # bersihkan baris
+        sys.stdout.write("\r" + " " * (cols - 1) + "\r")  # bersihkan baris
         sys.stdout.flush()
     except Exception:
         pass
@@ -441,7 +380,6 @@ def main() -> None:
         return
 
     if mode in ("chat", "cli"):
-        _enforce_update()    # paksa update bila cek latar menemukan pembaruan
         _preload_with_bar()  # bar loading BERTAHAP selama impor pustaka (~1 dtk)
         from .interfaces.cli import main as run
         run(resume=resume)
