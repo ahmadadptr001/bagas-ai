@@ -22,8 +22,12 @@ from __future__ import annotations
 from .. import prefs
 
 # --- tema yang tersedia --------------------------------------------------------
-# "default" WAJIB memuat nilai persis skema lama (emas + footer putih yang
-# sudah disetujui pengguna) supaya /theme bukan regresi bagi siapa pun.
+# "default" (Ember) WAJIB memuat nilai persis skema lama (emas + footer putih
+# yang sudah disetujui pengguna) supaya prefs lama yang menunjuknya tidak
+# berubah sepeser pun. TAPI ia bukan lagi titik awal aplikasi: bawaan pabrik
+# kini "biru" — berlabel Lautan di menu /theme. Id dan labelnya memang tak
+# seragam; id dipertahankan "biru" karena tersimpan begitu di prefs.json
+# pengguna — menggantinya berarti tema semua orang lepas ke default.
 TEMA: dict[str, dict] = {
     "default": {
         "label": "Ember",
@@ -129,14 +133,16 @@ _PETA_WARISAN: dict[str, str] = {
     "#f2e3cc": "teks", "#241a10": "menu_bg", "#1a120b": "menu_meta_bg",
 }
 
-_aktif: dict = TEMA["default"]
-_nama: str = "default"
+# Bawaan pabrik: Lautan (id "biru") — bukan "default"/Ember. Kunci "default"
+# tetap ada di TEMA semata demi prefs lama yang menunjuknya secara eksplisit.
+_aktif: dict = TEMA["biru"]
+_nama: str = "biru"
 
 
 def _muat() -> None:
     """Pasang tema tersimpan di prefs (dipanggil sekali saat impor)."""
     global _aktif, _nama
-    nama = (prefs.load().get("tema") or "default")
+    nama = (prefs.load().get("tema") or "biru")
     if nama in TEMA:
         _nama, _aktif = nama, TEMA[nama]
 

@@ -4208,8 +4208,8 @@ def main(resume: bool = False) -> None:
             # saat memilih — bukan reasoning/multimodal.
             badge = " 🌐" if spec.is_web else " 🤖"
             if spec.ditunda:
-                return f"{spec.label:<28}{badge}  {D}  ⏸ ditunda sementara"
-            note = f"  {D}  {spec.note}" if spec.note else ""
+                return f"{spec.label:<28}{badge}  —  ⏸ ditunda sementara"
+            note = f"  —  {spec.note}" if spec.note else ""
             # Dikatakan DI DAFTAR, bukan hanya saat dipilih lalu ditolak: entri
             # yang terlihat sama seperti yang lain padahal pasti gagal membuat
             # pengguna menabraknya dulu untuk tahu.
@@ -4290,7 +4290,7 @@ def main(resume: bool = False) -> None:
             tanda = "  (aktif)" if lv == aktif else ""
             # inquirer TIDAK memproses markup rich — tulis polos.
             choices.append(Choice(
-                lv, f"{ikon} {label:<{width}}  {D}  {desc}{tanda}"))
+                lv, f"{ikon} {label:<{width}}  —  {desc}{tanda}"))
         try:
             sel = inquirer.select(
                 message=f"Mode berpikir {spec.label}",
