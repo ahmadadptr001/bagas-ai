@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import unicodedata
@@ -382,11 +383,21 @@ def _fmt_elapsed(sec: float) -> str:
 # mengurus browser, dan bagi dia "jendela Chrome" terbaca seperti ada yang
 # salah. Kalimat sedetail itu tempatnya di log, bukan di baris status.
 _FASE_SIAP = "menyiapkan model"
+_FASE_TUNGGU = "menunggu model"
 _FASE_PIKIR = "berpikir"
 
 
-def _web_phase(msg: str) -> str:
-    """Ringkas status connector web jadi SATU kata fase untuk baris status."""
+def _fase_status(msg: str) -> str:
+    """Ringkas status jadi SATU kata fase untuk baris status.
+
+    Dipakai KEDUA jalur, karena itu namanya bukan lagi _web_phase: jalur API
+    (nvidia/*) mengirim statusnya lewat pintu yang sama, dan dulu status
+    "sedang memproses"-nya jatuh ke cabang terakhir lalu tampil sebagai
+    "menyiapkan model" — keliru, dan keliru ke arah yang paling merugikan:
+    permintaannya SUDAH terkirim dan model sudah bekerja, tapi pengguna
+    dibilangi modelnya belum siap. Pada model yang butuh menit-menitan sebelum
+    kata pertama, itu tampak persis seperti bagas-ai yang tak mengirim apa pun.
+    """
     m = (msg or "").lower()
     # "menjawab" ikut jadi "berpikir": bagi yang menunggu, keduanya sama saja —
     # model belum selesai. Membedakannya cuma menambah kata yang berkedip.
@@ -394,8 +405,14 @@ def _web_phase(msg: str) -> str:
         return _FASE_PIKIR
     if "login" in m or "sign-in" in m or "sign in" in m:
         return "menunggu login"
-    if "mengetik" in m or "mengirim" in m or "mengunggah" in m or "lampiran" in m:
+    if ("mengetik" in m or "mengirim" in m or "mengunggah" in m
+            or "lampiran" in m):
         return "analisis pesan"
+    # Jalur API: permintaan sudah di jalan, potongan pertama belum kembali.
+    # Diperiksa SESUDAH "berpikir"/"menjawab" supaya fase yang lebih pasti
+    # tetap menang, dan SEBELUM cabang terakhir supaya tak jadi "menyiapkan".
+    if "memproses" in m:
+        return _FASE_TUNGGU
     # Sisanya — meluncurkan browser, memuat halaman, membuka percakapan baru,
     # menyambung ulang tab yang mati, mengantre giliran browser — semuanya satu
     # hal yang sama di mata pengguna: modelnya belum siap dipakai.
@@ -2181,6 +2198,62 @@ _PHASE = {
 }
 
 
+# Blok "pikiran model" di region hidup: TERTUTUP satu baris, TERBUKA
+# beberapa baris ekor. Tab membuka & menutupnya (lihat _ketik).
+#
+# Kenapa di region hidup dan bukan dicetak ke scrollback: pikiran model itu
+# nalar MENTAH — panjang, berbahasa Inggris walau jawabannya Indonesia, dan
+# separuhnya berisi pertimbangan yang ia tolak sendiri beberapa kalimat
+# kemudian. Ditumpahkan ke transkrip, ia menenggelamkan jawaban & langkah yang
+# justru dicari orang. Di sini ia tetap TERLIHAT ADA (dan menghitung, jadi
+# terbukti hidup) tapi hanya terbuka kalau memang mau dibaca.
+#
+# Tingginya DIBATASI _PIKIR_BARIS: region hidup tak boleh melebihi layar, dan
+# aturan itu tak boleh ditawar cuma karena bloknya sedang terbuka.
+_PIKIR_BARIS = 8
+
+
+def _tinggi_pikir() -> int:
+    """Berapa baris isi pikiran yang boleh tampil saat bloknya dibuka.
+
+    Anggaran 15 baris untuk sisa region hidup (kotak chat 3 + bar status 1 +
+    tips 2 + napas + panel rencana bila ada) plus sedikit kelonggaran. Batas
+    ini ada supaya membuka pikiran tak pernah MENDORONG kotak chat keluar
+    layar: begitu kotaknya lenyap, orang menyangka ketikannya hilang — mahal
+    sekali untuk sesuatu yang cuma keterangan tambahan. Di layar pendek
+    bloknya menyusut, bukan region yang melebar."""
+    return max(3, min(_PIKIR_BARIS, console.height - 15))
+
+
+def _blok_pikir(teks: str, buka: bool, *, bisa_buka: bool = True) -> list:
+    """Baris-baris blok pikiran. [] bila model ini memang tak mengirim pikiran.
+
+    bisa_buka=False membuang tanda buka/tutupnya dan menyisakan penghitungnya
+    saja. Itu yang dipakai mode klasik, yang tak punya gelung pembaca tombol:
+    memasang tanda "bisa dipencet" pada yang tak bisa dipencet lebih buruk
+    daripada tak memasang tanda sama sekali.
+
+    Yang ditampilkan saat terbuka adalah EKORNYA, bukan awalnya: yang sedang
+    dipikirkan sekarang lebih berguna daripada pembukaan yang sudah lewat.
+    Spasi & baris baru dirapikan jadi satu aliran supaya tinggi bloknya bisa
+    dipastikan — nalar mentah kerap memberi baris kosong tiap dua kalimat, dan
+    menghormatinya berarti tinggi region berubah-ubah tiap frame."""
+    if not teks:
+        return []
+    tanda = ('▾ ' if buka else '▸ ') if bisa_buka else ''
+    kepala = _oneline(_TM(
+        f"  [dim]{tanda}💭 pikiran {_fmt(len(teks))} karakter[/]"))
+    if not buka:
+        return [kepala]
+    # Isinya menjorok ke kolom 4 — kolom yang SAMA dengan tulisan fase di baris
+    # status, sementara tanda ▾ menggantung di kolom 2 bersama gasing. Jadi
+    # tanda itu membuka blok yang duduk persis di bawah keterangannya.
+    lebar = max(24, console.size.width - 8)
+    baris = textwrap.wrap(" ".join(teks.split()), lebar)[-_tinggi_pikir():]
+    return [kepala] + [_oneline(Text(f"    {b}", style="dim italic"))
+                       for b in baris]
+
+
 class Status:
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -2199,6 +2272,19 @@ class Status:
         # Pemadatan ingatan yang sedang berjalan: (pecahan, keterangan, mulai).
         # None = tak sedang memadatkan.
         self.padat: tuple[float, str, float] | None = None
+        # Pikiran model yang sudah masuk giliran ini (lihat note_pikir).
+        self.pikir = ""
+
+    def note_pikir(self, piece: str) -> None:
+        """Satu potongan aliran "pikiran" model — ditumpuk, tidak dicetak.
+
+        Di mode klasik yang tampil cuma penghitungnya, dan itu memang seluruh
+        gunanya: pada model yang butuh sekitar 150 detik sebelum kata pertama
+        (TERUKUR: deepseek-v4-flash), angka yang merambat naik adalah
+        satu-satunya bukti ia bekerja alih-alih menggantung. Isinya tak bisa
+        dibuka di sini — mode klasik tak membaca tombol selagi giliran jalan."""
+        if piece:
+            self.pikir += piece
 
     def note_padat(self, frac: float, ket: str) -> None:
         """Kemajuan pemadatan ingatan (menggantikan baris status selagi jalan)."""
@@ -2247,6 +2333,9 @@ class Status:
         # menambah SATU baris kosong lagi — stack melompat sebaris tiap kali
         # rencana muncul/hilang atau mode berganti.)
         rows = [_KOSONG, self._baris_status()]
+        # Menempel LANGSUNG di bawah baris status, tanpa napas: keduanya satu
+        # keterangan tentang hal yang sama (apa yang sedang dikerjakan model).
+        rows.extend(_blok_pikir(self.pikir, False, bisa_buka=False))
         plan_rows = _panel_plan()
         if plan_rows:
             # Panel plan menempel langsung ke kotak chat
@@ -2263,7 +2352,7 @@ class Status:
         now = time.time()
         frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
 
-        dot = "[{tema.p('tepi_redup')}]•[/]"
+        dot = f"[{tema.p('tepi_redup')}]•[/]"
 
         # Ingatan sedang dipadatkan: SELURUH giliran berhenti di sini, jadi
         # baris status biasa (fase/token/alat) tak lagi menggambarkan apa pun
@@ -2415,6 +2504,10 @@ class TurnView:
         self.typing_pos = 0
         # Pemadatan ingatan yang sedang berjalan (lihat note_padat & _footer).
         self.padat: tuple[float, str, float] | None = None
+        # Pikiran model yang sudah masuk giliran ini + apakah bloknya
+        # sedang terbuka (lihat note_pikir & _blok_pikir).
+        self.pikir = ""
+        self.pikir_buka = False
 
     # --- mutasi (dipanggil dari worker) ---
     def note_padat(self, frac: float, ket: str) -> None:
@@ -2443,6 +2536,27 @@ class TurnView:
             out.append(Padding(_md(text.strip()),
                                (0 if baru_bicara else 1, 3, 0, 3)))
             self.commit(out)
+
+    def note_pikir(self, piece: str) -> None:
+        """Satu potongan aliran "pikiran" model — ditumpuk, tidak dicetak.
+
+        Yang menampilkannya _footer lewat _blok_pikir, dan bawaannya TERTUTUP:
+        cukup satu baris yang angkanya bertambah. Itu jawaban untuk keluhan
+        "diprompt 'hai' tapi tak dibalas" — pada model yang butuh ±150 detik
+        sebelum kata pertama (TERUKUR: deepseek-v4-flash), angka yang merambat
+        naik adalah satu-satunya bukti ia bekerja, bukan menggantung.
+
+        HANYA jalur API yang sampai ke sini; di jalur web blok berpikir sudah
+        dibuang saat serialisasi, jadi tak ada yang bisa diteruskan."""
+        if piece:
+            self.pikir += piece
+
+    def toggle_pikir(self) -> None:
+        """Buka/tutup blok pikiran (Tab). Tak melakukan apa pun bila model ini
+        memang tak mengirim pikiran — tombol yang membuka kekosongan hanya
+        membuat orang menyangka tombolnya rusak."""
+        if self.pikir:
+            self.pikir_buka = not self.pikir_buka
 
     def start_step(self, n: int, name: str, label: str) -> dict:
         rec = {"n": n, "name": name, "label": label, "result": "",
@@ -2607,6 +2721,11 @@ class TurnView:
             f"[dim]sesi[/]{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
         rows = [status]
+        # Blok pikiran menempel LANGSUNG di bawah baris status, tanpa napas:
+        # keduanya satu keterangan tentang hal yang sama (apa yang sedang
+        # dikerjakan model), sedangkan tips di bawah memang catatan terpisah
+        # dan karena itu ia yang diberi baris kosong.
+        rows.extend(_blok_pikir(self.pikir, self.pikir_buka))
         # Ketikannya sendiri tampil di KOTAK CHAT (lihat _kotak_ketikan), bukan
         # di sini — supaya bentuk & tempatnya sama persis dengan prompt idle.
         # Tak ada baris tambahan soal antrean: kotak chat satu-satunya UI chat.
@@ -3376,9 +3495,14 @@ def main(resume: bool = False) -> None:
                 view.note_retry(wait, f"percobaan ke-{attempt}")
 
         def _on_status(msg: str) -> None:
-            """Status connector web (menyiapkan sesi / berpikir / menjawab)."""
+            """Status model (menyiapkan sesi / memproses / berpikir / menjawab)."""
             if cbs_alive["on"]:
-                view.note_phase(_web_phase(msg))
+                view.note_phase(_fase_status(msg))
+
+        def _on_pikir(piece: str) -> None:
+            """Pikiran model, potongan demi potongan (hanya jalur API)."""
+            if cbs_alive["on"]:
+                view.note_pikir(piece)
 
         def _on_tim(nama: list[str]) -> None:
             """Rekan satu tim yang ikut meninjau langkah barusan (lihat tim.py).
@@ -3473,6 +3597,13 @@ def main(resume: bool = False) -> None:
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status, ambil_sisipan=_ambil_sisipan,
                     on_tim=_on_tim, on_padat=_padat,
+                    # on_reasoning DITERUSKAN walau on_token tidak (lihat
+                    # catatan di bawah): keduanya aliran yang berbeda.
+                    # Jawaban toh tercetak utuh ke scrollback sesudahnya,
+                    # sedangkan pikiran tak muncul di mana pun kecuali di
+                    # sini — dan justru selama pikiran itulah model yang
+                    # lambat memulai tampak seperti model yang mati.
+                    on_reasoning=_on_pikir,
                     # on_token SENGAJA tak diteruskan: pratinjau kalimat yang
                     # sedang ditulis sudah dihapus dari layar, jadi tak ada lagi
                     # yang memakainya. Efek sampingnya justru menguntungkan —
@@ -3642,6 +3773,15 @@ def main(resume: bool = False) -> None:
                     return True
                 _navigasi(kode)
                 return True
+            if ch == "\t":                          # Tab -> buka/tutup pikiran
+                # Tab, karena ia satu-satunya tombol yang sudah terbaca
+                # "buka yang tersembunyi" tanpa perlu satu kata pun di layar,
+                # dan selama giliran berjalan ia memang tak dipakai apa-apa:
+                # tak ada pelengkapan di sini, dan '\t' ada di bawah ' '
+                # sehingga sampai sekarang ia jatuh ke cabang terakhir lalu
+                # diabaikan begitu saja.
+                view.toggle_pikir()
+                return True
             if ch == "\x01":                        # Ctrl+A -> awal baris
                 typing_state["pos"] = 0
                 _sinkron()
@@ -3728,7 +3868,12 @@ def main(resume: bool = False) -> None:
                                     # ini satu baris. Jika panjang, ringkas jadi penanda.
                                     simpanan = _tempelan.simpanan()
                                     kirim = teks_mentah.endswith(("\r", "\n"))
-                                    bersih = teks_mentah.replace("\r", " ").replace("\n", " ").rstrip()
+                                    # Tab ikut dijadikan spasi: kotak ini SATU baris,
+                                    # dan tempelan kode berindentasi tab kalau tidak
+                                    # akan menyisipkan tab mentah ke ketikan.
+                                    bersih = (teks_mentah.replace("\r", " ")
+                                              .replace("\n", " ")
+                                              .replace("\t", " ").rstrip())
                                     if simpanan.perlu_diringkas(bersih):
                                         bersih = simpanan.simpan(bersih)
                                     if bersih:
@@ -3902,6 +4047,12 @@ def main(resume: bool = False) -> None:
                 _suara.ucap(content, penuh=akhir)
                 _kabar_suara()
 
+        def _on_pikir_klasik(piece: str) -> None:
+            """Aliran pikiran -> penghitung di bawah baris status. Mode klasik
+            tak punya gelung pembaca tombol, jadi bloknya tak bisa dibuka di
+            sini (lihat Status.note_pikir & _blok_pikir)."""
+            status_obj.note_pikir(piece)
+
         def on_retry(attempt: int, wait: float, exc: Exception) -> None:
             """Dipertahankan demi kecocokan; jalur web tak memakai on_retry —
             penantian saat server penuh ditangani di dalam core (WebBusyError
@@ -3921,8 +4072,9 @@ def main(resume: bool = False) -> None:
                     text, on_tool=on_tool, on_message=say,
                     on_retry=on_retry, cancel_event=cancel_event,
                     on_tool_result=finish_step,
-                    on_status=lambda m: status_obj.note_phase(_web_phase(m)),
+                    on_status=lambda m: status_obj.note_phase(_fase_status(m)),
                     on_padat=_jeda_padat(status_obj),
+                    on_reasoning=_on_pikir_klasik,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc

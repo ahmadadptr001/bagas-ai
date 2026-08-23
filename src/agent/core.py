@@ -2056,6 +2056,12 @@ class Agent:
         on_notice: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
         on_token: Callable[[str], None] | None = None,
+        # Aliran "pikiran" model, POTONGAN demi potongan — terpisah dari
+        # on_token (aliran jawaban). HANYA jalur API yang memanggilnya:
+        # situs AI web MEMBUANG blok berpikirnya saat serialisasi (lihat
+        # catatan di connectors/base.py), jadi di jalur web tak ada apa pun
+        # untuk diteruskan — memalsukannya berarti mengaku punya yang tak ada.
+        on_reasoning: Callable[[str], None] | None = None,
         attachments: list[str] | None = None,
         # Diambil di tiap batas langkah; mengembalikan pesan pengguna
         # yang mengantre supaya bisa DISISIPKAN ke giliran berjalan.
@@ -2108,6 +2114,7 @@ class Agent:
                 return self._run_api(
                     user_input, cancel_event=cancel_event,
                     on_status=on_status, on_token=on_token,
+                    on_reasoning=on_reasoning,
                     on_tool=on_tool, on_message=on_message,
                     on_tool_result=on_tool_result, on_notice=on_notice,
                     on_retry=on_retry, attachments=attachments,
@@ -2130,6 +2137,7 @@ class Agent:
         cancel_event: Any = None,
         on_status: Callable[[str], None] | None = None,
         on_token: Callable[[str], None] | None = None,
+        on_reasoning: Callable[[str], None] | None = None,
         on_tool: Callable[[str, dict[str, Any]], None] | None = None,
         on_message: Callable[[str], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
@@ -2184,7 +2192,8 @@ class Agent:
         try:
             return self._api_loop(
                 cancel_event=cancel_event, on_status=on_status,
-                on_token=on_token, on_tool=on_tool, on_message=on_message,
+                on_token=on_token, on_reasoning=on_reasoning,
+                on_tool=on_tool, on_message=on_message,
                 on_tool_result=on_tool_result, on_notice=on_notice,
                 on_retry=on_retry, ambil_sisipan=ambil_sisipan,
             )
@@ -2204,6 +2213,7 @@ class Agent:
         cancel_event: Any,
         on_status: Callable[[str], None] | None,
         on_token: Callable[[str], None] | None,
+        on_reasoning: Callable[[str], None] | None,
         on_tool: Callable[[str, dict[str, Any]], None] | None,
         on_message: Callable[[str], None] | None,
         on_tool_result: Callable[[str, str], None] | None,
@@ -2275,7 +2285,7 @@ class Agent:
                 if on_token:
                     on_token(piece)
 
-            def on_reasoning(piece: str) -> None:
+            def _on_reasoning(piece: str) -> None:
                 """Aliran "pikiran" model — DIPISAH dari aliran jawaban.
 
                 WAJIB diberikan, walau isinya cuma mengganti status. Bila
@@ -2284,12 +2294,19 @@ class Agent:
                 `content` kosong) — dan pada model yang mode berpikirnya
                 TAK BISA dimatikan (muse-glimmer: TERUKUR selalu bernalar),
                 seluruh rantai pikiran akan tercetak sebagai kalimat jawaban.
-                Isinya tetap tersimpan di llm.py, jadi tak ada yang hilang."""
+                Isinya tetap tersimpan di llm.py, jadi tak ada yang hilang.
+                Potongannya JUGA diteruskan ke pemanggil (on_reasoning),
+                bukan cuma dihitung. Tanpa itu, model yang butuh 80-169
+                detik sebelum kata pertama (TERUKUR: deepseek-v4-flash)
+                tak bisa dibedakan dari model yang mati — padahal justru
+                selama menit-menit itu pikirannya sudah mengalir."""
                 state["reasoning_est"] += _est_tokens(piece)
                 if state.get("fase") is None:
                     state["fase"] = "pikir"
                     if on_status:
                         on_status(f"{spec.label} sedang berpikir")
+                if on_reasoning:
+                    on_reasoning(piece)
 
             def _on_retry(attempt: int, wait: float, exc: Exception) -> None:
                 # Panggilan diulang DARI AWAL, jadi estimasi token parsial
@@ -2315,7 +2332,7 @@ class Agent:
                     extra_body=extra,
                     max_tokens=spec.max_tokens,
                     on_content=on_content,
-                    on_reasoning=on_reasoning,
+                    on_reasoning=_on_reasoning,
                     cancel_event=cancel_event,
                     on_retry=_on_retry,
                 )

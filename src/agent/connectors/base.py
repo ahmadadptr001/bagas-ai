@@ -960,7 +960,7 @@ class WebConnector:
         # tangan fungsi ikut melar tanpa alasan.
         #
         # PENTING: on_status TIDAK cukup. Terminal meringkas status connector
-        # jadi SATU KATA fase (cli._web_phase), jadi kalimat "selesaikan captcha
+        # jadi SATU KATA fase (cli._fase_status), jadi kalimat "selesaikan captcha
         # di jendela" hilang seluruhnya sebelum sampai ke mata pengguna —
         # pemberitahuan yang tak pernah terbaca sama saja dengan tak ada.
         self._kabar = on_notice
@@ -3017,7 +3017,7 @@ class WebConnector:
             # DUA SALURAN, bukan cuma status. Pelajaran yang sudah ditulis di
             # _intip_captcha tapi tak pernah sampai ke sini: baris fase di
             # footer MERINGKAS kalimat panjang jadi satu kata — permintaan
-            # sign-in ini menyusut jadi "menunggu login" (lihat _web_phase), dan
+            # sign-in ini menyusut jadi "menunggu login" (lihat _fase_status), dan
             # tak ada satu pun kata yang memberi tahu bahwa ADA JENDELA yang
             # harus disentuh. Dilaporkan pengguna sebagai "kok tak ada
             # pemberitahuan kalau harus login".
