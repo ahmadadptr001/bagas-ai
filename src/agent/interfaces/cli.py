@@ -3061,18 +3061,25 @@ def main(resume: bool = False) -> None:
         from ..ui import menu as ui_menu
         input_paused["on"] = True
         live = _LIVE.get("live")
+        _transient_lama = None
         if live:
             # Tandai PAUSED dulu (sebelum stop): _flush_konten di loop Live
             # harus tahu bahwa Live berhenti sementara, supaya tidak mencetak
             # ke console saat menu inquirer sedang menggambar.
             _LIVE["paused"] = True
+            # Frame region DIHAPUS saat stop (transient sesaat). Dibiarkan
+            # berarti kotak chat & bar status tampil DOBEL selama menu
+            # terbuka — sekali sebagai frame beku di atas menu, sekali lagi
+            # sebagai kaki di bawahnya. Nilai aslinya disimpan karena mode
+            # klasik memang ber-transient True sejak awal.
+            _transient_lama = live.transient
+            live.transient = True
             live.stop()
-        # Menu & isian bebas (ask_user) digambar sebagai MODAL di dasar layar,
-        # bukan di posisi kursor mana pun. Tumpukan yang membeku di atasnya
-        # (konten, baris status, panel rencana) tetap utuh dan terlihat DI
-        # ATAS modal — panel rencana tak pernah jatuh "di bawah" kotak
-        # input/footer. Tanpa ini, posisi kursor sisa live.stop() bisa
-        # membuat menu tampil melayang di tengah layar.
+        # Menu & isian bebas (ask_user) digambar mulai di posisi kursor —
+        # tepat di bawah konten terakhir, karena frame region barusan
+        # dihapus saat stop. _ke_dasar_layar() membuang sisa gambaran apa pun
+        # di bawah kursor supaya menu tidak menumpuk di atasnya; sisanya
+        # (scrollback di atas) tak disentuh sama sekali.
         _ke_dasar_layar()
         ui_menu.kaki_aktif = _kaki_menu()
         try:
@@ -3084,20 +3091,22 @@ def main(resume: bool = False) -> None:
             input_paused["on"] = False
             _tg_flush()
         if live:
-            # Menu inquirer menggambar di atas area region, dan stop() dengan
-            # transient=False meninggalkan frame terakhir — tanpa tata ulang,
-            # region lanjutan bisa menggantung di tengah layar dengan sisa
-            # frame lama di atasnya. Bersihkan lalu paku ulang ke dasar.
-            if _sisa_baris_bawah() is not None:
-                console.clear()
+            # TANPA console.clear(): itu menghapus SELURUH layar terlihat —
+            # transkrip yang semula kelihatan ikut lenyap, dan yang tersisa
+            # cuma region kecil di atas plus kekosongan panjang di bawahnya
+            # sampai konten baru mengalir ("nge-space banyak kosong").
+            # Cukup erase-down dari kursor: erase_when_done milik
+            # prompt_toolkit sudah mengembalikan kursor ke baris PERTAMA
+            # areanya, dan segala sesudahnya hanyalah gambaran menunya.
             _ke_dasar_layar()
             live.start()
+            live.transient = _transient_lama
             # PAUSED dilepas SETELAH start: antara start() dan pelepasannya
             # _flush_konten tetap menahan — print saat Live belum aktif lagi
             # akan mendarat di posisi kursor dan merusak region.
             _LIVE["paused"] = False
-            # Baris "✓ pertanyaan · jawaban" yang ditinggalkan menu barusan
-            # IKUT terhapus oleh clear — jejak tanya-jawab itu justru inti
+            # Ringkasan "✓ pertanyaan · jawaban" dicetak lewat jalur
+            # tertampung, bukan langsung: jejak tanya-jawab ini justru inti
             # dari modali ini, maka dicetak ulang lewat jalur tertampung
             # (aman dari tabrakan refresh Live, dan ikut menempel ke dasar).
             q = question if len(question) <= 46 else question[:45] + "…"
