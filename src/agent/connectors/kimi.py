@@ -57,7 +57,15 @@ class KimiConnector(WebConnector):
     # di dalam `.chat-editor-action > .right-area`. Enter bisa gagal mengirim
     # saat ada lampiran (persis kasus Qwen), jadi tombol ini dipakai _submit()
     # sebagai cadangan sesudah kotak input terbukti belum kosong.
-    send_button_selector = '.send-button-container, [class*="send-button"]'
+    #
+    # `:not(...)` bukan hiasan: TERUKUR, selagi Kimi menjawab tombol yang sama
+    # berubah jadi `.send-button-container.disabled.stop` — tombol BERHENTI.
+    # Tanpa penyaring itu, klik cadangan "tombol kirim" bisa mendarat pada
+    # tombol berhenti dan memotong jawaban yang sedang berjalan.
+    send_button_selector = (
+        '.send-button-container:not(.stop), '
+        '[class*="send-button"]:not([class*="stop"])'
+    )
     # DIVERIFIKASI live: tombol chat baru ada di sidebar. Dipakai agar memulai
     # percakapan baru tak perlu memuat ulang seluruh SPA.
     #

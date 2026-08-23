@@ -104,29 +104,40 @@ from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
 # Prompt interaktif MILIK SENDIRI (dulu InquirerPy) — lihat ui/menu.py.
 from ..ui.menu import Choice, inquirer  # noqa: E402
+from ..ui import tema  # noqa: E402
+
+
+def _TM(markup: str) -> Text:
+    """Text.from_markup yang SADAR-TEMA: hex warisan emas/oranye di dalam
+    markup ditukar menjadi warna tema aktif (lihat ui/tema.py). Seluruh
+    panggilan lama dialihkan ke sini sehingga berganti tema benar-benar
+    mengganti wajah UI, bukan cuma footer & kotak chat."""
+    return Text.from_markup(tema.terjemah(markup))
 
 # Tema Markdown selaras palet "zenitsu" (kuning-oranye) agar jawaban AI
 # (heading, list, kutipan,
 # kode, tautan) serasi dengan seluruh UI — bukan warna default rich yang kontras.
+# Warna diambil dari TEMA AKTIF saat impor (tersimpan di prefs, dipilih /theme),
+# jadi markdown jawaban ikut tema sejak startup.
 _MD_THEME = Theme({
-    "markdown.h1": "bold #fcc048",
-    "markdown.h1.border": "#fcc048",
-    "markdown.h2": "bold #fc9018",
-    "markdown.h3": "bold #ffb861",
+    "markdown.h1": f"bold {tema.p('aksen')}",
+    "markdown.h1.border": tema.p("aksen"),
+    "markdown.h2": f"bold {tema.p('aksen2')}",
+    "markdown.h3": f"bold {tema.p('aksen_terang')}",
     "markdown.h4": "bold #9fc93c",
-    "markdown.h5": "bold #f7d488",
-    "markdown.h6": "bold #fca830",
-    "markdown.item.bullet": "bold #fcc048",
-    "markdown.item.number": "bold #fc9018",
-    "markdown.code": "#ffd9a0 on #3a2a1a",       # `inline code`
-    "markdown.link": "#fc9018 underline",
-    "markdown.link_url": "dim #ffcf8a",
-    "markdown.block_quote": "italic #f7d488",
-    "markdown.block_quote_border": "#7a5c3a",
-    "markdown.hr": "#4a3826",
-    "markdown.strong": "bold #f7e6d0",
-    "markdown.emph": "italic #f2e3cc",
-    "markdown.text": "#f2e3cc",
+    "markdown.h5": f"bold {tema.p('aksen_terang')}",
+    "markdown.h6": f"bold {tema.p('aksen2')}",
+    "markdown.item.bullet": f"bold {tema.p('aksen')}",
+    "markdown.item.number": f"bold {tema.p('aksen2')}",
+    "markdown.code": f"{tema.p('aksen_terang')} on #3a2a1a",       # `inline code`
+    "markdown.link": f"{tema.p('aksen2')} underline",
+    "markdown.link_url": f"dim {tema.p('aksen_terang')}",
+    "markdown.block_quote": f"italic {tema.p('aksen_terang')}",
+    "markdown.block_quote_border": tema.p("tepi"),
+    "markdown.hr": tema.p("tepi_redup"),
+    "markdown.strong": f"bold {tema.p('teks')}",
+    "markdown.emph": f"italic {tema.p('teks')}",
+    "markdown.text": tema.p("teks"),
 })
 console = Console(theme=_MD_THEME, _environ={
     # COLUMNS/LINES warisan shell (di sebagian profil diekspor otomatis)
@@ -136,6 +147,21 @@ console = Console(theme=_MD_THEME, _environ={
     # langsung dari terminal di tiap render.
     k: v for k, v in os.environ.items() if k not in ("COLUMNS", "LINES")
 })  # auto-detect VT -> warna/emoji mulus
+
+# PRINT SADAR-TEMA: seluruh markup yang lewat console.print diterjemahkan
+# dulu lewat tema.terjemah(), jadi hex warisan emas/oranye pada teks status,
+# pemberitahuan, dan judul panel ikut tema aktif TANPA harus ditulis ulang
+# satu per satu — berlaku juga untuk cetakan baru di masa depan.
+_cetak_asli = console.print
+
+
+def _cetak_tematik(*args, **kwargs):
+    args = tuple(tema.terjemah(a) if isinstance(a, str) else a
+                 for a in args)
+    return _cetak_asli(*args, **kwargs)
+
+
+console.print = _cetak_tematik
 
 # Tema penyorotan sintaks blok kode ```lang``` — 'gruvbox-dark' dipilih karena
 # palet dasarnya memang hangat (kuning/oranye/cokelat), jadi kode di dalam
@@ -232,6 +258,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("model", "pilih model + saran"),
     ("effort", "mode berpikir"),
     ("mode", "mode kerja situs: buat gambar/video, dll"),
+    ("theme", "tema warna antarmuka"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
     ("voice", "mikrofon: sebut \"bagas ai …\" lalu diam sejenak "
@@ -321,7 +348,10 @@ def pout(renderable, *, bottom: int = 1) -> None:
 # Gradasi ungu -> biru (magenta neon) untuk teks shadow.
 # Gradasi wordmark: emas terang -> oranye -> cokelat bara, arah
 # yang sama dengan cahaya di latar tema ini.
-_GRAD = ["#fde68a", "#fcc048", "#fca830", "#fc9018", "#e8760c", "#c25a08", "#9c4800"]
+# Gradien logo mengikuti TEMA AKTIF (7 titik; lihat ui/tema.py). Dibaca via
+# fungsi supaya pergantian tema di tengah sesi langsung terlihat.
+def _grad() -> list[str]:
+    return list(tema.p("grad"))
 
 
 def _fmt(n: int) -> str:
@@ -416,6 +446,53 @@ def _oneline(t: Text) -> Text:
     t.no_wrap = True
     t.overflow = "ellipsis"
     return t
+
+
+# Gema prompt di transkrip — GARIS VERTIKAL LURUS agak tebal (▌) di tiap
+# baris, dibalut strip gelap netral. Warnanya ikut TEMA AKTIF (ui/tema.py),
+# dibaca saat dipanggil supaya /theme langsung terasa tanpa mulai ulang.
+def _gema_prompt(teks: str, prefix: str = "") -> Text:
+    """Gema pesan pengguna di transkrip — penanda batas antar-giliran.
+
+    Bentuknya garis vertikal LURUS & agak tebal (▌) yang memanjang di tiap
+    baris (termasuk lipatan), seluruh baris dibalut strip gelap — kontras
+    tinggi tapi netral, mudah ditemukan sekali lihat saat menggulung riwayat.
+
+    Lipatan dihitung SENDIRI (bukan Text.wrap: ia tak memecah tanpa justify)
+    memakai lebar sel tampilan rich, supaya emoji/CJK tak menggeser garis."""
+    from rich.cells import cell_len
+
+    bersih = _bersih_kendali(teks).strip()
+    if not bersih:
+        return _KOSONG
+    gema_bg = tema.p("gema_bg")
+    garis = tema.p("gema_garis")
+    teks_gaya = f"bold {tema.p('gema_teks')} on {gema_bg}"
+    lebar_isi = max(16, console.width - 2 * 2 - 2 - cell_len(prefix))
+    baris: list[str] = []
+    for paraf in bersih.split("\n"):
+        kata, kini = [], ""
+        for k in paraf.split(" "):
+            calon = f"{kini} {k}".strip() if kini else k
+            if kini and cell_len(calon) > lebar_isi:
+                baris.append(kini)
+                kini = k
+            else:
+                kini = calon
+        baris.append(kini)
+
+    hasil = Text(no_wrap=True, overflow="ellipsis")
+    for i, b in enumerate(baris):
+        if i:
+            hasil.append("\n  ")
+        else:
+            hasil.append("  ")
+        # Garis ikut berlatar strip supaya menyambung mulus dengan isinya.
+        hasil.append("▌ ", style=f"bold {garis} on {gema_bg}")
+        if i == 0 and prefix:
+            hasil.append(prefix, style=f"bold {garis} on {gema_bg}")
+        hasil.append(b, style=teks_gaya)
+    return hasil
 
 
 # Warna gaya editor (GitHub-like): teks kalem di atas bg gelap hijau/merah.
@@ -534,7 +611,10 @@ def _row(lineno: str, sign: str, text, style: str) -> Text:
 # DASAR LAYAR — saat kamu mengetik maupun saat AI masih bekerja. Bentuk dan
 # posisinya tak pernah berubah, jadi tempat mengetik selalu satu dan itu-itu
 # saja: tak perlu dicari ulang tiap kali layar berubah.
-_GARIS_KOTAK = "#7a5c3a"
+# Tepi kotak chat & panel gambar mengikuti TEMA AKTIF — dibaca per-render
+# lewat fungsi supaya /theme langsung terlihat di mode mengalir juga.
+def _garis_kotak() -> str:
+    return tema.p("tepi")
 
 
 _TAG_HTML_RE = re.compile(r"<[^>]+>")
@@ -937,22 +1017,22 @@ def _panel_gambar_rich() -> list[Text]:
     pad_l = max(0, (n_cols - tw) // 2)
     pad_r = max(0, n_cols - tw - pad_l)
     out: list[Text] = []
-    atas = Text("╭", style=_GARIS_KOTAK)
-    atas.append("─" * pad_l, style=_GARIS_KOTAK)
-    atas.append(t, style="bold #fcc048")
-    atas.append("─" * pad_r, style=_GARIS_KOTAK)
-    atas.append("╮", style=_GARIS_KOTAK)
+    atas = Text("╭", style=_garis_kotak())
+    atas.append("─" * pad_l, style=_garis_kotak())
+    atas.append(t, style=f"bold {tema.p('aksen')}")
+    atas.append("─" * pad_r, style=_garis_kotak())
+    atas.append("╮", style=_garis_kotak())
     out.append(atas)
     for row in rows:
-        baris = Text("│", style=_GARIS_KOTAK)
+        baris = Text("│", style=_garis_kotak())
         for r, g, b in row:
             baris.append(" ", style=f"on rgb({r},{g},{b})")
         sisa = n_cols - len(row)
         if sisa > 0:
             baris.append(" " * sisa)
-        baris.append("│", style=_GARIS_KOTAK)
+        baris.append("│", style=_garis_kotak())
         out.append(baris)
-    bawah = Text("╰" + "─" * n_cols + "╯", style=_GARIS_KOTAK)
+    bawah = Text("╰" + "─" * n_cols + "╯", style=_garis_kotak())
     out.append(bawah)
     return [_oneline(t) for t in out]
 
@@ -1048,10 +1128,10 @@ def _kotak_chat(isi: str = "", pos: int | None = None) -> list:
     `pos` = letak kursor di dalam `isi`. None berarti di ujung."""
     lebar = _lebar_kotak()
     atas = Text()
-    atas.append("╭" + "─" * (lebar - 2) + "╮", style=_GARIS_KOTAK)
+    atas.append("╭" + "─" * (lebar - 2) + "╮", style=_garis_kotak())
     baris = Text()
-    baris.append("│ ", style=_GARIS_KOTAK)
-    baris.append("❯ ", style="bold #fcc048")
+    baris.append("│ ", style=_garis_kotak())
+    baris.append("❯ ", style=f"bold {tema.p('aksen')}")
     if isi:
         n = len(isi)
         k = n if pos is None else max(0, min(int(pos), n))
@@ -1063,18 +1143,18 @@ def _kotak_chat(isi: str = "", pos: int | None = None) -> list:
         mulai = 0 if n <= muat else max(0, min(k - muat // 2, n - muat))
         tampak = isi[mulai:mulai + muat]
         rel = k - mulai
-        baris.append(tampak[:rel], style="#f2e3cc")
-        baris.append("▌", style="#fcc048")
-        baris.append(tampak[rel:], style="#f2e3cc")
+        baris.append(tampak[:rel], style=tema.p("teks"))
+        baris.append("▌", style=tema.p("aksen"))
+        baris.append(tampak[rel:], style=tema.p("teks"))
     # Potong dulu, baru ratakan sampai tepi kanan — kalau tidak, isi yang
     # kepanjangan mendorong tepi kanannya keluar layar dan kotaknya patah.
     baris.truncate(lebar - 1, overflow="ellipsis")
     pad = (lebar - 1) - baris.cell_len
     if pad > 0:
         baris.append(" " * pad)
-    baris.append("│", style=_GARIS_KOTAK)
+    baris.append("│", style=_garis_kotak())
     bawah = Text()
-    bawah.append("╰" + "─" * (lebar - 2) + "╯", style=_GARIS_KOTAK)
+    bawah.append("╰" + "─" * (lebar - 2) + "╯", style=_garis_kotak())
     return [_oneline(atas), _oneline(baris), _oneline(bawah)]
 
 
@@ -1099,7 +1179,9 @@ _MENU_MAKS = 8
 # gelap sebagai pembeda — dibatasi beberapa baris supaya keluaran 400 baris tak
 # menenggelamkan riwayat.
 _PRATINJAU_BARIS = 8
-_BG_HASIL = "#241a10"
+# Latar panel hasil (mode mengalir) mengikuti tema — dibaca per-render.
+def _BG_HASIL() -> str:
+    return tema.p("menu_bg")
 
 
 def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
@@ -1120,8 +1202,8 @@ def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
     if sisa > 0:
         tampil.append(f"… {sisa} baris lagi")
     lebar = max(20, console.width - 5)
-    gaya = f"on {_BG_HASIL}"
-    tepi = "#f0603c" if gagal else "#7a5c3a"
+    gaya = f"on {_BG_HASIL()}"
+    tepi = "#f0603c" if gagal else tema.p("tepi")
     out = []
     for i, ln in enumerate(tampil):
         baris = Text("     ")
@@ -1129,7 +1211,7 @@ def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
         # bingkai penuh yang bakal beradu dengan kotak chat satu-satunya.
         baris.append("▏", style=f"{tepi} {gaya}")
         redup = sisa > 0 and i == len(tampil) - 1
-        baris.append(" " + ln, style=f"{'#a89078 italic' if redup else '#d9c4a6'} {gaya}")
+        baris.append(" " + ln, style=f"{tema.p('redup') + ' italic' if redup else tema.p('teks')} {gaya}")
         baris.truncate(lebar, overflow="ellipsis")
         pad = lebar - baris.cell_len
         if pad > 0:
@@ -1172,13 +1254,13 @@ def _panel_plan() -> list:
     # berapa pun kecilnya layar (render rich.Live kacau bila itu terjadi).
     if n + 4 > _tinggi_terminal() - 10:
         ringkas = Text()
-        ringkas.append("  ◈ ", style="bold #fcc048")
-        ringkas.append(f"rencana {selesai}/{n}", style="#f7d488")
+        ringkas.append("  ◈ ", style=f"bold {tema.p('aksen')}")
+        ringkas.append(f"rencana {selesai}/{n}", style=tema.p("aksen_terang"))
         if 1 <= cur <= n:
-            ringkas.append(f"  ▸ {steps[cur - 1]}", style="#f2e3cc")
+            ringkas.append(f"  ▸ {steps[cur - 1]}", style=tema.p("teks"))
         return [_oneline(ringkas)]
 
-    tepi = "#4a3826"
+    tepi = tema.p("tepi_redup")
 
     def dibingkai(isi: Text) -> Text:
         """Tepi kiri/kanan + padding kanan sehingga baris selebar `lebar` persis.
@@ -1200,9 +1282,9 @@ def _panel_plan() -> list:
     # lebarnya pasti 1 kolom di semua terminal, jadi tepi kanan bingkai kotak
     # ini tetap lurus (lebar emoji bisa tak sepakat antara rich & terminal).
     header = Text()
-    header.append("◈ ", style="bold #fcc048")
-    header.append("rencana", style="bold #f2e3cc")
-    header.append(f"  ·  {selesai}/{n} selesai", style="dim #a89078")
+    header.append("◈ ", style=f"bold {tema.p('aksen')}")
+    header.append("rencana", style=f"bold {tema.p('teks')}")
+    header.append(f"  ·  {selesai}/{n} selesai", style=f"dim {tema.p('redup')}")
     out.append(dibingkai(header))
 
     # Separator tipis
@@ -1214,15 +1296,15 @@ def _panel_plan() -> list:
         if completed[i - 1]:
             # Selesai: centang hijau + teks redup (flag completed=True).
             isi.append("✓ ", style="bold #9fc93c")
-            isi.append(s, style="#a89078")
+            isi.append(s, style=tema.p("redup"))
         elif i == cur:
             # Sedang dikerjakan: panah kuning + teks terang.
-            isi.append("▸ ", style="bold #fcc048")
-            isi.append(s, style="#f2e3cc")
+            isi.append("▸ ", style=f"bold {tema.p('aksen')}")
+            isi.append(s, style=tema.p("teks"))
         else:
             # Belum: titik redup + teks redup.
-            isi.append("· ", style="#7a5c3a")
-            isi.append(s, style="#7a5c3a")
+            isi.append("· ", style=tema.p("tepi"))
+            isi.append(s, style=tema.p("tepi"))
         out.append(dibingkai(isi))
 
     # Garis bawah
@@ -1264,28 +1346,37 @@ def _sisa_baris_bawah() -> int | None:
 
 
 def _ke_dasar_layar() -> None:
-    """Dorong kursor ke baris TERAKHIR layar, kolom 0.
+    """RAPATKAN layar sebelum kotak/region baru digambar: kursor ke kolom 0,
+    lalu HAPUS semua baris di bawahnya (erase-down, TANPA menggulir).
 
-    Baris kosongnya jatuh di petak yang barusan ditinggalkan kotak idle (sudah
-    dihapus, jadi memang kosong), sehingga tak ada celah baru yang terlihat.
+    Tiga tahap sudah dicoba, dan jejak dua yang pertama masih terlihat di
+    transkrip pengguna sebagai 'jarak antar prompt & jawaban yang berjauhan'
+    (banding: --resume yang mencetak transkrip rapat tampil normal):
+      1. banjir '\\r\\n' sebanyak sisa baris — tiap barisnya MASUK SCROLLBACK;
+      2. Cursor Down (turun tanpa menggulir) — tak menambah baris, tapi kursor
+         DITELEPORT ke dasar, sehingga baris kosong di antara konten & dasar
+         tergulir menjadi celah permanen begitu giliran berikutnya menggulir
+         layar;
+      3. kini: erase-down + render di POSISI KURSOR. Region live yang mulai
+         tepat di bawah konten akan menyentuh dasar SENDIRI saat isinya
+         memenuhi layar (mekanisme sisip rich), jadi transkrip tetap rapat
+         seperti --resume dan tak ada baris basi/ghost yang tertinggal.
 
-    KOLOM juga dikembalikan ke 0 — bukan cuma barisnya. Setelah region live
-    selesai digambar, kursor bisa tertinggal di kolom akhir baris terakhirnya
-    (posisi "pending wrap"), dan aplikasi prompt_toolkit inline (menu ask_user)
-    menggambar baris pertamanya PERSIS di posisi kursor itu: tanpa reset kolom,
-    tepi atas kotaknya mulai dari tengah layar dan tampak terpotong."""
-    sisa = _sisa_baris_bawah()
-    if sisa is None:
-        return
-    if sisa > 1:
-        # \r\n: baris baru sekaligus kolom 0. (Di Windows, sys.stdout
-        # menambahkan \r sendiri pada \n, jadi ini menjadi \r\r\n — \r
-        # ekstra tak berbahaya, cuma mengulang "ke kolom 0".)
-        console.file.write("\r\n" * (sisa - 1))
-    else:
-        # Sudah di baris terbawah: cukup kembalikan kolomnya ke 0.
+    Kolom dikembalikan ke 0 dengan \\r karena aplikasi inline prompt_toolkit
+    (menu ask_user) menggambar baris pertamanya PERSIS di posisi kursor."""
+    try:
         console.file.write("\r")
-    console.file.flush()
+        console.file.flush()
+    except Exception:  # noqa: BLE001 - terminal tak bisa ditulis
+        return
+    try:
+        if _KELUARAN_PT["out"] is None:
+            from prompt_toolkit.output.defaults import create_output
+            _KELUARAN_PT["out"] = create_output(stdout=sys.stdout)
+        _KELUARAN_PT["out"].erase_down()
+        _KELUARAN_PT["out"].flush()
+    except Exception:  # noqa: BLE001 - erase-down tak didukung: diam saja
+        _KELUARAN_PT["menyerah"] = True
 
 
 def _retempel_live(live) -> None:
@@ -1312,7 +1403,13 @@ def _retempel_live(live) -> None:
 # masih menyusun jawabannya. Saat idle ia digambar prompt_toolkit (lihat
 # KotakChat), saat giliran berjalan ia digambar rich dari sini; isinya dijaga
 # sama persis supaya perpindahan antar keduanya tak terlihat.
-_BG_BAR = "#1a120b"
+#
+# Seluruh warnanya milik TEMA AKTIF (dibaca per-render di _bar_status &
+# _buat_pt_style) — pada tema "default" footer berlatar PUTIH dengan teks
+# gelap, sesuai permintaan pengguna; tema lain membawa keluarga warnannya
+# sendiri yang kontrasnya dijaga.
+def _BG_BAR() -> str:
+    return tema.p("bg_footer")
 
 # Urutan PENGORBANAN saat terminal menyempit, dari isi yang paling bisa
 # dilepas. Bar status dipatok di dasar layar, jadi ia tak boleh terlipat: satu
@@ -1418,36 +1515,36 @@ def _bar_status(agent: Agent, total: int) -> Text:
     teks["ubah"] = f"{SEP}📝 {git_changed}" if git_changed else ""
     ada = _bagian_bar(_lebar_kotak(), lambda b: Text(teks[b]).cell_len + 1)
 
-    bar = Text(style=f"on {_BG_BAR}")
+    bar = Text(style=f"on {_BG_BAR()}")
     if "merek" in ada:
-        bar.append(" ⬢ bagas-ai", style="bold #fcc048")
+        bar.append(" ⬢ bagas-ai", style=f"bold {tema.p('merek_footer')}")
     if "model" in ada:
         if "merek" in ada:
-            bar.append(SEP, style="#4a3826")
+            bar.append(SEP, style=tema.p("sep_footer"))
         else:
             bar.append(" ")
         bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
-        bar.append(spec.label, style="bold #fc9018")
+        bar.append(spec.label, style=f"bold {tema.p('model_footer')}")
     if "git" in ada and git_branch:
-        bar.append(SEP, style="#4a3826")
-        bar.append("🌿 ", style="#9fc93c")
-        bar.append(git_branch, style="#9fc93c")
+        bar.append(SEP, style=tema.p("sep_footer"))
+        bar.append("🌿 ", style=tema.p("git_footer"))
+        bar.append(git_branch, style=tema.p("git_footer"))
     if "ubah" in ada and git_changed:
-        bar.append(SEP, style="#4a3826")
-        bar.append(f"📝 {git_changed}", style="#f7d488")
+        bar.append(SEP, style=tema.p("sep_footer"))
+        bar.append(f"📝 {git_changed}", style=tema.p("ubah_footer"))
     # Segmen "sesi" DIHAPUS atas permintaan pengguna: token sesi sudah
     # ditampilkan di baris status live (⚡ X sesi), tak perlu duplikat di footer.
 
     # Perintah didorong ke tepi KANAN, bukan disambung dengan pemisah:
     # perintah bukan bagian dari deretan keterangan di kiri — ia hal lain, dan
     # memisahkannya secara ruang membuat keduanya terbaca sekali lihat.
-    kanan = Text(style=f"on {_BG_BAR}")
+    kanan = Text(style=f"on {_BG_BAR()}")
     if "perintah" in ada:
-        kanan.append("/menu", style="#ffb861")
-        kanan.append(" · ", style="#a89078")
-    kanan.append("/exit", style="#f0603c")
+        kanan.append("/menu", style=tema.p("cmd_footer"))
+        kanan.append(" · ", style=tema.p("sep_footer"))
+    kanan.append("/exit", style=tema.p("exit_footer"))
     if "ctrlc" in ada:
-        kanan.append(" atau ctrl+c", style="#a89078")
+        kanan.append(" atau ctrl+c", style=tema.p("muted_footer"))
     kanan.append(" ")
 
     # Sisanya diisi spasi supaya latarnya jadi PITA penuh, bukan potongan
@@ -1698,6 +1795,20 @@ _TOOL_UBAH_FILE = {
 }
 
 
+def _teks_unified(old: str, new: str, limit: int = 400) -> str:
+    """Teks unified-diff (tanpa header ---/+++) untuk DISIMPAN ke memory.
+
+    Dipangkas `limit` baris supaya write_file file raksasa tak menggembungkan
+    berkas sesi — replay tetap menampilkan paling penting di awal."""
+    d = list(difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                  lineterm="", n=2))
+    if len(d) >= 2 and d[0].startswith("---"):
+        d = d[2:]
+    if len(d) > limit:
+        d = d[:limit] + ["… (diff tersimpan dipangkas)"]
+    return "\n".join(d)
+
+
 def _isi_sebelum_sesudah(name: str, path: str, args: dict):
     """(isi_lama, isi_baru, file_sudah_ada) untuk merender diff sebuah langkah.
 
@@ -1752,7 +1863,7 @@ def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200,
     tumpukan bawah (mode mengalir); tanpa itu ia mengalir ke scrollback
     (mode klasik)."""
     icon, label = ("✨", "dibuat") if is_new else ("📝", "diubah")
-    rows: list = [Text.from_markup(
+    rows: list = [_TM(
         f"\n  [bold]{icon} [cyan]{_esc(path)}[/cyan][/bold] [dim]({label})[/dim]")]
     diff = list(difflib.unified_diff(old.splitlines(), new.splitlines(),
                                      lineterm="", n=2))
@@ -1796,7 +1907,7 @@ def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200,
 
 def _print_delete(path: str, content: str, limit: int = 80,
                   ke_konten: bool = False) -> None:
-    rows: list = [Text.from_markup(
+    rows: list = [_TM(
         f"\n  [bold]🗑 [cyan]{_esc(path)}[/cyan][/bold] [dim](dihapus)[/dim]")]
     warna = _pewarna(path, content)
     for i, line in enumerate(content.splitlines(), start=1):
@@ -1808,6 +1919,46 @@ def _print_delete(path: str, content: str, limit: int = 80,
         _tambah_konten(rows)
     else:
         console.print(Group(*rows))
+
+
+def _replay_diff(rec: dict) -> Group:
+    """Render ulang record diff tersimpan (role 'diff') untuk transkrip --resume.
+
+    Tanpa pewarnaan sintaks per-baris — isi lengkap file lamanya memang tak
+    disimpan (cuma teks unified yang sudah terpangkas), tapi pita hijau/merah,
+    nomor baris, dan header statusnya sama seperti saat diff itu pertama
+    tampil, jadi potongan kode tak lagi lenyap saat sesi dibuka kembali."""
+    path = str(rec.get("path") or "?")
+    if rec.get("deleted"):
+        icon, label = "🗑", "dihapus"
+    else:
+        icon, label = ("✨", "dibuat") if rec.get("is_new") else ("📝", "diubah")
+    rows = [_TM(f"\n  [bold]{icon} [cyan]{_esc(path)}[/cyan][/bold] "
+                f"[dim]({label})[/dim]")]
+    ln_old = ln_new = 0
+    for line in str(rec.get("diff") or "").split("\n"):
+        if line.startswith("@@"):
+            m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)", line)
+            if m:
+                ln_old, ln_new = int(m.group(1)), int(m.group(2))
+            if len(rows) > 1:
+                rows.append(Text("  ⋮", style="dim"))
+            continue
+        tag, isi = line[:1], line[1:]
+        if rec.get("deleted"):
+            ln_old += 1
+            rows.append(_row(str(ln_old), "-", isi, _DEL))
+        elif tag == "+":
+            ln_new += 1
+            rows.append(_row(str(ln_new), "+", isi, _ADD))
+        elif tag == "-":
+            ln_old += 1
+            rows.append(_row(str(ln_old), "-", isi, _DEL))
+        else:
+            ln_old += 1
+            ln_new += 1
+            rows.append(_row(str(ln_new), " ", isi, _CTX))
+    return Group(*rows)
 
 
 # Font logo berjenjang dari yang paling besar. Terminal yang menyempit
@@ -1862,22 +2013,23 @@ def _logo_content(lebar: int | None = None) -> Group:
     geser = max(0, (lebar - w_art) // 2)
 
     logo_lines = []
+    grad = _grad()
     for i, ln in enumerate(lines):
         t = Text(" " * geser + ln.rstrip(),
-                 style=f"bold {_GRAD[min(i, len(_GRAD) - 1)]}", no_wrap=True)
+                 style=f"bold {grad[min(i, len(grad) - 1)]}", no_wrap=True)
         logo_lines.append(t)
     # Garis aksen gradasi mengikuti LEBAR LOGONYA, bukan lebar panel —
     # aksen yang lebih panjang dari logonya membuat blok terasa miring.
     seg = min(56, max(12, w_art))
-    per = max(1, seg // len(_GRAD))
+    per = max(1, seg // len(grad))
     bar = Text(no_wrap=True)
-    for col in _GRAD:
+    for col in grad:
         bar.append("━" * per, style=col)
     logo_lines.append(_pusatkan(bar, lebar))
     # Tagline: versi panjang hanya bila benar-benar muat. Tanpa syarat ini
     # ia diukur 57 kolom dan menyeret perataan seluruh blok (lihat _pusatkan).
     sub = Text()
-    sub.append("AI agent serbaguna", style="bold #f2e3cc")
+    sub.append("AI agent serbaguna", style=f"bold {tema.p('teks')}")
     if 18 + len("  ·  terminal · telegram · multitasking") <= lebar:
         sub.append("  ·  terminal · telegram · multitasking", style="dim")
     logo_lines.append(_pusatkan(sub, lebar))
@@ -1888,7 +2040,7 @@ def show_logo() -> None:
     """Feedback cepat saat startup — wordmark singkat.
     Figlet penuh + info akan tampil di Panel _banner() setelah setup selesai."""
     console.print()
-    t = Text(" " * _LPAD + "⬢ bagas-ai", style="bold #fcc048")
+    t = Text(" " * _LPAD + "⬢ bagas-ai", style=f"bold {tema.p('aksen')}")
     console.print(t)
 
 
@@ -1907,7 +2059,8 @@ def show_logo() -> None:
 # bar yang macet.
 _PIL_TUTUP_KIRI, _PIL_TUTUP_KANAN = "▐", "▌"
 _PIL_ISI, _PIL_KOSONG = "▰", "╌"
-_PIL_TERANG, _PIL_REDUP, _PIL_SISA = "bold #fcc048", "#a86a18", "#4a3826"
+def _pil_warna():
+    return (f"bold {tema.p('aksen')}", tema.p("aksen2"), tema.p("tepi_redup"))
 
 
 def _bar_pil(frac: float, lebar: int = 20, fase: int = 0) -> Text:
@@ -1961,8 +2114,8 @@ def _baris_padat(frac: float, ket: str, sejak: float, el: float) -> Text:
     """Satu baris status pemadatan: pil + persen + perkiraan sisa waktu."""
     jalan = max(time.time() - sejak, 0.001)
     t = Text()
-    t.append("  ⏸ ", style="bold #fcc048")
-    t.append("memadatkan ingatan", style="#fcc048")
+    t.append("  ⏸ ", style=f"bold {tema.p('aksen')}")
+    t.append("memadatkan ingatan", style=tema.p("aksen"))
     t.append("  ")
     # Panjang pil MENYESUAIKAN lebar terminal: persen & keterangan lebih
     # penting daripada pilnya, dan baris ini anti-lipat — di terminal sempit
@@ -1970,7 +2123,7 @@ def _baris_padat(frac: float, ket: str, sejak: float, el: float) -> Text:
     # sisa waktu ikut disembunyikan bila ruangnya tak cukup.
     pil = max(6, min(20, (console.width - 62) // 2))
     t.append_text(_bar_pil(frac, pil, fase=int(el * 12)))
-    t.append(f" {int(round(frac * 100)):>3}%", style="bold #fc9018")
+    t.append(f" {int(round(frac * 100)):>3}%", style=f"bold {tema.p('aksen2')}")
     # ETA dari kemajuan NYATA, bukan tebakan: waktu yang sudah lewat dibagi
     # bagian yang sudah selesai. Di bawah 8% angkanya masih liar (satu tahap
     # cepat bisa menghasilkan perkiraan sepersepuluh detik), jadi ditahan dulu.
@@ -1978,7 +2131,7 @@ def _baris_padat(frac: float, ket: str, sejak: float, el: float) -> Text:
     # dulu dibuang: yang di sini mengukur pekerjaan LOKAL yang tahapannya
     # diketahui, bukan menebak kapan situs selesai menjawab.
     if 0.08 <= frac < 1.0 and console.width >= 72:
-        t.append(f"  ~{jalan / frac - jalan:.1f}s", style="#f7d488")
+        t.append(f"  ~{jalan / frac - jalan:.1f}s", style=tema.p("aksen_terang"))
     t.append("  ·  ")
     t.append(ket, style="dim")
     t.append("  ·  dijeda", style="dim italic")
@@ -2110,7 +2263,7 @@ class Status:
         now = time.time()
         frame = self.FRAMES[int(el * 10) % len(self.FRAMES)]
 
-        dot = "[#4a3826]•[/]"
+        dot = "[{tema.p('tepi_redup')}]•[/]"
 
         # Ingatan sedang dipadatkan: SELURUH giliran berhenti di sini, jadi
         # baris status biasa (fase/token/alat) tak lagi menggambarkan apa pun
@@ -2130,11 +2283,11 @@ class Status:
         if now < self.retry_until:
             left = self.retry_until - now
             t = Text()
-            t.append(f"  {frame} ", style="bold #f7d488")
-            t.append("layanan sibuk — menunggu lalu melanjutkan", style="#f7d488")
-            t.append(f"  {left:.0f}s", style="bold #fca830")
+            t.append(f"  {frame} ", style=f"bold {tema.p('aksen_terang')}")
+            t.append("layanan sibuk — menunggu lalu melanjutkan", style=tema.p("aksen_terang"))
+            t.append(f"  {left:.0f}s", style=f"bold {tema.p('aksen2')}")
             if self.retry_msg:
-                t.append(f"  ·  {self.retry_msg}", style="dim #f7d488")
+                t.append(f"  ·  {self.retry_msg}", style=f"dim {tema.p('aksen_terang')}")
             t.append("     Ctrl+C batal", style="dim italic")
             return _oneline(t)
 
@@ -2143,21 +2296,21 @@ class Status:
         if abs(target - self.disp) < 1:
             self.disp = target
         t = Text()
-        t.append(f"  {frame} ", style="bold #fcc048")
-        t.append(self.phase, style="#fcc048")
-        t.append(f"  {_fmt_elapsed(el)}", style="bold #fc9018")
+        t.append(f"  {frame} ", style=f"bold {tema.p('aksen')}")
+        t.append(self.phase, style=tema.p("aksen"))
+        t.append(f"  {_fmt_elapsed(el)}", style=f"bold {tema.p('aksen2')}")
         t.append("   ")
-        t.append_text(Text.from_markup(dot))
-        t.append(f"  ⚡ {_fmt(int(self.disp))}", style="#f7d488")
+        t.append_text(_TM(dot))
+        t.append(f"  ⚡ {_fmt(int(self.disp))}", style=tema.p("aksen_terang"))
         t.append(" sesi", style="dim")
         if self.tool:
             t.append("   ")
-            t.append_text(Text.from_markup(dot))
-            t.append(f"  🔧 {self.tool}", style="#ffd9a0")
+            t.append_text(_TM(dot))
+            t.append(f"  🔧 {self.tool}", style=tema.p("aksen_terang"))
         if self.step:
             t.append("   ")
-            t.append_text(Text.from_markup(dot))
-            t.append(f"  langkah {self.step}", style="dim #ffb861")
+            t.append_text(_TM(dot))
+            t.append(f"  langkah {self.step}", style=f"dim {tema.p('aksen_terang')}")
         t.append("     Ctrl+C batal", style="dim italic")
         return _oneline(t)
 
@@ -2282,7 +2435,7 @@ class TurnView:
             # ucapan yang ia perkenalkan.
             baru_bicara = not self._said
             if baru_bicara:
-                out.append(Padding(Text("🤖 bagas-ai", style="bold #fc9018"),
+                out.append(Padding(Text("🤖 bagas-ai", style=f"bold {tema.p('aksen2')}"),
                                    (1, 0, 0, 2)))
                 self._said = True
             out.append(Padding(_md(text.strip()),
@@ -2355,8 +2508,8 @@ class TurnView:
         failed = rec["failed"]
         icon = "[#f0603c]✗[/]" if failed else "[#9fc93c]✓[/]"
         phase = _PHASE.get(rec["name"], "langkah")
-        out = [_KOSONG, _oneline(Text.from_markup(
-            f"  {icon} [#f2e3cc]{phase}[/]  [white]{_esc(label)}[/]"))]
+        out = [_KOSONG, _oneline(_TM(
+            f"  {icon} [{tema.p('teks')}]{phase}[/]  [white]{_esc(label)}[/]"))]
         lines = rec.get("_lines") or []
         if lines:
             out.extend(_pratinjau_hasil(lines, gagal=failed))
@@ -2417,14 +2570,14 @@ class TurnView:
         if self.padat is not None:
             return _baris_padat(*self.padat, el)
         if self.cancelling:
-            return _oneline(Text.from_markup(
+            return _oneline(_TM(
                 f"  [bold #f0603c]{frame}[/] [#f0603c]membatalkan — "
                 f"menunggu langkah aman berhenti[/]   [dim italic]Ctrl+C lagi = paksa[/]"))
         if now < self.retry_until:
             left = self.retry_until - now
-            return _oneline(Text.from_markup(
-                f"  [bold #f7d488]{frame}[/] [#f7d488]layanan sibuk — menunggu lalu "
-                f"melanjutkan[/] [bold #fca830]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]"))
+            return _oneline(_TM(
+                f"  [bold {tema.p('aksen_terang')}]{frame}[/] [{tema.p('aksen_terang')}]layanan sibuk — menunggu lalu "
+                f"melanjutkan[/] [bold {tema.p('aksen2')}]{left:.0f}s[/]   [dim italic]Ctrl+C batal[/]"))
         target = float(self.agent.tokens_session.total + self.agent.tokens_live)
         self.disp += (target - self.disp) * 0.30
         if abs(target - self.disp) < 1:
@@ -2436,14 +2589,14 @@ class TurnView:
             if len(lbl) > 40:
                 lbl = lbl[:37] + "…"
             lbl = f" [dim]{_esc(lbl)}[/]" if lbl else ""
-            extra = f"   [dim]·[/]   [#ffd9a0]🔧 {_esc(self.tool)}[/]{lbl}"
+            extra = f"   [dim]·[/]   [{tema.p('aksen_terang')}]🔧 {_esc(self.tool)}[/]{lbl}"
         # Segmen "◇ effort" DIHAPUS: sejak semua model lewat browser,
         # agent.effort selalu None (mesin effort ala API ikut terhapus bersama
         # model ber-API-key), jadi ia tak pernah tampil — cuma menyisakan cabang
         # mati yang menyesatkan pembaca kode.
-        status = _oneline(Text.from_markup(
-            f"  [bold #fcc048]{frame}[/] [#fcc048]{_esc(self.phase)}[/]   [dim]·[/]   "
-            f"[#fc9018]{_fmt_elapsed(el)}[/]   [dim]·[/]   [#f7d488]⚡ {tok}[/] "
+        status = _oneline(_TM(
+            f"  [bold {tema.p('aksen')}]{frame}[/] [{tema.p('aksen')}]{_esc(self.phase)}[/]   [dim]·[/]   "
+            f"[{tema.p('aksen2')}]{_fmt_elapsed(el)}[/]   [dim]·[/]   [{tema.p('aksen_terang')}]⚡ {tok}[/] "
             f"[dim]sesi[/]{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
         rows = [status]
@@ -2475,20 +2628,20 @@ def _hint_banner(lebar: int) -> list[Text]:
     penuh = Text()
     penuh.append("ketik pesan untuk mengobrol", style="dim")
     penuh.append("   ")
-    penuh.append("/menu", style="#ffb861")
+    penuh.append("/menu", style=tema.p("aksen_terang"))
     penuh.append(" menu   ", style="dim")
-    penuh.append("/model", style="#ffb861")
+    penuh.append("/model", style=tema.p("aksen_terang"))
     penuh.append(" ganti model   ", style="dim")
     penuh.append("/exit", style="#f0603c")
     penuh.append(" keluar", style="dim")
     ringkas = Text()
     ringkas.append("ketik pesan untuk mengobrol", style="dim")
     ringkas.append("   ")
-    ringkas.append("/menu /model /exit", style="#ffb861")
+    ringkas.append("/menu /model /exit", style=tema.p("aksen_terang"))
     for t in (penuh, ringkas):
         if t.cell_len <= lebar:
             return [_pusatkan(t, lebar)]
-    return [_pusatkan(Text("/menu /model /exit", style="#ffb861"), lebar)]
+    return [_pusatkan(Text("/menu /model /exit", style=tema.p("aksen_terang")), lebar)]
 
 
 def _banner(agent: Agent, resumed: bool) -> Panel:
@@ -2497,9 +2650,9 @@ def _banner(agent: Agent, resumed: bool) -> Panel:
     # & kanan) - tepi panel (2) - padding panel (2+2). Logo dan hint dipusat
     # kan terhadap ruang yang SUNGGUH tersedia, bukan lebar terminal.
     isi = max(24, console.width - 2 * _LPAD - 2 - 4)
-    body = Group(_logo_content(isi), Rule(style="#3a2a1a"),
+    body = Group(_logo_content(isi), Rule(style=tema.p("tepi_redup")),
                  *_hint_banner(isi))
-    return Panel(body, border_style="#fcc048", box=box.ROUNDED, padding=(1, 2))
+    return Panel(body, border_style=tema.p("aksen"), box=box.ROUNDED, padding=(1, 2))
 
 
 # Tinggi minim kotak chat: napas(1) + kotak(3) + status(1). Dipakai oleh
@@ -2508,20 +2661,15 @@ _KOTAK_TINGGI_MIN = 5
 
 
 def _dorong_ke_bawah(renderables: list) -> None:
-    """Cetak spasi kosong lalu renderables supaya seluruhnya menempel di DASAR
-    layar — tepat di atas kotak chat yang akan muncul di idle berikutnya.
+    """Cetak renderables DI POSISI KURSOR — tanpa baris kosong pengisi.
 
-    Dipanggil di startup dan saat /clear & /new: konten ditempelkan manual ke
-    dasar, sehingga idle pertama tak perlu _ke_dasar_layar() (yang hanya
-    menciptakan celah kosong di antara logo & kotak chat)."""
-    try:
-        _t = len(console.render_lines(Group(*renderables)))
-    except Exception:  # noqa: BLE001
-        _t = 0
-    _kosong = max(0, console.height - _t - _KOTAK_TINGGI_MIN - 1)
-    if _kosong > 0:
-        console.file.write("\n" * _kosong)
-        console.file.flush()
+    Dipanggil di startup dan saat /clear & /new. Dulu ia mengisi sisa layar
+    dengan baris baru supaya konten MENEMPEL di dasar; pengisi itu masuk
+    scrollback dan menjadi celah permanen antar giliran (persis keluhan
+    'jarak antar prompt & jawaban berjauhan' — sementara --resume yang mencetak
+    rapat tampil normal). Kotak chat & region live kini digambar mengikuti
+    kursor (lihat _ke_dasar_layar) dan menyentuh dasar sendiri saat konten
+    memenuhi layar, jadi pengisi tak lagi diperlukan."""
     _tambah_konten(renderables)
 
 
@@ -2560,7 +2708,7 @@ def main(resume: bool = False) -> None:
         _primed_map = projectindex.prime(config.PROJECT_ROOT)
     except Exception as _prime_exc:  # noqa: BLE001
         _primed_map = ""
-        _tambah_konten([Text.from_markup(
+        _tambah_konten([_TM(
             "  [yellow]⚠ peta proyek dilewati saat start[/] "
             f"[dim](instalasi tampaknya belum tuntas: {type(_prime_exc).__name__}). "
             "Tutup bagas-ai lalu reinstall/`bagasai update` bila ini berulang.)[/]")])
@@ -2587,39 +2735,46 @@ def main(resume: bool = False) -> None:
     _konten_startup.append(Padding(_banner(agent, resumed), (0, _LPAD, 0, _LPAD)))
     if resumed:
         _konten_startup.append(Padding(Rule("[dim]percakapan sebelumnya[/dim]",
-                                            style="#3a2a1a"), (1, 0, 0, 0)))
+                                            style=tema.p("tepi_redup")), (1, 0, 0, 0)))
         for m in agent.memory.messages:
             role, content = m.get("role"), (m.get("content") or "")
             if role == "user":
-                # WAJIB di-escape: teks pengguna yang memuat '[i]' / '[red]'
-                # (lazim di kode, mis. arr[i]) akan ditafsirkan rich sebagai
-                # markup — teks berubah gaya & kurungnya hilang saat replay.
-                _konten_startup.append(Text.from_markup(
-                    f"\n  [on #2b2b2b bold #ffffff] {_esc(content)} [/]"))
+                # WAJIB dibersihkan dari kendali & ANSI: teks pengguna yang
+                # memuat '[i]' / '[red]' (lazim di kode, mis. arr[i]) akan
+                # ditafsirkan rich sebagai markup — teks berubah gaya &
+                # kurungnya hilang saat replay. _gema_prompt menghindarinya
+                # karena memakai Text.append, bukan from_markup.
+                _konten_startup.extend([Text("\n"), _gema_prompt(content)])
+            elif role == "diff":
+                # Potongan kode langkah tulis/ubah/hapus direplay juga —
+                # tanpa ini transkrip --resume kehilangan seluruh kerja
+                # kodenya (diff dulu hanya tampil di layar sesaat).
+                _konten_startup.append(Padding(_replay_diff(m),
+                                               (0, 3, 0, 3)))
             elif role == "assistant" and content:
-                _konten_startup.append(Text.from_markup(
-                    "\n  [bold #fc9018]🤖 bagas-ai[/]"))
+                _konten_startup.append(_TM(
+                    "\n  [bold {tema.p('aksen2')}]🤖 bagas-ai[/]"))
                 # Rapat ke headernya (top=0) — sama seperti add_narasi:
                 # header dan ucapannya satu blok, jaraknya satu baris di
                 # atas header, bukan di antara keduanya.
                 _konten_startup.append(Padding(_md(content), (0, 3, 0, 3)))
         _konten_startup.append(Padding(Rule("[dim]lanjut di bawah[/dim]",
-                                            style="#3a2a1a"), (1, 0, 0, 0)))
+                                            style=tema.p("tepi_redup")), (1, 0, 0, 0)))
     if os_status in ("added", "updated"):
         verb = "terdeteksi & disimpan" if os_status == "added" else "diperbarui"
-        _konten_startup.append(Padding(Text.from_markup(
+        _konten_startup.append(Padding(_TM(
             f"[dim]🖥  OS {verb}: {osinfo.summary()} — perintah terminal akan "
             f"disesuaikan.[/dim]"), (0, _LPAD, 0, _LPAD)))
     # Peta proyek: dari cache instan (disegarkan di latar), atau sedang dibangun
     # pertama kali di latar — dua-duanya TANPA menunda prompt.
     _pn = _primed_map.count("\n- ")
     if _pn:
-        _konten_startup.append(Padding(Text.from_markup(
+        _konten_startup.append(Padding(_TM(
             f"[dim]🗺  peta proyek siap (~{_pn} file) — disegarkan di latar; "
-            f"ketik [/][#ffb861]/scan[/][dim] untuk paksa pindai ulang.[/]"),
+            f"ketik [/][{tema.p('aksen_terang')}]/scan[/][dim] untuk paksa pindai ulang.[/]"),
             (0, _LPAD, 0, _LPAD)))
     else:
-        _konten_startup.append(Padding(Text.from_markup(
+        _konten_startup.append(Padding(_TM(
             "[dim]🗺  peta proyek dibangun di latar — langsung ngetik aja, "
             "tak perlu menunggu.[/dim]"), (0, _LPAD, 0, _LPAD)))
 
@@ -2820,9 +2975,9 @@ def main(resume: bool = False) -> None:
             # dari modali ini, maka dicetak ulang lewat jalur tertampung
             # (aman dari tabrakan refresh Live, dan ikut menempel ke dasar).
             q = question if len(question) <= 46 else question[:45] + "…"
-            _tambah_konten([_oneline(Text.from_markup(
-                f"  [#9fc93c]✓[/] [#f2e3cc]{_esc(q)}[/]"
-                f"  [dim]·[/] [#f2e3cc]{_esc(str(answer))}[/]"))])
+            _tambah_konten([_oneline(_TM(
+                f"  [#9fc93c]✓[/] [{tema.p('teks')}]{_esc(q)}[/]"
+                f"  [dim]·[/] [{tema.p('teks')}]{_esc(str(answer))}[/]"))])
         return answer
 
     interaction.set_choice_handler(choice_handler)
@@ -2853,6 +3008,8 @@ def main(resume: bool = False) -> None:
                 old, new, exists = _isi_sebelum_sesudah("edit_file", ep, e)
                 if not (exists and old == new):
                     _print_diff(ep, old, new, is_new=not exists)
+                    agent.memory.add_diff(ep, _teks_unified(old, new),
+                                          is_new=not exists)
         elif name in _TOOL_DIFF and p:
             old, new, exists = _isi_sebelum_sesudah(name, p, args)
             # old == new pada file yang sudah ada = tulisan itu akan DITOLAK
@@ -2860,10 +3017,15 @@ def main(resume: bool = False) -> None:
             # jangan cetak header diff yang menyesatkan.
             if not (exists and old == new):
                 _print_diff(p, old, new, is_new=not exists)
+                agent.memory.add_diff(p, _teks_unified(old, new),
+                                      is_new=not exists)
         elif name == "delete_file" and p:
             full = config.PROJECT_ROOT / p
             content = full.read_text(encoding="utf-8", errors="replace") if full.exists() else ""
             _print_delete(p, content)
+            agent.memory.add_diff(
+                p, "\n".join(content.splitlines()[:200]), is_new=False,
+                deleted=True)
 
     def finish_step(name: str, result: str) -> None:
         """Selesaikan langkah: cetak baris jejak + siapkan hasil penuhnya.
@@ -2985,15 +3147,15 @@ def main(resume: bool = False) -> None:
                     # begitu penantiannya selesai. console.print saat Live
                     # aktif mendarat di atas region hidup itu — permanen.
                     on_notice=lambda m: console.print(
-                        f"\n  [bold #fcc048]{_esc(m)}[/]\n"),
+                        f"\n  [bold {tema.p('aksen')}]{_esc(m)}[/]\n"),
                     cancel_event=cancel_event,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
 
         def render():
-            return Text.from_markup(
-                f"  [#ffb861]◐[/] [dim]{_esc(state['status'])}[/]")
+            return _TM(
+                f"  [{tema.p('aksen_terang')}]◐[/] [dim]{_esc(state['status'])}[/]")
 
         wt = threading.Thread(target=worker, daemon=True)
         interrupted = False
@@ -3021,64 +3183,32 @@ def main(resume: bool = False) -> None:
             cancel_event.set()
 
         if result["login"] is not None:
-            _pick_web_chat(connectors.get_connector(spec.connector))
-            if result["login"]:
+            # TANPA menu pilihan sesi — sesi bagasai SELALU mengikuti percakapan
+            # browser yang terkait dengannya otomatis: layanan yang sudah punya
+            # kaitan chat (dari sesi ini / --resume) disambung kembali begitu
+            # pesan dikirim, dan layanan yang belum langsung membuat chat BARU
+            # yang diawali konteks penuh — termasuk ringkasan percakapan dari
+            # model sebelumnya (lihat _sync_web_state & build_transcript_digest).
+            # Menu pilih-chat lama justru memutus aturan 'satu sesi terminal =
+            # satu percakapan browser': pengguna bisa memilih chat yang tak
+            # berhubungan dengan pekerjaan yang sedang berjalan.
+            if getattr(agent, "_web_chat_id", ""):
                 console.print(
-                    f"  [#9fc93c]✓ login berhasil — terhubung ke "
-                    f"[bold]{_esc(spec.label)}[/bold]. Jendela diminimalkan; "
-                    f"chat & jawaban di terminal ini.[/]\n")
+                    f"  [#9fc93c]✓ terhubung ke[/] [bold]{_esc(spec.label)}[/bold]"
+                    " [dim]— pesan berikutnya melanjutkan percakapan web yang "
+                    "sudah terkait sesi ini.[/]\n")
             else:
                 console.print(
-                    f"  [#9fc93c]✓ terhubung — sesi login [bold]"
-                    f"{_esc(spec.label)}[/bold] masih aktif, langsung ke chat.[/]\n")
+                    f"  [#9fc93c]✓ terhubung ke[/] [bold]{_esc(spec.label)}[/bold]"
+                    " [dim]— percakapan baru dibuka di pesan pertama, lengkap "
+                    "dengan konteks proyek & riwayat dari model "
+                    "sebelumnya.[/]\n")
             return
         err = result["error"]
         why = ("dibatalkan" if interrupted or isinstance(err, llm.Cancelled)
                else f"gagal: {err}")
         console.print(f"  [yellow]⚠ koneksi {_esc(spec.label)} {_esc(str(why))}[/]")
         _revert_model(prev_model_id)
-
-    def _pick_web_chat(conn) -> None:
-        """Menu PILIH SESI di AI web setelah model web dipilih.
-
-        Melanjutkan percakapan lama berarti konteks proyek yang sudah dikirim di
-        sana tetap dipakai — AI web tak perlu 'membaca ulang' proyek dari nol
-        (berguna untuk --resume). Satu sesi terminal terikat ke satu chat."""
-        if not conn.supports_resume():
-            return
-        rows = conn.own_chats()
-        linked = getattr(agent, "_web_chat_id", "")
-        if not rows and not linked:
-            return  # belum ada chat lama -> langsung chat baru saja
-
-        def _when(ts) -> str:
-            try:
-                return time.strftime("%d/%m %H:%M", time.localtime(float(ts)))
-            except (TypeError, ValueError):
-                return ""
-
-        choices = [Choice("__new__", "✨ Mulai percakapan BARU di web")]
-        for r in rows[:15]:
-            mark = "  ← terpakai sesi ini" if r.get("id") == linked else ""
-            title = (r.get("title") or "(tanpa judul)")[:52]
-            choices.append(Choice(r["id"], f"{title:<54}{_when(r.get('ts'))}{mark}"))
-        try:
-            sel = inquirer.select(
-                message="Lanjutkan percakapan web yang mana?",
-                choices=choices, pointer="❯", default=linked or "__new__",
-                long_instruction="Melanjutkan chat lama = konteks proyek tak perlu "
-                                 "dikirim ulang.",
-            ).execute()
-        except (KeyboardInterrupt, EOFError):
-            return
-        if sel == "__new__":
-            agent.start_new_web_chat(immediate=True)
-            console.print("  [dim]→ percakapan web baru dibuka di browser.[/dim]")
-            return
-        agent.use_web_chat(sel)
-        title = next((r.get("title") for r in rows if r.get("id") == sel), sel)
-        console.print(f"  [#9fc93c]✓ melanjutkan:[/] [bold]{_esc(str(title))}[/] "
-                      f"[dim]— konteks proyek sudah ada di percakapan itu.[/]")
 
     def _delete_web_chats_of(sessions_deleted: list) -> None:
         """Hapus percakapan AI web milik sesi terminal yang baru saja dihapus
@@ -3188,6 +3318,8 @@ def main(resume: bool = False) -> None:
                     old, new, exists = _isi_sebelum_sesudah("edit_file", ep, e)
                     if not (exists and old == new):
                         _print_diff(ep, old, new, is_new=not exists, ke_konten=True)
+                        agent.memory.add_diff(ep, _teks_unified(old, new),
+                                              is_new=not exists)
             elif name in _TOOL_DIFF and p:
                 # WAJIB lewat _isi_sebelum_sesudah: untuk edit_file/append_file
                 # isi barunya BUKAN args["content"] (edit_file pakai old_text/
@@ -3199,10 +3331,15 @@ def main(resume: bool = False) -> None:
                 # efek — jangan cetak header diff yang menyesatkan.
                 if not (exists and old == new):
                     _print_diff(p, old, new, is_new=not exists, ke_konten=True)
+                    agent.memory.add_diff(p, _teks_unified(old, new),
+                                          is_new=not exists)
             elif name == "delete_file" and p:
                 full = config.PROJECT_ROOT / p
                 content = full.read_text(encoding="utf-8", errors="replace") if full.exists() else ""
                 _print_delete(p, content, ke_konten=True)
+                agent.memory.add_diff(
+                    p, "\n".join(content.splitlines()[:200]), is_new=False,
+                    deleted=True)
 
         def _on_result(name: str, result: str) -> None:
             if not cbs_alive["on"]:
@@ -3245,7 +3382,7 @@ def main(resume: bool = False) -> None:
             pengguna tak punya cara tahu siapa yang sedang menemani."""
             if not cbs_alive["on"] or not nama:
                 return
-            _commit([_oneline(Text.from_markup(
+            _commit([_oneline(_TM(
                 f"  [dim]‧ ikut meninjau: {_esc(', '.join(nama))}[/dim]"))])
 
         def _on_notice(msg: str) -> None:
@@ -3262,7 +3399,7 @@ def main(resume: bool = False) -> None:
             # terlewat, dan yang terlewat di sini berakhir jadi giliran yang
             # menggantung tanpa sebab yang kelihatan.
             if "VERIFIKASI KEAMANAN" in msg or "captcha" in msg.lower():
-                _commit([_KOSONG, Text.from_markup(
+                _commit([_KOSONG, _TM(
                     f"  [bold #f0603c]🔒 {_esc(msg)}[/]"), _KOSONG])
                 return
             # LOGIN: sekelas captcha — giliran berhenti sampai ada tangan
@@ -3270,24 +3407,24 @@ def main(resume: bool = False) -> None:
             # label "naik kelas otomatis"/"anti-macet" di bawah, yang sama
             # sekali bukan artinya.
             if "belum login" in msg.lower() or "sign-in" in msg.lower():
-                _commit([_KOSONG, Text.from_markup(
-                    f"  [bold #fcc048]{_esc(msg)}[/]"), _KOSONG])
+                _commit([_KOSONG, _TM(
+                    f"  [bold {tema.p('aksen')}]{_esc(msg)}[/]"), _KOSONG])
                 return
             if "disisipkan" in msg:
-                _commit([Text.from_markup(
-                    f"  [#fc9018]✉ {_esc(msg)}[/] "
+                _commit([_TM(
+                    f"  [{tema.p('aksen2')}]✉ {_esc(msg)}[/] "
                     f"[dim]— bagas-ai yang menentukan urutannya[/]")])
                 return
             if "langkah" in msg and "batas" in msg:
                 # Batas langkah bukan kegagalan maupun pemulihan — ia keputusan
                 # yang bisa ditindaklanjuti pengguna, jadi ditandai tersendiri
                 # supaya tak terbaca sebagai error.
-                _commit([Text.from_markup(f"  [#f7d488]⏱ {_esc(msg)}[/]")])
+                _commit([_TM(f"  [#f7d488]⏱ {_esc(msg)}[/]")])
                 return
             label = ("⚡ naik kelas otomatis:" if "→" in msg
                      else "🛟 anti-macet:")
-            _commit([Text.from_markup(
-                f"  [#f7d488]{label}[/] [dim]{_esc(msg)} "
+            _commit([_TM(
+                f"  [{tema.p('aksen_terang')}]{label}[/] [dim]{_esc(msg)} "
                 f"— konteks dipertahankan[/]")])
 
         cancel_event = threading.Event()
@@ -3469,12 +3606,11 @@ def main(resume: bool = False) -> None:
                     # sengaja tak ada — lihat gelung utama.)
                     # Baris kosong DI ATAS gema: tanpa itu, gema menempel ke
                     # konten sebelumnya (jawaban/baris langkah terakhir).
-                    _commit([_KOSONG, _oneline(Text.from_markup(
-                        f"  [on #2b2b2b bold #ffffff] {_esc(teks)} [/]"))])
+                    _commit([_KOSONG, _gema_prompt(teks)])
                     # Perintah menunggu; tanpa keterangan ini ia tampak
                     # "terkirim tapi tak terjadi apa-apa" sampai giliran usai.
                     if _perintah(teks):
-                        _commit([_oneline(Text.from_markup(
+                        _commit([_oneline(_TM(
                             f"  [dim]dijalankan setelah {_esc(agent.model_spec.label)} "
                             f"selesai menjawab[/dim]"))])
                 return True
@@ -3636,13 +3772,13 @@ def main(resume: bool = False) -> None:
         if isinstance(err, (KeyboardInterrupt, llm.Cancelled)) or (
                 interrupted and not ans and err is None):
             # Benar-benar terputus (tak ada jawaban yang sempat jadi).
-            _tambah_konten([Text.from_markup("\n  [yellow]◼ dibatalkan[/yellow]\n")])
+            _tambah_konten([_TM("\n  [yellow]◼ dibatalkan[/yellow]\n")])
         # Cabang khusus rate-limit API DIHAPUS: batas pemakaian kini datang dari
         # SITUS AI web, dan itu sudah ditangani lebih baik di core sebagai
         # WebLimitError/WebBusyError — lengkap dengan kapan bisa dipakai lagi
         # dan ulang-otomatis. Sisanya jatuh ke cabang error umum di bawah.
         elif err is not None:
-            _tambah_konten([Text.from_markup(
+            _tambah_konten([_TM(
                 f"\n  [red]✖ error:[/red] {_esc(str(err))}\n")])
         else:
             # Jawaban ditambahkan ke TUMPUKAN BAWAH (di luar region live, yang
@@ -3657,7 +3793,7 @@ def main(resume: bool = False) -> None:
                 ada_header = not view._said
                 blok.append(_KOSONG)
                 if ada_header:
-                    blok.append(Text.from_markup("  [bold #fc9018]🤖 bagas-ai[/]"))
+                    blok.append(_TM("  [bold #fc9018]🤖 bagas-ai[/]"))
                     blok.append(Padding(_md(ans), (0, 3, 0, 3)))
                 else:
                     blok.append(Padding(_md(ans), (1, 3, 0, 3)))
@@ -3713,7 +3849,7 @@ def main(resume: bool = False) -> None:
                     seg.append(f"[#f0603c]{n_fail} gagal[/]")
                 seg += [_fmt_elapsed(time.time() - view.start),
                         f"⚡ {_fmt(agent.tokens_last.total)} token"]
-                _tambah_konten([Padding(Text.from_markup(
+                _tambah_konten([Padding(_TM(
                     "[dim]" + " · ".join(seg) + "[/]"), (1, 3, 0, 3))])
         _reindex_if_edited()
 
@@ -3888,7 +4024,7 @@ def main(resume: bool = False) -> None:
         parts.append(el)
         parts.append(f"⚡ {tok} token")
         body = " [dim]·[/] ".join(parts)
-        console.print(Padding(Text.from_markup(f"[dim]{body}[/dim]"),
+        console.print(Padding(_TM(f"[dim]{body}[/dim]"),
                               (1, 3, 0, 3)))
 
     # --- aksi menu (inquirer) ---
@@ -3897,7 +4033,7 @@ def main(resume: bool = False) -> None:
         if agent.model_spec.connector != "glm":
             return
         console.print(
-            "  [bold #fca830]⚠ GLM (chat.z.ai) memerlukan VPN aktif[/] "
+            "  [bold {tema.p('aksen2')}]⚠ GLM (chat.z.ai) memerlukan VPN aktif[/] "
             "[dim]— disarankan [bold]Cloudflare WARP[/].[/]\n"
             "  [dim]Model ini sering bermasalah; jika error berulang "
             "di terminal, coba ganti server VPN.[/]\n")
@@ -4028,8 +4164,8 @@ def main(resume: bool = False) -> None:
                 wt.start()
                 while wt.is_alive():
                     frame = FRAMES[int(time.time() * 10) % len(FRAMES)]
-                    live.update(_region_stack(_oneline(Text.from_markup(
-                        f"  [#fcc048]{frame}[/] [dim]{_esc(state['msg'])}[/]"))))
+                    live.update(_region_stack(_oneline(_TM(
+                        f"  [{tema.p('aksen')}]{frame}[/] [dim]{_esc(state['msg'])}[/]"))))
                     wt.join(timeout=0.1)
         except KeyboardInterrupt:
             # Sama seperti pembatalan giliran: bereskan di latar, dan HANYA
@@ -4107,8 +4243,8 @@ def main(resume: bool = False) -> None:
         state = {"pesan": "menyiapkan berkas ingatan…"}
 
         def render():
-            return Text.from_markup(
-                f"  [#ffb861]◐[/] [dim]{_esc(state['pesan'])}[/]")
+            return _TM(
+                f"  [{tema.p('aksen_terang')}]◐[/] [dim]{_esc(state['pesan'])}[/]")
 
         hasil = {"teks": "", "galat": None}
 
@@ -4186,21 +4322,20 @@ def main(resume: bool = False) -> None:
             return
         voice_state.pop("terucap", None)
         # Jalur antrean tak punya gema lain — di sini ia satu-satunya.
-        _tambah_konten([Text.from_markup(
-            f"\n  [on #2b2b2b bold #ffffff] 🎙 {_esc(teks)} [/]")])
+        _tambah_konten([Text("\n"), _gema_prompt(teks, prefix="🎙 ")])
         with antre_lock:
             prompt_queue.append(teks)
         # DUA keadaan yang sangat berbeda, dan dulu keduanya diberi kalimat yang
         # sama — padahal yang kedua berarti perintahnya MENGENDAP sampai
         # pengguna menekan Enter, hal yang justru tak ia lakukan saat bicara.
         if kotak_chat.galat_kirim:
-            _tambah_konten([Text.from_markup(
+            _tambah_konten([_TM(
                 f"  [yellow]⚠ perintah suara tak bisa masuk ke kotak "
                 f"({_esc(kotak_chat.galat_kirim)}).[/yellow]\n"
                 "  [dim]Ia menunggu di antrean — tekan Enter untuk "
                 "menjalankannya.[/dim]")])
         else:
-            _tambah_konten([Text.from_markup(
+            _tambah_konten([_TM(
                 "  [dim]— disisipkan ke giliran yang sedang "
                 "berjalan[/dim]")])
 
@@ -4279,17 +4414,17 @@ def main(resume: bool = False) -> None:
             threading.Thread(target=_lapor_ambang, daemon=True).start()
             console.print(
                 f"  [#9fc93c]● mikrofon AKTIF[/] [dim]— {_esc(nama)}[/]\n"
-                "  [dim]sebut[/] [#fcc048]\"bagas ai\"[/] [dim]lalu ucapkan "
+                "  [dim]sebut[/] [{tema.p('aksen')}]\"bagas ai\"[/] [dim]lalu ucapkan "
                 "perintahmu; berhenti bicara[/] "
-                f"[#fcc048]{_dengar.JEDA_SELESAI:.0f} detik[/] [dim]sudah "
+                f"[{tema.p('aksen')}]{_dengar.JEDA_SELESAI:.0f} detik[/] [dim]sudah "
                 "menutupnya — tak ada kata penutup. Contoh:[/]\n"
                 "  [dim]  \"bagas ai tolong buka main.py\"  → (diam) → "
                 "terkirim[/]\n"
                 "  [dim]begitu namaku terdengar aku MENJAWAB "
                 f"(\"{_dengar.sapaan()}\"), dan bar "
-                "status di bawah berubah jadi[/] [#fcc048]● merekam[/][dim]. "
+                "status di bawah berubah jadi[/] [{tema.p('aksen')}]● merekam[/][dim]. "
                 "Meneruskan kalimat sebelum jeda itu habis mengulang "
-                "hitungannya. Ucapkan[/] [#fcc048]\"batalkan\"[/] [dim]untuk "
+                "hitungannya. Ucapkan[/] [{tema.p('aksen')}]\"batalkan\"[/] [dim]untuk "
                 "membuang rekaman yang sedang berjalan. Satu perintah maksimal "
                 f"{_dengar.MAKS_REKAM:.0f} detik.[/dim]\n")
             return
@@ -4318,7 +4453,7 @@ def main(resume: bool = False) -> None:
             else:
                 console.print("  [dim]berlaku saat[/] [#fcc048]/voice on[/]"
                               "[dim]. Permanen: tulis[/] "
-                              f"[#fcc048]VOICE_JANGKAUAN={pilihan}[/] "
+                              f"[{tema.p('aksen')}]VOICE_JANGKAUAN={pilihan}[/] "
                               "[dim]di ~/.bagasai/.env[/]\n")
             return
 
@@ -4332,12 +4467,12 @@ def main(resume: bool = False) -> None:
             # pengguna; ambang mana pun yang dipilih dari sini tetap tebakan
             # sampai diukur dari titik yang benar-benar dipakai.
             console.print(
-                "\n  [bold #fcc048]🎙 Ukur jangkauan[/]\n"
+                "\n  [bold {tema.p('aksen')}]🎙 Ukur jangkauan[/]\n"
                 "  [dim]1. pergilah ke tempat kamu biasa memberi perintah "
                 "(kasur / ruang tengah)[/]\n"
                 "  [dim]2. DIAM dulu 1 detik — derau ruangan diukur[/]\n"
                 "  [dim]3. lalu bicara 6 detik dengan suara sewajarnya, mis.[/]"
-                " [#fcc048]\"bagas ai tolong buka main titik py\"[/]\n")
+                " [{tema.p('aksen')}]\"bagas ai tolong buka main titik py\"[/]\n")
             console.print("  [dim]mulai… diam sebentar[/]")
             try:
                 h = _dengar.ukur(6.0)
@@ -4360,7 +4495,7 @@ def main(resume: bool = False) -> None:
                 console.print(
                     f"  [yellow]✖ belum sampai[/] [dim]di jangkauan "
                     f"'{h['jangkauan']}'.[/] [#9fc93c]Pakai[/] "
-                    f"[#fcc048]/voice {h['saran']}[/][dim] — di situ suaramu "
+                    f"[{tema.p('aksen')}]/voice {h['saran']}[/][dim] — di situ suaramu "
                     "lewat.[/]")
             else:
                 # Bahkan profil paling longgar pun tak menangkapnya. Yang
@@ -4382,7 +4517,7 @@ def main(resume: bool = False) -> None:
                     "itu[/]")
             if h["teks"]:
                 console.print(f"  [#9fc93c]✓ terdengar:[/] "
-                              f"[#f2e3cc]{_esc(h['teks'])}[/]\n")
+                              f"[{tema.p('teks')}]{_esc(h['teks'])}[/]\n")
             else:
                 console.print("  [dim]tak ada kata yang dikenali dari rekaman "
                               "itu.[/dim]\n")
@@ -4413,7 +4548,7 @@ def main(resume: bool = False) -> None:
             console.print(
                 f"  [dim]tingkat suara tertinggi: {puncak:.0f}   "
                 f"ambang bicara: ≥{lantai:.0f} (mengikuti derau ruangan — "
-                f"ukur dari tempat dudukmu dengan[/dim] [#fcc048]/voice "
+                f"ukur dari tempat dudukmu dengan[/dim] [{tema.p('aksen')}]/voice "
                 f"jangkau[/][dim])[/dim]"
                 + ("\n  [yellow]mikrofonnya nyaris tak menangkap apa-apa[/]"
                    "[dim] — periksa mikrofon yang dipilih Windows, atau "
@@ -4421,7 +4556,7 @@ def main(resume: bool = False) -> None:
                    if puncak < lantai else ""))
             if teks:
                 console.print(f"  [#9fc93c]✓ terdengar:[/] "
-                              f"[#f2e3cc]{_esc(teks)}[/]\n")
+                              f"[{tema.p('teks')}]{_esc(teks)}[/]\n")
             else:
                 console.print("  [yellow]tak ada ucapan yang dikenali[/yellow]"
                               "[dim] — coba lebih dekat ke mikrofon, atau "
@@ -4436,20 +4571,20 @@ def main(resume: bool = False) -> None:
         console.print(f"  [dim]mikrofon :[/] {_esc(_dengar.nama_mikrofon() or '-')}")
         jnama = voice_state.get("jangkauan") or _dengar._nama_jangkauan()
         console.print(
-            f"  [dim]jangkauan:[/] [#fcc048]{jnama}[/]"
+            f"  [dim]jangkauan:[/] [{tema.p('aksen')}]{jnama}[/]"
             + (f"  [dim](derau {pendengar.derau:.0f} → ambang "
                f"{pendengar.ambang:.0f})[/]" if aktif and pendengar.ambang
                else "  [dim](dekat / normal / jauh)[/]"))
         if not ok:
             console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]")
         console.print("  [dim]cara pakai:[/] sebut [#fcc048]\"bagas ai\"[/] "
-                      "lalu perintahnya, lalu [#fcc048]diam 2 detik[/] "
-                      "[dim]· buang dengan[/] [#fcc048]\"batalkan\"[/]")
+                      "lalu perintahnya, lalu [{tema.p('aksen')}]diam 2 detik[/] "
+                      "[dim]· buang dengan[/] [{tema.p('aksen')}]\"batalkan\"[/]")
         console.print("  [dim]yang dikirim hanya yang terucap SESUDAH "
                       "namaku.[/dim]")
         console.print("  [dim]/voice on · off · tes ·[/] [#fcc048]jangkau[/]"
                       "[dim] (ukur dari tempat dudukmu) ·[/] "
-                      "[#fcc048]dekat|normal|jauh[/]\n")
+                      "[{tema.p('aksen')}]dekat|normal|jauh[/]\n")
 
     def show_mic(arg: str = "") -> None:
         """/mic — kabar AI dibacakan pengeras suara; on/off/tes.
@@ -4463,7 +4598,7 @@ def main(resume: bool = False) -> None:
             prefs.save(suara=nyala)
             if not nyala:
                 _suara.diam()
-            warna = "#9fc93c" if nyala else "#f7d488"
+            warna = "#9fc93c" if nyala else tema.p("aksen_terang")
             console.print(f"  [{warna}]✓ suara kabar {'AKTIF' if nyala else 'MATI'}"
                           f"[/]\n")
             return
@@ -4496,7 +4631,7 @@ def main(resume: bool = False) -> None:
                       "terdengar di jendela mana pun[/]")
         console.print(
             f"  [dim]status: [/]"
-            f"[{'#9fc93c' if aktif else '#f7d488'}]{'aktif' if aktif else 'mati'}[/]"
+            f"[{'#9fc93c' if aktif else tema.p('aksen_terang')}]{'aktif' if aktif else 'mati'}[/]"
             f"  [dim]· /mic off · /mic tes[/dim]")
         console.print("  [dim]giliran yang sampai kesimpulan ditandai dua "
                       "dengung pendek — 'getaran' penanda selesai[/dim]")
@@ -4527,7 +4662,7 @@ def main(resume: bool = False) -> None:
             terpasang = _suara.suara_tersedia()
             daftar = ", ".join(b.split("|")[0].strip() for b in terpasang)
             console.print(
-                "\n  [dim]Suara bawaan Windows[/] [#f7d488]tidak dipakai[/] "
+                "\n  [dim]Suara bawaan Windows[/] [{tema.p('aksen_terang')}]tidak dipakai[/] "
                 "[dim]— tak ada suara Indonesia terpasang"
                 + (f" (yang ada: {_esc(daftar)})" if daftar else "")
                 + ". Suara Inggris sengaja dilewati: melafalkan kalimat "
@@ -4557,18 +4692,18 @@ def main(resume: bool = False) -> None:
             nyala = pilihan in ("on", "hidup")
             _prefs.save(tim=nyala)
             kata = "AKTIF" if nyala else "MATI"
-            warna = "#9fc93c" if nyala else "#f7d488"
+            warna = "#9fc93c" if nyala else tema.p("aksen_terang")
             console.print(f"  [{warna}]✓ tim spesialis {kata}[/]\n")
             return
 
         aktif = bool(_prefs.load().get("tim", True))
         console.print()
         console.print(
-            f"  [bold #fcc048]Tim {len(_tim.ANGGOTA)} spesialis[/] "
+            f"  [bold {tema.p('aksen')}]Tim {len(_tim.ANGGOTA)} spesialis[/] "
             f"[dim]— bekerja pasif, dibangunkan oleh isi pekerjaan[/]")
         console.print(
             f"  [dim]status: [/]"
-            f"[{'#9fc93c' if aktif else '#f7d488'}]{'aktif' if aktif else 'mati'}[/]"
+            f"[{'#9fc93c' if aktif else tema.p('aksen_terang')}]{'aktif' if aktif else 'mati'}[/]"
             f"  [dim]· /tim off untuk mematikan · maksimal "
             f"{_tim._MAKS_PER_LANGKAH} orang per langkah, tiap orang bicara "
             f"sekali per giliran[/]\n")
@@ -4651,8 +4786,8 @@ def main(resume: bool = False) -> None:
                     frame = FRAMES[int(time.time() * 10) % len(FRAMES)]
                     kerja = ("mematikan mode" if sel == MATIKAN
                              else f"menekan '{_esc(sel)}'")
-                    live.update(_region_stack(_oneline(Text.from_markup(
-                        f"  [#fcc048]{frame}[/] [dim]{kerja} di "
+                    live.update(_region_stack(_oneline(_TM(
+                        f"  [{tema.p('aksen')}]{frame}[/] [dim]{kerja} di "
                         f"{_esc(spec.label)}…[/dim]"))))
                     wt.join(timeout=0.1)
         except KeyboardInterrupt:
@@ -4710,8 +4845,8 @@ def main(resume: bool = False) -> None:
                 wt.start()
                 while wt.is_alive():
                     frame = FRAMES[int(time.time() * 10) % len(FRAMES)]
-                    live.update(_region_stack(_oneline(Text.from_markup(
-                        f"  [#fcc048]{frame}[/] [dim]{_esc(msg)}[/]"))))
+                    live.update(_region_stack(_oneline(_TM(
+                        f"  [{tema.p('aksen')}]{frame}[/] [dim]{_esc(msg)}[/]"))))
                     wt.join(timeout=0.1)
         except KeyboardInterrupt:
             _reset_web_hub_if_stuck(wt)
@@ -4735,7 +4870,7 @@ def main(resume: bool = False) -> None:
         own = conn.own_chats()
         console.print(
             f"  [dim]Layanan:[/] [bold]{_esc(conn.label)}[/]   "
-            f"[dim]chat tercatat dibuat bagas-ai:[/] [#ffb861]{len(own)}[/]\n")
+            f"[dim]chat tercatat dibuat bagas-ai:[/] [{tema.p('aksen_terang')}]{len(own)}[/]\n")
 
         choices = [
             Choice("prune", "🧹 Hapus chat lama buatan bagas-ai (sisakan N terbaru)"),
@@ -4881,7 +5016,7 @@ def main(resume: bool = False) -> None:
         _delete_web_chats_of(removed)
 
     def show_help() -> None:
-        c = "#ffb861"
+        c = tema.p("aksen_terang")
         pout(Panel(
             "[dim]ketik pesan biasa untuk mengobrol dengan bagas-ai[/dim]\n\n"
             f"[{c}]/menu[/]     menu interaktif        [{c}]/model[/]    pilih model + saran\n"
@@ -4894,8 +5029,8 @@ def main(resume: bool = False) -> None:
             f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
             f"[{c}]/mode[/]     mode kerja situs       [{c}]/scripts[/]  script memory\n"
             f"[{c}]/update[/]   cek pembaruan          [#f0603c]/exit[/]     keluar",
-            title="[bold #fcc048]❔ Bantuan[/]", title_align="left",
-            border_style="#fcc048", box=box.ROUNDED, padding=(1, 2)))
+            title=tema.terjemah("[bold #fcc048]❔ Bantuan[/]"), title_align="left",
+            border_style=tema.p("aksen"), box=box.ROUNDED, padding=(1, 2)))
 
     def _baris_versi() -> None:
         """Versi dari SEMUA sumber, bukan cuma GitHub — yang menentukan apa yang
@@ -4906,13 +5041,13 @@ def main(resume: bool = False) -> None:
             return
         t = Text("  ")
         t.append("terpasang ", style="dim")
-        t.append(v.get("terpasang") or "?", style="#fc9018")
+        t.append(v.get("terpasang") or "?", style=tema.p("aksen2"))
         if v.get("repo"):
             t.append("   repo ", style="dim")
             t.append(v["repo"], style="#9fc93c")
         if v.get("remote") and v["remote"] != v.get("repo"):
             t.append("   remote ", style="dim")
-            t.append(v["remote"], style="#f7d488")
+            t.append(v["remote"], style=tema.p("aksen_terang"))
         if v.get("commit_lokal"):
             t.append(f"   commit {v['commit_lokal']}", style="dim")
         console.print(_oneline(t))
@@ -4942,15 +5077,15 @@ def main(resume: bool = False) -> None:
             # padahal kode yang jalan masih yang lama.
             body = Text()
             body.append("Repo sudah mutakhir, tapi paket yang TERPASANG "
-                        "tertinggal.\n\n", style="bold #f7d488")
+                        "tertinggal.\n\n", style=f"bold {tema.p('aksen_terang')}")
             body.append("Yang benar-benar dijalankan adalah salinan di "
                         "site-packages, dan isinya berbeda dari repo:\n\n",
                         style="dim")
             for b in (res.get("beda") or [])[:10]:
-                body.append("  • ", style="#fc9018")
+                body.append("  • ", style=tema.p("aksen2"))
                 body.append(b + "\n")
-            pout(Panel(body, title="[bold #fcc048]🔄 Pemasangan tertinggal[/]",
-                       title_align="left", border_style="#f7d488",
+            pout(Panel(body, title=tema.terjemah("[bold #fcc048]🔄 Pemasangan tertinggal[/]"),
+                       title_align="left", border_style=tema.p("aksen_terang"),
                        box=box.ROUNDED, padding=(1, 2)))
             try:
                 go = inquirer.confirm(message="Pasang ulang sekarang?",
@@ -4981,11 +5116,11 @@ def main(resume: bool = False) -> None:
             # folder). Bisa disiapkan otomatis: clone lalu reinstall.
             body = Text()
             body.append("Auto-update belum disiapkan untuk instalasi ini.\n\n",
-                        style="bold #f7d488")
+                        style=f"bold {tema.p('aksen_terang')}")
             body.append(f"Sumber : {res.get('repo_url','')}\n", style="dim")
             body.append(f"Branch : {res.get('branch','')}", style="dim")
-            pout(Panel(body, title="[bold #fcc048]🔄 Siapkan pembaruan[/]",
-                       title_align="left", border_style="#fcc048",
+            pout(Panel(body, title=tema.terjemah("[bold #fcc048]🔄 Siapkan pembaruan[/]"),
+                       title_align="left", border_style=tema.p("aksen"),
                        box=box.ROUNDED, padding=(1, 2)))
             try:
                 go = inquirer.confirm(message="Siapkan & perbarui sekarang?",
@@ -5000,15 +5135,15 @@ def main(resume: bool = False) -> None:
             n = res.get("behind", "?")
             log = res.get("log", "")
             body = Text()
-            body.append(f"{n} pembaruan tersedia  ", style="bold #f7d488")
+            body.append(f"{n} pembaruan tersedia  ", style=f"bold {tema.p('aksen_terang')}")
             body.append(f"({res.get('local','')} → {res.get('remote','')})\n\n",
                         style="dim")
             if log:
                 for line in log.splitlines():
-                    body.append("  • ", style="#fc9018")
+                    body.append("  • ", style=tema.p("aksen2"))
                     body.append(line + "\n")
-            pout(Panel(body, title="[bold #fcc048]🔄 Pembaruan bagas-ai[/]",
-                       title_align="left", border_style="#fcc048",
+            pout(Panel(body, title=tema.terjemah("[bold #fcc048]🔄 Pembaruan bagas-ai[/]"),
+                       title_align="left", border_style=tema.p("aksen"),
                        box=box.ROUNDED, padding=(1, 2)))
             try:
                 go = inquirer.confirm(message="Terapkan pembaruan sekarang?",
@@ -5042,7 +5177,7 @@ def main(resume: bool = False) -> None:
             console.print(f"  [red]✖ gagal ({ost}):[/red] {out.get('detail','')}\n")
             return
 
-        note = f"\n  [#f7d488]ℹ {_esc(out['note'])}[/]" if out.get("note") else ""
+        note = f"\n  [{tema.p('aksen_terang')}]ℹ {_esc(out['note'])}[/]" if out.get("note") else ""
         if out.get("verified"):
             # TERVERIFIKASI = isi paket terpasang benar-benar sama dengan repo,
             # bukan sekadar "pip keluar dengan kode 0". Bedanya penting: yang
@@ -5054,7 +5189,7 @@ def main(resume: bool = False) -> None:
                 + ("\n  [dim]kode terbaru sudah aktif — cukup jalankan ulang "
                    "perintahnya, tak ada yang perlu ditunggu.[/dim]"
                    if langsung else
-                   "\n  [dim]jalankan ulang[/dim] [#ffb861]bagas-ai[/] "
+                   "\n  [dim]jalankan ulang[/dim] [{tema.p('aksen_terang')}]bagas-ai[/] "
                    "[dim]agar perubahan aktif.[/dim]")
                 + note)
             _baris_versi()
@@ -5120,8 +5255,8 @@ def main(resume: bool = False) -> None:
         if not dirs:
             console.print(
                 "  [dim]Belum ada folder konteks tambahan.[/dim]  "
-                "Ketik [#ffb861]/add-dir[/] untuk menambah (muncul box input "
-                "path), atau langsung [#ffb861]/add-dir <path>[/].\n"
+                "Ketik [{tema.p('aksen_terang')}]/add-dir[/] untuk menambah (muncul box input "
+                "path), atau langsung [{tema.p('aksen_terang')}]/add-dir <path>[/].\n"
             )
             return
         body = Text()
@@ -5177,10 +5312,10 @@ def main(resume: bool = False) -> None:
                        box=box.ROUNDED, padding=(1, 2)))
         elif action == "scripts":
             items = scripts.index_list()
-            txt = "\n".join(f"• [#fc9018]{it['name']}[/]: {it.get('description') or '-'}"
+            txt = "\n".join(f"• [{tema.p('aksen2')}]{it['name']}[/]: {it.get('description') or '-'}"
                             for it in items) or "[dim]belum ada[/dim]"
-            pout(Panel(txt, title="[bold #fc9018]📜 Script memory[/]",
-                       title_align="left", border_style="#fc9018",
+            pout(Panel(txt, title=tema.terjemah("[bold #fc9018]📜 Script memory[/]"),
+                       title_align="left", border_style=tema.p("aksen2"),
                        box=box.ROUNDED, padding=(1, 2)))
         elif action == "help":
             show_help()
@@ -5233,18 +5368,18 @@ def main(resume: bool = False) -> None:
         # dengan print dari worker.
         t = _esc(text or "")
         if kind == "in":
-            _tambah_konten([Text.from_markup(
-                f"\n  [#fc9018]📲 Telegram ▸[/] [#f2e3cc]{t}[/]")])
+            _tambah_konten([_TM(
+                f"\n  [{tema.p('aksen2')}]📲 Telegram ▸[/] [{tema.p('teks')}]{t}[/]")])
         elif kind == "out":
             snip = t if len(t) <= 600 else t[:600] + "…"
-            _tambah_konten([Text.from_markup(
+            _tambah_konten([_TM(
                 f"  [#9fc93c]  ↳ balasan:[/] [dim]{snip}[/]")])
         elif kind == "perm":
-            _tambah_konten([Text.from_markup(f"\n  [#f7d488]🔔 {t}[/]")])
+            _tambah_konten([_TM(f"\n  [#f7d488]🔔 {t}[/]")])
         elif kind == "error":
-            _tambah_konten([Text.from_markup(f"  [red]📲 error:[/] {t}")])
+            _tambah_konten([_TM(f"  [red]📲 error:[/] {t}")])
         else:
-            _tambah_konten([Text.from_markup(f"  [dim]📲 {t}[/]")])
+            _tambah_konten([_TM(f"  [dim]📲 {t}[/]")])
 
     def do_bot() -> None:
         svc = tg_service.get("svc")
@@ -5282,7 +5417,7 @@ def main(resume: bool = False) -> None:
                 f"  [#9fc93c]✓ bot Telegram AKTIF[/] [dim]— kontrol bagas-ai dari HP-mu "
                 f"selama sesi ini hidup. Folder: {config.PROJECT_ROOT}\n"
                 f"     ID diizinkan: {idtxt}. Aktivitas tampil di sini. "
-                f"Atur izin: [/][#ffb861]/permissions-bot[/][dim].[/]\n")
+                f"Atur izin: [/][{tema.p('aksen_terang')}]/permissions-bot[/][dim].[/]\n")
         elif svc.error is not None:
             console.print(f"  [red]✖ gagal menyalakan bot:[/] {svc.error}\n")
         elif svc.alive():
@@ -5299,11 +5434,11 @@ def main(resume: bool = False) -> None:
         while True:
             pend = telegram_perms.pending()
             allowed = sorted(telegram_perms.allowed_ids())
-            head = Text.from_markup(
-                f"[bold #fc9018]🔐 Izin bot Telegram[/]\n"
+            head = _TM(
+                f"[bold {tema.p('aksen2')}]🔐 Izin bot Telegram[/]\n"
                 f"[dim]Diizinkan:[/] {allowed or '(belum ada)'}\n"
                 f"[dim]Menunggu izin:[/] {len(pend)}")
-            pout(Panel(head, border_style="#fc9018", box=box.ROUNDED, padding=(1, 2)))
+            pout(Panel(head, border_style=tema.p("aksen2"), box=box.ROUNDED, padding=(1, 2)))
             choices = []
             for cid, info in pend.items():
                 choices.append(Choice(("approve", int(cid)),
@@ -5342,6 +5477,152 @@ def main(resume: bool = False) -> None:
                     console.print(f"  [green]✓ id {val.strip()} ditambahkan[/]")
                 else:
                     console.print("  [yellow]ID harus angka.[/]")
+
+    def _pilih_tema() -> None:
+        """Menu /theme: daftar tema di KIRI, PRATINJAU HIDUP di KANAN dalam
+        bingkai — pratinjau berganti mengikuti pilihan yang sedang disorot,
+        jadi pengguna melihat tepat satu tema dalam konteks utuhnya (gradasi
+        logo, footer, gema prompt, kotak chat) sebelum menekan Enter. Pilihan
+        tersimpan di prefs, jadi bertahan antar-jalanan."""
+        nonlocal kotak_chat
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.formatted_text import FormattedText
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import Layout, HSplit, VSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+
+        daftar = tema.daftar()
+        idx = {"i": next((i for i, (tid, *_r) in enumerate(daftar)
+                          if tid == tema.nama_aktif()), 0)}
+
+        def teks_daftar() -> FormattedText:
+            """Kolom kiri: satu entri per tema, sorotan mengikuti kursor."""
+            frag: list[tuple[str, str]] = [("", "\n")]
+            for i, (tid, label, desc) in enumerate(daftar):
+                t = tema.TEMA[tid]
+                aktif_skrg = i == idx["i"]
+                dipakai = tid == tema.nama_aktif()
+                frag.append((f"fg:{t['menu_aktif_bg']} bold",
+                             " ❭ " if aktif_skrg else "   "))
+                if aktif_skrg:
+                    frag.append((f"bg:{t['menu_aktif_bg']} "
+                                 f"fg:{t['menu_aktif_teks']} bold", label))
+                else:
+                    frag.append((f"fg:{t['aksen']}", label))
+                frag.append(("class:muted", " ✓" if dipakai else ""))
+                frag.append(("", "\n"))
+            return FormattedText(frag)
+
+        def teks_pratinjau() -> FormattedText:
+            """Kolom kanan: pratinjau tema yang SEDANG disorot."""
+            tid, label, desc = daftar[idx["i"]]
+            t = tema.TEMA[tid]
+            frag: list[tuple[str, str]] = [
+                (f"fg:{t['aksen']} bold", f" {label}"),
+                ("class:muted", f" — {desc}\n\n"),
+                ("", " "),
+            ]
+            # Gradasi logo (7 titik).
+            for hexa in t["grad"]:
+                frag.append((f"fg:{hexa}", "██"))
+            frag.append(("", "\n\n"))
+            # Contoh baris footer.
+            bgf = f"bg:{t['bg_footer']}"
+            frag.append((f"{bgf} fg:{t['merek_footer']} bold",
+                         " ⬢ bagas-ai "))
+            frag.append((f"{bgf} fg:{t['sep_footer']}", "│ "))
+            frag.append((f"{bgf} fg:{t['model_footer']}", "🌐 Gemini "))
+            frag.append((f"{bgf} fg:{t['cmd_footer']}", "/menu "))
+            frag.append((f"{bgf} fg:{t['exit_footer']}", "/exit \n\n"))
+            # Contoh gema prompt.
+            bgg = f"bg:{t['gema_bg']}"
+            frag.append((f"{bgg} fg:{t['gema_garis']} bold", " ▌ "))
+            frag.append((f"{bgg} fg:{t['gema_teks']} bold",
+                         "pesanmu tampil di sini\n\n"))
+            # Contoh kotak chat (tepi + ❯).
+            tepi = f"fg:{t['tepi']}"
+            frag.append((tepi, " ╭───────╮\n"))
+            frag.append((tepi, " │ "))
+            frag.append((f"fg:{t['aksen']} bold", "❯ "))
+            frag.append(("", "ketik…"))
+            frag.append((tepi, " │\n"))
+            frag.append((tepi, " ╰───────╯\n"))
+            return FormattedText(frag)
+
+        def teks_tepi_pratinjau(bawah: bool) -> FormattedText:
+            """Tepi bingkai pratinjau (atas berjudul, bawah polos) — warnanya
+            mengikuti tema yang sedang disorot. Bersisi tiga, tanpa tepi
+            kanan: lebar emoji tak seragam antar-terminal dan tepi kanan
+            yang menuntut lebar persis justru bergerigi (keputusan yang sama
+            dengan bingkai menu, lihat ui/menu.py)."""
+            t = tema.TEMA[daftar[idx["i"]][0]]
+            tepi = f"fg:{t['tepi']}"
+            if bawah:
+                return FormattedText([(tepi, " ╰" + "─" * 34)])
+            return FormattedText([
+                (tepi, " ╭─ "),
+                (f"fg:{t['aksen']} bold", "Pratinjau"),
+                (tepi, " " + "─" * 24),
+            ])
+
+        kb = KeyBindings()
+
+        @kb.add("up")
+        @kb.add("c-p")
+        def _naik(_e):
+            idx["i"] = (idx["i"] - 1) % len(daftar)
+
+        @kb.add("down")
+        @kb.add("c-n")
+        @kb.add("tab")
+        def _turun(_e):
+            idx["i"] = (idx["i"] + 1) % len(daftar)
+
+        @kb.add("enter")
+        def _pilih(e):
+            e.app.exit(result=daftar[idx["i"]][0])
+
+        @kb.add("escape")
+        @kb.add("c-c")
+        def _batal(e):
+            e.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
+        aplikasi = Application(
+            layout=Layout(HSplit([
+                VSplit([
+                    Window(FormattedTextControl(teks_daftar),
+                           width=26, wrap_lines=False),
+                    Window(width=1),
+                    HSplit([
+                        Window(FormattedTextControl(
+                            lambda: teks_tepi_pratinjau(False)), height=1),
+                        Window(FormattedTextControl(teks_pratinjau),
+                               wrap_lines=True),
+                        Window(FormattedTextControl(
+                            lambda: teks_tepi_pratinjau(True)), height=1),
+                    ]),
+                ]),
+                Window(height=1, char=" "),
+                Window(FormattedTextControl(
+                    lambda: FormattedText(
+                        [("class:muted",
+                          " ↑↓ pilih   ·   enter pakai   ·   esc batal ")])),
+                       height=1),
+            ])),
+            full_screen=False, key_bindings=kb, style=_buat_pt_style())
+        try:
+            pilihan = aplikasi.run()
+        except KeyboardInterrupt:
+            return
+        if tema.set_tema(str(pilihan)):
+            # Kotak chat dibangun ulang: tepinya, "❯", footer idle, dan menu
+            # autocomplete prompt_toolkit menangkap gaya saat KONSTRUKSI —
+            # tanpa pembangunan ulang semuanya tetap memakai tema lama.
+            kotak_chat = _buat_kotak()
+            console.print(_TM(
+                f"  [#9fc93c]✓ tema aktif:[/] [bold]{tema.label_aktif()}[/] — "
+                "kotak chat & footer langsung berganti. (Warna markdown "
+                "jawaban menyusul saat bagasai dijalankan ulang.)\n"))
 
     def open_menu() -> bool:
         try:
@@ -5501,28 +5782,36 @@ def main(resume: bool = False) -> None:
             event.app.exit(exception=EOFError, style="class:exiting")
 
     # Gaya status bar: latar gelap hangat + aksen kuning-oranye per segmen.
-    _pt_style = PTStyle.from_dict({
-        "bottom-toolbar": "bg:#1a120b #f2e3cc noreverse",
-        "garis": "#7a5c3a",      # tepi kotak chat
-        "tanda": "bold #fcc048",  # "❯" di dalam kotak
-        "sep": "#4a3826",
-        "brand": "#fcc048 bold",
-        "model": "#fc9018 bold",
-        "eff": "#ffd9a0",
-        "sesi": "#f7d488",
-        "git": "#9fc93c",
-        "ubah": "#f7d488",
-        "total": "#9fc93c",
-        "cmd": "#ffb861",
-        "exit": "#f0603c",
-        "muted": "#a89078",
-        # Menu autocomplete "/..." — selaras tema kuning-oranye.
-        "completion-menu": "bg:#241a10 #f2e3cc",
-        "completion-menu.completion": "bg:#241a10 #f2e3cc",
-        "completion-menu.completion.current": "bg:#fcc048 #241a10 bold",
-        "completion-menu.meta.completion": "bg:#1a120b #a89078",
-        "completion-menu.meta.completion.current": "bg:#4a3826 #f2e3cc",
-    })
+    def _buat_pt_style() -> PTStyle:
+        """Gaya prompt_toolkit dari TEMA AKTIF — dibangun ulang tiap kotak
+        chat dibuat, supaya /theme mengganti kotak & footernya hidup-hidup."""
+        return PTStyle.from_dict({
+            "bottom-toolbar": f"bg:{tema.p('bg_footer')} "
+                              f"{tema.p('model_footer')} noreverse",
+            "garis": tema.p("tepi"),            # tepi kotak chat
+            "tanda": f"bold {tema.p('aksen')}",  # "❯" di dalam kotak
+            "sep": tema.p("sep_footer"),
+            "brand": f"{tema.p('merek_footer')} bold",
+            "model": f"{tema.p('model_footer')} bold",
+            "eff": tema.p("ubah_footer"),
+            "sesi": tema.p("ubah_footer"),
+            "git": tema.p("git_footer"),
+            "ubah": tema.p("ubah_footer"),
+            "total": tema.p("git_footer"),
+            "cmd": tema.p("cmd_footer"),
+            "exit": tema.p("exit_footer"),
+            "muted": tema.p("muted_footer"),
+            # Menu autocomplete "/..." — gelap bertema.
+            "completion-menu": f"bg:{tema.p('menu_bg')} {tema.p('menu_teks')}",
+            "completion-menu.completion":
+                f"bg:{tema.p('menu_bg')} {tema.p('menu_teks')}",
+            "completion-menu.completion.current":
+                f"bg:{tema.p('menu_aktif_bg')} {tema.p('menu_aktif_teks')} bold",
+            "completion-menu.meta.completion":
+                f"bg:{tema.p('menu_meta_bg')} {tema.p('menu_meta_teks')}",
+            "completion-menu.meta.completion.current":
+                f"bg:{tema.p('tepi_redup')} {tema.p('menu_teks')}",
+        })
     # Status bar PERMANEN di paling bawah (selalu terlihat & rapi).
     def status_bar():
         s = agent.tokens_session
@@ -5577,8 +5866,13 @@ def main(resume: bool = False) -> None:
         spasi = " " * max(0, antara)
         return HTML(kiri + spasi + kanan)
 
-    kotak_chat = KotakChat(status=status_bar, key_bindings=kb, style=_pt_style,
-                           completer=SlashCompleter())
+    def _buat_kotak() -> KotakChat:
+        """Pabrik kotak chat — /theme membangun ulang lewat sini supaya gaya
+        (tepi, ❯, footer, menu autocomplete) mengikuti tema yang baru."""
+        return KotakChat(status=status_bar, key_bindings=kb,
+                         style=_buat_pt_style(), completer=SlashCompleter())
+
+    kotak_chat = _buat_kotak()
 
     # Pada idle pertama, konten startup sudah dorong ke dasar layar secara manual
     # (lihat main()), jadi _ke_dasar_layar() di tanya() TIDAK dipanggil — push
@@ -5654,9 +5948,8 @@ def main(resume: bool = False) -> None:
                 # Baris kosong DI ATAS gema: jarak dari output giliran
                 # sebelumnya (jawaban/baris langkah terakhir).
                 lisan = voice_state.pop("terucap", None) == raw.strip()
-                prefix = "🎙 " if lisan else ""
-                _tambah_konten([_KOSONG, Text.from_markup(
-                    f"  [on #2b2b2b bold #ffffff] {prefix}{_esc(raw.strip())} [/]")])
+                _tambah_konten([_KOSONG, _gema_prompt(
+                    raw.strip(), prefix="🎙 " if lisan else "")])
         text = raw.strip()
         if not text:
             continue
@@ -5709,6 +6002,8 @@ def main(resume: bool = False) -> None:
                     console.print("  [yellow]Pakai: /rm-dir <path folder>[/yellow]\n")
             elif cmd == "mode":
                 _with_console(pick_web_mode)
+            elif cmd == "theme":
+                _with_console(_pilih_tema)
             elif cmd == "tim" or cmd.startswith("tim "):
                 show_tim(text[4:].strip())
             elif cmd == "mic" or cmd.startswith("mic "):

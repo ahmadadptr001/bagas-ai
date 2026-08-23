@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import time
 
+from .. import config
 from .base import tool
 from .files import _display, _safe_path
 from .screen import IMAGE_MARK
@@ -352,6 +353,14 @@ def web_preview(url: str, wait_seconds: float = 2.0, full_page: bool = False,
     u = (url or "").strip()
     if not u:
         return "[error] url kosong — contoh: web_preview('http://localhost:3000')"
+    if not config.WEB_PREVIEW:
+        return ("[dinonaktifkan sementara] Tool preview web sedang dijeda "
+                "untuk menghemat token (screenshot-nya boros kuota). JANGAN "
+                "mencobanya lagi di sesi ini. Pastikan kode lewat "
+                "validate_project / run_tests / test_function, dan uraikan "
+                "struktur tampilannya dari berkasnya. Bila pengguna benar-benar "
+                "perlu melihat hasilnya, ia bisa menyalakannya kembali "
+                "(WEB_PREVIEW=true di .env).")
     if not _URL_RE.match(u):
         u = "http://" + u
     try:

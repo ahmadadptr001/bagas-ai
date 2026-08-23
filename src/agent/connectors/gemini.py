@@ -110,12 +110,21 @@ class GeminiConnector(WebConnector):
     # itu wajar dan tak mengganggu, sebab _submit() hanya memakainya sebagai
     # cadangan ketika teks ternyata masih tertinggal di kotak.
     #
-    # Wadah ber-data-test-id didahulukan; ikon jadi pegangan utama yang tahan
-    # bahasa; aria-label dua bahasa hanya jaring pengaman terakhir.
+    # SATU TOMBOL, TIGA WAJAH: <button> dalam send-button-container adalah
+    # elemen YANG SAMA yang selagi Gemini menjawab berganti ikon `stop` (lihat
+    # stop_selectors). Selektor wadah polos tetap cocok pada keadaan itu,
+    # sehingga klik "tombol kirim" yang salah waktu malah MENGHENTIKAN jawaban
+    # yang sedang berjalan. Karena itu TIAP kandidat di bawah menuntut ikon
+    # arrow_upward / aria-label kirim — tombol dalam wajah lain tak pernah
+    # terpilih. Tuple (bukan satu daftar berkoma) agar kandidat paling spesifik
+    # benar-benar dicoba duluan; aria-label dua bahasa cuma jaring pengaman
+    # terakhir.
     send_button_selector = (
-        '[data-test-id="send-button-container"] button, '
-        + _ikon("arrow_upward")
-        + ', button[aria-label="Kirim pesan"], button[aria-label="Send message"]'
+        '[data-test-id="send-button-container"] button:has('
+        'mat-icon[fonticon="arrow_upward"])',
+        _ikon("arrow_upward"),
+        'button[aria-label="Kirim pesan"]',
+        'button[aria-label="Send message"]',
     )
     # Tombol "chat baru" di sidebar — DIVERIFIKASI hadir & terlihat pada KELIMA
     # lebar yang diuji (termasuk 420 px). Dipakai agar memulai percakapan baru

@@ -128,8 +128,16 @@ def baris_tool(nama: str) -> str:
 
 
 def katalog_inti() -> str:
-    """Baris katalog untuk tool INTI saja (yang ikut di pesan pembuka)."""
-    return "\n".join(b for b in (baris_tool(n) for n in INTI) if b)
+    """Baris katalog untuk tool INTI saja (yang ikut di pesan pembuka).
+
+    web_preview dibuang dari daftar saat dijeda (config.WEB_PREVIEW): biar
+    hemat sungguhan, bukan cuma kosmetik — deskripsi tool ikut dibayar di
+    pesan pembuka SETIAP sesi, dan namanya yang masih tercantum hanya
+    menggoda model mencobanya lalu gagal."""
+    from .. import config
+    nama_inti = (n for n in INTI
+                 if config.WEB_PREVIEW or n != "web_preview")
+    return "\n".join(b for b in (baris_tool(n) for n in nama_inti) if b)
 
 
 def ringkasan_kategori() -> str:

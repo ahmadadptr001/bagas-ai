@@ -62,21 +62,19 @@ def _get_bool(name: str, default: bool) -> bool:
 
 
 # --- Model ---
-# bagas-ai tidak lagi memakai model ber-API-key: SELURUH model kini berbasis
-# browser (lihat models.py & agent/connectors), memakai akun pengguna sendiri.
-# Karena itu tak ada NVIDIA_API_KEY / NVIDIA_BASE_URL / VISION_MODEL lagi, dan
-# tak ada kredensial apa pun yang perlu diisi saat instalasi.
+# bagas-ai mendukung DUA jalur model:
+#  1. Browser-based (web/...) — login sekali lewat Chrome, kredensial milik sendiri
+#  2. API-based (nvidia/...) — pakai NVIDIA_API_KEY ke integrate.api.nvidia.com/v1
 #
-# Nilai lama peninggalan era NVIDIA yang mungkin masih tersimpan di .env
-# (mis. "z-ai/glm-5.2") diabaikan: models.spec_for_id memetakannya ke model
-# bawaan, jadi pengguna lama otomatis mendarat di model yang benar-benar jalan
-# alih-alih terjebak di ID yang sudah tak ada.
-#
-# Bawaannya GLM: untuk sementara hanya model itu yang boleh dipilih (lihat
-# _DITUNDA di models.py). Nilai lain yang masih tertulis di .env tak apa-apa —
-# models.spec_for_id memetakan model yang ditunda ke model aktif.
+# Default: web/glm (browser). Pilih lewat /model; pilihan terakhir otomatis tersimpan.
+# Konfigurasi NVIDIA API (opsional; hanya untuk model nvidia/*):
+NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "").strip()
+NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
+# Model default bila memakai jalur NVIDIA (hanya berlaku saat model nvidia/* dipilih)
+NVIDIA_DEFAULT_MODEL: str = os.getenv("NVIDIA_DEFAULT_MODEL", "deepseek-ai/deepseek-v4-flash-0731").strip()
+
 CHAT_MODEL: str = os.getenv("CHAT_MODEL", "web/glm").strip()
-if not CHAT_MODEL.startswith("web/"):
+if not CHAT_MODEL.startswith(("web/", "nvidia/")):
     CHAT_MODEL = "web/glm"
 
 # --- Telegram ---
@@ -128,6 +126,12 @@ MAX_DUPLICATE_TOOL_CALLS: int = int(os.getenv("MAX_DUPLICATE_TOOL_CALLS", "3"))
 
 # --- Keamanan ---
 ALLOW_CODE_EXEC: bool = _get_bool("ALLOW_CODE_EXEC", True)
+# Tool web_preview DIJEDA secara bawaan: tiap panggilannya melampirkan
+# screenshot (gambar = boros kuota/ataensi di situs AI web), deskripsinya
+# panjang dan ikut pesan pembuka, dan loop agent kerap MEMAKSA model
+# memakainya di tiap perubahan UI. Aktifkan lagi dengan WEB_PREVIEW=true
+# di .env bila tampilan memang perlu dilihat lagi.
+WEB_PREVIEW: bool = _get_bool("WEB_PREVIEW", False)
 CODE_EXEC_TIMEOUT: int = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))
 # Timeout untuk perintah shell (run_command) — lebih longgar karena bisa lama
 # (mis. install dependency / scaffolding). Perintah dijalankan NON-INTERAKTIF

@@ -242,6 +242,33 @@ def bg_output(bg_id: str, lines: int = 40) -> str:
     return f"[bg {bg_id}] {status} · {e['command']}\n{body}"
 
 
+def _tulis_stdin_berbatas(proc: subprocess.Popen, data: str,
+                          batas: float = 5.0) -> Exception | None:
+    """Tulis ke stdin proses latar DENGAN BATAS WAKTU; None bila sukses.
+
+    Tanpa batas, `stdin.write` pada proses yang TIDAK membaca stdin (sudah
+    macet / buffer pipa penuh) menggantung TANPA AKHIR — dan karena tool
+    dieksekusi di thread giliran, seluruh giliran ikut terkunci sampai
+    pengguna menekan Ctrl+C. Tulis di thread bantu lalu tunggu sebentar:
+    kegagalan dilaporkan jujur, giliran tetap hidup."""
+    hasil: dict = {"galat": None}
+
+    def _tulis() -> None:
+        try:
+            proc.stdin.write(data)
+            proc.stdin.flush()
+        except Exception as exc:  # noqa: BLE001 - dilaporkan ke pemanggil
+            hasil["galat"] = exc
+
+    th = threading.Thread(target=_tulis, daemon=True)
+    th.start()
+    th.join(batas)
+    if th.is_alive():
+        return TimeoutError(
+            f"proses tidak membaca stdin (tulis tak selesai dalam {batas:.0f} detik)")
+    return hasil["galat"]
+
+
 @tool
 def bg_send(bg_id: str, text: str, press_enter: bool = True) -> str:
     """Kirim INPUT (ketikan) ke sebuah perintah latar yang sedang berjalan — untuk menjawab prompt interaktif ('Ok to proceed? y'), mengetik ke REPL, atau perintah CLI yang menunggu jawaban. Setelahnya cek reaksi prosesnya via output yang dikembalikan / bg_output.
@@ -261,11 +288,9 @@ def bg_send(bg_id: str, text: str, press_enter: bool = True) -> str:
     if proc.stdin is None:
         return f"[error] {bg_id} tidak membuka saluran input (stdin tertutup)."
     data = text if (text.endswith("\n") or not press_enter) else text + "\n"
-    try:
-        proc.stdin.write(data)
-        proc.stdin.flush()
-    except (OSError, ValueError, BrokenPipeError) as exc:
-        return (f"[GAGAL] tak bisa mengirim input ke {bg_id}: {exc}. "
+    galat = _tulis_stdin_berbatas(proc, data)
+    if galat is not None:
+        return (f"[GAGAL] tak bisa mengirim input ke {bg_id}: {galat}. "
                 "Prosesnya kemungkinan tidak sedang membaca stdin "
                 "(atau baru saja berhenti — cek bg_output).")
     # Beri proses waktu sejenak bereaksi supaya output balasannya ikut terbawa.

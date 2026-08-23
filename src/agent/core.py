@@ -462,10 +462,14 @@ def _web_tool_protocol() -> str:
         "atau efek samping. JANGAN HANYA andalkan validate_project — tool itu cuma "
         "cek sintaksis dasar (py_compile), bukan logika atau kelengkapan kode. "
         "Setelah yakin manual, baru jalankan validate_project (isi paths dengan "
-        "berkas yang kamu ubah). Sesudah mengubah tampilan, lihat sendiri "
-        "hasilnya: web_preview untuk halaman web, take_screenshot untuk aplikasi "
-        "desktop — lalu sebutkan apa yang kamu lihat.\n"
-        "- Sebelum memakai pustaka/framework yang cepat berubah, pastikan "
+        "berkas yang kamu ubah)."
+        + (" Sesudah mengubah tampilan, lihat sendiri "
+           "hasilnya: web_preview untuk halaman web, take_screenshot untuk "
+           "aplikasi desktop — lalu sebutkan apa yang kamu lihat.\n"
+           if config.WEB_PREVIEW else
+           " Sesudah mengubah tampilan, pastikan strukturnya benar dari "
+           "berkasnya (class/id/kondisi tampil tiap keadaan).\n")
+        + "- Sebelum memakai pustaka/framework yang cepat berubah, pastikan "
         "dengan web_search memakai tahun berjalan di kuerinya (mis. "
         f"'next.js app router {_tahun_ini()} docs') — ingatanmu punya batas "
         "waktu. Tak perlu untuk kode proyek ini sendiri atau sintaks dasar.\n"
@@ -504,9 +508,12 @@ def _web_tool_protocol() -> str:
         "- Perintah cepat -> run_command. Proses yang terus jalan (server, "
         "watch, build besar) -> run_command_bg lalu bg_output — run_command "
         "biasa akan menggantung. Jalankan kode Python -> run_python.\n"
-        "- Lihat hasil tampilan web -> web_preview; aplikasi desktop -> "
-        "take_screenshot. Sebutkan apa yang kamu lihat.\n"
-        "- Cari info terkini di internet -> web_search. Baca satu URL yang "
+        + ("- Lihat hasil tampilan web -> web_preview; aplikasi desktop -> "
+           "take_screenshot. Sebutkan apa yang kamu lihat.\n"
+           if config.WEB_PREVIEW else
+           "- Lihat hasil tampilan aplikasi desktop -> take_screenshot. "
+           "Sebutkan apa yang kamu lihat.\n")
+        + "- Cari info terkini di internet -> web_search. Baca satu URL yang "
         "sudah kamu tahu -> fetch_url.\n"
         "- Butuh kemampuan yang tak ada di daftar bawah (unduh aset, olah "
         "media, zip, clipboard, dll) -> cari_tool('kebutuhanmu') atau "
@@ -621,6 +628,47 @@ def _escape_control_in_strings(raw: str) -> str:
     return "".join(out)
 
 
+def _buang_koma_buntut(raw: str) -> str:
+    """Buang koma buntut (sebelum } atau ]) yang berada DI LUAR string.
+
+    Koma semacam itu membuat JSON tak sah padahal isinya sehat — model kerap
+    menulisnya. Pembersihan dilakukan sadar-string dengan pola mesin keadaan
+    yang sama seperti _escape_control_in_strings: koma di DALAM nilai (mis.
+    potongan kode `f(a[1,])` pada write_file) tak boleh tersentuh, sebab
+    mengubahnya diam-diam sama dengan merusak isi berkas yang diminta model."""
+    out: list[str] = []
+    dalam_string = False
+    escape = False
+    i, n = 0, len(raw or "")
+    while i < n:
+        ch = raw[i]
+        if dalam_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                dalam_string = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            dalam_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and raw[j] in " \t\r\n":
+                j += 1
+            if j < n and raw[j] in "}]":
+                i += 1          # buang komanya; penutupnya diproses normal
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _json_tool_obj(raw: str) -> dict | None:
     """Baca satu objek tool JSON dari teks.
 
@@ -636,13 +684,21 @@ def _json_tool_obj(raw: str) -> dict | None:
     # dulu, spasi non-breaking di DALAM isi file ikut jadi spasi biasa dan
     # kode yang ditulis jadi berbeda dari yang dimaksud model.
     bersih = _clean_json_text(body)
+    # Koma buntut sebelum }/] — JSON tak sah, tapi model kerap menulisnya dan
+    # ia membuat usulan tool yang lainnya SEHAT gagal dibaca. Tanpa toleransi
+    # ini gilirannya jatuh ke jalur "kirim ulang blokmu": satu putaran penuh
+    # browser (belasan detik) terbuang untuk hal yang bisa dibenarkan di tempat.
+    # Pembersihnya SADAR-STRING (lihat _buang_koma_buntut) sehingga koma di
+    # dalam nilai — mis. kode pada write_file — tak ikut tersentuh.
     for candidate in (body,
                       _escape_control_in_strings(body),
                       bersih,
                       _escape_control_in_strings(bersih),
                       _BAD_ESCAPE_RE.sub(r"\\\\", bersih),
                       _BAD_ESCAPE_RE.sub(
-                          r"\\\\", _escape_control_in_strings(bersih))):
+                          r"\\\\", _escape_control_in_strings(bersih)),
+                      _buang_koma_buntut(body),
+                      _buang_koma_buntut(_escape_control_in_strings(bersih))):
         try:
             # raw_decode: berhenti di akhir objek JSON pertama, sisanya diabaikan.
             obj, _ = json.JSONDecoder().raw_decode(candidate)
@@ -669,6 +725,20 @@ def _bersihkan_nilai(obj: Any) -> Any:
     return obj
 
 
+def _tool_args(obj: dict) -> dict:
+    """Argumen panggilan tool dari objek JSON, berdasarkan kunci args/arguments/
+    parameters.
+
+    Tiga nama karena tiga kebiasaan yang semuanya nyata di lapangan: protokol
+    bagas-ai memakai "args", format bawaan Qwen "arguments", dan format legacy
+    OpenAI "parameters". Dulu yang terakhir TIDAK dikenali — panggilannya tetap
+    dieksekusi tapi dengan args KOSONG, sehingga tool yang jelas-jelas diminta
+    model (mis. read_file) berjalan tanpa path dan gagal: persis keluhan 'tool
+    sudah dikasih instruksi tapi tidak dieksekusi'."""
+    args = obj.get("args") or obj.get("arguments") or obj.get("parameters")
+    return args if isinstance(args, dict) else {}
+
+
 def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
     """Ambil daftar {'name','arguments'} dari blok [[TOOL]] pada balasan AI web.
 
@@ -686,7 +756,7 @@ def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
         obj = _json_tool_obj(body)
         if obj is not None:
             calls.append({"name": str(obj.get("tool") or obj.get("name")),
-                          "arguments": obj.get("args") or obj.get("arguments") or {}})
+                          "arguments": _tool_args(obj)})
 
     # Cadangan: sebagian/seluruh usulan gagal dibaca dari teks -> pakai isi
     # mentah blok kode (byte apa adanya, tak tersentuh perenderan markdown).
@@ -699,7 +769,7 @@ def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
             if obj is not None:
                 from_code.append(
                     {"name": str(obj.get("tool") or obj.get("name")),
-                     "arguments": obj.get("args") or obj.get("arguments") or {}})
+                     "arguments": _tool_args(obj)})
         if len(from_code) > len(calls):
             calls = from_code
 
@@ -713,8 +783,8 @@ def _parse_web_tool_calls(text: str, code_blocks: Any = ()) -> list[dict]:
             obj = _json_tool_obj(str(raw))
             if obj is None:
                 continue
-            args = obj.get("args") or obj.get("arguments")
-            if not isinstance(args, dict):
+            args = _tool_args(obj)
+            if not isinstance(args, dict) or not args:
                 continue
             sisa = _FENCE_RE.sub("", str(raw))
             sisa = re.sub(r"\{.*\}", "", sisa, flags=re.DOTALL).strip()
@@ -1126,10 +1196,14 @@ class Agent:
         # Connector web: apakah konteks laptop/proyek sudah dikirim ke sesi web
         # ini (dikirim SEKALI sbg preamble pesan pertama; AI web ingat sepanjang chat).
         self._web_ctx_sent = False
-        # Percakapan AI web yang DILANJUTKAN (dari sesi tersimpan / menu pilih
-        # sesi). Bila ada, giliran pertama membuka chat itu — bukan chat baru —
-        # sehingga konteks proyek yang sudah ada di sana tak perlu dikirim ulang.
+        # Percakapan AI web yang DILANJUTKAN (dari sesi tersimpan). Bila ada,
+        # giliran pertama membuka chat itu — bukan chat baru — sehingga konteks
+        # proyek yang sudah ada di sana tak perlu dikirim ulang.
         self._web_chat_id = ""
+        # Posisi riwayat yang TERAKHIR dilihat chat layanan aktif — tak None
+        # berarti ada perkembangan (dikerjakan di layanan lain) yang belum
+        # sampai ke sana dan perlu dikirim sebagai ringkasan (lihat _hitung_gap).
+        self._web_gap_from: int | None = None
         # Lampiran DIMATIKAN sementara untuk percakapan web ini karena situsnya
         # sudah mentok jumlah berkas (chat.z.ai: 10 per percakapan). Sengaja
         # per-percakapan, bukan permanen: chat baru berarti jatah berkasnya
@@ -1215,6 +1289,49 @@ class Agent:
         # terbawa, kalau tidak chat yang baru saja dibuka langsung dianggap
         # penuh gara-gara warisan percakapan di layanan sebelumnya.
         self._web_chars = 0
+        self._hitung_gap(svc, saved)
+
+    def _hitung_gap(self, svc: str, saved: str) -> None:
+        """Adakah perkembangan yang BELUM dilihat chat layanan ini?
+
+        Pindah-pulang antar model (A -> B -> A) punya lubang yang tak tertutup
+        oleh konteks-pertama: chat A memang sudah berkonteks, jadi ia dianggap
+        tak perlu apa-apa lagi — padahal pekerjaan yang berjalan di B selama
+        di sana TIDAK PERNAH sampai ke A. Penanda `web_seen` di sesi mencatat
+        sejauh mana chat tiap layanan pernah melihat riwayat; bila riwayat
+        kini lebih panjang dari itu, catat posisinya di `_web_gap_from` agar
+        giliran berikutnya mengirim RINGKASAN kemajuannya (bukan konteks
+        penuh) ke chat yang sudah ada."""
+        self._web_gap_from = None
+        if not saved or self.session is None or not svc:
+            return
+        try:
+            seen = (getattr(self.session, "web_seen", None) or {}).get(svc, 0)
+            kini = len(self.memory.messages)
+        except Exception:  # noqa: BLE001 - sesi lama tanpa penanda -> anggap segar
+            return
+        if kini > seen:
+            self._web_gap_from = seen
+
+    def _stamp_web_seen(self) -> None:
+        """Catat: chat layanan aktif SUDAH melihat riwayat sampai sepanjang ini.
+
+        Dipanggil di akhir giliran web yang tuntas — satu-satunya titik di mana
+        isi memory dan isi percakapan di situs benar-benar sejajar."""
+        if not (self.session is not None and self._web_chat_id):
+            return
+        svc = self.model_spec.connector
+        if not svc:
+            return
+        try:
+            seen = getattr(self.session, "web_seen", None)
+            if seen is None:      # sesi lama tanpa atribut ini
+                seen = {}
+                self.session.web_seen = seen
+            seen[svc] = len(self.memory.messages)
+            self._web_gap_from = None
+        except Exception:  # noqa: BLE001 - penanda gagal tak boleh mengganggu
+            pass
 
     # set_effort() & _escalate() DIHAPUS bersama model ber-API-key: keduanya
     # bekerja dengan menaikkan parameter reasoning lalu berpindah ke model lain
@@ -1232,6 +1349,7 @@ class Agent:
         tak dikirim ulang (hemat & AI web langsung 'ingat' proyeknya)."""
         self._web_chat_id = chat_id or ""
         self._web_ctx_sent = bool(chat_id)
+        self._hitung_gap(self.model_spec.connector, chat_id or "")
         # Panjang chat lama tak bisa kita ketahui dari luar (isinya sudah ada di
         # situs sebelum sesi ini). Dimulai dari nol dengan sadar: menebak angka
         # besar berarti memadatkan percakapan yang mungkin masih lega.
@@ -1247,6 +1365,9 @@ class Agent:
         self._web_ctx_sent = False
         self._web_chars = 0
         self._kabar_panjang = False
+        # Chat baru menerima konteks PENUH di pesan pertamanya, jadi tak ada
+        # 'kemajuan yang tertinggal' yang perlu diringkaskan.
+        self._web_gap_from = None
         if self.session is not None:
             svc = self.model_spec.connector
             if svc and svc in getattr(self.session, "web_chats", {}):
@@ -1290,6 +1411,7 @@ class Agent:
         # yang jadi dasar simpanan otomatis berikutnya.
         self._web_chars = 0
         self._kabar_panjang = False
+        self._web_gap_from = None
         # Jatah berkas dihitung PER PERCAKAPAN, jadi chat baru = lampiran boleh
         # dipakai lagi. Tanpa baris ini, sekali kena batas, seluruh sisa sesi
         # berjalan buta walau sudah pindah ke chat yang kosong.
@@ -2364,7 +2486,36 @@ class Agent:
                 if dibuat:
                     self._link_web_chat(dibuat)
                 self._web_ctx_sent = True
+                self._web_gap_from = None   # konteks penuh barusan dikirim
                 _status(f"mengirim permintaanmu ke {self.model_spec.label}…")
+            elif self._web_gap_from is not None:
+                # PULANG ke layanan yang chat-nya sudah berkonteks, tapi ada
+                # perkembangan yang dikerjakan di layanan lain selama di sana
+                # (A -> B -> A). Kirim RINGKASAN kemajuannya saja — bukan
+                # konteks penuh — ke percakapan yang sama, supaya model ini
+                # benar-benar melanjutkan pekerjaan, bukan versi dirinya yang
+                # tertinggal beberapa langkah.
+                awal = self._web_gap_from
+                self._web_gap_from = None
+                try:
+                    potong = self.memory.messages[awal:-1]  # tanpa pesan aktif
+                except Exception:  # noqa: BLE001
+                    potong = []
+                try:
+                    digest = prompts.build_transcript_digest(potong)
+                except Exception:  # noqa: BLE001
+                    digest = ""
+                if digest:
+                    _status("menyampaikan perkembangan dari model "
+                            "sebelumnya…")
+                    with self._tanpa_catatan():
+                        _send(
+                            "[SISTEM] Aku asisten yang sama, kini lanjut bekerja "
+                            "di layanan ini. Di bawah ini ringkasan perkembangan "
+                            "sejak terakhir di percakapan ini (dikerjakan asisten "
+                            "lain di layanan sebelah). LANJUTKAN dari titik ini — "
+                            "jangan mengulang yang sudah beres:\n\n" + digest,
+                            new_chat=False, open_chat_id=self._web_chat_id)
             # Pesan 2 (atau satu-satunya, bila konteks sudah pernah dikirim):
             # permintaan pengguna.
             reply = _send(
@@ -2600,7 +2751,12 @@ class Agent:
                 # gambarnya itu mengarang. Dipaksa maksimal SEKALI per giliran
                 # supaya tak memutar tanpa henti bila memang tak ada yang bisa
                 # dilihat (tak ada dev server / bukan aplikasi berjendela).
-                if (not calls and not force_final and ubah_tampilan
+                # DILEWATI saat web_preview dijeda: menuntut tool yang mati
+                # hanya membuang satu putaran penuh browser untuk jawaban
+                # "dinonaktifkan" — take_screenshot sendirian tak menggantikan
+                # perannya untuk halaman web.
+                if (config.WEB_PREVIEW
+                        and not calls and not force_final and ubah_tampilan
                         and not dilihat and not lihat_dipaksa):
                     lihat_dipaksa = True
                     reply = _send(
@@ -2971,6 +3127,10 @@ class Agent:
         # pekerjaannya utuh (jawaban akhir sudah masuk riwayat) dan tak ada
         # berkas yang ditulis belasan kali dalam satu giliran panjang.
         self._simpan_otomatis(conn, on_notice, on_padat)
+        # Chat layanan ini kini melihat riwayat sampai titik ini — penanda
+        # untuk pengiriman ringkasan kemajuan saat pengguna pulang dari
+        # layanan lain (lihat _hitung_gap).
+        self._stamp_web_seen()
         # Web-AI tak melaporkan token; pakai estimasi ~4 karakter per token dari
         # TOTAL lalu-lintas giliran ini (semua pesan terkirim + semua balasan),
         # bukan hanya jawaban akhir, supaya angkanya mencerminkan biaya nyata.

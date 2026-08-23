@@ -41,6 +41,7 @@ class Session:
         created: float | None = None,
         tokens: dict[str, int] | None = None,
         web_chats: dict[str, str] | None = None,
+        web_seen: dict[str, int] | None = None,
     ) -> None:
         self.id = session_id
         self.project_root = project_root
@@ -51,6 +52,14 @@ class Session:
         # `--resume` menyambung ke chat yang SAMA di situs — konteks proyek &
         # protokol tool sudah ada di sana, jadi tak perlu dikirim ulang.
         self.web_chats: dict[str, str] = dict(web_chats or {})
+        # Penanda "terakhir dilihat": {service: jumlah pesan memory} pada saat
+        # giliran terakhir selesai di layanan itu. Dipakai saat PINDAH-PULANG
+        # antar model (A -> B -> A): chat A memang sudah berkonteks, tapi
+        # pekerjaan yang berjalan di B belum pernah sampai ke sana — dari
+        # penanda inilah bagas-ai tahu harus mengirim ringkasan kemajuan
+        # (lihat _web_gap_from di core.py). Tanpa ini, pulang ke model lama
+        # berarti melanjutkan percakapan yang tertinggal beberapa langkah.
+        self.web_seen: dict[str, int] = dict(web_seen or {})
         # Token kumulatif SESI ini (persisten lintas --resume).
         self.tokens = {"prompt": 0, "completion": 0}
         if tokens:
@@ -80,6 +89,7 @@ class Session:
             "updated": self.updated,
             "tokens": self.tokens,
             "web_chats": self.web_chats,
+            "web_seen": self.web_seen,
             "messages": messages,
         }
         self.path.write_text(
@@ -103,6 +113,7 @@ class Session:
             data.get("created"),
             data.get("tokens"),
             data.get("web_chats"),
+            data.get("web_seen"),
         )
         s.updated = data.get("updated", s.created)
         return s

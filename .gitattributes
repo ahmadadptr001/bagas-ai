@@ -1,3 +1,7 @@
 # Hook shell WAJIB LF: dengan CRLF, sh gagal ("bad interpreter: /bin/sh^M")
 # di clone yang autocrlf-nya aktif.
 .githooks/pre-commit text eol=lf
+
+# Semua skrip .sh idem — install.sh apalagi: jalur curl|bash membaca berkas
+# yang sama persis, dan CRLF membuat bash menolaknya di Linux/macOS.
+*.sh text eol=lf

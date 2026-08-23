@@ -32,6 +32,19 @@ class Memory:
     def add_assistant_text(self, content: str) -> None:
         self.add({"role": "assistant", "content": content})
 
+    def add_diff(self, path: str, unified: str, is_new: bool,
+                 deleted: bool = False) -> None:
+        """Catat PRATINJAU DIFF langkah tulis/ubah/hapus untuk replay --resume.
+
+        Diff hanya tampil di layar sesaat langkah berjalan; tanpa record ini
+        transkrip --resume kehilangan seluruh potongan kodenya. Disimpan
+        sebagai record ber-role 'diff' (bukan pesan), jadi otomatis AMAN dari
+        semua konsumen riwayat: digest & berkas konteks menyaring role
+        user/assistant saja (lihat prompts.transcript_rows), dan demikian
+        pula protokol web. `unified` sudah terpangkas di pemanggilnya."""
+        self.add({"role": "diff", "path": path, "diff": unified,
+                  "is_new": bool(is_new), "deleted": bool(deleted)})
+
     @property
     def messages(self) -> list[dict[str, Any]]:
         return self._messages

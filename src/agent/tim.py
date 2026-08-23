@@ -30,11 +30,30 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from . import config
+
 # Jumlah anggota yang boleh bangun dalam SATU langkah.
 _MAKS_PER_LANGKAH = 2
 # Panjang maksimal satu catatan (huruf) — penjaga terakhir agar blok yang
 # ditempel ke pesan tak pernah membengkak.
 _MAKS_CATATAN = 700
+
+# Poin pemeriksaan yang menyuruh web_preview — hanya disertakan saat tool itu
+# aktif. Saat dijeda, seruan memakainya hanya membuah putaran browser untuk
+# jawaban "dinonaktifkan" (lihat config.WEB_PREVIEW).
+_POIN_PREVIEW_FE = (
+    "alurnya DIBUKTIKAN jalan, bukan dinilai dari kode: web_preview(url, "
+    "actions=['isi #x = nilai', 'klik button[type=submit]', "
+    "'tunggu .hasil']) melaporkan tiap langkah DAN teks yang muncul",
+) if config.WEB_PREVIEW else ()
+_POIN_PREVIEW_RESPONSIF = (
+    "BUKTIKAN, jangan dikira-kira: web_preview(url, "
+    "widths=[360, 768, 1280]) menyebut elemen mana yang meluber — di "
+    "gambar hal itu justru terpotong sehingga tampak baik-baik saja",
+) if config.WEB_PREVIEW else (
+    "uji lebar sempit dengan menelusuri aturan media-query-nya di berkas "
+    "(apa yang berubah di tiap breakpoint), bukan dikira-kira",
+)
 
 
 @dataclass(frozen=True)
@@ -165,9 +184,7 @@ ANGGOTA: tuple[Anggota, ...] = (
         jalur=("component", "komponen", "page", "halaman", "view"),
         periksa=(
             "keadaan memuat, kosong, dan gagal punya tampilannya sendiri",
-            "alurnya DIBUKTIKAN jalan, bukan dinilai dari kode: web_preview(url, "
-            "actions=['isi #x = nilai', 'klik button[type=submit]', "
-            "'tunggu .hasil']) melaporkan tiap langkah DAN teks yang muncul",
+            *_POIN_PREVIEW_FE,
             "data dari server dianggap bisa terlambat atau tak datang",
         ), prioritas=25),
     Anggota(
@@ -195,9 +212,7 @@ ANGGOTA: tuple[Anggota, ...] = (
         isi=(r"(?i)@media\b", r"(?i)\b(width|min-width|max-width)\s*:",
              r"(?i)\b(flex|grid)\b"),
         periksa=(
-            "BUKTIKAN, jangan dikira-kira: web_preview(url, "
-            "widths=[360, 768, 1280]) menyebut elemen mana yang meluber — di "
-            "gambar hal itu justru terpotong sehingga tampak baik-baik saja",
+            *_POIN_PREVIEW_RESPONSIF,
             "sasaran sentuh minimal 44x44 px",
             "tata letak tak bergantung pada hover semata",
         ), prioritas=35),

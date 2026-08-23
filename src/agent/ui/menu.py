@@ -40,19 +40,37 @@ from prompt_toolkit.layout.processors import PasswordProcessor
 from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.utils import get_cwidth
 
-# Palet mengikuti tema kuning-oranye yang dipakai CLI supaya prompt ini
-# menyatu dengan panel & jejak langkah di sekitarnya.
+from . import tema
+
+# Palet menu mengikuti TEMA AKTIF (ui/tema.py) supaya prompt ini menyatu
+# dengan panel & footer di sekitarnya — berganti /theme, menu ikut berganti.
 #
-# Namanya sengaja diganti bersamaan dengan nilainya: dulu EMAS/ORANYE, dan
-# konstanta warna yang namanya tak lagi cocok dengan isinya adalah jebakan
-# yang menunggu — pembaca berikutnya akan memakai "ORANYE" mengira ia biru.
-EMAS = "fg:#fcc048"
-ORANYE = "fg:#fc9018"
+# Berbentuk FUNGSI (dibaca tiap render), bukan konstanta: konstanta terikat
+# sekali saat impor, sehingga pergantian tema di tengah sesi tak pernah
+# sampai ke sini. HIJAU/MERAH tetap konstanta — warna SEMANTIK (sukses/
+# bahaya), bukan bagian identitas tema.
+def EMAS() -> str:
+    return "fg:" + tema.p("aksen")
+
+
+def ORANYE() -> str:
+    return "fg:" + tema.p("aksen2")
+
+
+def KUNING() -> str:
+    return "fg:" + tema.p("aksen_terang")
+
+
+def REDUP() -> str:
+    return "fg:" + tema.p("redup")
+
+
+def TEKS() -> str:
+    return "fg:" + tema.p("teks")
+
+
 HIJAU = "fg:#9fc93c"
-KUNING = "fg:#f7d488"
 MERAH = "fg:#f0603c"
-REDUP = "fg:#8f7a62"
-TEKS = "fg:#f2e3cc"
 
 # Sebanyak-banyaknya baris pilihan yang tampil sekaligus; sisanya digulung.
 _MAKS_TAMPIL = 9
@@ -209,13 +227,14 @@ def _bungkus_teks(teks: str, lebar: int) -> list[str]:
 
 
 def _kotak(judul: str, isi: list[list[tuple[str, str]]], footer: str,
-           warna: str = EMAS) -> FormattedText:
+           warna: str = "") -> FormattedText:
     """Bungkus baris-baris isi dengan bingkai bersisi tiga (lihat docstring).
 
     Judul PANJANG — mis. permintaan izin yang memuat path lengkap — tidak
     dipaksa masuk ke garis atas: ia pindah ke dalam kotak dan dibungkus jadi
     beberapa baris. Kalau dipaksa di garis atas, judulnya akan melewati lebar
     terminal lalu dilipat sendiri oleh terminal, dan bingkainya berantakan."""
+    warna = warna or EMAS()
     lebar = min(_lebar_terminal() - 2, _LEBAR_MAKS)
     frag: list[tuple[str, str]] = []
 
@@ -230,13 +249,13 @@ def _kotak(judul: str, isi: list[list[tuple[str, str]]], footer: str,
     baris([(warna, "│")])
     if judul_di_dalam:
         for t in _bungkus_teks(judul, lebar - 5):
-            baris([(warna, "│  "), (f"{TEKS} bold", t)])
+            baris([(warna, "│  "), (f"{TEKS()} bold", t)])
         baris([(warna, "│")])
     for isi_baris in isi:
         baris([(warna, "│  ")] + isi_baris)
     if footer:
         baris([(warna, "│")])
-        baris([(warna, "│  "), (REDUP, _potong(footer, lebar - 4))])
+        baris([(warna, "│  "), (REDUP(), _potong(footer, lebar - 4))])
     frag.extend([(warna, "╰" + "─" * (lebar - 1))])
     return FormattedText(frag)
 
@@ -278,21 +297,22 @@ def _ringkas(judul: str, jawaban: str, warna: str = HIJAU) -> None:
         return
     print_formatted_text(FormattedText([
         (warna, "  ✓ "),
-        (REDUP, _potong(judul, 46) + ("  ·  " if jawaban else "")),
-        (TEKS, _potong(jawaban, 60)),
+        (REDUP(), _potong(judul, 46) + ("  ·  " if jawaban else "")),
+        (TEKS(), _potong(jawaban, 60)),
     ]))
 
 
 def _batal(judul: str) -> None:
     print_formatted_text(FormattedText([
-        (KUNING, "  ◼ "), (REDUP, _potong(judul, 46) + "  ·  dibatalkan")]))
+        (KUNING(), "  ◼ "), (REDUP(), _potong(judul, 46) + "  ·  dibatalkan")]))
 
 
 # ------------------------------------------------------------------ select
 def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
-           hint: str = "", warna: str = EMAS, ringkas: bool = True,
+           hint: str = "", warna: str = "", ringkas: bool = True,
            **_lain: Any) -> Any:
     """Menu pilih-satu. Kembalikan `value` pilihan; batal -> KeyboardInterrupt."""
+    warna = warna or EMAS()
     opsi = _sebagai_choices(choices)
     if not opsi:
         raise ValueError("select butuh minimal satu pilihan")
@@ -335,8 +355,8 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
     def bangun() -> FormattedText:
         lihat = tersaring()
         if not lihat:
-            isi = [[(KUNING, "tak ada yang cocok dengan "),
-                    (f"{KUNING} bold", repr(keadaan["kueri"]))]]
+            isi = [[(KUNING(), "tak ada yang cocok dengan "),
+                    (f"{KUNING()} bold", repr(keadaan["kueri"]))]]
             return _kotak(message, isi, "ketik untuk ubah pencarian · esc batal",
                           warna)
         selaraskan()
@@ -348,26 +368,26 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
 
         isi: list[list[tuple[str, str]]] = []
         if awal > 0:
-            isi.append([(REDUP, f"  ↑ {awal} lainnya di atas")])
+            isi.append([(REDUP(), f"  ↑ {awal} lainnya di atas")])
         for urut in range(awal, akhir):
             i = lihat[urut]
             c = opsi[i]
             dipilih = i == keadaan["idx"]
             nomor = "" if boleh_cari else f"{urut + 1}. "
             if c.nonaktif:
-                # Tampil REDUP seluruhnya & tanpa penunjuk: sekali lihat sudah
+                # Tampil REDUP() seluruhnya & tanpa penunjuk: sekali lihat sudah
                 # jelas ia ada tapi bukan pilihan.
-                isi.append([(REDUP, "  " + nomor
+                isi.append([(REDUP(), "  " + nomor
                              + _potong(c.name, lebar - len(nomor)))])
                 continue
             isi.append([
                 (f"{warna} bold" if dipilih else "", "❯ " if dipilih else "  "),
-                (REDUP if not dipilih else f"{warna} bold", nomor),
-                (f"{warna} bold" if dipilih else TEKS,
+                (REDUP() if not dipilih else f"{warna} bold", nomor),
+                (f"{warna} bold" if dipilih else TEKS(),
                  _potong(c.name, lebar - len(nomor))),
             ])
         if akhir < len(lihat):
-            isi.append([(REDUP, f"  ↓ {len(lihat) - akhir} lainnya di bawah")])
+            isi.append([(REDUP(), f"  ↓ {len(lihat) - akhir} lainnya di bawah")])
 
         petunjuk = hint or "↑↓ pilih  ·  ⏎ konfirmasi  ·  esc batal"
         if boleh_cari:
@@ -464,8 +484,9 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
 
 # ---------------------------------------------------------------- checkbox
 def checkbox(message: str = "", choices: Sequence[Any] = (), hint: str = "",
-             warna: str = ORANYE, ringkas: bool = True, **_lain: Any) -> list[Any]:
+             warna: str = "", ringkas: bool = True, **_lain: Any) -> list[Any]:
     """Menu pilih-banyak. Kembalikan daftar `value` yang dicentang."""
+    warna = warna or ORANYE()
     opsi = _sebagai_choices(choices)
     if not opsi:
         return []
@@ -491,7 +512,7 @@ def checkbox(message: str = "", choices: Sequence[Any] = (), hint: str = "",
     def bangun() -> FormattedText:
         lihat = tersaring()
         if not lihat:
-            return _kotak(message, [[(KUNING, "tak ada yang cocok")]],
+            return _kotak(message, [[(KUNING(), "tak ada yang cocok")]],
                           "ketik untuk ubah pencarian · esc batal", warna)
         selaraskan()
         pos = lihat.index(keadaan["idx"])
@@ -502,18 +523,18 @@ def checkbox(message: str = "", choices: Sequence[Any] = (), hint: str = "",
 
         isi: list[list[tuple[str, str]]] = []
         if awal > 0:
-            isi.append([(REDUP, f"  ↑ {awal} lainnya di atas")])
+            isi.append([(REDUP(), f"  ↑ {awal} lainnya di atas")])
         for urut in range(awal, akhir):
             i = lihat[urut]
             c = opsi[i]
             aktif = i == keadaan["idx"]
             isi.append([
                 (f"{warna} bold" if aktif else "", "❯ " if aktif else "  "),
-                (HIJAU if i in ditandai else REDUP, "◉ " if i in ditandai else "○ "),
-                (f"{warna} bold" if aktif else TEKS, _potong(c.name, lebar)),
+                (HIJAU if i in ditandai else REDUP(), "◉ " if i in ditandai else "○ "),
+                (f"{warna} bold" if aktif else TEKS(), _potong(c.name, lebar)),
             ])
         if akhir < len(lihat):
-            isi.append([(REDUP, f"  ↓ {len(lihat) - akhir} lainnya di bawah")])
+            isi.append([(REDUP(), f"  ↓ {len(lihat) - akhir} lainnya di bawah")])
 
         petunjuk = hint or ("spasi tandai  ·  a semua  ·  ⏎ konfirmasi  ·  "
                             "esc batal")
@@ -599,9 +620,9 @@ def confirm(message: str = "", default: bool = True, warna: str = KUNING,
     def bangun() -> FormattedText:
         ya, tidak = keadaan["ya"], not keadaan["ya"]
         isi = [[
-            (f"{HIJAU} bold" if ya else REDUP, "❯ Ya" if ya else "  Ya"),
+            (f"{HIJAU} bold" if ya else REDUP(), "❯ Ya" if ya else "  Ya"),
             ("", "      "),
-            (f"{MERAH} bold" if tidak else REDUP,
+            (f"{MERAH} bold" if tidak else REDUP(),
              "❯ Tidak" if tidak else "  Tidak"),
         ]]
         return _kotak(message, isi,
@@ -639,7 +660,7 @@ def confirm(message: str = "", default: bool = True, warna: str = KUNING,
         raise
     if ringkas:
         _ringkas(message, "ya" if hasil else "tidak",
-                 HIJAU if hasil else KUNING)
+                 HIJAU if hasil else KUNING())
     return hasil
 
 
@@ -670,7 +691,7 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
     buf.accept_handler = _terima
 
     lebar = min(_lebar_terminal() - 2, _LEBAR_MAKS)
-    warna = ORANYE
+    warna = warna or ORANYE()
     judul_di_dalam = bool(message) and get_cwidth(message) > lebar - 8
 
     def bagian_atas() -> FormattedText:
@@ -687,7 +708,7 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
             for t in _bungkus_teks(message, lebar - 5):
                 frag.append(("", "\n"))
                 frag.append((warna, "│  "))
-                frag.append((f"{TEKS} bold", t))
+                frag.append((f"{TEKS()} bold", t))
         return FormattedText(frag)
 
     def bagian_bawah() -> FormattedText:
@@ -700,7 +721,7 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
         if hint:
             frag.append(("", "\n"))
             frag.append((warna, "│  "))
-            frag.append((REDUP, _potong(hint, lebar - 4)))
+            frag.append((REDUP(), _potong(hint, lebar - 4)))
         frag.append(("", "\n"))
         frag.append((warna, "╰" + "─" * (lebar - 1)))
         return FormattedText(frag)
@@ -709,7 +730,7 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
     # LEBARNYA DIKUNCI: tanpa ini, jendela penanda ikut "fleksibel" di dalam
     # VSplit dan membagi lebar kotak 50:50 dengan jendela buffer — input lalu
     # melompat ke TENGAH kotak, bukan di kiri setelah "❯".
-    teks_penanda = [(warna, "│  "), (f"{EMAS} bold", "❯ ")]
+    teks_penanda = [(warna, "│  "), (f"{EMAS()} bold", "❯ ")]
     penanda = FormattedTextControl(lambda: teks_penanda, show_cursor=False)
 
     # Rahasia: tampilkan ••• alih-alih huruf aslinya (PasswordProcessor),

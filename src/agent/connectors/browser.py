@@ -517,6 +517,12 @@ def forget_profile(service: str) -> bool:
 # dalam hub) karena penjaganya dibutuhkan justru saat hub sudah dibubarkan:
 # jalur penutupan darurat di shutdown() berjalan sesudah itu.
 _MENUMPANG: set[str] = set()
+# Kunci _MENUMPANG: ia diubah di thread hub (page_for/_sambung_cdp/drop) tapi
+# dibaca di thread pemanggil (_kill_profile_browsers dari hub()/reset_hub).
+# Tanpa kunci ada jendela TOCTOU: penyapu membaca "tak ada yang ditumpangi"
+# tepat sebelum thread hub menambahkan satu — lalu membunuh Chrome tetangga
+# yang baru saja ditumpangi, persis kerusakan yang penanda ini buat cegah.
+_MENUMPANG_KUNCI = threading.Lock()
 
 
 # Browser yang bisa diminta lewat CONNECTOR_BROWSER_CHANNEL di .env.
@@ -659,17 +665,18 @@ def _kill_profile_browsers(service: str | None = None) -> None:
     miliknya."""
     if sys.platform != "win32":
         return
-    if service and service in _MENUMPANG:
-        log.info("lewati pembunuhan Chrome %s — jendelanya milik terminal lain",
-                 service)
-        return
-    if service is None and _MENUMPANG:
-        # Penyapuan menyeluruh tak bisa memilah per profil, jadi ia dibatalkan
-        # seluruhnya bila ada satu saja yang ditumpangi. Kerugiannya cuma
-        # kunci profil yang telat lepas; kerugian sebaliknya jauh lebih besar.
-        log.info("lewati pembunuhan menyeluruh — masih menumpang: %s",
-                 ", ".join(sorted(_MENUMPANG)))
-        return
+    with _MENUMPANG_KUNCI:
+        if service and service in _MENUMPANG:
+            log.info("lewati pembunuhan Chrome %s — jendelanya milik terminal lain",
+                     service)
+            return
+        if service is None and _MENUMPANG:
+            # Penyapuan menyeluruh tak bisa memilah per profil, jadi ia dibatalkan
+            # seluruhnya bila ada satu saja yang ditumpangi. Kerugiannya cuma
+            # kunci profil yang telat lepas; kerugian sebaliknya jauh lebih besar.
+            log.info("lewati pembunuhan menyeluruh — masih menumpang: %s",
+                     ", ".join(sorted(_MENUMPANG)))
+            return
     try:
         target = profile_dir(service) if service else _PROFILE_ROOT
         # Jendela yang tercatat tersembunyi ikut dilupakan — prosesnya mati,
@@ -794,7 +801,7 @@ def playwright_available() -> bool:
 
 
 class _Job:
-    __slots__ = ("fn", "result", "error", "done", "started")
+    __slots__ = ("fn", "result", "error", "done", "started", "batal")
 
     def __init__(self, fn: Callable[["BrowserHub"], Any]) -> None:
         self.fn = fn
@@ -806,6 +813,13 @@ class _Job:
         # job MACET" terlihat sama persis dari sisi pemanggil — dan yang kedua
         # itulah yang membuat terminal diam tanpa penjelasan.
         self.started = threading.Event()
+        # DITANDAI oleh submit() saat pemanggil sudah MENYERAH (timeout) —
+        # job yang masih mengantre tak boleh lagi dijalankan. Tanpa ini ada
+        # celah nyata yang terasa langsung ke pengguna: pemanggil menerima
+        # "melebihi batas waktu" lalu MENGIRIM ULANG, sementara job lamanya
+        # masih mengantre dan akhirnya DIJALANKAN JUGA — pesan yang sama
+        # berangkat DUA KALI ke situs AI web.
+        self.batal = False
 
 
 class BrowserHub:
@@ -841,6 +855,10 @@ class BrowserHub:
         # kalau tidak, pemanggil menunggu hasil yang takkan pernah datang
         # karena tak ada lagi yang mengambil job dari antrean.
         self._mati = False
+        # True bila hub ini DIGANTI hub baru oleh hub() karena poisoned: job
+        # yang datang belakangan WAJIB ditolak, sebab menjalankannya akan
+        # meluncurkan Chrome di hub yang tak pernah ditutup siapa pun.
+        self.ditinggalkan = False
 
     # --- sisi pemanggil (thread mana pun) ---
     def _ensure_thread(self) -> None:
@@ -896,6 +914,7 @@ class BrowserHub:
                     pass
             sisa = max(0.0, queue_timeout - 3.0)
             if not job.started.wait(sisa):
+                job.batal = True      # jangan dijalankan belakangan (kirim dobel)
                 self.poisoned = True
                 raise BrowserError(
                     "giliran browser sebelumnya belum lepas setelah "
@@ -903,6 +922,7 @@ class BrowserHub:
                 )
 
         if not job.done.wait(timeout):
+            job.batal = True
             self.poisoned = True
             raise BrowserError(
                 "aksi browser melebihi batas waktu — sesi direset, coba lagi."
@@ -967,6 +987,8 @@ class BrowserHub:
                 job.started.set()
                 job.error = pesan
                 job.done.set()
+            self._mati = True
+            self._drain()
             return
 
         self._pw = pw
@@ -975,6 +997,25 @@ class BrowserHub:
             if job is None:
                 break
             job.started.set()
+            # Job yang pemanggilnya SUDAH MENYERAH (timeout lalu kirim ulang)
+            # tidak boleh dijalankan belakangan — pesannya akan berangkat dua
+            # kali ke situs AI web. Job di hub yang sudah TERLANTAR (diganti
+            # hub() karena poisoned) juga ditolak: menjalankannya berarti
+            # meluncurkan Chrome baru di hub tak bertuan, yang tak pernah
+            # ditutup siapa pun — proses zombi yang menumpuk & membebani.
+            if job.batal:
+                job.error = BrowserError(
+                    "job dibatalkan: pemanggilnya sudah kehabisan waktu dan "
+                    "kemungkinan mengirim ulang — tidak dijalankan agar pesan "
+                    "tak berangkat dua kali.")
+                job.done.set()
+                continue
+            if self.ditinggalkan:
+                job.error = BrowserError(
+                    "hub browser ini sudah terlantar (diganti yang baru) — "
+                    "job ditolak agar tak meluncurkan browser yatim.")
+                job.done.set()
+                continue
             self._sedang_jalan = True
             try:
                 job.result = job.fn(self)
@@ -1038,7 +1079,8 @@ class BrowserHub:
             ctx = self._sambung_cdp(service)
             if ctx is not None:
                 self._dipinjam.add(service)
-                _MENUMPANG.add(service)
+                with _MENUMPANG_KUNCI:
+                    _MENUMPANG.add(service)
                 # TAB BARU, bukan tab yang sudah ada: tab pertama milik
                 # terminal sebelah dan mungkin sedang menunggu jawaban.
                 page = ctx.new_page()
@@ -1099,9 +1141,16 @@ class BrowserHub:
         yang sedang berjalan macet, submit-nya gagal — di situlah `paksa`
         dipakai: thread tetap diakhiri (sentinel None) supaya ia berhenti begitu
         panggilan yang menggantung itu lepas."""
-        if not self._started or self._mati:
-            self._mati = True
-            return True
+        # Dibaca di bawah _start_lock: tanpa itu, submit() yang baru saja lolos
+        # pemeriksaan _mati bisa MENYALAKAN thread-nya tepat setelah dispose
+        # menyatakan "rapi" — caller percaya semuanya tertutup, padahal job
+        # (dan Chrome yang diluncurkannya) berjalan tanpa pernah dibersihkan.
+        with self._start_lock:
+            if self._mati:
+                return True
+            if not self._started:
+                self._mati = True
+                return True
         rapi = True
         try:
             self.submit(_shutdown_on_hub, timeout=timeout, queue_timeout=timeout)
@@ -1123,7 +1172,8 @@ class BrowserHub:
         ia melindungi BANGKAI yang memegang kunci profil. Karena itu ia harus
         bisa dicabut, bukan cuma dipasang."""
         self._dipinjam.discard(service)
-        _MENUMPANG.discard(service)
+        with _MENUMPANG_KUNCI:
+            _MENUMPANG.discard(service)
 
     def drop(self, service: str) -> None:
         """Tutup & lupakan context sebuah service (HARUS di thread hub)."""
@@ -1422,7 +1472,8 @@ class BrowserHub:
                 ctx = self._sambung_cdp(service)
                 if ctx is not None:
                     self._dipinjam.add(service)
-                    _MENUMPANG.add(service)
+                    with _MENUMPANG_KUNCI:
+                        _MENUMPANG.add(service)
                     return ctx
             _kill_profile_browsers(service)
             import time as _t
@@ -1557,8 +1608,34 @@ def hub() -> BrowserHub:
     with _BERSIH_LOCK:
         with _HUB_LOCK:
             if _HUB is not None and _HUB.poisoned:
-                _kill_profile_browsers()  # lepaskan kunci profil sebelum hub baru
-                _HUB = None
+                lama, _HUB = _HUB, None
+                # Tandai TERLANTAR lebih dulu: job yang masih mengantre di
+                # thread-nya ditolak belakangan, sehingga tak ada Chrome baru
+                # yang diluncurkan di hub tak bertuan.
+                lama.ditinggalkan = True
+                # Daftar layanan dibaca lintas-thread (thread hub mungkin masih
+                # sibuk) — kegagalan iterasi cukup berarti "tak ada yang dibunuh",
+                # bukan menggagalkan pembuatan hub baru.
+                try:
+                    layanan = set(lama._ctx) | set(lama._proses)
+                except Exception:  # noqa: BLE001
+                    layanan = set()
+                # BUBARKAN RAPI dulu (driver node.exe dihentikan, thread usai).
+                # Dulu hub terlanjur racun hanya DILEPAS acuannya — tiap timeout
+                # menyisakan satu proses node.exe + satu thread menganggur;
+                # setelah beberapa kali, aplikasi terasa BERAT (terukur: tiga
+                # reset = tiga node.exe hidup bersamaan).
+                try:
+                    rapi = lama.dispose(timeout=4.0, paksa=True)
+                except Exception:  # noqa: BLE001
+                    rapi = False
+                # Chrome profil hanya dibunuh bila pembubaran rapi GAGAL, dan
+                # HANYA milik layanan yang benar-benar dipakai hub itu. Sapuan
+                # menyeluruh terbukti menghancurkan sesi terminal SEBELAH yang
+                # sedang sehat — persis yang dijaga _MENUMPANG.
+                if not rapi:
+                    for svc in sorted(layanan):
+                        _kill_profile_browsers(svc)
             if _HUB is None:
                 _HUB = BrowserHub()
             return _HUB

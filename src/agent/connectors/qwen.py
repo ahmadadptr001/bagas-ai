@@ -53,7 +53,15 @@ class QwenConnector(WebConnector):
     # prompt tertinggal di kotak & URL tak pernah jadi /c/<id>, lalu giliran
     # gagal dengan "balasan tak terdeteksi" yang menyesatkan. Tombol Send dipakai
     # _submit() sebagai cadangan; inilah yang juga diklik pengguna.
-    send_button_selector = 'button.send-button, [aria-label="Send"]'
+    #
+    # `:not([aria-label="Stop"])` penjaga pola Gemini/Kimi — tombol yang
+    # ter-label "Stop" tak pernah tombol kirim, betapapun kelasnya sama;
+    # belum terukur apakah Qwen bertukar tombol saat menjawab, tapi penyaring
+    # ini tak bisa merusak pengiriman yang sah.
+    send_button_selector = (
+        'button.send-button:not([aria-label="Stop"]), '
+        '[aria-label="Send"]'
+    )
 
     # --- deteksi belum-login ---
     # Qwen menampilkan kotak input untuk TAMU tetapi tak memproses pesannya,

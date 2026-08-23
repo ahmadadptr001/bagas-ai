@@ -535,7 +535,10 @@ class WebConnector:
     # TERUKUR Enter tak mengirim apa pun — prompt tertinggal di kotak, lalu
     # giliran gagal dengan "balasan tak terdeteksi" yang menyesatkan (seolah
     # selector jawabannya yang salah, padahal pesannya belum pernah berangkat).
-    send_button_selector: str = ""
+    # Seperti selector lain: SATU string atau BEBERAPA kandidat (tuple) yang
+    # dicoba berurutan — dan kandidatnya WAJIB tak cocok pada tombol STOP,
+    # karena di sebagian situs (Gemini, Kimi) keduanya elemen yang sama.
+    send_button_selector: str | tuple[str, ...] = ""
     # True = jawaban FINAL direkonstruksi jadi Markdown dari HTML (agar list,
     # tabel, heading, blok kode tampil rapi di terminal), bukan teks polos.
     read_as_markdown: bool = False
@@ -1046,13 +1049,27 @@ class WebConnector:
     def _is_done(self, page: Any) -> bool:
         """Balasan sudah tuntas? Dua penanda dipakai bila situs menyediakannya:
         indikator streaming hilang DAN tombol "berhenti" tak lagi ada. Tanpa
-        keduanya, jatuh ke True -> murni mengandalkan kestabilan teks."""
+        keduanya, jatuh ke True -> murni mengandalkan kestabilan teks.
+
+        Yang diperiksa VISIBILITAS, bukan sekadar keberadaan. Sebagian situs
+        MENYISAKAN elemen penandanya di DOM (display:none) sesudah selesai —
+        persis pola yang sudah terukur pada widget captcha (lihat komentar di
+        captcha_selectors). Dengan pemeriksaan keberadaan polos, giliran yang
+        jawabannya sudah tamat menggantung sampai batas waktu PENUH: teks stabil
+        tak pernah diterima karena syarat "situs tak lagi menandai sedang
+        mengetik" tak pernah terpenuhi (TERUKUR di web_timing: satu giliran GLM
+        berdurasi persis 300,2 detik — batas answer_timeout — padahal balasannya
+        cuma 203 karakter yang sudah stabil jauh sebelumnya). Tombol berhenti
+        yang tak TERLIHAT juga tak bisa ditekan pengguna, jadi ia memang bukan
+        tanda "masih bekerja"."""
         try:
-            if self.streaming_selector and \
-                    page.query_selector(self.streaming_selector) is not None:
-                return False
+            if self.streaming_selector:
+                el = page.query_selector(self.streaming_selector)
+                if el is not None and el.is_visible():
+                    return False
             for sel in self.stop_selectors:
-                if page.query_selector(sel) is not None:
+                el = page.query_selector(sel)
+                if el is not None and el.is_visible():
                     return False
         except Exception:  # noqa: BLE001
             return True
@@ -1278,6 +1295,18 @@ class WebConnector:
                     # (terminal terlihat macet) — terima apa adanya.
                     if stable >= self._stable_needed * 4:
                         break
+                # PENJAGA TERAKHIR anti-menggantung: teks DIAM SENYAP terlalu
+                # lama walau situs (katanya) masih menandai sedang mengetik.
+                # Penanda itu bisa berbohong — elemennya tertinggal di DOM, atau
+                # situs lupa mencabutnya — dan tanpa jalan keluar ini giliran
+                # menggantung sampai answer_timeout PENUH (terukur di web_timing:
+                # satu giliran berdurasi persis 300,2 detik untuk balasan 203
+                # karakter yang sudah stabil jauh sebelumnya). Tiga puluh detik
+                # tanpa satu huruf pun berubah tak pernah terjadi pada jawaban
+                # yang masih hidup; menerima balasan yang ada jauh lebih baik
+                # daripada menyandera terminal lima menit.
+                if stable >= 75:      # ~75 x 400 ms = 30 detik senyap
+                    break
             else:
                 stable = 0
                 last = cur
@@ -2251,16 +2280,29 @@ class WebConnector:
             # Enter pada tik yang sama bisa mengirim keadaan yang belum sinkron.
             page.wait_for_timeout(200)
         page.keyboard.press(self.submit_key)
-        # Coba klik tombol kirim juga bila langsung tersedia (penting untuk editor
-        # ProseMirror multi-baris di mana Enter menyisipkan newline).
+        if not self.send_button_selector:
+            return
+        # TOMBOL KIRIM BARU DIKLIK SETELAH ENTER TERBUKTI GAGAL — bukan
+        # tergesa-gesa sesudah Enter ditekan. TERUKUR di Gemini & Kimi: tombol
+        # kirinya BERTUKAR jadi tombol STOP pada ELEMEN YANG SAMA begitu model
+        # mulai menjawab, jadi klik cadangan yang ditembakkan mengejar Enter
+        # yang sukses malah mendarat di tombol stop dan MEMBATALKAN jawaban
+        # yang baru dimulai (teramati di Gemini: SETIAP jawaban terpotong,
+        # seperti tombol kirim ditekan dua kali dengan cepat). Karena itu Enter
+        # diberi kesempatan dulu; tombolnya baru disentuh bila kotak masih
+        # berisi & tak ada pesan baru — itulah kasus editor multi-baris
+        # (ProseMirror) yang memang tak terkirim lewat Enter dan butuh
+        # klik tombolnya.
+        for _ in range(6):          # ~1,2 detik
+            if self._sudah_terkirim(page, inp, counts0, url0):
+                return              # Enter mempan — jangan sentuh tombol lagi
+            page.wait_for_timeout(200)
         btn = self._send_button(page)
         if btn is not None:
             try:
                 self._click_element(btn)
             except Exception:  # noqa: BLE001
                 pass
-        if not self.send_button_selector:
-            return
         # Diperiksa DULU baru menunggu: pada jalur normal (Enter memang bekerja)
         # kotaknya sudah kosong seketika, jadi tak ada jeda yang ditambahkan ke
         # tiap pengiriman. Dulu urutannya terbalik dan setiap giliran membayar
@@ -2446,7 +2488,7 @@ class WebConnector:
             pass
 
     @staticmethod
-    def _input_text(inp: Any, timeout: float = 2500) -> str | None:
+    def _input_text(inp: Any, timeout: float = 1200) -> str | None:
         """Isi kotak input saat ini, atau None bila TAK BISA DIBACA.
 
         Perbedaan None vs "" itu inti perbaikan sebuah bug, bukan kerapian:
@@ -2461,7 +2503,12 @@ class WebConnector:
         `timeout` juga sengaja pendek. Playwright menunggu 30 detik sebelum
         menyerah pada selektor yang tak cocok, dan _submit membaca kotak ini
         berkali-kali — cukup untuk membuat satu pengiriman gagal menggantung
-        bermenit-menit."""
+        bermenit-menit. Membaca innerText elemen hidup normalnya selesai di
+        bawah 50 ms; 1200 ms sudah ~20x longgar, dan yang terjadi ketika
+        melewatinya adalah locator basi karena DOM dirender ulang — keadaan
+        yang memang tak bisa dibaca tunggu lebih lama, dan justru memperlambat
+        setiap putaran pemeriksaan (dulu 2500 ms per panggilan, terasa macet
+        di terminal)."""
         try:
             return (inp.evaluate(
                 "el => (el.value !== undefined ? el.value : el.innerText) || ''",
