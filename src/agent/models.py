@@ -1,40 +1,99 @@
 """Daftar model yang tersedia + util untuk memilih model.
 
-bagas-ai kini bermodalkan DUA hal saja: bot Telegram dan model AI web lewat
-browser. Tidak ada lagi model berbayar/ber-API-key: seluruh entri di bawah
-adalah CONNECTOR ke antarmuka chat berbasis browser (lihat agent/connectors),
-dijalankan lewat Playwright memakai akun milik pengguna sendiri.
+bagas-ai punya DUA jalur model yang cara kerjanya berbeda mendasar:
 
-Dulu daftar ini berisi ~20 model yang di-host NVIDIA (integrate.api.nvidia.com)
-dan connector web cuma pelengkap. Itu DIHAPUS seluruhnya — beserta API key,
-endpoint, mode /effort ala API (Nemotron reasoning_budget & gpt-oss
-reasoning_effort), dan tool vision berbasis VLM. Yang tersisa sengaja
-sesederhana ini: satu jenis model, satu cara kerja.
+  1. CONNECTOR WEB (`web/...`) — antarmuka chat berbasis browser lewat
+     Playwright memakai akun pengguna sendiri. Konteks dipegang SITUSNYA,
+     tool dipanggil lewat protokol teks [[TOOL]], dan /effort berarti
+     MENGKLIK tombol mode berpikir di halamannya.
+  2. API NVIDIA (`nvidia/...`) — endpoint OpenAI-compatible di
+     integrate.api.nvidia.com. Konteks dipegang KITA (dikirim ulang tiap
+     request), tool memakai function-calling ASLI, dan /effort berarti
+     mengirim parameter `extra_body`.
 
-Konsekuensi yang disengaja:
-  - tak ada lagi kredensial yang perlu diisi saat instalasi;
-  - /effort tidak lagi mengirim parameter API, melainkan MENGKLIK tombol mode
-    berpikir di situsnya (lihat WebConnector.web_actions);
-  - gambar tidak lagi dianalisis lewat model vision terpisah, melainkan
-    DILAMPIRKAN ke percakapan web (lihat attachments di core._run_connector).
+Karena itu `ModelSpec.is_web` adalah satu-satunya titik percabangan; lihat
+core.Agent.run().
+
+# CATATAN PENTING soal effort di jalur NVIDIA (TERUKUR 2026-08-23, bukan dugaan)
+Gateway NVIDIA MENERIMA parameter yang tidak didukung modelnya TANPA protes:
+tanpa error, tanpa peringatan, dan tanpa efek apa pun pada keluaran. Jadi
+"apakah model ini punya effort" TIDAK BISA dideteksi saat jalan (coba-lalu-
+tangkap-error mustahil). Satu-satunya cara yang jujur adalah TABEL STATIS di
+bawah — karena itu tiap entri menyatakan sendiri kunci apa yang ia hormati
+(`reasoning_key`) dan tingkatan apa yang nyata (`effort_levels`).
+
+Hasil pengukuran yang mendasari tabel itu:
+  - muse-glimmer-30b : reasoning SELALU keluar, bahkan tanpa extra_body.
+    `thinking`, `enable_thinking`, dan `reasoning_effort` sama-sama diterima
+    tanpa efek -> TAK ADA saklar, TAK ADA tingkatan.
+  - nemotron-3-ultra : `enable_thinking` benar-benar bekerja DUA ARAH
+    (True -> ada reasoning, False -> tidak), bawaannya NYALA. `reasoning_effort`
+    diabaikan. `reasoning_budget` di level atas sekarang membalas HTTP 500 --
+    parameter itu DIBUANG, jangan dihidupkan lagi.
+  - deepseek-v4-flash : `thinking` bekerja, bawaannya MATI (kebalikan
+    nemotron). `reasoning_effort` low/medium/high diterima, tapi panjang
+    reasoning yang terukur JUSTRU TERBALIK (low 1280 char > medium 1014) dan
+    nilai ngawur ("ngaco") ikut diterima tanpa error -- jadi pengaruhnya tak
+    terbukti. Tetap dikirim (sesuai contoh resmi & tak berbiaya), tapi menu
+    /effort menyebut apa adanya supaya pengguna tak dijanjikan yang belum tentu.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from . import config
+
+# --- tingkatan effort: nama internal -> (label, keterangan, ikon) ------------
+# Dipakai menu /effort. "langsung" berarti mode berpikir DIMATIKAN; sisanya
+# menyalakannya dengan nilai reasoning_effort yang berbeda.
+EFFORT_INFO: dict[str, tuple[str, str, str]] = {
+    "langsung": ("Langsung", "tanpa mode berpikir — jawaban paling cepat", "⚡"),
+    "ringkas": ("Ringkas", "berpikir singkat — gesit & hemat token", "🌤"),
+    "seimbang": ("Seimbang", "nalar secukupnya — pas untuk kebanyakan tugas", "⚖"),
+    "mendalam": ("Mendalam", "berpikir penuh — untuk soal kompleks (lebih lambat)", "🔬"),
+}
+
+# nama internal -> nilai yang dikirim sebagai chat_template_kwargs.reasoning_effort
+_EFFORT_API: dict[str, str] = {
+    "ringkas": "low", "seimbang": "medium", "mendalam": "high",
+}
+
 
 @dataclass(frozen=True)
 class ModelSpec:
-    id: str  # ID internal, selalu berbentuk "web/<service>"
+    id: str  # ID internal: "web/<service>" (browser) atau "nvidia/<slug>" (API)
     label: str  # nama tampilan
     # Nama service connector ("kimi", "qwen", "gemini") -> agent/connectors.
-    # Selalu terisi: semua model bagas-ai kini berbasis browser.
+    # KOSONG untuk model API — inilah penanda jalur mana yang dipakai.
     connector: str = ""
-    multimodal: bool = True  # semua situs AI web menerima lampiran gambar
+    multimodal: bool = True  # situs AI web menerima lampiran gambar
     note: str = ""  # keterangan singkat
     # DITUNDA: entrinya tetap ada & tetap tampil di /model, tapi tak bisa
     # dipilih. Lihat catatan _DITUNDA di bawah.
     ditunda: bool = False
+
+    # --- khusus jalur API NVIDIA (kosong/nol untuk model web) ---------------
+    # ID model APA ADANYA di endpoint NVIDIA. Dipisah dari `id` karena `id`
+    # adalah identitas internal bagas-ai (tersimpan di prefs) sedangkan ini
+    # yang dikirim ke server; menyatukan keduanya membuat ID tersimpan tak bisa
+    # diubah tanpa memutus preferensi pengguna.
+    api_model: str = ""
+    # Kunci di chat_template_kwargs yang MEMANG dihormati model ini:
+    # "thinking" (deepseek), "enable_thinking" (nemotron), atau "" = tak ada
+    # saklar berpikir sama sekali. Lihat catatan pengukuran di docstring modul.
+    reasoning_key: str = ""
+    # Tingkatan yang DITAWARKAN /effort. () = model ini tak punya effort, dan
+    # menu akan mengatakannya terus-terang alih-alih memberi pilihan palsu.
+    effort_levels: tuple[str, ...] = ()
+    effort_default: str = ""
+    # Kirim juga chat_template_kwargs.reasoning_effort? Hanya untuk model yang
+    # setidaknya MENERIMA-nya sesuai contoh resmi. Untuk nemotron sengaja
+    # False: terukur diabaikan, jadi mengirimnya cuma menyesatkan pembaca kode.
+    kirim_reasoning_effort: bool = False
+    # Batas token keluaran (dari contoh resmi tiap model).
+    max_tokens: int = 16384
+    # Catatan jujur yang ditempel di menu /effort bila ada yang perlu diakui.
+    effort_catatan: str = ""
 
     @property
     def is_web(self) -> bool:
@@ -42,9 +101,49 @@ class ModelSpec:
         return bool(self.connector)
 
     @property
+    def is_api(self) -> bool:
+        """True bila model ini lewat API NVIDIA (butuh NVIDIA_API_KEY)."""
+        return not self.connector
+
+    @property
     def aktif(self) -> bool:
         """True bila model ini boleh dipilih pengguna sekarang."""
         return not self.ditunda
+
+    @property
+    def punya_effort(self) -> bool:
+        """True bila /effort benar-benar bisa mengubah sesuatu di model ini.
+
+        Untuk model web selalu True: /effort di sana berarti mengklik tombol di
+        situsnya, dan daftar tombolnya baru diketahui saat browser terbuka."""
+        return self.is_web or bool(self.effort_levels)
+
+    def extra_body_for(self, effort: str | None) -> dict | None:
+        """Parameter extra_body untuk satu giliran, sesuai effort terpilih.
+
+        Mengembalikan None bila tak ada yang perlu dikirim — TERMASUK untuk
+        model yang saklar berpikirnya terbukti tak berfungsi (muse-glimmer).
+        Mengirim parameter mati ke sana bukan cuma sia-sia: ia membuat kode ini
+        terlihat seolah effort-nya bekerja, padahal tidak.
+
+        `reasoning_budget` era lama TIDAK dipakai lagi — terukur membalas
+        HTTP 500 di nemotron-3-ultra, jadi menghidupkannya membuat SETIAP
+        setelan effort gagal.
+        """
+        if self.is_web or not self.reasoning_key:
+            return None
+        lvl = effort if effort in self.effort_levels else self.effort_default
+        if not lvl:
+            return None
+        ctk: dict[str, object] = {}
+        if lvl == "langsung":
+            ctk[self.reasoning_key] = False
+        else:
+            ctk[self.reasoning_key] = True
+            nilai = _EFFORT_API.get(lvl)
+            if nilai and self.kirim_reasoning_effort:
+                ctk["reasoning_effort"] = nilai
+        return {"chat_template_kwargs": ctk}
 
 
 # MODEL YANG SEDANG DITUNDA — atas permintaan pengguna. Yang boleh dipakai
@@ -99,6 +198,63 @@ MODELS: dict[str, ModelSpec] = {
               "pilih ini untuk kerja visual, bukan untuk ngoding. Kuota "
               "gratisnya terbatas, jadi pakai seperlunya"),
     ),
+
+    # --- jalur API NVIDIA (butuh NVIDIA_API_KEY, tanpa browser) -------------
+    # Tiga entri di bawah TIDAK memakai connector, jadi is_web-nya False dan
+    # core mengarahkannya ke _run_api. Nilai reasoning_key/effort_levels di
+    # sini adalah hasil PENGUKURAN (lihat docstring modul), bukan salinan
+    # dokumentasi — beberapa parameter yang ada di contoh resmi terbukti tak
+    # berpengaruh, dan itu dinyatakan apa adanya di sini.
+    "nemotron": ModelSpec(
+        id="nvidia/nemotron",
+        label="Nemotron 3 Ultra (API)",
+        api_model="nvidia/nemotron-3-ultra-550b-a55b",
+        multimodal=False,  # endpoint teks; lampiran gambar tak dikirim
+        note=("Via API NVIDIA — 550B, mode berpikir bisa dimatikan; "
+              "cepat mulai menjawab, cocok untuk kerja tool bertubi-tubi"),
+        reasoning_key="enable_thinking",
+        # HANYA dua tingkat, dan itu memang seluruh yang model ini punya:
+        # enable_thinking terbukti bekerja dua arah, sedangkan reasoning_effort
+        # di dalam chat_template_kwargs terukur DIABAIKAN (panjang reasoning
+        # identik). Menawarkan "ringkas/seimbang/mendalam" di sini berarti
+        # menjanjikan tiga hal yang menghasilkan keluaran sama persis.
+        effort_levels=("langsung", "mendalam"),
+        effort_default="mendalam",  # bawaan server memang NYALA
+        kirim_reasoning_effort=False,
+        max_tokens=16384,
+    ),
+    "muse": ModelSpec(
+        id="nvidia/muse",
+        label="Muse Glimmer 30B (API)",
+        api_model="meta/muse-glimmer-30b",
+        multimodal=False,
+        note=("Via API NVIDIA — 30B, paling ringan & paling gesit; "
+              "mode berpikirnya selalu nyala dan tak bisa diatur"),
+        # Kosong SEMUA, sesuai pengukuran: tanpa extra_body pun reasoning tetap
+        # keluar, dan ketiga kunci saklar diterima tanpa mengubah apa pun.
+        reasoning_key="",
+        effort_levels=(),
+        max_tokens=8192,  # contoh resminya 8192, bukan 16384
+        effort_catatan=("model ini tak punya saklar mode berpikir — nalarnya "
+                        "selalu aktif dan tak ada tingkatan yang bisa dipilih"),
+    ),
+    "deepseek": ModelSpec(
+        id="nvidia/deepseek",
+        label="DeepSeek V4 Flash (API)",
+        api_model="deepseek-ai/deepseek-v4-flash-0731",
+        multimodal=False,
+        note=("Via API NVIDIA — penalaran paling dalam, TAPI paling lambat "
+              "memulai (terukur 1-3 menit sebelum kata pertama)"),
+        reasoning_key="thinking",
+        effort_levels=("langsung", "ringkas", "seimbang", "mendalam"),
+        effort_default="seimbang",  # bawaan server MATI; ini pilihan bagas-ai
+        kirim_reasoning_effort=True,
+        max_tokens=16384,
+        effort_catatan=("tingkatan ringkas/seimbang/mendalam dikirim sesuai "
+                        "contoh resmi, tapi pengaruhnya BELUM terbukti pada "
+                        "pengukuran kami; yang pasti bekerja: langsung "
+                        "(mematikan mode berpikir)"),
+    ),
 }
 
 MODELS = {k: (v if k not in _DITUNDA else
@@ -127,11 +283,25 @@ _ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web
 
 
 def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
-    """Tolak model yang sedang ditunda — dengan alasan, bukan sekadar 'gagal'.
+    """Tolak model yang belum boleh dipakai — dengan alasan, bukan sekadar 'gagal'.
+
+    Dua sebab penolakan: model sedang DITUNDA, atau model API tapi
+    NVIDIA_API_KEY kosong.
 
     Penolakannya di SINI, satu pintu untuk semua jalan masuk (/model, argumen
     baris perintah, tombol Telegram, preferensi tersimpan): kalau tiap
     antarmuka menyaring sendiri-sendiri, cepat atau lambat ada satu yang lupa."""
+    if spec.is_api and not config.has_api_key():
+        # Diperiksa DI SINI, bukan saat giliran berjalan: kalau tidak, pengguna
+        # baru tahu key-nya kosong sesudah mengirim pesan panjang, dan pesan itu
+        # sudah masuk riwayat sebagai giliran gagal.
+        raise ValueError(
+            f"Model {spec.label} lewat API NVIDIA dan butuh NVIDIA_API_KEY, "
+            f"yang belum diisi. Isi di {config.ENV_FILE} "
+            "(baris: NVIDIA_API_KEY=nvapi-...), key gratis di "
+            "https://build.nvidia.com — atau pilih model (web) mana pun, "
+            "yang tak butuh key sama sekali."
+        )
     if spec.aktif:
         return spec
     raise ValueError(
@@ -236,17 +406,28 @@ def catalog_aktif() -> list[tuple[int, str, ModelSpec]]:
 
 def list_text(current_id: str | None = None) -> str:
     """Daftar model siap tampil untuk perintah /model."""
-    lines = ["Model (semua via browser — butuh login sekali):"]
-    if len(_AKTIF) < len(_ORDER):
+    lines = ["Model — (web) lewat browser + login sekali, "
+             "(API) lewat NVIDIA_API_KEY tanpa browser:"]
+    # Sebut yang DITUNDA, bukan yang aktif: dulu baris ini mendaftar yang aktif,
+    # dan begitu modelnya bertambah ia berbunyi "untuk sementara hanya
+    # <delapan model> yang bisa dipilih" — kalimat yang isinya justru
+    # menyembunyikan satu-satunya keterangan yang berguna.
+    _tunda = [MODELS[k].label for k in _ORDER if not MODELS[k].aktif]
+    if _tunda:
         lines.append(
-            "Untuk sementara hanya " + ", ".join(MODELS[k].label for k in _AKTIF)
-            + " yang bisa dipilih; sisanya ditunda (connector-nya tak dihapus).")
+            "Ditunda (connector-nya tak dihapus, bisa dibuka lagi): "
+            + ", ".join(_tunda) + ".")
     for i, key in enumerate(_ORDER, start=1):
         spec = MODELS[key]
         tag = f"  [{spec.note}]" if spec.note else ""
         mark = "  <- aktif" if current_id and spec.id == current_id else ""
         if spec.ditunda:
             mark = "  (ditunda — belum bisa dipilih)"
+        elif spec.is_api and not config.has_api_key():
+            # Tetap DITAMPILKAN, bukan disembunyikan: pengguna perlu tahu model
+            # ini ada dan apa syaratnya. Menyembunyikannya membuat fitur yang
+            # sudah terpasang terlihat tak pernah ada.
+            mark = "  (butuh NVIDIA_API_KEY)"
         lines.append(f"  {i:>2}. {key:12s} {spec.label}{tag}{mark}")
     contoh = _AKTIF[0]
     lines.append(f"Pilih: /model <nama|nomor>   contoh: /model {contoh}")

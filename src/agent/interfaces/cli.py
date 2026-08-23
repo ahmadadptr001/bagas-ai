@@ -2322,9 +2322,11 @@ class Status:
 # menjanjikan hal usang lebih merugikan daripada tak ada tips sama sekali —
 # pengguna mencoba, gagal, lalu berhenti percaya pada seluruh barisan ini. Dua
 # yang sudah pernah basi dan kini diperbaiki: "/effort mengatur kedalaman
-# berpikir" (sejak semua model lewat browser, /effort MENGKLIK pemilih mode di
-# situsnya, bukan mengirim parameter API) dan "naik kelas otomatis" (mekanisme
-# itu ikut terhapus bersama model ber-API-key; yang tersisa penjaga anti-macet).
+# berpikir" (artinya BEDA per jalur — di model (web) ia MENGKLIK pemilih mode di
+# situsnya, di model (API) ia mengirim parameter permintaan; tipsnya harus benar
+# untuk keduanya) dan "naik kelas otomatis" (yang tersisa hanya kenaikan EFFORT
+# di jalur API + penjaga anti-macet — bagas-ai tak pernah berpindah model
+# sendiri, lihat catatan _escalate di core.py).
 _TIPS = (
     "ketik pesan berikutnya kapan saja — Enter mengirimnya, dikerjakan sesudah ini",
     "/model ganti model kapan saja — login cukup sekali, sesudah itu langsung jalan",
@@ -2336,7 +2338,7 @@ _TIPS = (
     "keluaran tiap langkah langsung tampil di bawahnya, dipotong biar riwayat tetap terbaca",
     "tiap perubahan file ditampilkan sebagai diff dulu, sebelum berkasnya disentuh",
     "/memory menyimpan fakta yang harus diingat lintas sesi",
-    "/effort memilih varian model & mode berpikir langsung di situs modelnya",
+    "/effort mengatur mode berpikir — diklik di situsnya (web) atau dikirim sebagai parameter (API)",
     "kalau model mengulang langkah yang sama, bagas-ai menyetopnya lalu cari jalan lain",
     "/web merapikan chat yang menumpuk di situs model · sekalian logout kalau perlu",
     "/bot menyalakan kontrol lewat Telegram — perintahkan bagas-ai dari HP",
@@ -2590,10 +2592,15 @@ class TurnView:
                 lbl = lbl[:37] + "…"
             lbl = f" [dim]{_esc(lbl)}[/]" if lbl else ""
             extra = f"   [dim]·[/]   [{tema.p('aksen_terang')}]🔧 {_esc(self.tool)}[/]{lbl}"
-        # Segmen "◇ effort" DIHAPUS: sejak semua model lewat browser,
-        # agent.effort selalu None (mesin effort ala API ikut terhapus bersama
-        # model ber-API-key), jadi ia tak pernah tampil — cuma menyisakan cabang
-        # mati yang menyesatkan pembaca kode.
+        # Segmen "◇ effort" HANYA untuk model (API): di sanalah mode berpikir
+        # jadi parameter yang benar-benar ikut tiap permintaan. Untuk model (web)
+        # agent.effort selalu None — mode berpikirnya tombol di situs, bukan
+        # keadaan yang kita pegang, jadi menampilkannya di sini berarti mengaku
+        # tahu sesuatu yang tak kita ketahui.
+        if self.agent.effort:
+            _lbl = models.EFFORT_INFO.get(
+                self.agent.effort, (self.agent.effort,))[0]
+            extra += (f"   [dim]·[/]   [{tema.p('aksen2')}]◇ {_esc(_lbl)}[/]")
         status = _oneline(_TM(
             f"  [bold {tema.p('aksen')}]{frame}[/] [{tema.p('aksen')}]{_esc(self.phase)}[/]   [dim]·[/]   "
             f"[{tema.p('aksen2')}]{_fmt_elapsed(el)}[/]   [dim]·[/]   [{tema.p('aksen_terang')}]⚡ {tok}[/] "
@@ -4042,13 +4049,20 @@ def main(resume: bool = False) -> None:
         """Menu pilih model. Return ID model SEBELUMNYA bila yang dipilih adalah
         connector web (pemanggil lalu menjalankan _connect_web), selain itu None."""
         def _describe(spec) -> str:
-            # Satu baris: nama (rata) + badge kemampuan + SARAN "cocok untuk apa".
-            # Semua model kini web, jadi lencana reasoning/multimodal tak lagi
-            # membedakan apa pun — cukup satu penanda bahwa ini lewat browser.
-            badge = " 🌐" if spec.is_web else "  "
+            # Satu baris: nama (rata) + badge JALUR + SARAN "cocok untuk apa".
+            # Lencananya menandai JALUR, bukan kemampuan: 🌐 = lewat browser
+            # (butuh login sekali, jendela browser hidup), 🤖 = lewat API (butuh
+            # NVIDIA_API_KEY, tanpa browser). Itulah beda yang paling terasa
+            # saat memilih — bukan reasoning/multimodal.
+            badge = " 🌐" if spec.is_web else " 🤖"
             if spec.ditunda:
-                return f"{spec.label:<28}{badge}  —  ⏸ ditunda sementara"
-            note = f"  —  {spec.note}" if spec.note else ""
+                return f"{spec.label:<28}{badge}  {D}  ⏸ ditunda sementara"
+            note = f"  {D}  {spec.note}" if spec.note else ""
+            # Dikatakan DI DAFTAR, bukan hanya saat dipilih lalu ditolak: entri
+            # yang terlihat sama seperti yang lain padahal pasti gagal membuat
+            # pengguna menabraknya dulu untuk tahu.
+            if spec.is_api and not config.has_api_key():
+                note += "  (butuh NVIDIA_API_KEY)"
             return f"{spec.label:<28}{badge}{note}"
 
         # Model yang ditunda TETAP TAMPIL, tapi redup & dilewati kursor. Kalau
@@ -4066,7 +4080,15 @@ def main(resume: bool = False) -> None:
                               if s.id == agent.model and s.aktif), None),
             ).execute()
             prev = agent.model
-            console.print(f"[green]✓ Model: {agent.set_model(sel)}[/green] "
+            try:
+                label = agent.set_model(sel)
+            except ValueError as exc:
+                # models._pastikan_aktif menolak model yang ditunda & model (API)
+                # tanpa key. Alasannya sudah lengkap di pesan galatnya, jadi
+                # cukup ditampilkan — model yang aktif tak berubah.
+                console.print(f"  [yellow]⚠ {_esc(str(exc))}[/yellow]\n")
+                return None
+            console.print(f"[green]✓ Model: {label}[/green] "
                           f"[dim]({agent.model})[/dim]")
             _warn_glm_vpn()
             if agent.model_spec.is_web:
@@ -4076,13 +4098,69 @@ def main(resume: bool = False) -> None:
         return None
 
     def pick_effort() -> None:
-        """/effort — untuk model web berarti MENGKLIK tombol mode berpikir di UI
-        situsnya, bukan mengirim parameter API.
+        """/effort — satu perintah, DUA mekanisme yang sama sekali berbeda.
 
-        Cabang model ber-API-key (menu effort dari reasoning_style, set_effort)
-        DIHAPUS bersama katalog NVIDIA: seluruh model kini web, jadi satu-satunya
-        jalur yang tersisa adalah pick_web_option."""
-        pick_web_option()
+        Model (web): mode berpikir adalah TOMBOL di halaman situsnya, jadi yang
+        dilakukan program adalah MENGKLIKNYA di browser (pick_web_option).
+        Model (API): mode berpikir adalah PARAMETER yang ikut tiap permintaan
+        (`extra_body.chat_template_kwargs`), jadi cukup disimpan di sini
+        (pick_api_effort) tanpa menyentuh jaringan sedikit pun.
+
+        Karena itu keduanya tak bisa dilebur: yang satu butuh browser hidup &
+        bisa gagal, yang satu tak pernah gagal."""
+        if agent.model_spec.is_web:
+            pick_web_option()
+        else:
+            pick_api_effort()
+
+    def pick_api_effort() -> None:
+        """/effort untuk model API: pilih tingkat berpikir yang dikirim sebagai
+        parameter permintaan.
+
+        Model tanpa tingkat berpikir DIKATAKAN TERUS TERANG, tidak diberi menu
+        palsu berisi pilihan yang tak berpengaruh — endpoint NVIDIA
+        MENERIMA parameter yang tak didukung tanpa keluhan (TERUKUR), jadi menu
+        yang terlihat bekerja padahal tidak justru menyesatkan."""
+        spec = agent.model_spec
+        if not spec.effort_levels:
+            catatan = spec.effort_catatan or (
+                "model ini tak punya saklar mode berpikir yang bisa diatur.")
+            console.print(f"  [dim]{_esc(spec.label)}: {_esc(catatan)}[/dim]\n")
+            return
+
+        aktif = agent.effort or spec.effort_default
+        width = max(
+            (len(models.EFFORT_INFO.get(lv, (lv,))[0]) for lv in spec.effort_levels),
+            default=0)
+        choices = []
+        for lv in spec.effort_levels:
+            label, desc, ikon = models.EFFORT_INFO.get(lv, (lv, "", "◇"))
+            tanda = "  (aktif)" if lv == aktif else ""
+            # inquirer TIDAK memproses markup rich — tulis polos.
+            choices.append(Choice(
+                lv, f"{ikon} {label:<{width}}  {D}  {desc}{tanda}"))
+        try:
+            sel = inquirer.select(
+                message=f"Mode berpikir {spec.label}",
+                choices=choices, pointer="❯",
+                long_instruction=(
+                    "Dikirim sebagai parameter tiap permintaan — berlaku "
+                    "mulai pesan berikutnya."),
+            ).execute()
+        except (KeyboardInterrupt, EOFError):
+            return
+        try:
+            hasil = agent.set_effort(sel)
+        except ValueError as exc:
+            console.print(f"  [yellow]⚠ {_esc(str(exc))}[/yellow]\n")
+            return
+        if not hasil:
+            return
+        label = models.EFFORT_INFO.get(hasil, (hasil,))[0]
+        console.print(f"  [#9fc93c]✓ Mode berpikir: {_esc(label)}[/]")
+        if spec.effort_catatan:
+            console.print(f"  [dim]{_esc(spec.effort_catatan)}[/dim]")
+        console.print()
 
     def pick_browser() -> None:
         """Ganti browser yang dipakai connector (CONNECTOR_BROWSER_CHANNEL)."""
@@ -4226,8 +4304,13 @@ def main(resume: bool = False) -> None:
                     _baris_padat(*p, time.time() - mulai) if p
                     else Text("  ⏸ menyiapkan…", style="dim")))
                 wt.join(timeout=0.05)
-        console.print("  [#9fc93c]✓ riwayat tersimpan[/] [dim]— chat di situs "
-                      "tak disentuh.[/]\n")
+        # Kalimat penutup menyesuaikan JALUR. "chat di situs tak disentuh"
+        # cuma bermakna di jalur (web), tempat percakapan hidup di server
+        # orang lain. Di jalur (API) riwayatnya kita sendiri yang pegang,
+        # jadi yang perlu ditegaskan justru bahwa menyimpan tak memotong apa pun.
+        sisa = ("chat di situs tak disentuh." if agent.model_spec.is_web
+                else "percakapan ini jalan terus.")
+        console.print(f"  [#9fc93c]✓ riwayat tersimpan[/] [dim]— {sisa}[/]\n")
         console.print(Padding(_md(hasil["teks"]), (0, 3, 1, 3)))
 
     def do_send_compact(arg: str = "") -> None:

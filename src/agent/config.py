@@ -70,8 +70,14 @@ def _get_bool(name: str, default: bool) -> bool:
 # Konfigurasi NVIDIA API (opsional; hanya untuk model nvidia/*):
 NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
-# Model default bila memakai jalur NVIDIA (hanya berlaku saat model nvidia/* dipilih)
-NVIDIA_DEFAULT_MODEL: str = os.getenv("NVIDIA_DEFAULT_MODEL", "deepseek-ai/deepseek-v4-flash-0731").strip()
+# Model default bila memakai jalur NVIDIA (hanya berlaku saat model nvidia/*
+# dipilih tanpa menyebut api_model-nya -- praktis cuma jaring pengaman).
+#
+# SENGAJA nemotron, bukan deepseek. TERUKUR 2026-08-23: deepseek-v4-flash butuh
+# 106-169 detik sebelum kata pertama keluar dan 4 dari 8 permintaan uji habis
+# waktu di 240 detik. Sebagai bawaan, itu berarti pengguna baru menunggu
+# menit-menitan lalu gagal, dan menyimpulkan bagas-ai yang rusak.
+NVIDIA_DEFAULT_MODEL: str = os.getenv("NVIDIA_DEFAULT_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip()
 
 CHAT_MODEL: str = os.getenv("CHAT_MODEL", "web/glm").strip()
 if not CHAT_MODEL.startswith(("web/", "nvidia/")):
@@ -115,14 +121,43 @@ MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))
 # tool & menyimpulkan. Mencegah AI mengulang-ulang pekerjaan tanpa henti.
 MAX_DUPLICATE_TOOL_CALLS: int = int(os.getenv("MAX_DUPLICATE_TOOL_CALLS", "3"))
 
-# Setelan khusus endpoint API — TEMPERATURE, REQUEST_TIMEOUT, RETRY_MAX_SECONDS,
-# STREAM_STALL_TIMEOUT, MAX_STALLS_PER_CALL, MAX_TOOL_CALLS, AUTO_FALLBACK,
-# MAX_ESCALATIONS — DIHAPUS bersama model ber-API-key. Padanannya di jalur
-# browser hidup di tempat yang sesuai: batas waktu & polling ada di
+# --- Setelan khusus endpoint API (HANYA berlaku untuk model nvidia/*) ---
+# Jalur browser tak memakai satu pun dari ini: batas waktunya ada di
 # WebConnector (start_timeout/answer_timeout), penantian saat server penuh
-# ditangani WebBusyError + tunggu-lalu-ulangi, dan penjaga anti-mengoceh ada di
-# _MAX_REPLY_CHARS. Nilai lama yang mungkin masih tertulis di .env diabaikan
-# begitu saja — tak perlu dibersihkan manual.
+# ditangani WebBusyError, dan penjaga anti-mengoceh ada di _MAX_REPLY_CHARS.
+TEMPERATURE: float = float(os.getenv("TEMPERATURE", "1.0"))
+TOP_P: float = float(os.getenv("TOP_P", "0.95"))
+# Batas waktu satu permintaan (dipakai klien openai untuk panggilan non-stream).
+REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "600"))
+# TOTAL anggaran menunggu saat endpoint throttle (retry berjenjang) sebelum
+# benar-benar menyerah. Free tier NVIDIA ±40 RPM, jadi menunggu jauh lebih
+# berguna daripada membatalkan tugas pengguna.
+RETRY_MAX_SECONDS: float = float(os.getenv("RETRY_MAX_SECONDS", "300"))
+
+# DUA anggaran waktu yang SENGAJA DIPISAH — jangan disatukan lagi.
+#
+# TERUKUR (2026-08-23, integrate.api.nvidia.com): deepseek-v4-flash butuh
+# ±120 detik sampai token PERTAMA keluar, sementara nemotron & muse-glimmer
+# menjawab dalam hitungan detik. Klien lama memakai SATU angka
+# (httpx read=STREAM_STALL_TIMEOUT) untuk keduanya — dan karena httpx
+# menghitung read-timeout per operasi baca socket, angka itu ikut membatasi
+# penantian token pertama. Akibatnya permintaan yang sebenarnya SEHAT
+# dibatalkan hanya karena modelnya lambat memulai.
+#
+# TTFT_TIMEOUT  : sabar — menunggu token PERTAMA (model bisa mengantre).
+# STREAM_STALL_TIMEOUT: ketat — jeda antar-token SESUDAH token pertama tiba;
+#                       di titik itu stream yang diam berarti server menggantung.
+TTFT_TIMEOUT: float = float(os.getenv("BAGASAI_TTFT_TIMEOUT", "300"))
+STREAM_STALL_TIMEOUT: float = float(os.getenv("STREAM_STALL_TIMEOUT", "45"))
+# Berapa kali MACET (bukan throttle) boleh diulang dalam satu panggilan sebelum
+# dilempar sebagai StreamStalled ke core.
+MAX_STALLS_PER_CALL: int = int(os.getenv("MAX_STALLS_PER_CALL", "2"))
+# Anggaran total panggilan tool dalam SATU giliran (jaring pengaman anti-liar).
+MAX_TOOL_CALLS: int = int(os.getenv("MAX_TOOL_CALLS", "40"))
+# Berapa kali bagas-ai boleh MENAIKKAN effort sendiri dalam satu giliran saat
+# model terdeteksi mengulang / membalas kosong. Hanya effort — TIDAK berpindah
+# model (lihat catatan _escalate di core.py).
+MAX_ESCALATIONS: int = int(os.getenv("MAX_ESCALATIONS", "2"))
 
 # --- Keamanan ---
 ALLOW_CODE_EXEC: bool = _get_bool("ALLOW_CODE_EXEC", True)
@@ -258,6 +293,28 @@ SUARA_SELESAI: str = os.getenv("BAGASAI_SUARA_SELESAI", "").strip()
 
 ENV_FILE = CONFIG_HOME / ".env"
 
-# has_api_key()/require_api_key() DIHAPUS bersama model ber-API-key. bagas-ai
-# tak lagi punya kredensial wajib: yang dibutuhkan cuma login browser (sekali,
-# lewat jendela Chrome) dan — bila ingin memakai Telegram — token botnya.
+def has_api_key() -> bool:
+    """True bila NVIDIA_API_KEY terisi.
+
+    Kredensial ini TIDAK wajib: bagas-ai tetap jalan penuh dengan model browser
+    saja. Ia hanya syarat untuk model nvidia/* — karena itu pemeriksaannya
+    berupa pertanyaan (has_), bukan syarat mati saat startup.
+    """
+    return bool(NVIDIA_API_KEY)
+
+
+def require_api_key() -> None:
+    """Pastikan NVIDIA_API_KEY ada; kalau tidak, jelaskan cara mengisinya.
+
+    Pesannya menyebut jalan keluar yang TIDAK butuh kredensial (pindah ke model
+    browser) supaya pengguna tak merasa terkunci hanya karena memilih model
+    nvidia/* tanpa punya key.
+    """
+    if NVIDIA_API_KEY:
+        return
+    raise RuntimeError(
+        "Model ini lewat API NVIDIA dan butuh NVIDIA_API_KEY, yang belum diisi. "
+        f"Isi di {ENV_FILE} (baris: NVIDIA_API_KEY=nvapi-...), ambil key gratis "
+        "di https://build.nvidia.com — atau ketik /model lalu pilih model "
+        "browser, yang tak butuh key sama sekali."
+    )

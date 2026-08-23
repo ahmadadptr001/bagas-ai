@@ -119,6 +119,9 @@ def plan_step(current: int, note: str = "") -> str:
         return ("Semua langkah rencana selesai:\n" + teks
                 + "\n\nTutup dengan jawaban akhir berisi HASILnya."
                 + (f"\ncatatan: {note.strip()}" if note.strip() else ""))
+    # "panggil tool-nya", bukan "sertakan blok [[TOOL]]": hasil ini dibaca
+    # model (web) DAN model (API), dan keduanya memanggil tool dengan cara
+    # yang berbeda (blok teks vs function-calling asli).
     return (teks + (f"\ncatatan: {note.strip()}" if note.strip() else "")
-            + "\n\nKerjakan langkah bertanda ▸ sekarang — sertakan blok "
-              "[[TOOL]]-nya di pesan yang sama.")
+            + "\n\nKerjakan langkah bertanda ▸ sekarang — panggil tool-nya "
+              "di pesan yang sama.")

@@ -223,7 +223,13 @@ def cari_tool(kebutuhan: str, jumlah: int = 5) -> str:
     for _, nama in pilihan:
         baris.append(baris_tool(nama))
     baris.append("")
-    baris.append("Pakai NAMA PERSIS di atas saat memanggil [[TOOL]].")
+    # Kalimat ini sampai ke DUA jalur model, jadi ia tak boleh menyebut
+    # satu mekanisme pun: model (web) memanggil tool lewat blok teks
+    # [[TOOL]], model (API) lewat function-calling asli. Menyebut salah
+    # satunya berarti menyuruh separuh model memakai protokol yang bukan
+    # miliknya — dan model (API) yang menuliskan [[TOOL]] sebagai teks
+    # menghasilkan giliran yang tampak menjawab tapi tak menjalankan apa pun.
+    baris.append("Pakai NAMA PERSIS di atas saat memanggilnya.")
     return "\n".join(baris)
 
 

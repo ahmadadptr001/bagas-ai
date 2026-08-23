@@ -1135,14 +1135,29 @@ def _web_reply_complete(text: str) -> bool:
     return opens <= closes
 
 
+def _est_tokens(text: str) -> int:
+    """Perkiraan kasar: 1 token — 4 karakter.
+
+    Dipakai HANYA untuk penghitung realtime di layar, saat jumlah sebenarnya
+    belum diketahui. Angka resminya datang dari `usage` di ujung stream dan
+    langsung menggantikan perkiraan ini.
+    """
+    return max(1, len(text or "") // 4)
+
+
+def _est_messages(messages: list[dict[str, Any]]) -> int:
+    total = sum(len(str(m.get("content", "") or "")) for m in messages)
+    return total // 4
+
+
 class Usage:
     """Akumulator token (energi AI).
 
-    add() yang membaca objek usage milik API DIHAPUS: situs AI web tak pernah
-    melaporkan jumlah token, jadi satu-satunya sumber angka adalah estimasi dari
-    jumlah karakter lalu lintas giliran (lihat add_raw di _run_connector).
-    Begitu pula _est_tokens/_est_messages, yang dulu dipakai memperkirakan
-    ukuran prompt sebelum dikirim ke endpoint.
+    Dua sumber angka, sesuai jalur modelnya:
+      - add(usage)  : objek usage dari endpoint API — angka SEBENARNYA.
+      - add_raw(..) : estimasi dari jumlah karakter, satu-satunya cara di jalur
+        web (situs AI tak pernah melaporkan token) dan juga cadangan di jalur
+        API bila `stream_options.include_usage` tak dibalas.
     """
 
     def __init__(self) -> None:
@@ -1152,6 +1167,12 @@ class Usage:
     @property
     def total(self) -> int:
         return self.prompt + self.completion
+
+    def add(self, usage: Any) -> None:
+        if not usage:
+            return
+        self.prompt += getattr(usage, "prompt_tokens", 0) or 0
+        self.completion += getattr(usage, "completion_tokens", 0) or 0
 
     def add_raw(self, prompt: int, completion: int) -> None:
         self.prompt += prompt
@@ -1177,7 +1198,15 @@ class Agent:
         # menampilkan "aktif" pada entri yang tak ada.
         if not models.is_known_id(model_id):
             prefs.save(model=self.model_spec.id)
-        self.effort = None
+        # Effort model API: dipulihkan dari prefs lalu DISARING lewat tabel
+        # kapabilitas modelnya (models.ModelSpec.effort_levels). Untuk model
+        # web tetap None — di sana /effort berarti MENGKLIK tombol mode
+        # berpikir di situsnya, jadi tak ada nilai yang perlu disimpan.
+        self.effort: str | None = None
+        self._init_effort()
+        # Berapa kali effort dinaikkan SENDIRI dalam satu giliran (batasnya
+        # config.MAX_ESCALATIONS). Direset di tiap run().
+        self._escalations = 0
 
         self.memory = Memory(system_prompt=prompts.build_system_prompt())
         self.tool_names = tool_names
@@ -1253,11 +1282,13 @@ class Agent:
             self.memory.load(session.messages)
 
     # --- model ---
-    # `effort` DIPERTAHANKAN sebagai atribut (selalu None) karena UI & sesi masih
-    # membacanya, tapi mesin effort ala API — reasoning_budget Nemotron dan
-    # reasoning_effort gpt-oss — ikut terhapus bersama model ber-API-key. Untuk
-    # model web, /effort MENGKLIK tombol mode berpikir di situsnya (lihat
-    # WebConnector.web_actions), jadi tak ada state yang perlu disimpan di sini.
+    # `effort` punya DUA arti, tergantung jalur modelnya:
+    #  - model web  : /effort MENGKLIK tombol mode berpikir di situsnya (lihat
+    #                 WebConnector.web_actions). Tak ada state di sini, jadi
+    #                 self.effort tetap None.
+    #  - model API  : /effort memilih salah satu ModelSpec.effort_levels, yang
+    #                 diterjemahkan jadi extra_body tiap request. Nilainya
+    #                 disimpan di sini DAN di prefs.
 
     @property
     def model(self) -> str:
@@ -1272,8 +1303,44 @@ class Agent:
             # konteks (padahal chat-nya kosong) dan ID chat milik layanan lama
             # ikut terbawa.
             self._sync_web_state()
-        prefs.save(model=self.model_spec.id)
+        # Effort DISARING, bukan dibawa buta dan bukan dinolkan.
+        # TERUKUR: pindah nemotron(mendalam) -> deepseek menyisakan "mendalam",
+        # karena tingkat itu ADA di keduanya dan itu pilihan sadar pengguna.
+        # Yang TIDAK ada di model baru ("ringkas" milik DeepSeek saat pindah ke
+        # Nemotron) jatuh ke bawaan model baru. Penyaringan ini wajib: nilai
+        # asing diam-diam diabaikan extra_body_for(), jadi tanpa ini UI
+        # memamerkan effort yang sebenarnya tak pernah dikirim ke server.
+        self._init_effort()
+        prefs.save(model=self.model_spec.id, effort=self.effort)
         return self.model_spec.label
+
+    def _init_effort(self) -> None:
+        """Tetapkan effort awal dari prefs, disaring tabel kapabilitas model.
+
+        Disaring, bukan dipakai apa adanya: nilai tersimpan bisa milik model
+        lain. Nilai asing akan diam-diam diabaikan extra_body_for(), jadi lebih
+        baik dibereskan di sini — kalau tidak, UI memamerkan effort yang tak
+        pernah sampai ke server."""
+        spec = self.model_spec
+        if spec.is_web or not spec.effort_levels:
+            self.effort = None
+            return
+        tersimpan = prefs.get_effort()
+        self.effort = (tersimpan if tersimpan in spec.effort_levels
+                       else (spec.effort_default or None))
+
+    def set_effort(self, name: str) -> str | None:
+        """Ganti effort model API. None = model ini memang tak punya effort."""
+        spec = self.model_spec
+        if spec.is_web or not spec.effort_levels:
+            return None
+        if name not in spec.effort_levels:
+            raise ValueError(
+                f"Effort '{name}' tak dikenal untuk {spec.label}. Pilihan: "
+                + ", ".join(spec.effort_levels))
+        self.effort = name
+        prefs.save(effort=name)
+        return name
 
     def _sync_web_state(self) -> None:
         """Selaraskan kaitan chat web dengan LAYANAN yang sedang aktif."""
@@ -1333,13 +1400,42 @@ class Agent:
         except Exception:  # noqa: BLE001 - penanda gagal tak boleh mengganggu
             pass
 
-    # set_effort() & _escalate() DIHAPUS bersama model ber-API-key: keduanya
-    # bekerja dengan menaikkan parameter reasoning lalu berpindah ke model lain
-    # di katalog. Untuk model web, "naik kelas" otomatis tak masuk akal — tiap
-    # layanan butuh login browser tersendiri, jadi berpindah diam-diam di tengah
-    # tugas justru memutus konteks dan bisa memunculkan jendela login mendadak.
-    # Penjaga anti-macet untuk jalur web ada di _run_connector dalam bentuk yang
-    # sesuai: batas tool berulang & beruntun gagal, lalu dipaksa menyimpulkan.
+    def _escalate(self, reason: str) -> str | None:
+        """Naikkan effort satu tingkat saat model terdeteksi mandek/mengulang.
+
+        HANYA effort — TIDAK berpindah model, meski versi lama fungsi ini
+        melakukannya sesudah effort tertinggi. Berpindah model tak boleh
+        dihidupkan lagi karena katalognya kini BERCAMPUR: pindah otomatis bisa
+        mendarat di model web, yang berarti jendela login browser muncul
+        mendadak di tengah tugas. Lebih buruk lagi, kedua jalur memakai protokol
+        tool yang berbeda — riwayat berisi `tool_calls` asli tak bisa
+        dilanjutkan oleh model web yang cuma mengerti penanda [[TOOL]], jadi
+        perpindahan itu merusak konteks yang justru ingin diselamatkan.
+
+        Kembalikan keterangan perubahan, atau None bila tak ada yang bisa
+        dinaikkan (model web, model tanpa tingkatan, sudah di puncak, atau
+        anggaran naik-kelas giliran ini habis).
+        """
+        spec = self.model_spec
+        if spec.is_web or not spec.effort_levels:
+            return None
+        if self._escalations >= config.MAX_ESCALATIONS:
+            return None
+        opts = list(spec.effort_levels)
+        kini = self.effort if self.effort in opts else spec.effort_default
+        if kini not in opts:
+            return None
+        i = opts.index(kini)
+        if i >= len(opts) - 1:
+            return None
+        lama, self.effort = kini, opts[i + 1]
+        self._escalations += 1
+        return f"effort {lama} → {self.effort} ({reason})"
+
+    # Penjaga anti-macet jalur WEB tak lewat sini: ia ada di _run_connector
+    # dalam bentuk yang sesuai medianya (batas tool berulang & beruntun gagal,
+    # lalu dipaksa menyimpulkan), sebab di situs tak ada parameter effort yang
+    # bisa dinaikkan tanpa mengklik tombol di halamannya.
 
     # --- kaitan sesi terminal <-> percakapan di AI web ---
     def use_web_chat(self, chat_id: str) -> None:
@@ -1577,14 +1673,26 @@ class Agent:
         if not berkas:
             return ("Riwayat tak bisa disimpan (berkasnya gagal ditulis di "
                     f"{config.KONTEKS_DIR}).")
-        giliran = len(self._riwayat_web)
+        # Jumlah giliran dihitung dari SUMBER yang benar per jalur, karena isi
+        # berkasnya juga beda:
+        #  - (web) _riwayat_web  -> percakapan APA ADANYA (mentah/verbatim)
+        #  - (API) memory.messages -> ringkasan_giliran; riwayatnya kita pegang
+        #          sendiri, dan _riwayat_web memang SELALU kosong di jalur ini
+        #          (cuma _catat_web yang mengisinya, dan itu di _run_connector).
+        # Tanpa pemisahan ini jalur (API) selalu melapor "BELUM ada percakapan"
+        # padahal gilirannya IKUT tersimpan -- pengguna menyangka pekerjaannya
+        # hilang lalu mengulang dari nol.
+        web = self.model_spec.is_web
+        giliran = (len(self._riwayat_web) if web
+                   else len(prompts.transcript_rows(self.memory.messages)))
         besar = konteks.ukuran(berkas)
         # Dikatakan apa adanya kalau riwayatnya memang belum ada (sesi baru,
         # atau seluruh percakapan terjadi sebelum bagas-ai ini dijalankan).
         # Berkasnya tetap berguna — isinya konteks proyek — tapi menyebutnya
         # "riwayat tersimpan" akan membuat pengguna mengira pekerjaannya
         # terbawa padahal tidak.
-        isi = (f"- {giliran} giliran percakapan apa adanya"
+        isi = (f"- {giliran} giliran percakapan"
+               + (" apa adanya" if web else " (ringkasannya)")
                if giliran else
                "- BELUM ada percakapan yang tercatat di sesi ini — yang "
                "tersimpan baru konteks proyeknya")
@@ -1592,13 +1700,26 @@ class Agent:
         pecah = (f"\n- Dipecah jadi {len(berkas)} berkas karena melewati "
                  f"{config.KONTEKS_MAKS_BYTES // 1024} KB."
                  if len(berkas) > 1 else "")
+        # Penutupnya per jalur juga. /send-compact MENOLAK model (API) — ia
+        # mengunggah berkas ke kotak chat di situs — jadi menyarankannya di sana
+        # sama dengan menyuruh pengguna menabrak dinding.
+        if web:
+            catatan = (
+                "- Chat di situs TIDAK diapa-apakan dan tak ada yang dikirim.\n\n"
+                "Untuk melanjutkan di percakapan yang bersih: `/new` lalu "
+                "`/send-compact` — berkas INI yang diunggah, bukan yang lain.")
+        else:
+            catatan = (
+                "- Percakapan ini jalan terus; tak ada yang dikirim ke mana pun.\n\n"
+                "Model (API) tak punya kotak chat untuk diunggahi, jadi TAK ADA "
+                "/send-compact di sini dan berkas ini TIDAK ikut sendiri ke "
+                "giliran berikutnya. Sesudah `/new`, suruh saja bagas-ai membaca "
+                "berkas di atas — ia bisa membukanya sendiri dengan tool.")
         return (
             f"Ingatan tersimpan di `{berkas[0].parent}`:\n"
             + "\n".join(f"  - {p.name}" for p in berkas) + "\n\n"
             f"{isi} (±{besar // 1024} KB), plus peta proyek & memori.{pecah}\n"
-            "- Chat di situs TIDAK diapa-apakan dan tak ada yang dikirim.\n\n"
-            "Untuk melanjutkan di percakapan yang bersih: `/new` lalu "
-            "`/send-compact` — berkas INI yang diunggah, bukan yang lain."
+            + catatan
         )
 
     def _simpan_otomatis(self, conn: Any = None, on_notice: Any = None,
@@ -1947,11 +2068,16 @@ class Agent:
     ) -> str:
         """Proses satu giliran. Kembalikan teks jawaban final.
 
-        SEMUA model bagas-ai kini berbasis browser, jadi setiap giliran
-        diteruskan ke situs AI web lewat Playwright (`on_status`/`on_token`
-        untuk progres & teks) dan memakai protokol tool berbasis penanda
-        [[TOOL]] — bukan tool-calling API. Jalur API beserta
-        streaming/retry/naik-kelasnya sudah dihapus.
+        DUA jalur, dipilih oleh `model_spec.is_web` dan hanya di sini:
+          - model `web/*`    — _run_connector: situs AI lewat Playwright
+            (`on_status`/`on_token` untuk progres & teks), tool lewat protokol
+            penanda [[TOOL]] karena situs chat tak punya function-calling.
+          - model `nvidia/*` — _run_api: endpoint OpenAI-compatible, tool
+            lewat function-calling ASLI, effort lewat extra_body.
+
+        Callback-nya sama untuk keduanya supaya UI tak perlu tahu jalur mana
+        yang dipakai; yang tak punya padanan di jalur API disebutkan di
+        _run_api.
 
         `on_message(teks)` dipanggil untuk narasi antar-langkah (ketika agent
         menjelaskan apa yang akan dilakukan sebelum memakai tool).
@@ -1974,6 +2100,19 @@ class Agent:
             # model melanjutkan daftar langkah milik permintaan yang sudah lewat.
             from .tools import plan_tool as _plan
             _plan.reset()
+            # Anggaran naik-kelas berlaku PER GILIRAN: kalau tidak, effort yang
+            # sempat dinaikkan di giliran lalu membuat giliran berikutnya mulai
+            # dengan kuota yang sudah habis.
+            self._escalations = 0
+            if not self.model_spec.is_web:
+                return self._run_api(
+                    user_input, cancel_event=cancel_event,
+                    on_status=on_status, on_token=on_token,
+                    on_tool=on_tool, on_message=on_message,
+                    on_tool_result=on_tool_result, on_notice=on_notice,
+                    on_retry=on_retry, attachments=attachments,
+                    ambil_sisipan=ambil_sisipan,
+                )
             return self._run_connector(
                 user_input, cancel_event=cancel_event,
                 on_status=on_status, on_token=on_token,
@@ -1982,6 +2121,408 @@ class Agent:
                 on_retry=on_retry, attachments=attachments,
                 ambil_sisipan=ambil_sisipan, on_tim=on_tim, on_padat=on_padat,
             )
+
+    # --- jalur API NVIDIA (function-calling asli) --------------------------
+    def _run_api(
+        self,
+        user_input: Any,
+        *,
+        cancel_event: Any = None,
+        on_status: Callable[[str], None] | None = None,
+        on_token: Callable[[str], None] | None = None,
+        on_tool: Callable[[str, dict[str, Any]], None] | None = None,
+        on_message: Callable[[str], None] | None = None,
+        on_tool_result: Callable[[str, str], None] | None = None,
+        on_notice: Callable[[str], None] | None = None,
+        on_retry: Callable[[int, float, Exception], None] | None = None,
+        attachments: list[str] | None = None,
+        ambil_sisipan: Callable[[], list[str]] | None = None,
+    ) -> str:
+        """Jalankan giliran lewat endpoint API NVIDIA sebagai AGENT penuh.
+
+        Bedanya dengan _run_connector, dan kenapa keduanya tak bisa disatukan:
+        di sini KITA yang memegang konteks (seluruh riwayat dikirim ulang tiap
+        request), tool dipanggil lewat `tool_calls` ASLI dari endpoint, dan
+        setelan berpikir dikirim sebagai `extra_body`. Di jalur web ketiganya
+        kebalikannya: situs memegang konteks, tool lewat penanda teks, dan mode
+        berpikir diatur dengan MENGKLIK tombol di halamannya.
+
+        Yang tak punya padanan di sini, sengaja tidak dipalsukan:
+          - `on_padat` : simpanan otomatis di jalur web dipicu jumlah karakter
+            percakapan DI SITUS. Di sini pemangkasan riwayat sudah ditangani
+            Memory, jadi tak ada bar kemajuan yang perlu digerakkan.
+          - `on_tim`   : tinjauan rekan tim berjalan di jalur web; di sini satu
+            giliran adalah satu rantai tool, tak ada langkah untuk ditinjau.
+        """
+        self.memory.add_user(user_input)
+        self.tokens_last = Usage()
+        self.tokens_live = 0
+
+        if attachments:
+            # Ketiga model nvidia/* bertipe TEKS (ModelSpec.multimodal=False),
+            # jadi gambar memang tak bisa dikirim. Lampirannya TIDAK dibuang
+            # diam-diam: jalurnya dialihkan ke tool baca-berkas dan pengguna
+            # diberi tahu. Membuangnya tanpa kabar membuat pengguna menunggu
+            # jawaban tentang berkas yang model ini tak pernah lihat.
+            daftar = "\n".join(f"- {a}" for a in attachments)
+            self.memory.add({
+                "role": "user",
+                "content": (
+                    "[SISTEM] Pengguna melampirkan berkas di bawah. Model ini "
+                    "tak menerima gambar lewat API, jadi berkasnya TIDAK "
+                    "terkirim sebagai gambar. Buka sendiri dengan tool "
+                    "(mis. baca berkas / daftar isi folder) bila perlu:\n"
+                    + daftar
+                ),
+            })
+            if on_notice:
+                on_notice(
+                    f"{len(attachments)} lampiran tak dikirim sebagai gambar "
+                    f"({self.model_spec.label} model teks) — pathnya "
+                    "diteruskan supaya bisa dibaca lewat tool")
+
+        try:
+            return self._api_loop(
+                cancel_event=cancel_event, on_status=on_status,
+                on_token=on_token, on_tool=on_tool, on_message=on_message,
+                on_tool_result=on_tool_result, on_notice=on_notice,
+                on_retry=on_retry, ambil_sisipan=ambil_sisipan,
+            )
+        except BaseException:
+            # BaseException, bukan Exception: KeyboardInterrupt & llm.Cancelled
+            # justru kasus yang paling butuh pembersihan ini. Riwayat yang
+            # berhenti di tengah rantai tool memuat `tool_calls` tanpa balasan
+            # `role:"tool"` pasangannya — bentuk yang DITOLAK endpoint,
+            # jadi tanpa perbaikan ini giliran BERIKUTNYA gagal sebelum mulai.
+            self.memory.repair_dangling_tools()
+            self._persist()
+            raise
+
+    def _api_loop(
+        self,
+        *,
+        cancel_event: Any,
+        on_status: Callable[[str], None] | None,
+        on_token: Callable[[str], None] | None,
+        on_tool: Callable[[str, dict[str, Any]], None] | None,
+        on_message: Callable[[str], None] | None,
+        on_tool_result: Callable[[str, str], None] | None,
+        on_notice: Callable[[str], None] | None,
+        on_retry: Callable[[int, float, Exception], None] | None,
+        ambil_sisipan: Callable[[], list[str]] | None,
+    ) -> str:
+        """Putaran tool: minta jawaban — eksekusi tool — kirim
+        hasilnya, sampai model menjawab tanpa memanggil tool lagi.
+
+        Jaring pengaman anti-loop-liar (semuanya per-giliran):
+          - `seen_tools`  : cache hasil per (nama+argumen). Panggilan PERSIS
+                            SAMA tak dieksekusi ulang; hasilnya dikembalikan
+                            beserta teguran.
+          - `dup_hits`    : berapa kali pengulangan terjadi. Melewati batas
+                            — tool DIMATIKAN & model dipaksa menyimpulkan.
+          - `total_calls` : anggaran total panggilan tool (config.MAX_TOOL_CALLS).
+          - `weak_hits`   : model menuliskan tool call sebagai TEKS/XML (llm.py
+                            menyelamatkannya dengan id `txt_`) = lemah di
+                            function-calling.
+          - `empty_hits`  : balasan kosong berulang.
+        """
+        spec = self.model_spec
+        schemas = tools.get_schemas(self.tool_names)
+        guard = 0
+        safety = max(self.max_iterations, 60)
+        seen_tools: dict[str, str] = {}
+        dup_hits = 0
+        total_calls = 0
+        force_final = False
+        weak_hits = 0
+        empty_hits = 0
+        stall_rounds = 0
+
+        while True:
+            guard += 1
+            if guard > safety:
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                raise llm.Cancelled()
+
+            # Dihitung ULANG tiap putaran: effort bisa BERUBAH di tengah giliran
+            # akibat _escalate.
+            extra = spec.extra_body_for(self.effort)
+            prompt_est = _est_messages(self.memory.messages)
+            # "fase": None -> belum ada apa pun, "pikir" -> pikiran mengalir,
+            # "jawab" -> jawaban mengalir. Dipakai supaya status hanya
+            # berubah saat FASENYA berpindah, bukan tiap potongan token.
+            state = {"completion_est": 0, "reasoning_est": 0, "fase": None}
+            self.tokens_live = self.tokens_last.total + prompt_est
+            if on_status:
+                # NETRAL: pada titik ini permintaan baru dikirim dan belum satu
+                # potong pun kembali, jadi kita belum tahu model akan bernalar
+                # dulu atau langsung menjawab. on_reasoning/on_content di bawah
+                # yang mempertegasnya begitu fasenya jelas.
+                on_status(f"{spec.label} sedang memproses")
+
+            def on_content(piece: str) -> None:
+                # Jawaban SUNGGUHAN. Begitu ia mulai mengalir, status kembali
+                # dari "berpikir" ke "menjawab" supaya keduanya tak tertukar.
+                if state.get("fase") != "jawab":
+                    state["fase"] = "jawab"
+                    if on_status:
+                        on_status(f"{spec.label} sedang menjawab")
+                state["completion_est"] += _est_tokens(piece)
+                self.tokens_live = (
+                    self.tokens_last.total + prompt_est + state["completion_est"]
+                )
+                if on_token:
+                    on_token(piece)
+
+            def on_reasoning(piece: str) -> None:
+                """Aliran "pikiran" model — DIPISAH dari aliran jawaban.
+
+                WAJIB diberikan, walau isinya cuma mengganti status. Bila
+                on_reasoning dibiarkan kosong, llm.py meneruskan pikiran itu ke
+                on_content sebagai jaring penyelamat (supaya tak hilang saat
+                `content` kosong) — dan pada model yang mode berpikirnya
+                TAK BISA dimatikan (muse-glimmer: TERUKUR selalu bernalar),
+                seluruh rantai pikiran akan tercetak sebagai kalimat jawaban.
+                Isinya tetap tersimpan di llm.py, jadi tak ada yang hilang."""
+                state["reasoning_est"] += _est_tokens(piece)
+                if state.get("fase") is None:
+                    state["fase"] = "pikir"
+                    if on_status:
+                        on_status(f"{spec.label} sedang berpikir")
+
+            def _on_retry(attempt: int, wait: float, exc: Exception) -> None:
+                # Panggilan diulang DARI AWAL, jadi estimasi token parsial
+                # direset — tanpa ini tiap percobaan menambah angka yang
+                # sama lagi dan penghitung di layar membengkak tanpa alasan.
+                state["completion_est"] = 0
+                state["reasoning_est"] = 0
+                state["fase"] = None
+                self.tokens_live = self.tokens_last.total + prompt_est
+                if on_retry:
+                    on_retry(attempt, wait, exc)
+
+            # Saat stagnasi terdeteksi, tool DIMATIKAN — model TERPAKSA
+            # menjawab dengan teks (menyimpulkan), tak bisa mengulang tool lagi.
+            active_tools = None if force_final else (schemas or None)
+            try:
+                content, tool_calls, usage = llm.stream_completion(
+                    self.memory.messages,
+                    tools=active_tools,
+                    # api_model, BUKAN spec.id: `id` adalah identitas internal
+                    # bagas-ai ("nvidia/deepseek") yang tak dikenal server.
+                    model=spec.api_model,
+                    extra_body=extra,
+                    max_tokens=spec.max_tokens,
+                    on_content=on_content,
+                    on_reasoning=on_reasoning,
+                    cancel_event=cancel_event,
+                    on_retry=_on_retry,
+                )
+            except llm.StreamStalled:
+                # Stream berhenti mengirim data berulang kali. Naikkan effort
+                # lalu ULANGI: memory belum disentuh di putaran ini, jadi
+                # konteksnya masih utuh dan tak ada pekerjaan yang hilang.
+                stall_rounds += 1
+                if stall_rounds > 3:
+                    final = (
+                        "Maaf, model terus macet (berhenti mengirim respons) "
+                        "meski sudah kubatalkan & kuulang otomatis beberapa "
+                        "kali. Kemungkinan server NVIDIA sedang bermasalah "
+                        "— coba lagi sebentar lagi, atau ganti model "
+                        "dengan /model (model (web) tak lewat server ini)."
+                    )
+                    self.memory.add_assistant_text(final)
+                    self._persist()
+                    return final
+                changed = self._escalate(
+                    "respons macet — stream diam terlalu lama")
+                if on_notice:
+                    on_notice(changed or
+                              "respons macet — dibatalkan & diulang otomatis")
+                continue
+
+            # Konfirmasi token: pakai usage ASLI bila ada, estimasi bila tidak.
+            if usage:
+                self.tokens_last.add(usage)
+                self.tokens_session.add(usage)
+            else:
+                # Pikiran IKUT dihitung: ia token keluaran yang benar-benar
+                # ditagih, dan pada model yang selalu bernalar ia bisa jauh
+                # lebih banyak daripada jawabannya sendiri. Mengabaikannya
+                # membuat penghitung di layar jauh lebih kecil dari kenyataan.
+                keluar = state["completion_est"] + state["reasoning_est"]
+                self.tokens_last.add_raw(prompt_est, keluar)
+                self.tokens_session.add_raw(prompt_est, keluar)
+            self.tokens_live = self.tokens_last.total
+
+            # --- deteksi "performa menurun" ---
+            if tool_calls and any(
+                str(tc.get("id", "")).startswith("txt_") for tc in tool_calls
+            ):
+                weak_hits += 1
+            if not tool_calls and not (content and content.strip()):
+                empty_hits += 1
+
+            if not tool_calls:
+                # Balasan kosong berulang — coba naikkan effort dulu
+                # sebelum menyerah.
+                if empty_hits >= 2 and not force_final:
+                    changed = self._escalate("respons kosong berulang")
+                    if changed:
+                        empty_hits = 0
+                        if on_notice:
+                            on_notice(changed)
+                        self.memory.add({
+                            "role": "user",
+                            "content": ("[SISTEM] Balasanmu kosong. Lanjutkan "
+                                        "tugas dari konteks di atas dan berikan "
+                                        "jawaban."),
+                        })
+                        continue
+                # Jangan pernah "berhenti diam": bila model tak menghasilkan
+                # teks apa pun, beri pesan cadangan yang jelas alih-alih layar
+                # kosong yang tak bisa dibedakan dari aplikasi menggantung.
+                final = content if (content and content.strip()) else (
+                    "Hmm, aku berhenti tanpa sempat menyusun jawaban. Coba "
+                    "ulangi atau perjelas permintaanmu"
+                    + (". Bisa juga turunkan /effort supaya anggaran "
+                       "berpikirnya tak habis sebelum menjawab."
+                       if spec.effort_levels else ".")
+                )
+                self.memory.add_assistant_text(final)
+                self._persist()
+                return final
+
+            # Narasi sebelum aksi tool (mis. "Baik, saya akan membuat file X").
+            if content and content.strip() and on_message:
+                on_message(content)
+
+            self.memory.add({
+                "role": "assistant",
+                "content": content or "",
+                "tool_calls": [
+                    {
+                        "id": tc["id"] or f"call_{i}",
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"] or "{}",
+                        },
+                    }
+                    for i, tc in enumerate(tool_calls)
+                ],
+            })
+            for i, tc in enumerate(tool_calls):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise llm.Cancelled()
+                name = tc["name"]
+                try:
+                    args = json.loads(tc["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                if on_tool:
+                    on_tool(name, args)
+                key = name + "::" + json.dumps(
+                    args, sort_keys=True, ensure_ascii=False, default=str
+                )
+                if key in seen_tools:
+                    dup_hits += 1
+                    result = (
+                        "[SISTEM] Kamu SUDAH memanggil tool ini dengan argumen "
+                        "yang sama persis; hasilnya identik dengan di bawah. "
+                        "JANGAN mengulanginya — gunakan hasil ini lalu "
+                        "lanjut ke langkah berikutnya atau berikan jawaban "
+                        "akhir.\n\n" + seen_tools[key]
+                    )
+                else:
+                    result = tools.execute(name, args)
+                    seen_tools[key] = result
+                    # Hasil ditampilkan HANYA saat tool benar-benar dieksekusi,
+                    # bukan saat dedup mengembalikan cache + teguran.
+                    if on_tool_result:
+                        on_tool_result(name, result)
+                total_calls += 1
+                self.memory.add({
+                    "role": "tool",
+                    "tool_call_id": tc["id"] or f"call_{i}",
+                    "content": result,
+                })
+
+            # SISIPKAN pesan susulan pengguna, tepat di batas langkah ini.
+            # TIDAK saat force_final: di sana model justru sedang disuruh
+            # berhenti memakai tool dan menyimpulkan, jadi menaruh tugas baru
+            # berarti dua perintah yang bertabrakan. Pesannya tetap di antrean
+            # dan dikerjakan sebagai giliran berikutnya — tak ada yang
+            # hilang.
+            if ambil_sisipan is not None and not force_final:
+                try:
+                    susulan = list(ambil_sisipan() or [])
+                except Exception:  # noqa: BLE001 - antrean rusak != giliran gagal
+                    susulan = []
+                bersih = [s.strip() for s in susulan if (s or "").strip()]
+                for s in bersih:
+                    self.memory.add_user(s)
+                if bersih and on_notice:
+                    on_notice(
+                        f"{len(bersih)} pesan susulanmu disisipkan ke giliran ini"
+                        if len(bersih) > 1 else
+                        "pesan susulanmu disisipkan ke giliran ini")
+
+            # --- stagnasi / performa menurun ---
+            # Naikkan effort dulu lalu LANJUTKAN dengan konteks yang sama;
+            # memory tak direset, jadi progres tak hilang.
+            looping = dup_hits >= config.MAX_DUPLICATE_TOOL_CALLS
+            weak = weak_hits >= 2
+            if not force_final and (looping or weak):
+                reason = ("terdeteksi mengulang langkah" if looping
+                          else "lemah memanggil tool")
+                changed = self._escalate(reason)
+                if changed:
+                    if on_notice:
+                        on_notice(changed)
+                    # Penghitung direset supaya setelan baru dapat kesempatan
+                    # bersih, bukan langsung kena batas warisan sebelumnya.
+                    dup_hits = 0
+                    weak_hits = 0
+                    seen_tools.clear()
+                    self.memory.add({
+                        "role": "user",
+                        "content": (
+                            f"[SISTEM] Kamu tampak {reason}. Aku sudah "
+                            f"menaikkan kemampuan berpikirmu ({changed}). "
+                            "Konteks & progres di atas TETAP berlaku — "
+                            "JANGAN ulangi dari nol. Lihat apa yang SUDAH "
+                            "selesai, lalu lanjutkan langkah BERIKUTNYA sampai "
+                            "tuntas."
+                        ),
+                    })
+                    continue
+            # Sudah tak bisa dinaikkan lagi (atau anggaran tool habis) —
+            # minta menyimpulkan dengan jujur.
+            if not force_final and (
+                looping or weak or total_calls >= config.MAX_TOOL_CALLS
+            ):
+                force_final = True
+                self.memory.add({
+                    "role": "user",
+                    "content": (
+                        "[SISTEM] Kamu tampak mengulang langkah / terlalu "
+                        "banyak memakai tool. STOP memakai tool dan berikan "
+                        "jawaban akhir dalam teks biasa. JUJUR: jelaskan apa "
+                        "yang SUDAH selesai dan apa yang BELUM. JANGAN mengaku "
+                        "tuntas kalau memang belum — sebutkan langkah "
+                        "tersisa yang perlu dilakukan."
+                    ),
+                })
+
+        fallback = (
+            "Maaf, proses berhenti karena mencapai batas iterasi tool. "
+            "Coba persempit permintaanmu."
+        )
+        self.memory.add_assistant_text(fallback)
+        self._persist()
+        return fallback
 
     # --- pemulihan saat situsnya bermasalah -------------------------------
     def _pulihkan_chat_rusak(self, exc, user_text, on_status, on_notice) -> str:

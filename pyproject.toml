@@ -4,14 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.1.80"
+version = "1.1.82"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # WAJIB: seluruh model bagas-ai berjalan lewat browser, jadi Playwright
-    # bukan lagi pelengkap opsional seperti dulu.
+    # WAJIB untuk model web/* (mayoritas katalog): jalurnya otomasi browser,
+    # jadi Playwright bukan pelengkap opsional seperti dulu.
     "playwright>=1.40.0",
+    # WAJIB untuk model nvidia/*: klien endpoint OpenAI-compatible di
+    # llm.py. Diimpor MALAS di sana, jadi pengguna yang cuma memakai model
+    # browser tak pernah membayar waktu impornya -- tapi paketnya tetap wajib
+    # dipasang, karena satu /model ke nvidia/* langsung membutuhkannya dan
+    # kegagalan impor di tengah sesi jauh lebih membingungkan daripada
+    # dependensi yang ikut terpasang sejak awal.
+    "openai>=1.30.0",
     "rich>=13.0.0",
     # WAJIB: kotak chat, menu interaktif (ui/menu.py), dan seluruh line editing
     # dibangun di atasnya. Selama ini cuma kebetulan ikut terpasang lewat
