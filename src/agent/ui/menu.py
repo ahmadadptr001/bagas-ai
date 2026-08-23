@@ -76,7 +76,6 @@ MERAH = "fg:#f0603c"
 _MAKS_TAMPIL = 9
 # Daftar sepanjang ini ke atas mendapat kotak pencarian (ketik untuk menyaring).
 _AMBANG_CARI = 8
-_LEBAR_MAKS = 96
 
 
 class Choice:
@@ -119,14 +118,21 @@ def _lebar_terminal() -> int:
     warisan itu bisa basi (terminal sudah diubah ukurannya, environ belum)
     sehingga menu yang sedang tampil digambar dengan lebar lama sampai
     ditutup. Tanyakan ke output prompt_toolkit yang sedang menggambar dulu,
-    lalu ke terminal lewat os.get_terminal_size — keduanya selalu segar."""
+    lalu ke terminal lewat os.get_terminal_size — keduanya selalu segar.
+
+    Yang dikembalikan JUMLAH KOLOM TERMINAL apa adanya, di semua jalur. Dulu
+    jalur prompt_toolkit memotong satu kolom sendiri sementara jalur
+    os/shutil tidak, jadi terminal yang sama dilaporkan beda satu kolom
+    tergantung ada-tidaknya app yang sedang berjalan — selisih sekecil itu
+    sudah cukup menggeser tepi kotak. Urusan "kolom terakhir tak boleh
+    dilukis" sekarang dipusatkan di _lebar_kotak, satu tempat saja."""
     try:
         from prompt_toolkit.application.current import get_app_or_none
         app = get_app_or_none()
         if app is not None and app.is_running:
             kolom = app.output.get_size().columns
             if kolom > 1:
-                return max(40, min(kolom - 1, 200))
+                return kolom
     except Exception:  # noqa: BLE001
         pass
     import os
@@ -134,14 +140,53 @@ def _lebar_terminal() -> int:
         try:
             kolom = os.get_terminal_size(f.fileno()).columns
             if kolom > 0:
-                return max(40, min(kolom, 200))
+                return kolom
         except Exception:  # noqa: BLE001
             continue
     try:
         import shutil
-        return max(40, min(shutil.get_terminal_size((80, 24)).columns, 200))
+        return shutil.get_terminal_size((80, 24)).columns
     except Exception:  # noqa: BLE001
         return 80
+
+
+def _lebar_kotak() -> int:
+    """Lebar tergambar tiap kotak menu = lebar terminal dikurangi SATU kolom.
+
+    Kembaran persis _lebar_kotak di interfaces/cli.py, dan itu justru
+    maksudnya: kotak chat + bar status milik CLI dipaku di kaki tiap menu
+    (lihat _jalankan), jadi kotak menu, kotak chat, dan bar status WAJIB
+    berbagi satu tepi kanan. Beda sedikit saja langsung terbaca mata sebagai
+    kotak kepotong yang menggantung di atas dua baris yang penuh sampai tepi.
+
+    Kenapa W-1 dan bukan W: penggambar prompt_toolkit tak pernah melukis kolom
+    terakhir terminal (supaya tak kena auto-wrap), jadi W-1 adalah lebar yang
+    BENAR-BENAR habis tergambar — termasuk rel kanan dan sudut-sudutnya.
+
+    Tak ada lagi batas atas (dulu konstanta 96 kolom) maupun potongan dua
+    kolom. Batas itu masuk akal ketika kotak menu masih berdiri sendiri di
+    tengah layar, tapi sejak kaki CLI menempel di bawahnya ia berubah jadi
+    sumber kerusakan: di terminal 133 kolom, kotaknya berhenti 36 kolom
+    sebelum tepi kanan sementara kotak chat tepat di bawahnya penuh."""
+    # Selama ada kaki, lebarnya DIUKUR dari kaki itu — tidak dihitung ulang.
+    # Alasannya: kaki digambar rich SEBELUM app menu berjalan, kotak menu
+    # digambar prompt_toolkit SESUDAHNYA, dan kedua penggambar itu tak selalu
+    # sepakat soal jumlah kolom (rich memotong satu kolom sendiri di konsol
+    # warisan Windows). Menghitung ulang berarti bertaruh keduanya sepakat;
+    # mengukur berarti kotak menu memakai angka yang SAMA dengan yang sudah
+    # dipakai kaki, jadi tepi kanannya sejajar dengan sendirinya.
+    kaki = kaki_aktif           # diisi cli.py — lihat catatan di kaki_aktif
+    if kaki:
+        try:
+            teks = "".join(t for _, t in kaki)
+            lebar = max(get_cwidth(b) for b in teks.split("\n"))
+            # Waras dulu: kaki yang kosong/rusak jangan sampai mengecilkan
+            # kotak jadi tak terpakai atau melebarkannya keluar terminal.
+            if 20 <= lebar <= _lebar_terminal():
+                return lebar
+        except Exception:  # noqa: BLE001
+            pass
+    return max(20, _lebar_terminal() - 1)
 
 
 def _potong(teks: str, maks: int) -> str:
@@ -235,7 +280,7 @@ def _kotak(judul: str, isi: list[list[tuple[str, str]]], footer: str,
     beberapa baris. Kalau dipaksa di garis atas, judulnya akan melewati lebar
     terminal lalu dilipat sendiri oleh terminal, dan bingkainya berantakan."""
     warna = warna or EMAS()
-    lebar = min(_lebar_terminal() - 2, _LEBAR_MAKS)
+    lebar = _lebar_kotak()
     frag: list[tuple[str, str]] = []
 
     def baris(bagian: list[tuple[str, str]]) -> None:
@@ -364,7 +409,7 @@ def select(message: str = "", choices: Sequence[Any] = (), default: Any = None,
         awal = 0 if len(lihat) <= _MAKS_TAMPIL else max(
             0, min(pos - _MAKS_TAMPIL // 2, len(lihat) - _MAKS_TAMPIL))
         akhir = min(len(lihat), awal + _MAKS_TAMPIL)
-        lebar = min(_lebar_terminal() - 2, _LEBAR_MAKS) - 8
+        lebar = _lebar_kotak() - 8
 
         isi: list[list[tuple[str, str]]] = []
         if awal > 0:
@@ -519,7 +564,7 @@ def checkbox(message: str = "", choices: Sequence[Any] = (), hint: str = "",
         awal = 0 if len(lihat) <= _MAKS_TAMPIL else max(
             0, min(pos - _MAKS_TAMPIL // 2, len(lihat) - _MAKS_TAMPIL))
         akhir = min(len(lihat), awal + _MAKS_TAMPIL)
-        lebar = min(_lebar_terminal() - 2, _LEBAR_MAKS) - 10
+        lebar = _lebar_kotak() - 10
 
         isi: list[list[tuple[str, str]]] = []
         if awal > 0:
@@ -690,7 +735,7 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
 
     buf.accept_handler = _terima
 
-    lebar = min(_lebar_terminal() - 2, _LEBAR_MAKS)
+    lebar = _lebar_kotak()
     warna = warna or ORANYE()
     judul_di_dalam = bool(message) and get_cwidth(message) > lebar - 8
 
