@@ -327,7 +327,13 @@ def transcript_rows(
         content = m.get("content")
         if not isinstance(content, str):
             continue
-        text = content.strip()
+        # Penanda lampiran media [LAMPIR-MEDIA]<path> adalah URUSAN DALAM
+        # jalur API (dikonversi jadi bagian multimodal per-request). Ia TIDAK
+        # boleh bocor ke ringkasan/digest/berkas /compact — dulu ia ikut dan
+        # bahkan disuntik ulang sebagai teks mentah oleh /send-compact.
+        text = "\n".join(ln for ln in content.splitlines()
+                         if not ln.startswith("[LAMPIR-MEDIA]")).strip()
+        text = text.strip()
         # Lewati instruksi internal & preamble yang bukan ucapan pengguna.
         if not text or text.startswith("[SISTEM]") or text.startswith("[[HASIL"):
             continue

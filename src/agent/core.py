@@ -980,14 +980,38 @@ def _potong_alasan(asli: str, maks: int = 90) -> str:
     return teks or "riwayat melebihi jendela konteks"
 
 
-def _pesan_dengan_media(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+# Batas ukuran media per request (terverifikasi: video 30 MB -> data-URL
+# ±40 MB yang dikirim ulang DI SETIAP putaran rantai tool — biaya meledak
+# dan konteks pasti penuh). Media di atas batas DILEWATI dengan kabar.
+_BATAS_GAMBAR = 5 * 1024 * 1024     # 5 MB / gambar
+_BATAS_VIDIO = 20 * 1024 * 1024     # 20 MB / video
+_BATAS_TOTAL_MEDIA = 24 * 1024 * 1024  # total gabungan dalam satu pesan
+
+
+def _pesan_dengan_media(messages: list[dict[str, Any]],
+                        cache: dict[str, str | None] | None = None,
+                        lewat: list[str] | None = None,
+                        ) -> list[dict[str, Any]]:
     """Konversi pesan user berpenanda [LAMPIR-MEDIA]<path> jadi multimodal.
 
     Gambar menjadi bagian `image_url`, video menjadi `video_url` — keduanya
     data-URL base64 sesuai contoh resmi OpenRouter. Penanda yang filenya
     sudah tak ada / formatnya tak didukung dibuang diam-diam: riwayat lama
     (resume) sering menyimpan path yang sudah terhapus, dan mengirim data-URL
-    kosong justru membuat seluruh request ditolak."""
+    kosong justru membuat seluruh request ditolak.
+
+    `cache` (opsional): {path: data-url atau None} milik SATU giliran —
+    diisi sekali lalu dipakai ulang tiap putaran rantai tool, supaya berkas
+    besar tidak dibaca & dienkode ulang berkali-kali dan keputusan "terlalu
+    besar" konsisten antar-putaran. Bila tak diberikan, fungsi tetap jalan
+    tanpa cache (dipakai uji/pemakaian sekali-pakai).
+
+    `lewat` (opsional): daftar keterangan media yang DILEWATI karena
+    melebihi batas ukuran — pemanggil boleh mengumumkannya sekali via
+    on_notice alih-alih membiarkan media hilang tanpa kabar."""
+    cache = cache if cache is not None else {}
+    lewat = lewat if lewat is not None else []
+    total = sum(len(v) for v in cache.values() if v)
     out: list[dict[str, Any]] = []
     for m in messages:
         c = m.get("content")
@@ -1002,13 +1026,34 @@ def _pesan_dengan_media(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                          if not ln.startswith(_MEDIA_LAMPIR)).strip()
         parts: list[dict[str, Any]] = [{"type": "text", "text": teks}] if teks else []
         for p in paths:
-            mime = _mime_gambar(p) or _mime_vidio(p)
-            if not (mime and Path(p).is_file()):
+            url = cache.get(p)
+            if url is None and p not in cache:
+                mime = _mime_gambar(p) or _mime_vidio(p)
+                if not (mime and Path(p).is_file()):
+                    continue          # hilang/bukan media: buang penandanya
+                vidio = mime in _MIME_VIDIO
+                batas = _BATAS_VIDIO if vidio else _BATAS_GAMBAR
+                besar = Path(p).stat().st_size
+                if besar > batas or total + besar > _BATAS_TOTAL_MEDIA:
+                    sebab = ("melebihi batas "
+                             f"{batas // (1024 * 1024)} MB per media"
+                             if besar > batas else
+                             "melebihi kuota total media pesan")
+                    ket = (f"{Path(p).name} ({besar // (1024 * 1024)} MB) "
+                           f"dilewati: {sebab}")
+                    lewat.append(ket)
+                    cache[p] = None   # keputusan TETAP utk putaran berikutnya
+                    continue
+                with open(p, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                jenis = "image_url" if mime in _MIME_GAMBAR else "video_url"
+                url = f"data:{mime};base64,{b64}"
+                cache[p] = url
+                total += len(url)
+            if not url:
                 continue
-            with open(p, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode("utf-8")
-            jenis = "image_url" if mime in _MIME_GAMBAR else "video_url"
-            parts.append({"type": jenis, jenis: {"url": f"data:{mime};base64,{b64}"}})
+            jenis = "image_url" if url.startswith("data:image/") else "video_url"
+            parts.append({"type": jenis, jenis: {"url": url}})
         if len(parts) > 1:  # ada teks DAN minimal satu media sah
             out.append({**m, "content": parts})
         else:
@@ -1866,6 +1911,14 @@ class Agent:
         ringkas: list[tuple[str, str]] = []
         ekor: list[tuple[str, str]] = []
         terlihat: set[tuple[str, str]] = set()
+
+        def _bersih(isi: Any) -> str:
+            # Berkas memory buatan versi lama bisa membawa penanda
+            # [LAMPIR-MEDIA] di isinya — jangan disuntikkan apa adanya.
+            return "\n".join(
+                ln for ln in " ".join(str(isi).split()).splitlines()
+                if not ln.startswith(_MEDIA_LAMPIR)).strip()
+
         for p in berkas:
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
@@ -1873,16 +1926,20 @@ class Agent:
                 continue
             for r in (data.get("ringkasan_giliran") or []):
                 if isinstance(r, dict) and r.get("isi"):
-                    pasangan = (str(r.get("dari", "?")),
-                                " ".join(str(r["isi"]).split()))
+                    isi = _bersih(r["isi"])
+                    if not isi:
+                        continue
+                    pasangan = (str(r.get("dari", "?")), isi)
                     if pasangan not in terlihat:
                         terlihat.add(pasangan)
                         ringkas.append(pasangan)
             verbatim = data.get("percakapan_terakhir_apa_adanya") or {}
             for g in (verbatim.get("giliran") or [])[-10:]:
                 if isinstance(g, dict) and g.get("isi"):
-                    pasangan = (str(g.get("dari", "?")),
-                                " ".join(" ".join(g["isi"]).split())[:600])
+                    isi = _bersih(g["isi"])[:600]
+                    if not isi:
+                        continue
+                    pasangan = (str(g.get("dari", "?")), isi)
                     if pasangan not in terlihat:
                         terlihat.add(pasangan)
                         ekor.append(pasangan)
@@ -2453,6 +2510,14 @@ class Agent:
         weak_hits = 0
         empty_hits = 0
         stall_rounds = 0
+        # Cache media MILIK GILIRAN INI: data-URL dihitung sekali, dipakai
+        # ulang tiap putaran rantai tool (tanpa ini, video 30 MB dibaca &
+        # dienkode ulang berkali-kali — biaya & waktu sia-sia). `media_lewat`
+        # mengumpulkan media yang dilewati; diumumkan SEKALI setelah putaran
+        # pertama memintanya.
+        media_cache: dict[str, str | None] = {}
+        media_lewat: list[str] = []
+        media_sudah_dikabari = False
 
         while True:
             guard += 1
@@ -2534,7 +2599,8 @@ class Agent:
                     # multimodal (image_url/video_url base64) DI SINI, tiap
                     # putaran: endpoint API tak punya memori, jadi medianya
                     # wajib ikut di SETIAP request selama rantai tool berjalan.
-                    _pesan_dengan_media(self.memory.messages),
+                    _pesan_dengan_media(self.memory.messages,
+                                        cache=media_cache, lewat=media_lewat),
                     tools=active_tools,
                     # api_model, BUKAN spec.id: `id` adalah identitas internal
                     # bagas-ai ("openrouter/ox-alpha") yang tak dikenal server.
@@ -2596,6 +2662,15 @@ class Agent:
                     on_notice(changed or
                               "respons macet — dibatalkan & diulang otomatis")
                 continue
+
+            # Media yang DILEWATI diumumkan SEKALI (putaran pertama yang
+            # memintanya) — tanpa ini pengguna mengira fotonya terkirim.
+            if media_lewat and not media_sudah_dikabari:
+                media_sudah_dikabari = True
+                if on_notice:
+                    ringkas = "; ".join(media_lewat[:3]) + (
+                        "…" if len(media_lewat) > 3 else "")
+                    on_notice(f"media dilewati: {ringkas}")
 
             # Konfirmasi token: pakai usage ASLI bila ada, estimasi bila tidak.
             if usage:
