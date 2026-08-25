@@ -980,6 +980,31 @@ def _potong_alasan(asli: str, maks: int = 90) -> str:
     return teks or "riwayat melebihi jendela konteks"
 
 
+def _pastikan_tugas_aktif(memory: Memory, teks: str) -> bool:
+    """Pastikan permintaan pengguna yang SEDANG dikerjakan selamat dari
+    pemangkasan. Return True bila ia diselamatkan (disisipkan ulang).
+
+    potong_awal() menyimpan N entri terakhir — padahal dalam rantai tool
+    panjang, entri-entri itu adalah langkah-langkahnya, bukan permintaannya.
+    Tanpa jagaan ini model kehilangan OBJEKTIF di tengah kerja lalu menjawab
+    acak. Pencocokan memakai normalisasi spasi + 120 karakter pertama supaya
+    tetap kenal walau isi pesan panjang."""
+    awal = " ".join((teks or "").split())[:120]
+    if not awal:
+        return False
+    for m in memory.messages:
+        c = m.get("content")
+        if m.get("role") == "user" and isinstance(c, str) \
+                and awal in " ".join(c.split()):
+            return False                      # masih ada — tidak perlu apa-apa
+    memory.messages.insert(1, {
+        "role": "user",
+        "content": ("[SISTEM] Tugas yang SEDANG dikerjakan (riwayat awalnya "
+                    f"terpangkas agar muat konteks):\n{(teks or '')[:1500]}"),
+    })
+    return True
+
+
 # Batas ukuran media per request (terverifikasi: video 30 MB -> data-URL
 # ±40 MB yang dikirim ulang DI SETIAP putaran rantai tool — biaya meledak
 # dan konteks pasti penuh). Media di atas batas DILEWATI dengan kabar.
@@ -2518,6 +2543,14 @@ class Agent:
         media_cache: dict[str, str | None] = {}
         media_lewat: list[str] = []
         media_sudah_dikabari = False
+        # Permintaan pengguna giliran ini — pegang TEKS-nya sejak awal:
+        # bila KonteksPenuh memaksa pemangkasan dan ia tergesang keluar,
+        # _pastikan_tugas_aktif menyisipkannya kembali.
+        tugas_aktif = ""
+        for m in reversed(self.memory.messages):
+            if m.get("role") == "user" and isinstance(m.get("content"), str):
+                tugas_aktif = m["content"]
+                break
 
         while True:
             guard += 1
@@ -2624,6 +2657,10 @@ class Agent:
                 # dikorbankan, dan itu sudah terwakili ringkasan /compact.
                 pangkas_ke += 1
                 sisa = self.memory.potong_awal(14 if pangkas_ke == 1 else 6)
+                # Jaga OBJEKTIF: bila permintaan aktif ikut terpangkas,
+                # sisipkan ulang ringkasnya — tanpa ini model melanjutkan
+                # rantai tool tanpa tahu tugasnya apa.
+                _pastikan_tugas_aktif(self.memory, tugas_aktif)
                 if sisa <= 2 or pangkas_ke > 2:
                     final = (
                         "Konteks model ini penuh dan tetap penuh sesudah "

@@ -107,7 +107,8 @@ _KATA_KONTEKS_PENUH = (
     "context length", "context window", "maximum context", "context_limit",
     "too many tokens", "token limit", "exceeds the maximum",
     "input length", "input tokens exceed", "prompt is too long",
-    "reduce the length", "percih panjang",
+    "reduce the length", "percih panjang", "payload too large",
+    "request too large", "too large",
 )
 
 
@@ -131,14 +132,17 @@ def _teks_menyebut_konteks_penuh(teks: str) -> bool:
 
 
 def _apakah_konteks_penuh(exc: Exception) -> bool:
-    """Deteksi HTTP 400 'konteks penuh' dari exception openai apa pun.
+    """Deteksi HTTP 400/413 'konteks penuh' dari exception openai apa pun.
 
     Isi galatnya tersebar di .message / .body / str() tergantung jalur
     (OpenRouter membalas {"error":{"message":...,"code":400}}), jadi ketiganya
-    digabung lalu dicocokkan kata kuncinya."""
+    digabung lalu dicocokkan kata kuncinya. Status 413 (Payload Too Large)
+    langsung sah tanpa perlu cocok kata kunci."""
     o = _openai
     if o is None or not isinstance(exc, o.BadRequestError):
         return False
+    if getattr(exc, "status_code", None) == 413:
+        return True
     gabung = " ".join(str(getattr(exc, a, "") or "") for a in ("message", "body"))
     return _teks_menyebut_konteks_penuh(gabung + " " + str(exc))
 
@@ -571,6 +575,11 @@ def stream_completion(
                         f"stream diam >{config.STREAM_STALL_TIMEOUT:.0f} dtk "
                         "sesudah token pertama"
                     ) from exc
+                # Provider kadang mengirim error 400/413 sebagai CHUNK PERTAMA
+                # (bukan saat create()) — tanpa ini, "konteks penuh" jatuh ke
+                # jalur generik dan pemulih pemangkasannya tak pernah jalan.
+                if _apakah_konteks_penuh(exc):
+                    raise KonteksPenuh(str(exc)) from exc
                 raise
         finally:
             state["selesai"] = True
