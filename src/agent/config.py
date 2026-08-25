@@ -62,14 +62,19 @@ def _get_bool(name: str, default: bool) -> bool:
 
 
 # --- Model ---
-# bagas-ai mendukung DUA jalur model:
+# bagas-ai mendukung TIGA jalur model:
 #  1. Browser-based (web/...) — login sekali lewat Chrome, kredensial milik sendiri
-#  2. API-based (nvidia/...) — pakai NVIDIA_API_KEY ke integrate.api.nvidia.com/v1
+#  2. API NVIDIA (nvidia/...) — pakai NVIDIA_API_KEY ke integrate.api.nvidia.com/v1
+#  3. API OpenRouter (openrouter/...) — pakai OPENROUTER_API_KEY ke openrouter.ai/api/v1
 #
 # Default: web/glm (browser). Pilih lewat /model; pilihan terakhir otomatis tersimpan.
 # Konfigurasi NVIDIA API (opsional; hanya untuk model nvidia/*):
 NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
+# Konfigurasi OpenRouter API (opsional; hanya untuk model openrouter/*):
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_BASE_URL: str = os.getenv(
+    "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
 # Model default bila memakai jalur NVIDIA (hanya berlaku saat model nvidia/*
 # dipilih tanpa menyebut api_model-nya -- praktis cuma jaring pengaman).
 #
@@ -77,10 +82,11 @@ NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidi
 # 106-169 detik sebelum kata pertama keluar dan 4 dari 8 permintaan uji habis
 # waktu di 240 detik. Sebagai bawaan, itu berarti pengguna baru menunggu
 # menit-menitan lalu gagal, dan menyimpulkan bagas-ai yang rusak.
-NVIDIA_DEFAULT_MODEL: str = os.getenv("NVIDIA_DEFAULT_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip()
+NVIDIA_DEFAULT_MODEL: str = os.getenv(
+    "NVIDIA_DEFAULT_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip()
 
 CHAT_MODEL: str = os.getenv("CHAT_MODEL", "web/glm").strip()
-if not CHAT_MODEL.startswith(("web/", "nvidia/")):
+if not CHAT_MODEL.startswith(("web/", "nvidia/", "openrouter/")):
     CHAT_MODEL = "web/glm"
 
 # --- Telegram ---
@@ -293,28 +299,45 @@ SUARA_SELESAI: str = os.getenv("BAGASAI_SUARA_SELESAI", "").strip()
 
 ENV_FILE = CONFIG_HOME / ".env"
 
-def has_api_key() -> bool:
-    """True bila NVIDIA_API_KEY terisi.
+# Nama env var kredensial per penyedia API — dipakai pesan galat & label menu
+# supaya semua tempat menyebut NAMA YANG SAMA tanpa menyalin string manual.
+_PROVIDER_KEY_ENV = {
+    "nvidia": "NVIDIA_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def api_key_env(provider: str = "") -> str:
+    """Nama env var kunci untuk satu penyedia ('nvidia'/'openrouter')."""
+    return _PROVIDER_KEY_ENV.get(provider, "NVIDIA_API_KEY")
+
+
+def has_api_key(provider: str = "") -> bool:
+    """True bila kunci PENYEDIA itu (atau salah satu, bila tak disebut) terisi.
 
     Kredensial ini TIDAK wajib: bagas-ai tetap jalan penuh dengan model browser
-    saja. Ia hanya syarat untuk model nvidia/* — karena itu pemeriksaannya
-    berupa pertanyaan (has_), bukan syarat mati saat startup.
+    saja. Ia hanya syarat untuk model API — karena itu pemeriksaannya berupa
+    pertanyaan (has_), bukan syarat mati saat startup.
     """
-    return bool(NVIDIA_API_KEY)
+    if provider == "openrouter":
+        return bool(OPENROUTER_API_KEY)
+    if provider == "nvidia":
+        return bool(NVIDIA_API_KEY)
+    return bool(NVIDIA_API_KEY) or bool(OPENROUTER_API_KEY)
 
 
-def require_api_key() -> None:
-    """Pastikan NVIDIA_API_KEY ada; kalau tidak, jelaskan cara mengisinya.
+def require_api_key(provider: str = "") -> None:
+    """Pastikan kunci penyedia ada; kalau tidak, jelaskan cara mengisinya.
 
     Pesannya menyebut jalan keluar yang TIDAK butuh kredensial (pindah ke model
     browser) supaya pengguna tak merasa terkunci hanya karena memilih model
-    nvidia/* tanpa punya key.
+    API tanpa punya key.
     """
-    if NVIDIA_API_KEY:
+    env_name = api_key_env(provider)
+    if has_api_key(provider):
         return
     raise RuntimeError(
-        "Model ini lewat API NVIDIA dan butuh NVIDIA_API_KEY, yang belum diisi. "
-        f"Isi di {ENV_FILE} (baris: NVIDIA_API_KEY=nvapi-...), ambil key gratis "
-        "di https://build.nvidia.com — atau ketik /model lalu pilih model "
-        "browser, yang tak butuh key sama sekali."
+        f"Model ini lewat API dan butuh {env_name}, yang belum diisi. "
+        f"Isi di {ENV_FILE} (baris: {env_name}=...) — atau ketik /model "
+        "lalu pilih model browser, yang tak butuh key sama sekali."
     )

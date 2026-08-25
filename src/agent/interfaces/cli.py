@@ -4212,9 +4212,9 @@ def main(resume: bool = False) -> None:
         def _describe(spec) -> str:
             # Satu baris: nama (rata) + badge JALUR + SARAN "cocok untuk apa".
             # Lencananya menandai JALUR, bukan kemampuan: 🌐 = lewat browser
-            # (butuh login sekali, jendela browser hidup), 🤖 = lewat API (butuh
-            # NVIDIA_API_KEY, tanpa browser). Itulah beda yang paling terasa
-            # saat memilih — bukan reasoning/multimodal.
+            # (butuh login sekali, jendela browser hidup), 🤖 = lewat API
+            # (butuh API key penyedia, tanpa browser). Itulah beda yang paling
+            # terasa saat memilih — bukan reasoning/multimodal.
             badge = " 🌐" if spec.is_web else " 🤖"
             if spec.ditunda:
                 return f"{spec.label:<28}{badge}  —  ⏸ ditunda sementara"
@@ -4222,8 +4222,8 @@ def main(resume: bool = False) -> None:
             # Dikatakan DI DAFTAR, bukan hanya saat dipilih lalu ditolak: entri
             # yang terlihat sama seperti yang lain padahal pasti gagal membuat
             # pengguna menabraknya dulu untuk tahu.
-            if spec.is_api and not config.has_api_key():
-                note += "  (butuh NVIDIA_API_KEY)"
+            if spec.is_api and not config.has_api_key(spec.provider):
+                note += f"  (butuh {config.api_key_env(spec.provider)})"
             return f"{spec.label:<28}{badge}{note}"
 
         # Model yang ditunda TETAP TAMPIL, tapi redup & dilewati kursor. Kalau

@@ -2327,10 +2327,13 @@ class Agent:
                     self.memory.messages,
                     tools=active_tools,
                     # api_model, BUKAN spec.id: `id` adalah identitas internal
-                    # bagas-ai ("nvidia/deepseek") yang tak dikenal server.
+                    # bagas-ai ("openrouter/ox-alpha") yang tak dikenal server.
                     model=spec.api_model,
                     extra_body=extra,
                     max_tokens=spec.max_tokens,
+                    # Penyedia endpoint menentukan klien (base_url + API key):
+                    # nvidia -> NVIDIA_API_KEY, openrouter -> OPENROUTER_API_KEY.
+                    provider=spec.provider,
                     on_content=on_content,
                     on_reasoning=_on_reasoning,
                     cancel_event=cancel_event,

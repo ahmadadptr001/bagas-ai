@@ -23,6 +23,7 @@ from . import config
 _ENV_ORDER = [
     "CHAT_MODEL",
     "NVIDIA_API_KEY",
+    "OPENROUTER_API_KEY",
     "CONNECTOR_BROWSER_CHANNEL",
     "VOICE_JANGKAUAN",
     "TELEGRAM_BOT_TOKEN",
@@ -39,6 +40,10 @@ _ENV_KOMENTAR = {
         "# Kunci untuk model (API) nvidia/* - OPSIONAL. Tanpa ini bagas-ai",
         "# tetap jalan penuh dengan model (web) lewat browser.",
         "# Key gratis: https://build.nvidia.com",
+    ],
+    "OPENROUTER_API_KEY": [
+        "# Kunci untuk model (API) openrouter/* (mis. ox-alpha) - OPSIONAL.",
+        "# Ambil key: https://openrouter.ai/keys (awalan sk-or-...).",
     ],
     "CONNECTOR_BROWSER_CHANNEL": [
         "# Browser yang dipakai connector. Pilihan: brave, chrome,",

@@ -6,10 +6,12 @@ bagas-ai punya DUA jalur model yang cara kerjanya berbeda mendasar:
      Playwright memakai akun pengguna sendiri. Konteks dipegang SITUSNYA,
      tool dipanggil lewat protokol teks [[TOOL]], dan /effort berarti
      MENGKLIK tombol mode berpikir di halamannya.
-  2. API NVIDIA (`nvidia/...`) — endpoint OpenAI-compatible di
-     integrate.api.nvidia.com. Konteks dipegang KITA (dikirim ulang tiap
-     request), tool memakai function-calling ASLI, dan /effort berarti
-     mengirim parameter `extra_body`.
+  2. API (`nvidia/...`, `openrouter/...`) — endpoint OpenAI-compatible.
+     Konteks dipegang KITA (dikirim ulang tiap request), tool memakai
+     function-calling ASLI, dan /effort berarti mengirim parameter
+     `extra_body`. Penyedianya dibedakan lewat ModelSpec.provider:
+       - "nvidia"      : integrate.api.nvidia.com (NVIDIA_API_KEY)
+       - "openrouter"  : openrouter.ai/api/v1     (OPENROUTER_API_KEY)
 
 Karena itu `ModelSpec.is_web` adalah satu-satunya titik percabangan; lihat
 core.Agent.run().
@@ -72,8 +74,12 @@ class ModelSpec:
     # dipilih. Lihat catatan _DITUNDA di bawah.
     ditunda: bool = False
 
-    # --- khusus jalur API NVIDIA (kosong/nol untuk model web) ---------------
-    # ID model APA ADANYA di endpoint NVIDIA. Dipisah dari `id` karena `id`
+    # --- khusus jalur API (kosong/nol untuk model web) ----------------------
+    # Penyedia endpoint: "nvidia" (integrate.api.nvidia.com) atau
+    # "openrouter" (openrouter.ai/api/v1). Menentukan klien, API key, dan
+    # pesan galat mana yang dipakai.
+    provider: str = "nvidia"
+    # ID model APA ADANYA di endpoint penyedia. Dipisah dari `id` karena `id`
     # adalah identitas internal bagas-ai (tersimpan di prefs) sedangkan ini
     # yang dikirim ke server; menyatukan keduanya membuat ID tersimpan tak bisa
     # diubah tanpa memutus preferensi pengguna.
@@ -82,6 +88,10 @@ class ModelSpec:
     # "thinking" (deepseek), "enable_thinking" (nemotron), atau "" = tak ada
     # saklar berpikir sama sekali. Lihat catatan pengukuran di docstring modul.
     reasoning_key: str = ""
+    # ALTERNATIF saklar gaya OpenRouter: bila diisi (mis. "reasoning"), effort
+    # dikirim sebagai {reasoning: {"enabled": bool}} — bukan lewat
+    # chat_template_kwargs. Menang atas reasoning_key bila keduanya terisi.
+    reasoning_param: str = ""
     # Tingkatan yang DITAWARKAN /effort. () = model ini tak punya effort, dan
     # menu akan mengatakannya terus-terang alih-alih memberi pilihan palsu.
     effort_levels: tuple[str, ...] = ()
@@ -102,7 +112,7 @@ class ModelSpec:
 
     @property
     def is_api(self) -> bool:
-        """True bila model ini lewat API NVIDIA (butuh NVIDIA_API_KEY)."""
+        """True bila model ini lewat endpoint API (butuh API key penyedia)."""
         return not self.connector
 
     @property
@@ -130,10 +140,16 @@ class ModelSpec:
         HTTP 500 di nemotron-3-ultra, jadi menghidupkannya membuat SETIAP
         setelan effort gagal.
         """
-        if self.is_web or not self.reasoning_key:
+        if self.is_web:
             return None
         lvl = effort if effort in self.effort_levels else self.effort_default
         if not lvl:
+            return None
+        # Gaya OpenRouter: parameter resminya `reasoning.enabled` di level
+        # atas body (contoh resmi OpenRouter), bukan chat_template_kwargs.
+        if self.reasoning_param:
+            return {self.reasoning_param: {"enabled": lvl != "langsung"}}
+        if not self.reasoning_key:
             return None
         ctk: dict[str, object] = {}
         if lvl == "langsung":
@@ -199,8 +215,8 @@ MODELS: dict[str, ModelSpec] = {
               "gratisnya terbatas, jadi pakai seperlunya"),
     ),
 
-    # --- jalur API NVIDIA (butuh NVIDIA_API_KEY, tanpa browser) -------------
-    # Tiga entri di bawah TIDAK memakai connector, jadi is_web-nya False dan
+    # --- jalur API (butuh API key penyedia, tanpa browser) ------------------
+    # Entri di bawah TIDAK memakai connector, jadi is_web-nya False dan
     # core mengarahkannya ke _run_api. Nilai reasoning_key/effort_levels di
     # sini adalah hasil PENGUKURAN (lihat docstring modul), bukan salinan
     # dokumentasi — beberapa parameter yang ada di contoh resmi terbukti tak
@@ -238,22 +254,25 @@ MODELS: dict[str, ModelSpec] = {
         effort_catatan=("model ini tak punya saklar mode berpikir — nalarnya "
                         "selalu aktif dan tak ada tingkatan yang bisa dipilih"),
     ),
-    "deepseek": ModelSpec(
-        id="nvidia/deepseek",
-        label="DeepSeek V4 Flash (API)",
-        api_model="deepseek-ai/deepseek-v4-flash-0731",
+    # Dihapus 2026-08-25: deepseek-v4-flash (nvidia/deepseek) — paling lambat
+    # memulai dari semuanya (TERUKUR 106-169 dtk sampai kata pertama, 4 dari 8
+    # permintaan uji habis waktu). Digantikan ox-alpha via OpenRouter.
+    "oxalpha": ModelSpec(
+        id="openrouter/ox-alpha",
+        label="Ox Alpha (API)",
+        provider="openrouter",
+        api_model="stealth/ox-alpha",
         multimodal=False,
-        note=("Via API NVIDIA — penalaran paling dalam, TAPI paling lambat "
-              "memulai (terukur 1-3 menit sebelum kata pertama)"),
-        reasoning_key="thinking",
-        effort_levels=("langsung", "ringkas", "seimbang", "mendalam"),
-        effort_default="seimbang",  # bawaan server MATI; ini pilihan bagas-ai
-        kirim_reasoning_effort=True,
+        note=("Via API OpenRouter — mode berpikir nyala bawaan "
+              "(reasoning.enabled); bisa dimatikan lewat /effort langsung"),
+        # Saklar gaya OpenRouter: extra_body {"reasoning": {"enabled": ...}}
+        # persis contoh resminya. Bawaan MENDALAM = selalu menyala.
+        reasoning_param="reasoning",
+        reasoning_key="",
+        effort_levels=("langsung", "mendalam"),
+        effort_default="mendalam",
+        kirim_reasoning_effort=False,
         max_tokens=16384,
-        effort_catatan=("tingkatan ringkas/seimbang/mendalam dikirim sesuai "
-                        "contoh resmi, tapi pengaruhnya BELUM terbukti pada "
-                        "pengukuran kami; yang pasti bekerja: langsung "
-                        "(mematikan mode berpikir)"),
     ),
 }
 
@@ -285,20 +304,29 @@ _ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web
 def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
     """Tolak model yang belum boleh dipakai — dengan alasan, bukan sekadar 'gagal'.
 
-    Dua sebab penolakan: model sedang DITUNDA, atau model API tapi
-    NVIDIA_API_KEY kosong.
+    Dua sebab penolakan: model sedang DITUNDA, atau model API tapi kunci
+    penyedianya kosong.
 
     Penolakannya di SINI, satu pintu untuk semua jalan masuk (/model, argumen
     baris perintah, tombol Telegram, preferensi tersimpan): kalau tiap
     antarmuka menyaring sendiri-sendiri, cepat atau lambat ada satu yang lupa."""
-    if spec.is_api and not config.has_api_key():
+    if spec.is_api and not config.has_api_key(spec.provider):
+        env_name = config.api_key_env(spec.provider)
         # Diperiksa DI SINI, bukan saat giliran berjalan: kalau tidak, pengguna
         # baru tahu key-nya kosong sesudah mengirim pesan panjang, dan pesan itu
         # sudah masuk riwayat sebagai giliran gagal.
+        if spec.provider == "openrouter":
+            raise ValueError(
+                f"Model {spec.label} lewat API OpenRouter dan butuh "
+                f"{env_name}, yang belum diisi. Isi di {config.ENV_FILE} "
+                f"(baris: {env_name}=sk-or-...), ambil key di "
+                "https://openrouter.ai/keys — atau pilih model (web) mana "
+                "pun, yang tak butuh key sama sekali."
+            )
         raise ValueError(
-            f"Model {spec.label} lewat API NVIDIA dan butuh NVIDIA_API_KEY, "
+            f"Model {spec.label} lewat API NVIDIA dan butuh {env_name}, "
             f"yang belum diisi. Isi di {config.ENV_FILE} "
-            "(baris: NVIDIA_API_KEY=nvapi-...), key gratis di "
+            f"(baris: {env_name}=nvapi-...), key gratis di "
             "https://build.nvidia.com — atau pilih model (web) mana pun, "
             "yang tak butuh key sama sekali."
         )
@@ -407,7 +435,7 @@ def catalog_aktif() -> list[tuple[int, str, ModelSpec]]:
 def list_text(current_id: str | None = None) -> str:
     """Daftar model siap tampil untuk perintah /model."""
     lines = ["Model — (web) lewat browser + login sekali, "
-             "(API) lewat NVIDIA_API_KEY tanpa browser:"]
+             "(API) lewat API key tanpa browser:"]
     # Sebut yang DITUNDA, bukan yang aktif: dulu baris ini mendaftar yang aktif,
     # dan begitu modelnya bertambah ia berbunyi "untuk sementara hanya
     # <delapan model> yang bisa dipilih" — kalimat yang isinya justru
@@ -423,11 +451,11 @@ def list_text(current_id: str | None = None) -> str:
         mark = "  <- aktif" if current_id and spec.id == current_id else ""
         if spec.ditunda:
             mark = "  (ditunda — belum bisa dipilih)"
-        elif spec.is_api and not config.has_api_key():
+        elif spec.is_api and not config.has_api_key(spec.provider):
             # Tetap DITAMPILKAN, bukan disembunyikan: pengguna perlu tahu model
             # ini ada dan apa syaratnya. Menyembunyikannya membuat fitur yang
             # sudah terpasang terlihat tak pernah ada.
-            mark = "  (butuh NVIDIA_API_KEY)"
+            mark = f"  (butuh {config.api_key_env(spec.provider)})"
         lines.append(f"  {i:>2}. {key:12s} {spec.label}{tag}{mark}")
     contoh = _AKTIF[0]
     lines.append(f"Pilih: /model <nama|nomor>   contoh: /model {contoh}")

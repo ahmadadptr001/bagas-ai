@@ -1,10 +1,12 @@
-"""Klien API NVIDIA (endpoint OpenAI-compatible) + retry tahan-banting.
+"""Klien endpoint API OpenAI-compatible (NVIDIA & OpenRouter) + retry
+tahan-banting.
 
-Modul ini melayani SATU dari dua jalur model bagas-ai: model `nvidia/*`. Jalur
-lainnya (model `web/*`) tak menyentuh berkas ini sama sekali — ia lewat
-agent/connectors + Agent._run_connector, dan padanan penanganan "sementara" di
-sana berbentuk lain sesuai medianya (WebBusyError untuk server penuh,
-WebLimitError untuk kuota situs habis).
+Modul ini melayani jalur model bagas-ai yang berbasis API: model `nvidia/*`
+(integrate.api.nvidia.com) dan `openrouter/*` (openrouter.ai/api/v1, kunci
+OPENROUTER_API_KEY). Jalur lainnya (model `web/*`) tak menyentuh berkas ini
+sama sekali — ia lewat agent/connectors + Agent._run_connector, dan padanan
+penanganan "sementara" di sana berbentuk lain sesuai medianya (WebBusyError
+untuk server penuh, WebLimitError untuk kuota situs habis).
 
 Poin penting jalur API: free tier NVIDIA (~40 request/menit) membalas throttle
 dengan bentuk yang BERMACAM-MACAM — bukan cuma HTTP 429/RateLimitError, tapi
@@ -259,22 +261,45 @@ def _call_with_retry(
             _sleep_cancellable(wait, cancel_event)
 
 
-# Satu klien dipakai ulang di seluruh aplikasi.
-_client = None
+# Satu klien PER PENYEDIA dipakai ulang di seluruh aplikasi.
+_clients: dict[str, Any] = {}
+
+# Header atribusi yang diminta OpenRouter (opsional tapi resmi): identitas
+# aplikasi muncul di dashboard aktivitas openrouter.ai.
+_OPENROUTER_HEADERS = {
+    "HTTP-Referer": config.REPO_URL,
+    "X-Title": config.APP_NAME,
+}
 
 
-def get_client():
-    """Klien OpenAI yang diarahkan ke endpoint NVIDIA (dibuat sekali)."""
-    global _client
-    if _client is None:
-        config.require_api_key()
-        _client = _oa().OpenAI(
-            base_url=config.NVIDIA_BASE_URL,
-            api_key=config.NVIDIA_API_KEY,
-            timeout=config.REQUEST_TIMEOUT,
-            max_retries=0,  # retry ditangani _call_with_retry di atas
-        )
-    return _client
+def get_client(provider: str = ""):
+    """Klien OpenAI diarahkan ke endpoint penyedia (dibuat sekali per penyedia).
+
+    provider="" atau "nvidia" -> integrate.api.nvidia.com (NVIDIA_API_KEY);
+    provider="openrouter"     -> openrouter.ai/api/v1 (OPENROUTER_API_KEY).
+    """
+    p = provider if provider in ("nvidia", "openrouter") else "nvidia"
+    client = _clients.get(p)
+    if client is None:
+        if p == "openrouter":
+            config.require_api_key("openrouter")
+            client = _oa().OpenAI(
+                base_url=config.OPENROUTER_BASE_URL,
+                api_key=config.OPENROUTER_API_KEY,
+                timeout=config.REQUEST_TIMEOUT,
+                max_retries=0,  # retry ditangani _call_with_retry di atas
+                default_headers=_OPENROUTER_HEADERS,
+            )
+        else:
+            config.require_api_key("nvidia")
+            client = _oa().OpenAI(
+                base_url=config.NVIDIA_BASE_URL,
+                api_key=config.NVIDIA_API_KEY,
+                timeout=config.REQUEST_TIMEOUT,
+                max_retries=0,  # retry ditangani _call_with_retry di atas
+            )
+        _clients[p] = client
+    return client
 
 
 def _base_kwargs(
@@ -288,7 +313,7 @@ def _base_kwargs(
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         # Bawaannya NVIDIA_DEFAULT_MODEL, BUKAN config.CHAT_MODEL: CHAT_MODEL
-        # berisi ID internal bagas-ai ("nvidia/deepseek") yang tak dikenal
+        # berisi ID internal bagas-ai ("nvidia/nemotron") yang tak dikenal
         # server. Pemanggil normal selalu mengirim ModelSpec.api_model.
         "model": model or config.NVIDIA_DEFAULT_MODEL,
         "messages": messages,
@@ -319,11 +344,12 @@ def chat_completion(
     stream: bool = False,
     extra_body: dict[str, Any] | None = None,
     max_tokens: int | None = None,
+    provider: str = "",
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
 ) -> Any:
     """Panggil chat completions (non-stream) dengan retry tahan-banting."""
-    client = get_client()
+    client = get_client(provider)
     kwargs = _base_kwargs(messages, tools, model, temperature, extra_body,
                           stream, max_tokens)
 
@@ -389,6 +415,7 @@ def stream_completion(
     temperature: float | None = None,
     extra_body: dict[str, Any] | None = None,
     max_tokens: int | None = None,
+    provider: str = "",
     on_content: Any = None,
     on_reasoning: Any = None,
     cancel_event: Any = None,
@@ -398,13 +425,13 @@ def stream_completion(
 
     Memanggil `on_content(teks)` tiap potongan jawaban tiba (token realtime),
     `on_reasoning(teks)` untuk potongan "pikiran" bila disediakan, dan memeriksa
-    `cancel_event` tiap chunk supaya responsif saat dibatalkan. Bila NVIDIA
+    `cancel_event` tiap chunk supaya responsif saat dibatalkan. Bila endpoint
     throttle di awal/tengah, seluruh panggilan diulang otomatis dengan backoff
     lewat `_call_with_retry`, dan `on_retry` mengabari UI.
 
     Mengembalikan (teks_final, daftar_tool_calls, usage).
     """
-    client = get_client()
+    client = get_client(provider)
     kwargs = _base_kwargs(messages, tools, model, temperature, extra_body,
                           True, max_tokens)
     try:
@@ -449,9 +476,10 @@ def stream_completion(
                             on_content(piece)
                     # Model bernalar mengalirkan "pikiran" di field terpisah
                     # (`reasoning_content` di nemotron/muse, `reasoning` di
-                    # deepseek). Ditangkap supaya TIDAK hilang: jadi jawaban
-                    # cadangan bila `content` akhirnya kosong, sekaligus bukti
-                    # bagi UI bahwa modelnya bekerja, bukan menggantung.
+                    # deepseek & OpenRouter). Ditangkap supaya TIDAK hilang:
+                    # jadi jawaban cadangan bila `content` akhirnya kosong,
+                    # sekaligus bukti bagi UI bahwa modelnya bekerja, bukan
+                    # menggantung.
                     rpiece = (getattr(delta, "reasoning_content", None)
                               or getattr(delta, "reasoning", None))
                     if rpiece:
