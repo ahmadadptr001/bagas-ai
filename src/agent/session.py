@@ -61,11 +61,16 @@ class Session:
         # (lihat _web_gap_from di core.py). Tanpa ini, pulang ke model lama
         # berarti melanjutkan percakapan yang tertinggal beberapa langkah.
         self.web_seen: dict[str, int] = dict(web_seen or {})
-        # Token kumulatif SESI ini (persisten lintas --resume).
-        self.tokens = {"prompt": 0, "completion": 0}
+        # Token kumulatif SESI ini (persisten lintas --resume). `cost`
+        # berikutnya bila endpoint melaporkan biaya (OpenRouter melakukannya).
+        self.tokens = {"prompt": 0, "completion": 0, "cost": 0.0}
         if tokens:
             self.tokens["prompt"] = int(tokens.get("prompt", 0) or 0)
             self.tokens["completion"] = int(tokens.get("completion", 0) or 0)
+            try:
+                self.tokens["cost"] = float(tokens.get("cost", 0) or 0)
+            except (TypeError, ValueError):
+                self.tokens["cost"] = 0.0
 
     @property
     def path(self) -> Path:
@@ -82,6 +87,7 @@ class Session:
             self.tokens = {
                 "prompt": int(tokens.get("prompt", 0) or 0),
                 "completion": int(tokens.get("completion", 0) or 0),
+                "cost": float(tokens.get("cost", 0) or 0),
             }
         data = {
             "id": self.id,

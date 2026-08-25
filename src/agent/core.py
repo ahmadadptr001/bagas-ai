@@ -1284,8 +1284,17 @@ def _web_reply_complete(text: str) -> bool:
     return opens <= closes
 
 
+# --- perkiraan token --------------------------------------------------------
+# 1 token ≈ 4 karakter (teks campuran Indonesia/Inggris/kode). Ini HANYA untuk
+# penghitung realtime di layar saat angka resmi belum datang; usage asli dari
+# endpoint selalu menggantikannya di akhir putaran.
+_TOK_PER_MEDIA_GAMBAR = 1500   # tipikal biaya vision per gambar ter-encode
+_TOK_PER_MEDIA_VIDIO = 8000    # kasar; provider jarang membuka rincian video
+_OVERHEAD_PER_PESAN = 4        # pembungkus role/format tiap pesan
+
+
 def _est_tokens(text: str) -> int:
-    """Perkiraan kasar: 1 token — 4 karakter.
+    """Perkiraan kasar: 1 token ≈ 4 karakter.
 
     Dipakai HANYA untuk penghitung realtime di layar, saat jumlah sebenarnya
     belum diketahui. Angka resminya datang dari `usage` di ujung stream dan
@@ -1294,9 +1303,40 @@ def _est_tokens(text: str) -> int:
     return max(1, len(text or "") // 4)
 
 
-def _est_messages(messages: list[dict[str, Any]]) -> int:
-    total = sum(len(str(m.get("content", "") or "")) for m in messages)
-    return total // 4
+def _est_messages(messages: list[dict[str, Any]],
+                  extra_chars: int = 0) -> int:
+    """Perkiraan token SELURUH permintaan — bukan cuma isi pesannya.
+
+    char//4 saja MEREMEHKAN besar (audit 2026-08-26):
+      - argumen `tool_calls.function.arguments` ikut dikirim setiap putaran
+        tapi dulu tak dihitung sama sekali;
+      - tiap pesan membungkus ±beberapa token overhead format;
+      - satu penanda [LAMPIR-MEDIA] berarti GAMBAR/VIDEO sungguhan di mata
+        endpoint vision (±1500 / ±8000 token) — dulu dihitung ±8 token dari
+        panjang path-nya, sehingga penghitung menipu saat memakai media.
+
+    `extra_chars`: panjang JSON schema tool yang juga ikut tiap request saat
+    tools aktif — dihitung pemanggil sekali di awal giliran."""
+    total = max(0, extra_chars)
+    for m in messages:
+        total += _OVERHEAD_PER_PESAN
+        c = m.get("content")
+        if isinstance(c, str):
+            for ln in c.splitlines():
+                if ln.startswith(_MEDIA_LAMPIR):
+                    p = ln[len(_MEDIA_LAMPIR):].strip()
+                    # Konversi balik ke CHAR-EQUIVALENT (x4) supaya satu
+                    # satuan dengan sisa total sebelum dibagi 4 di akhir.
+                    total += (_TOK_PER_MEDIA_VIDIO if _mime_vidio(p)
+                              else _TOK_PER_MEDIA_GAMBAR) * 4
+                else:
+                    total += len(ln)
+            continue
+        total += len(str(c or ""))
+        for tc in m.get("tool_calls") or []:
+            args = ((tc.get("function") or {}).get("arguments")) or ""
+            total += len(args)
+    return max(1, total // 4)
 
 
 class Usage:
@@ -1307,11 +1347,20 @@ class Usage:
       - add_raw(..) : estimasi dari jumlah karakter, satu-satunya cara di jalur
         web (situs AI tak pernah melaporkan token) dan juga cadangan di jalur
         API bila `stream_options.include_usage` tak dibalas.
+
+    Selain prompt/completion, OpenRouter (dan endpoint OpenAI-compatible lain)
+    melaporkan BIAYA (`usage.cost`, USD) serta rincian cache & reasoning —
+    ketiganya ditangkap di sini supaya bisa tampil seperti AI agent pada
+    umumnya. completion_tokens standar SUDAH termasuk reasoning; medan itu
+    cuma rincian transparansi, bukan tambahan.
     """
 
     def __init__(self) -> None:
         self.prompt = 0
         self.completion = 0
+        self.cost = 0.0          # USD kumulatif; 0 selama endpoint tak laporkan
+        self.cached = 0          # bagian prompt yang ketemu cache provider
+        self.reasoning = 0       # rincian token nalar (bila dilaporkan)
 
     @property
     def total(self) -> int:
@@ -1322,6 +1371,16 @@ class Usage:
             return
         self.prompt += getattr(usage, "prompt_tokens", 0) or 0
         self.completion += getattr(usage, "completion_tokens", 0) or 0
+        try:
+            self.cost += float(getattr(usage, "cost", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        pdet = getattr(usage, "prompt_tokens_details", None)
+        if pdet is not None:
+            self.cached += int(getattr(pdet, "cached_tokens", 0) or 0)
+        cdet = getattr(usage, "completion_tokens_details", None)
+        if cdet is not None:
+            self.reasoning += int(getattr(cdet, "reasoning_tokens", 0) or 0)
 
     def add_raw(self, prompt: int, completion: int) -> None:
         self.prompt += prompt
@@ -1426,6 +1485,11 @@ class Agent:
             self.tokens_session.completion = int(
                 session.tokens.get("completion", 0) or 0
             )
+            try:
+                self.tokens_session.cost = float(
+                    session.tokens.get("cost", 0) or 0)
+            except (TypeError, ValueError):
+                self.tokens_session.cost = 0.0
 
         if session and session.messages:
             self.memory.load(session.messages)
@@ -2290,6 +2354,7 @@ class Agent:
                     tokens={
                         "prompt": self.tokens_session.prompt,
                         "completion": self.tokens_session.completion,
+                        "cost": round(self.tokens_session.cost, 6),
                     },
                 )
             except OSError:
@@ -2529,6 +2594,9 @@ class Agent:
         """
         spec = self.model_spec
         schemas = tools.get_schemas(self.tool_names)
+        # Schema tool ikut SETIAP request saat aktif (bisa ribuan token) —
+        # masuk perkiraan prompt, bukan diabaikan seperti dulu.
+        schemas_est = (len(json.dumps(schemas)) // 4) if schemas else 0
         guard = 0
         safety = max(self.max_iterations, 60)
         # Pemulih konteks penuh: berapa kali riwayat dipangkas giliran ini.
@@ -2569,7 +2637,8 @@ class Agent:
             # Dihitung ULANG tiap putaran: effort bisa BERUBAH di tengah giliran
             # akibat _escalate.
             extra = spec.extra_body_for(self.effort)
-            prompt_est = _est_messages(self.memory.messages)
+            prompt_est = _est_messages(self.memory.messages,
+                                       extra_chars=schemas_est)
             # "fase": None -> belum ada apa pun, "pikir" -> pikiran mengalir,
             # "jawab" -> jawaban mengalir. Dipakai supaya status hanya
             # berubah saat FASENYA berpindah, bukan tiap potongan token.

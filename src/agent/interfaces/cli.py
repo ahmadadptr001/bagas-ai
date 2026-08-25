@@ -99,7 +99,8 @@ try:
 except Exception:  # pragma: no cover
     Figlet = None  # type: ignore
 
-from .. import config, interaction, llm, longmem, models, osinfo, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
+from .. import (config, interaction, llm, longmem, models, osinfo, prefs,  # noqa: E402
+                projectindex, scripts, telegram_perms, updater, workspace)
 from .. import dengar as _dengar  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from .. import tanda as _tanda  # noqa: E402
@@ -365,6 +366,15 @@ def _grad() -> list[str]:
 
 def _fmt(n: int) -> str:
     return f"{n:,}".replace(",", ".")
+
+
+def _segmen_biaya(agent) -> str:
+    """Segmen `· $0.0123` untuk bar status — kosong bila endpoint tak
+    melaporkan biaya (jalur web selalu 0; OpenRouter melaporkan)."""
+    c = float(getattr(getattr(agent, "tokens_session", None), "cost", 0) or 0)
+    if c <= 0:
+        return ""
+    return f"   [dim]·[/]   [dim italic]${c:.4f}[/]"
 
 
 def _fmt_elapsed(sec: float) -> str:
@@ -2487,6 +2497,9 @@ class Status:
         t.append_text(_TM(dot))
         t.append(f"  ⚡ {_fmt(int(self.disp))}", style=tema.p("aksen_terang"))
         t.append(" sesi", style="dim")
+        biaya = _segmen_biaya(self.agent)
+        if biaya:
+            t.append_text(_TM(biaya))
         if self.tool:
             t.append("   ")
             t.append_text(_TM(dot))
@@ -2814,7 +2827,7 @@ class TurnView:
         status = _oneline(_TM(
             f"  [bold {tema.p('aksen')}]{frame}[/] [{tema.p('aksen')}]{_esc(self.phase)}[/]   [dim]·[/]   "
             f"[{tema.p('aksen2')}]{_fmt_elapsed(el)}[/]   [dim]·[/]   [{tema.p('aksen_terang')}]⚡ {tok}[/] "
-            f"[dim]sesi[/]{extra}"
+            f"[dim]sesi[/]{_segmen_biaya(self.agent)}{extra}"
             f"   [dim italic]Ctrl+C batal[/]"))
         rows = [status]
         # Blok pikiran menempel LANGSUNG di bawah baris status, tanpa napas:
@@ -3986,6 +3999,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                             # inquirer — cukup catat ukuran barunya saja.
                             if not _LIVE["paused"]:
                                 _retempel_live(live)
+                                live.refresh()   # langsung rapi, tanpa nunggu tick
                         if input_paused["on"]:
                             # ask_user sedang tampil -> JANGAN baca console;
                             # biarkan inquirer yang menerima seluruh ketikan.
@@ -4249,6 +4263,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                             # refresh() akan mencetak Control() ke console.
                             if not _LIVE["paused"]:
                                 _retempel_live(live)
+                                live.refresh()   # langsung rapi, tanpa nunggu tick
                         worker_thread.join(timeout=0.1)
                     except KeyboardInterrupt:
                         if not interrupted:
@@ -4328,6 +4343,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             parts.append(f"[#f0603c]{n_fail} gagal[/]")
         parts.append(el)
         parts.append(f"⚡ {tok} token")
+        if agent.tokens_session.cost > 0:
+            parts.append(f"${agent.tokens_session.cost:.4f}")
         body = " [dim]·[/] ".join(parts)
         console.print(Padding(_TM(f"[dim]{body}[/dim]"),
                               (1, 3, 0, 3)))
@@ -4338,7 +4355,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         if agent.model_spec.connector != "glm":
             return
         console.print(
-            "  [bold {tema.p('aksen2')}]⚠ GLM (chat.z.ai) memerlukan VPN aktif[/] "
+            f"  [bold {tema.p('aksen2')}]⚠ GLM (chat.z.ai) memerlukan VPN aktif[/] "
             "[dim]— disarankan [bold]Cloudflare WARP[/].[/]\n"
             "  [dim]Model ini sering bermasalah; jika error berulang "
             "di terminal, coba ganti server VPN.[/]\n")
