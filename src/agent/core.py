@@ -2096,6 +2096,16 @@ class Agent:
         hitung-mundur sisa waktu di footer.
         Bila `cancel_event` diset di tengah jalan, melempar llm.Cancelled.
         """
+        # Penanda [GAMBAR] <path> di TEKS pengguna (mis. drag-drop foto dari
+        # CLI yang menukar [foto] dengan penanda ini) dipisah di sini jadi
+        # LAMPIRAN sungguhan — satu gerbang untuk semua antarmuka. Dulu
+        # penanda itu hanya dibaca dari hasil tool (_take_image_marks di
+        # _web_tool_protocol), sehingga foto yang di-drop pengguna tak pernah
+        # sampai ke model: yang terkirim cuma baris teks "[GAMBAR] C:\..."
+        if isinstance(user_input, str) and "[GAMBAR]" in user_input:
+            user_input, gambar_user = _take_image_marks(user_input)
+            if gambar_user:
+                attachments = list(attachments or []) + gambar_user
         with self._run_lock:
             # Kelompok checkpoint baru per giliran: undo_changes memulihkan tepat
             # satu giliran, bukan campuran beberapa giliran.

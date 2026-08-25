@@ -977,6 +977,34 @@ def _perbarui_pratinjau_gambar(
         except Exception:
             pass
 
+
+def _kembangkan_foto(teks: str) -> str:
+    """Tukar penanda [foto] dengan penanda lampiran `[GAMBAR] <path>`.
+
+    [foto] CUMA bentuk tampilan di kotak ketik & gema riwayat — yang dikirim
+    ke model wajib penanda [GAMBAR], sebab hanya itu yang dikenali core dan
+    dipisah jadi LAMPIRAN sungguhan (Agent.run). Dulu [foto] ditukar jadi
+    path telanjang di tengah kalimat; tak ada yang membacanya sebagai
+    lampiran, jadi model menerima teks path dan fotonya tak pernah terkirim.
+    Baris-baris baru di sekelilingnya sengaja ada: penandanya berlaku per
+    BARIS, dan tanpa itu "[foto] analisis ini" melahirkan path+prompt dalam
+    SATU baris yang tak tertangkap regex.
+
+    Gambar pending TANPA [foto] di teks tetap dilampirkan ke pesan ini —
+    perilaku "drop lalu langsung Enter" yang sudah biasa. Pending dibersihkan
+    sesudah dipakai: satu gambar, satu pesan."""
+    p = _pending_gambar.get("path")
+    if not p:
+        return teks
+    if "[foto]" in teks:
+        teks = teks.replace("[foto]", f"\n{IMAGE_MARK} {p}\n")
+    elif teks.strip():
+        teks = f"{teks}\n{IMAGE_MARK} {p}"
+    else:
+        teks = f"{IMAGE_MARK} {p}"
+    _pending_gambar.clear()
+    return teks
+
 def _gambar_idle_pt() -> list[tuple[str, str]]:
     """Render blok warna gambar untuk jendela idle (prompt_toolkit).
 
@@ -2241,8 +2269,12 @@ def _blok_pikir(teks: str, buka: bool, *, bisa_buka: bool = True) -> list:
     if not teks:
         return []
     tanda = ('▾ ' if buka else '▸ ') if bisa_buka else ''
+    # Petunjuk tombolnya DITULIS: dulu blok ini cuma memasang tanda ▸ yang
+    # menyerupai bisa-diklik, dan tak satu pun teks di layar menyebut Tab —
+    # pengguna menekan/mengklik apa saja lalu menyimpulkan fiturnya rusak.
+    petunjuk = "" if (buka or not bisa_buka) else " · Tab buka/tutup"
     kepala = _oneline(_TM(
-        f"  [dim]{tanda}💭 pikiran {_fmt(len(teks))} karakter[/]"))
+        f"  [dim]{tanda}💭 pikiran {_fmt(len(teks))} karakter{petunjuk}[/]"))
     if not buka:
         return [kepala]
     # Isinya menjorok ke kolom 4 — kolom yang SAMA dengan tulisan fase di baris
@@ -2433,6 +2465,7 @@ _TIPS = (
     "/bot menyalakan kontrol lewat Telegram — perintahkan bagas-ai dari HP",
     "/scripts menyimpan perintah panjang jadi satu nama pendek",
     "/live mengalihkan tampilan mengalir ↔ klasik bila terminalmu bermasalah",
+    "💭 aliran pikiran model: tekan Tab selagi ia berpikir untuk buka/tutup",
 )
 
 
@@ -3593,8 +3626,11 @@ def main(resume: bool = False) -> None:
                 # Pesan sisipan tak lewat gelung utama, jadi penanda tempelannya
                 # harus dikembangkan di sini juga — kalau tidak, AI menerima
                 # tulisan "[tempelan #1 · 312 baris · 14,2 KB]" alih-alih log
-                # yang sebenarnya ingin ditunjukkan pengguna.
-                return [_tempelan.simpanan().kembangkan(t) for t in diambil]
+                # yang sebenarnya ingin ditunjukkan pengguna. [foto] + gambar
+                # pending ikut ditukarkan: sisipan adalah jalur masuk yang sama
+                # sahnya dengan kotak idle, lampirannya harus sama pula.
+                return [_kembangkan_foto(_tempelan.simpanan().kembangkan(t))
+                        for t in diambil]
 
         _padat = _jeda_padat(view)
 
@@ -6278,15 +6314,9 @@ def main(resume: bool = False) -> None:
             # sebelumnya berjalan. Yang tergema ke riwayat tetap bentuk
             # ringkasnya (lihat gema di atas): itu memang yang membuat
             # riwayatnya tetap bisa dibaca.
-            # Ganti [foto] dengan path gambar yang sedang pending.
-            _msg = _tempelan.simpanan().kembangkan(text)
-            if "[foto]" in _msg and _pending_gambar.get("path"):
-                _msg = _msg.replace("[foto]", _pending_gambar["path"])
-                _pending_gambar.clear()
-            elif _pending_gambar.get("path"):
-                # User ketik sesuatu selain [foto] → lampirkan gambarnya.
-                _msg += f"\n{IMAGE_MARK} {_pending_gambar['path']}"
-                _pending_gambar.clear()
+            # [foto] + gambar pending -> penanda lampiran [GAMBAR] (lihat
+            # _kembangkan_foto); core yang memisahkannya jadi lampiran.
+            _msg = _kembangkan_foto(_tempelan.simpanan().kembangkan(text))
             process(_msg)
         except KeyboardInterrupt:
             # Jaring pengaman terakhir: Ctrl+C tak boleh menjatuhkan REPL.
