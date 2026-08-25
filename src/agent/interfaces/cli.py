@@ -23,6 +23,7 @@ import textwrap
 import threading
 import time
 import unicodedata
+from typing import Any
 
 try:  # keyboard non-blocking (Windows): ketikan-selama-giliran & Ctrl+C
     import msvcrt as _msvcrt
@@ -56,6 +57,13 @@ for _s in (sys.stdout, sys.stderr):
         _s.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except Exception:
         pass
+
+# Logger modul: dipakai jalur-jalur yang kegagalannya tak boleh senyap
+# (mis. kirim_dari_luar di dalam loop prompt_toolkit) tapi juga tak boleh
+# meledak ke layar pengguna.
+import logging as _logging  # noqa: E402
+
+log = _logging.getLogger(__name__)
 
 from prompt_toolkit.application import Application  # noqa: E402
 from prompt_toolkit.buffer import Buffer  # noqa: E402
@@ -2151,19 +2159,24 @@ def _pil_warna():
 
 
 def _bar_pil(frac: float, lebar: int = 20, fase: int = 0) -> Text:
-    """Bar pil putus-putus. `fase` menggeser ruas terangnya (animasi)."""
+    """Bar pil putus-putus. `fase` menggeser ruas terangnya (animasi).
+
+    Warnanya dibaca per-render lewat _pil_warna() (ikut /theme). Dulu di sini
+    dipakai tiga NAMA konstanta yang tak pernah didefinisikan (_PIL_TERANG/
+    _PIL_SISA/_PIL_REDUP) — NameError menunggu di /compact pertama."""
     frac = max(0.0, min(1.0, frac))
     isi = int(round(frac * lebar))
+    terang, redup, sisa = _pil_warna()
     t = Text()
-    t.append(_PIL_TUTUP_KIRI, style=_PIL_TERANG if isi else _PIL_SISA)
+    t.append(_PIL_TUTUP_KIRI, style=terang if isi else sisa)
     for i in range(lebar):
         if i < isi:
             # Ruas 2 terang - 2 redup yang merayap: pola putus-putus yang hidup.
-            terang = ((i - fase) % 4) < 2
-            t.append(_PIL_ISI, style=_PIL_TERANG if terang else _PIL_REDUP)
+            gerak = ((i - fase) % 4) < 2
+            t.append(_PIL_ISI, style=terang if gerak else redup)
         else:
-            t.append(_PIL_KOSONG, style=_PIL_SISA)
-    t.append(_PIL_TUTUP_KANAN, style=_PIL_TERANG if isi >= lebar else _PIL_SISA)
+            t.append(_PIL_KOSONG, style=sisa)
+    t.append(_PIL_TUTUP_KANAN, style=terang if isi >= lebar else sisa)
     return t
 
 
@@ -6432,13 +6445,10 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         pass
     console.clear()
     console.print("\n  [#fcc048]⬢ bagas-ai[/]  [dim]— sampai jumpa! 👋[/dim]")
-    # ID sesi DICETAK SAAT KELUAR: inilah satu-satunya momen pengguna pasti
-    # melihatnya, padahal itulah kunci untuk melanjutkan kerja ini lewat
-    # `bagas-ai --resume <id>` — dari folder yang sama.
+    # Satu baris, langsung PAKAI: cara lanjutkan = sekaligus ID-nya.
     console.print(
-        f"  [dim]ID sesi ini:[/dim] [bold {tema.p('aksen2')}]{_esc(session.id)}[/] "
-        f"[dim]· lanjutkan nanti:[/dim] "
-        f"[cyan]bagas-ai --resume {_esc(session.id)}[/cyan]\n")
+        f"  [cyan]bagas-ai --resume {_esc(session.id)}[/cyan] "
+        f"[dim]untuk melanjutkan[/dim]\n")
 
 
 if __name__ == "__main__":

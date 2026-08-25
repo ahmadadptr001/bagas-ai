@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -124,6 +125,36 @@ def latest(project_root: Path | None = None) -> Session | None:
     d = _project_dir(project_root)
     files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     return Session.load(files[0]) if files else None
+
+
+def find(session_id: str, project_root: Path | None = None) -> Session | None:
+    """Sesi dengan ID persis — atau AWALAN yang tunak — atau None.
+
+    Awalan diterima agar menyalin sebagian ID cukup (`--resume 20250825`),
+    TAPI hanya bila ia menunjuk SATU sesi: beberapa kandidat berarti ambigu,
+    dan menebak di antara sesi-sesi kerja nyata lebih berbahaya daripada
+    meminta ID yang lebih panjang. ValueError-nya berisi penjelasan +
+    kandidat terdekat supaya pesan galatnya bisa ditindaklanjuti langsung.
+    """
+    bersih = re.sub(r"[^\w.-]", "", (session_id or "").strip())
+    if not bersih:
+        return None
+    d = _project_dir(project_root)
+    exact = d / f"{bersih}.json"
+    if exact.is_file():
+        return Session.load(exact)
+    files = sorted(d.glob(f"{bersih}*.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        raise ValueError(
+            f"Tidak ada sesi ber-ID '{session_id}' di folder ini. "
+            "Tanpa argumen, --resume melanjutkan yang TERAKHIR.")
+    if len(files) > 1:
+        contoh = ", ".join(f.stem[:16] for f in files[:4])
+        raise ValueError(
+            f"ID '{session_id}' ambigu — cocok {len(files)} sesi "
+            f"({contoh}…). Tulis lebih panjang.")
+    return Session.load(files[0])
 
 
 def list_sessions(project_root: Path | None = None) -> list[Session]:

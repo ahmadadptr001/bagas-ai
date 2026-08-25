@@ -43,6 +43,7 @@ bagas-ai v{__version__} — AI agent serbaguna (model via browser)
 Penggunaan:
   bagas-ai              Buka sesi chat BARU di folder saat ini
   bagas-ai --resume     Lanjutkan percakapan terakhir di folder ini
+  bagas-ai --resume ID  Lanjutkan sesi ber-ID itu (ID dicetak saat kamu keluar)
   bagas-ai login        Wizard: hubungkan bot Telegram (opsional)
   bagas-ai add-dir <p>  Tambah folder konteks agar bagas-ai memahaminya
   bagas-ai update       Cek & terapkan pembaruan dari GitHub
@@ -347,7 +348,21 @@ def _preload_with_bar() -> None:
 def main() -> None:
     args = sys.argv[1:]
     flags = {a for a in args if a.startswith("-")}
-    positional = [a for a in args if not a.startswith("-")]
+    # Nilai sesudah --resume/-r adalah ID SESI (mis. `bagas-ai --resume
+    # 20250825-101030-a1b2`). Ia TIDAK boleh dihitung sebagai mode/positional:
+    # tanpa ini, "bagas-ai --resume 20250825" dibaca sebagai perintah mode
+    # "20250825" yang tak dikenal.
+
+    def _nilai_bendera(nama: str) -> str:
+        if nama in args:
+            i = args.index(nama)
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                return args[i + 1]
+        return ""
+
+    resume_id = _nilai_bendera("--resume") or _nilai_bendera("-r")
+    positional = [a for a in args
+                  if not a.startswith("-") and a != resume_id]
     mode = positional[0].lower() if positional else "chat"
     resume = "--resume" in flags or "-r" in flags
 
@@ -382,7 +397,7 @@ def main() -> None:
     if mode in ("chat", "cli"):
         _preload_with_bar()  # bar loading BERTAHAP selama impor pustaka (~1 dtk)
         from .interfaces.cli import main as run
-        run(resume=resume)
+        run(resume=resume, resume_id=resume_id)
         return
     if mode == "telegram":
         from . import osinfo
