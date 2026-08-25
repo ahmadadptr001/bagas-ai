@@ -14,6 +14,11 @@ _IMG_EXT = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif",
 })
 
+# Ekstensi video yang dikenali (lampiran analisis via model vision API).
+_VID_EXT = frozenset({
+    ".mp4", ".mpeg", ".mpg", ".webm", ".mov", ".m4v",
+})
+
 # Lebar & tinggi blok pixel (sesuai permintaan: ~1/4 lebar chat box)
 BLOCK_W = 18   # kolom pixel (20 total - 2 untuk border │)
 BLOCK_H = 8    # baris pixel
@@ -21,6 +26,16 @@ BLOCK_H = 8    # baris pixel
 
 def is_image_path(text: str) -> bool:
     """True bila ``text`` adalah path file gambar yang valid & ada di disk."""
+    return _is_media_path(text, _IMG_EXT)
+
+
+def is_video_path(text: str) -> bool:
+    """True bila ``text`` adalah path file video yang valid & ada di disk."""
+    return _is_media_path(text, _VID_EXT)
+
+
+def _is_media_path(text: str, exts: frozenset) -> bool:
+    """Pemeriksa path media bersama: bersihkan kutip/file:// lalu cek ekstensi."""
     text = text.strip().strip('"').strip("'").strip()
     if not text:
         return False
@@ -33,7 +48,7 @@ def is_image_path(text: str) -> bool:
             pass
     try:
         p = Path(text)
-        return p.is_file() and p.suffix.lower() in _IMG_EXT
+        return p.is_file() and p.suffix.lower() in exts
     except Exception:
         return False
 

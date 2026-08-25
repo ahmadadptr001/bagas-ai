@@ -99,7 +99,10 @@ from .. import session as session_mod  # noqa: E402
 from .. import tanda as _tanda  # noqa: E402
 from .. import suara as _suara  # noqa: E402
 from .. import tempelan as _tempelan  # noqa: E402
-from ..ui.ascii_art import BLOCK_H, BLOCK_W, image_dimensions, image_to_blocks_pixels, is_image_path  # noqa: E402
+from ..ui.ascii_art import (  # noqa: E402
+    BLOCK_H, BLOCK_W, image_dimensions,
+    image_to_blocks_pixels, is_image_path, is_video_path,
+)
 from ..tools.screen import IMAGE_MARK  # noqa: E402
 from ..core import Agent  # noqa: E402
 from ..session import Session  # noqa: E402
@@ -870,43 +873,70 @@ _pending_gambar: dict = {}  # path: str
 
 
 def _ekstrak_path_gambar(text: str, pending_path: str = "") -> str | None:
-    """Cari path file gambar yang valid di dalam teks (atau dari [foto])."""
+    """Cari path file GAMBAR/VIDEO yang valid di dalam teks (atau dari [foto]).
+
+    Video ikut dikenali sejak dukungan analisis video di model API vision —
+    pratinjaunya tanpa pixel (lihat _perbarui_pratinjau_gambar), tapi
+    mekanisme pending & pelampirannya sama persis."""
     if not text:
         return None
 
     # 1. Jika ada [foto] dan pending_path masih valid di disk
-    if "[foto]" in text and pending_path and is_image_path(pending_path):
+    if "[foto]" in text and pending_path and \
+            (is_image_path(pending_path) or is_video_path(pending_path)):
         return pending_path
+
+    def _media(bersih: str) -> str | None:
+        if is_image_path(bersih) or is_video_path(bersih):
+            try:
+                return str(Path(bersih).resolve())
+            except Exception:
+                return bersih
+        return None
 
     # 2. Cek apakah seluruh text adalah path (dengan atau tanpa tanda petik / file://)
     bersih = text.strip().strip('"').strip("'").strip()
-    if is_image_path(bersih):
-        try:
-            return str(Path(bersih).resolve())
-        except Exception:
-            return bersih
+    ketemu = _media(bersih)
+    if ketemu:
+        return ketemu
 
     # 3. Cari quoted paths di dalam text: "..." atau '...'
     quoted = re.findall(r'["\']([^"\']+)["\']', text)
     for q in quoted:
-        q_bersih = q.strip()
-        if is_image_path(q_bersih):
-            try:
-                return str(Path(q_bersih).resolve())
-            except Exception:
-                return q_bersih
+        ketemu = _media(q.strip())
+        if ketemu:
+            return ketemu
 
-    # 4. Cari kata-kata / token yang merupakan path gambar valid
+    # 4. Cari kata-kata / token yang merupakan path media valid
     tokens = text.split()
     for tok in tokens:
         tok_b = tok.strip().strip('"').strip("'").strip("(),;[]<>")
-        if is_image_path(tok_b):
-            try:
-                return str(Path(tok_b).resolve())
-            except Exception:
-                return tok_b
+        ketemu = _media(tok_b)
+        if ketemu:
+            return ketemu
 
     return None
+
+
+def _isi_state_media(p: str) -> bool:
+    """Isi _gambar_state utk satu path media. False bila tak bisa dipratinjau.
+
+    Gambar -> pixel blok warna; VIDEO -> tanpa pixel (renderer menampilkan
+    baris judul saja). State tanpa isi membuat panel tak muncul sama sekali,
+    jadi kegagalan muat gambar tetap ditolak di sini."""
+    if is_video_path(p):
+        _gambar_state.clear()
+        _gambar_state["title"] = Path(p).name
+        _gambar_state["path"] = p
+        return True
+    px = image_to_blocks_pixels(p)
+    if not px:
+        return False
+    _gambar_state.clear()
+    _gambar_state["pixels"] = px[0]
+    _gambar_state["title"] = Path(p).name
+    _gambar_state["path"] = p
+    return True
 
 
 def _perbarui_pratinjau_gambar(
@@ -916,8 +946,10 @@ def _perbarui_pratinjau_gambar(
 ) -> None:
     """Perbarui _gambar_state secara reaktif berdasarkan teks saat ini.
 
-    Bila teks mengandung path gambar yang valid (bukan sudah diganti [foto]):
-      • Muat pixel → tampilkan pratinjau Minecraft di bawah kotak.
+    Bila teks mengandung path gambar/video yang valid (bukan sudah diganti
+    [foto]):
+      • Muat pixel → tampilkan pratinjau Minecraft di bawah kotak (gambar);
+        video tampil sebagai baris judul saja.
       • Ganti teks di buffer dengan [foto] supaya pesan yang terkirim konsisten.
     Bila path tidak valid → hapus pratinjau seketika.
     """
@@ -926,30 +958,21 @@ def _perbarui_pratinjau_gambar(
     # periksa pending_path-nya saja — tidak perlu mencari path lagi di teks.
     if "[foto]" in text and _pending_gambar.get("path"):
         # Pratinjau sudah ada & pending ok → pastikan _gambar_state masih terisi.
-        if not _gambar_state.get("pixels"):
+        if not _gambar_state.get("pixels") and not _gambar_state.get("title"):
             p = _pending_gambar["path"]
-            if is_image_path(p):
-                px = image_to_blocks_pixels(p)
-                if px:
-                    _gambar_state["pixels"] = px[0]
-                    _gambar_state["title"] = Path(p).name
-                    _gambar_state["path"] = p
-                    if app is not None:
-                        try:
-                            app.invalidate()
-                        except Exception:
-                            pass
+            _isi_state_media(p)
+            if app is not None:
+                try:
+                    app.invalidate()
+                except Exception:
+                    pass
         return
 
     p = _ekstrak_path_gambar(text, _pending_gambar.get("path", ""))
     berubah = False
     if p:
         if _gambar_state.get("path") != p:
-            px = image_to_blocks_pixels(p)
-            if px:
-                _gambar_state["pixels"] = px[0]
-                _gambar_state["title"] = Path(p).name
-                _gambar_state["path"] = p
+            if _isi_state_media(p):
                 _pending_gambar["path"] = p
                 berubah = True
                 # Ganti teks buffer dengan [foto] (hanya bila teks bukan [foto]).
@@ -1012,10 +1035,18 @@ def _gambar_idle_pt() -> list[tuple[str, str]]:
     warna per-pixel. Kosong bila tak ada gambar.
     """
     rows = _gambar_state.get("pixels")
-    if not rows:
-        return []
     title = _gambar_state.get("title", "")
     bdr = "class:garis"
+    if not rows:
+        # VIDEO / media tanpa pratinjau pixel: satu kotak judul mini, supaya
+        # pengguna tetap TAHU lampirannya menempel (bukan hilang diam-diam).
+        if title:
+            return [
+                (bdr, "╭─ "), ("class:tanda", f"🎞 {title}"), (bdr, " ─╮"),
+                ("", "\n"),
+                (bdr, "╰" + "─" * (get_cwidth(title) + 8) + "╯"),
+            ]
+        return []
     n_cols = max(len(r) for r in rows) if rows else BLOCK_W
     # Judul di tengah tepi atas (dipotong bila panjang).
     avail = max(0, n_cols - 2)
@@ -1052,9 +1083,17 @@ def _panel_gambar_rich() -> list[Text]:
     Text. Dipakai region live saat giliran berjalan supaya urutan tumpukan
     bawah sama persis dengan saat idle (status · gambar · kotak · rencana)."""
     rows = _gambar_state.get("pixels")
-    if not rows:
-        return []
     title = _gambar_state.get("title", "")
+    if not rows:
+        # Kembaran fallback video _gambar_idle_pt (versi rich).
+        if title:
+            baris = Text("╭─ ", style=_garis_kotak())
+            baris.append(f"🎞 {title}", style=f"bold {tema.p('aksen')}")
+            baris.append(" ─╮", style=_garis_kotak())
+            bawah = Text("╰" + "─" * (get_cwidth(title) + 8) + "╯",
+                         style=_garis_kotak())
+            return [_oneline(baris), _oneline(bawah)]
+        return []
     n_cols = max(len(r) for r in rows)
     avail = max(0, n_cols - 2)
     t = title[:avail]
@@ -6025,16 +6064,16 @@ def main(resume: bool = False) -> None:
             return
         simpanan = _tempelan.simpanan()
         import time as _time
-        # --- deteksi file gambar yang di-drop → blok warna Minecraft ----------
+        # --- deteksi file media yang di-drop → pratinjau + penanda [foto] ----
+        # Gambar: blok warna Minecraft; VIDEO: ikut diterima (analisis via
+        # model API vision) dengan panel judul saja — mekanisme pending &
+        # pelampirannya sama persis.
         try:
             _cek = data.strip().strip('"').strip("'")
-            if _cek and is_image_path(_cek):
+            if _cek and (is_image_path(_cek) or is_video_path(_cek)):
                 resolved = str(Path(_cek).resolve())
-                px = image_to_blocks_pixels(resolved)
-                if px:
-                    _gambar_state["pixels"] = px[0]
-                    _gambar_state["title"] = Path(resolved).name
-                    _gambar_state["path"] = resolved
+                if not _isi_state_media(resolved):
+                    raise ValueError("media tak bisa dipratinjau")
                 _pending_gambar["path"] = resolved
                 event.current_buffer.text = "[foto]"
                 event.current_buffer.cursor_position = len("[foto]")

@@ -11,10 +11,12 @@ percakapan browser, dan penyimpanan sesi.
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime as _dt
 import json
 import logging
+import mimetypes
 import re
 import threading
 import time
@@ -935,6 +937,70 @@ def _take_image_marks(result: str) -> tuple[str, list[str]]:
         return result, []
     cleaned = _IMAGE_MARK_RE.sub("", result or "").rstrip()
     return cleaned, paths
+
+
+# --- lampiran media di jalur API (vision) -----------------------------------
+# Jalur WEB mengunggah berkas ke situsnya (Playwright); jalur API TIDAK punya
+# komposer — medianya ikut sebagai BAGIAN PESAN gaya OpenAI/OpenRouter: konten
+# user berubah jadi daftar bagian [{type:text},{type:image_url|video_url}]
+# berisi data-URL base64. Base64 SENGAJA tidak pernah masuk Memory: riwayat
+# cuma menyimpan PENANDA + path aslinya, lalu _pesan_dengan_media
+# mengkonversinya tiap request. Dengan itu berkas sesi tetap ramping dan
+# digest antar-model tak membawa gumpalan base64.
+_MIME_GAMBAR = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+# "video/mov" ada di contoh resmi OpenRouter walau bukan MIME baku; .mov milik
+# sistem biasanya terdeteksi video/quicktime — keduanya diterima.
+_MIME_VIDIO = {"video/mp4", "video/mpeg", "video/webm",
+               "video/quicktime", "video/mov"}
+_MEDIA_LAMPIR = "[LAMPIR-MEDIA]"
+
+
+def _mime_gambar(path: str) -> str | None:
+    """MIME gambar yang didukung endpoint vision, atau None bila bukan."""
+    mime, _ = mimetypes.guess_type(path)
+    return mime if mime in _MIME_GAMBAR else None
+
+
+def _mime_vidio(path: str) -> str | None:
+    """MIME video yang didukung endpoint vision, atau None bila bukan."""
+    mime, _ = mimetypes.guess_type(path)
+    return mime if mime in _MIME_VIDIO else None
+
+
+def _pesan_dengan_media(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Konversi pesan user berpenanda [LAMPIR-MEDIA]<path> jadi multimodal.
+
+    Gambar menjadi bagian `image_url`, video menjadi `video_url` — keduanya
+    data-URL base64 sesuai contoh resmi OpenRouter. Penanda yang filenya
+    sudah tak ada / formatnya tak didukung dibuang diam-diam: riwayat lama
+    (resume) sering menyimpan path yang sudah terhapus, dan mengirim data-URL
+    kosong justru membuat seluruh request ditolak."""
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        c = m.get("content")
+        if m.get("role") != "user" or not isinstance(c, str) \
+                or _MEDIA_LAMPIR not in c:
+            out.append(m)
+            continue
+        baris = c.splitlines()
+        paths = [ln[len(_MEDIA_LAMPIR):].strip() for ln in baris
+                 if ln.startswith(_MEDIA_LAMPIR)]
+        teks = "\n".join(ln for ln in baris
+                         if not ln.startswith(_MEDIA_LAMPIR)).strip()
+        parts: list[dict[str, Any]] = [{"type": "text", "text": teks}] if teks else []
+        for p in paths:
+            mime = _mime_gambar(p) or _mime_vidio(p)
+            if not (mime and Path(p).is_file()):
+                continue
+            with open(p, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            jenis = "image_url" if mime in _MIME_GAMBAR else "video_url"
+            parts.append({"type": jenis, jenis: {"url": f"data:{mime};base64,{b64}"}})
+        if len(parts) > 1:  # ada teks DAN minimal satu media sah
+            out.append({**m, "content": parts})
+        else:
+            out.append({**m, "content": teks})
+    return out
 
 
 def _looks_like_unapplied_code(text: str) -> bool:
@@ -2177,27 +2243,56 @@ class Agent:
         self.tokens_live = 0
 
         if attachments:
-            # Ketiga model nvidia/* bertipe TEKS (ModelSpec.multimodal=False),
-            # jadi gambar memang tak bisa dikirim. Lampirannya TIDAK dibuang
-            # diam-diam: jalurnya dialihkan ke tool baca-berkas dan pengguna
-            # diberi tahu. Membuangnya tanpa kabar membuat pengguna menunggu
-            # jawaban tentang berkas yang model ini tak pernah lihat.
-            daftar = "\n".join(f"- {a}" for a in attachments)
-            self.memory.add({
-                "role": "user",
-                "content": (
-                    "[SISTEM] Pengguna melampirkan berkas di bawah. Model ini "
-                    "tak menerima gambar lewat API, jadi berkasnya TIDAK "
-                    "terkirim sebagai gambar. Buka sendiri dengan tool "
-                    "(mis. baca berkas / daftar isi folder) bila perlu:\n"
-                    + daftar
-                ),
-            })
-            if on_notice:
-                on_notice(
-                    f"{len(attachments)} lampiran tak dikirim sebagai gambar "
-                    f"({self.model_spec.label} model teks) — pathnya "
-                    "diteruskan supaya bisa dibaca lewat tool")
+            spec = self.model_spec
+            if spec.multimodal:
+                # Model API ini penerima media (mis. ox-alpha via OpenRouter):
+                # gambar & video dikirim sebagai bagian pesan (image_url /
+                # video_url base64) lewat penanda di memori — konversinya
+                # terjadi per-request di _pesan_dengan_media. Berkas yang
+                # BUKAN media tetap dialihkan ke tool baca-berkas.
+                media = [p for p in attachments
+                         if _mime_gambar(p) or _mime_vidio(p)]
+                lain = [p for p in attachments if p not in media]
+                if media:
+                    self.memory.messages[-1]["content"] += "".join(
+                        f"\n{_MEDIA_LAMPIR}{p}" for p in media)
+                    if on_notice:
+                        on_notice(f"{len(media)} media dilampirkan "
+                                  f"(gambar/video) ke {spec.label}")
+                if lain:
+                    daftar = "\n".join(f"- {a}" for a in lain)
+                    self.memory.add({
+                        "role": "user",
+                        "content": (
+                            "[SISTEM] Pengguna melampirkan berkas di bawah. "
+                            "Berkasnya bukan gambar/video, jadi tidak ikut "
+                            "sebagai lampiran pesan. Buka sendiri dengan tool "
+                            "(mis. baca berkas / daftar isi folder) bila "
+                            "perlu:\n" + daftar
+                        ),
+                    })
+            else:
+                # Model TEKS: tak ada komposer punya vision. Lampirannya TIDAK
+                # dibuang diam-diam: jalurnya dialihkan ke tool baca-berkas
+                # dan pengguna diberi tahu. Membuangnya tanpa kabar membuat
+                # pengguna menunggu jawaban tentang berkas yang model ini tak
+                # pernah lihat.
+                daftar = "\n".join(f"- {a}" for a in attachments)
+                self.memory.add({
+                    "role": "user",
+                    "content": (
+                        "[SISTEM] Pengguna melampirkan berkas di bawah. Model "
+                        "ini tak menerima gambar lewat API, jadi berkasnya "
+                        "TIDAK terkirim sebagai gambar. Buka sendiri dengan "
+                        "tool (mis. baca berkas / daftar isi folder) bila "
+                        "perlu:\n" + daftar
+                    ),
+                })
+                if on_notice:
+                    on_notice(
+                        f"{len(attachments)} lampiran tak dikirim sebagai "
+                        f"gambar ({spec.label} model teks) — pathnya "
+                        "diteruskan supaya bisa dibaca lewat tool")
 
         try:
             return self._api_loop(
@@ -2334,7 +2429,11 @@ class Agent:
             active_tools = None if force_final else (schemas or None)
             try:
                 content, tool_calls, usage = llm.stream_completion(
-                    self.memory.messages,
+                    # Penanda [LAMPIR-MEDIA] di riwayat dikonversi jadi bagian
+                    # multimodal (image_url/video_url base64) DI SINI, tiap
+                    # putaran: endpoint API tak punya memori, jadi medianya
+                    # wajib ikut di SETIAP request selama rantai tool berjalan.
+                    _pesan_dengan_media(self.memory.messages),
                     tools=active_tools,
                     # api_model, BUKAN spec.id: `id` adalah identitas internal
                     # bagas-ai ("openrouter/ox-alpha") yang tak dikenal server.

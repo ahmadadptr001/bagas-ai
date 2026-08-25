@@ -262,17 +262,24 @@ MODELS: dict[str, ModelSpec] = {
         label="Ox Alpha (API)",
         provider="openrouter",
         api_model="stealth/ox-alpha",
-        multimodal=False,
-        note=("Via API OpenRouter — mode berpikir nyala bawaan "
-              "(reasoning.enabled); bisa dimatikan lewat /effort langsung"),
-        # Saklar gaya OpenRouter: extra_body {"reasoning": {"enabled": ...}}
-        # persis contoh resminya. Bawaan MENDALAM = selalu menyala.
-        reasoning_param="reasoning",
+        # Penerima GAMBAR & VIDEO lewat konten multimodal OpenRouter
+        # (image_url / video_url base64) — lihat core._pesan_dengan_media.
+        multimodal=True,
+        note=("Via API OpenRouter — paham gambar & video; nalarnya selalu "
+              "nyala dan tak bisa dimatikan (syarat endpoint)"),
+        # Saklar gaya OpenRouter DITOLAK server untuk model ini — TERUKUR
+        # 2026-08-25: {"reasoning":{"enabled":false}} dibalas HTTP 400 "Reasoning
+        # is mandatory for this endpoint". Jadi TIDAK ada saklar yang jujur untuk
+        # ditawarkan; nalar selalu menyala tanpa tingkatan yang bisa dijamin.
+        reasoning_param="",
         reasoning_key="",
-        effort_levels=("langsung", "mendalam"),
-        effort_default="mendalam",
+        effort_levels=(),
+        effort_default="",
         kirim_reasoning_effort=False,
         max_tokens=16384,
+        effort_catatan=("model ini SELALU bernalar — endpointnya menolak "
+                        "mode tanpa-reasoning (HTTP 400), jadi tak ada "
+                        "saklar/tingkatan yang bisa dipilih"),
     ),
 }
 
