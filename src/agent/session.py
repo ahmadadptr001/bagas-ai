@@ -136,7 +136,7 @@ def find(session_id: str, project_root: Path | None = None) -> Session | None:
     meminta ID yang lebih panjang. ValueError-nya berisi penjelasan +
     kandidat terdekat supaya pesan galatnya bisa ditindaklanjuti langsung.
     """
-    bersih = re.sub(r"[^\w.-]", "", (session_id or "").strip())
+    bersih = re.sub(r"[^\w.-]", "", (session_id or "").strip()).strip(".-")
     if not bersih:
         return None
     d = _project_dir(project_root)

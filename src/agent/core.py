@@ -1925,11 +1925,16 @@ class Agent:
             berkas = konteks.terbaru(konteks.AWALAN)
         berkas = [Path(p) for p in berkas if Path(p).is_file()]
         if not berkas:
-            return ("Belum ada berkas ingatan yang tersimpan. Jalankan "
-                    "`/compact` dulu di percakapan yang ingin kamu bawa.")
+            # Kegagalan DIANGKAT, bukan dikembalikan sebagai teks: dulu CLI
+            # mencetak "✓ ingatan terpasang" untuk pesan ini juga — klaim
+            # sukses di atas kegagalan yang nyata.
+            raise ValueError(
+                "Belum ada berkas ingatan yang tersimpan. Jalankan "
+                "`/compact` dulu di percakapan yang ingin kamu bawa.")
         if len(konteks.kode(berkas)) != len(berkas):
-            return ("Berkas memory tak terbaca / bukan buatan bagas-ai: "
-                    + ", ".join(p.name for p in berkas))
+            raise ValueError(
+                "Berkas memory tak terbaca / bukan buatan bagas-ai: "
+                + ", ".join(p.name for p in berkas))
         if on_status:
             on_status("memasang ingatan ke percakapan…")
 
@@ -2008,6 +2013,8 @@ class Agent:
         (lihat _pasang_memory_api)."""
         from . import connectors
         if not self.model_spec.is_web:
+            # Kegagalan keras (tak ada berkas / berkas rusak) DIANGKAT sebagai
+            # ValueError supaya CLI bisa menampilkan ✗ — bukan ✓ palsu.
             return self._pasang_memory_api(path, on_status=on_status)
         # URUTAN PEMILIHANNYA PENTING, dan inilah bug yang pernah terjadi:
         #   1. path yang disebut pengguna;

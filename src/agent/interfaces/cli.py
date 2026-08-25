@@ -1015,7 +1015,17 @@ def _perbarui_pratinjau_gambar(
             pass
 
 
-def _kembangkan_foto(teks: str) -> str:
+def _gagal_compact(teks: str) -> bool:
+    """True bila balasan kirim_memory termasuk KEGAGALAN, bukan sukses.
+
+    Dipakai CLI agar tak lagi mencetak "✓ ingatan terpasang" di atas pesan
+    "Belum ada berkas..." / "tak terbaca" / "GAGAL dikirim"."""
+    t = (teks or "").lstrip()
+    return t.startswith(("Belum ada", "Berkas memory tak terbaca",
+                         "Ingatan GAGAL"))
+
+
+def _kembangkan_foto(teks: str, hanya_bila_ditandai: bool = False) -> str:
     """Tukar penanda [foto] dengan penanda lampiran `[GAMBAR] <path>`.
 
     [foto] CUMA bentuk tampilan di kotak ketik & gema riwayat — yang dikirim
@@ -1028,10 +1038,12 @@ def _kembangkan_foto(teks: str) -> str:
     SATU baris yang tak tertangkap regex.
 
     Gambar pending TANPA [foto] di teks tetap dilampirkan ke pesan ini —
-    perilaku "drop lalu langsung Enter" yang sudah biasa. Pending dibersihkan
-    sesudah dipakai: satu gambar, satu pesan."""
+    perilaku "drop lalu langsung Enter" yang sudah biasa — KECUALI
+    `hanya_bila_ditandai` (jalur sisipan tengah-giliran): tanpa itu, foto
+    milik pesan lain bisa salah sasaran. Pending dibersihkan sesudah
+    dipakai: satu gambar, satu pesan."""
     p = _pending_gambar.get("path")
-    if not p:
+    if not p or (hanya_bila_ditandai and "[foto]" not in teks):
         return teks
     if "[foto]" in teks:
         teks = teks.replace("[foto]", f"\n{IMAGE_MARK} {p}\n")
@@ -2998,8 +3010,10 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 _konten_startup.append(Padding(_replay_diff(m),
                                                (0, 3, 0, 3)))
             elif role == "assistant" and content:
+                # f-prefix WAJIB: dulu hilang, tag markupnya berisi literal
+                # "{tema.p('aksen2')}" sehingga headernya tak berwarna.
                 _konten_startup.append(_TM(
-                    "\n  [bold {tema.p('aksen2')}]🤖 bagas-ai[/]"))
+                    f"\n  [bold {tema.p('aksen2')}]🤖 bagas-ai[/]"))
                 # Rapat ke headernya (top=0) — sama seperti add_narasi:
                 # header dan ucapannya satu blok, jaraknya satu baris di
                 # atas header, bukan di antara keduanya.
@@ -3713,11 +3727,13 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 # Pesan sisipan tak lewat gelung utama, jadi penanda tempelannya
                 # harus dikembangkan di sini juga — kalau tidak, AI menerima
                 # tulisan "[tempelan #1 · 312 baris · 14,2 KB]" alih-alih log
-                # yang sebenarnya ingin ditunjukkan pengguna. [foto] + gambar
-                # pending ikut ditukarkan: sisipan adalah jalur masuk yang sama
-                # sahnya dengan kotak idle, lampirannya harus sama pula.
-                return [_kembangkan_foto(_tempelan.simpanan().kembangkan(t))
-                        for t in diambil]
+                # yang sebenarnya ingin ditunjukkan pengguna. Media pending
+                # hanya ikut bila pesannya MEMANG menandai [foto] — dulu
+                # foto milik pesan berikutnya bisa salah sasaran ke pesan
+                # sisipan yang kebetulan lebih dulu diketik.
+                return [_kembangkan_foto(
+                    _tempelan.simpanan().kembangkan(t),
+                    hanya_bila_ditandai=True) for t in diambil]
 
         _padat = _jeda_padat(view)
 
@@ -4622,6 +4638,11 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                     arg.strip().strip('"').strip("'") or None,
                     on_status=lambda m: state.__setitem__("pesan", m),
                     on_notice=lambda m: state.__setitem__("pesan", m))
+            except ValueError as exc:
+                # Kegagalan keras dari core — ditampilkan sebagai ✗ oleh
+                # pemeriksa _gagal_compact di bawah, bukan ✓ palsu.
+                hasil["teks"] = str(exc)
+                hasil["galat"] = None
             except BaseException as exc:  # noqa: BLE001
                 hasil["galat"] = exc
 
@@ -4641,9 +4662,16 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             console.print(f"\n  [red]✖ gagal mengirim ingatan:[/red] "
                           f"{hasil['galat']}\n")
             return
+        # Kegagalan keras dari core datang sebagai ValueError; jalur web
+        # menyatakan gagal lewat teks "Ingatan GAGAL". Dulu SEMUANYA dicetak
+        # dengan "✓ terpasang" — klaim sukses di atas kegagalan nyata.
+        teks = (hasil["teks"] or "").strip()
+        if isinstance(hasil["teks"], str) and _gagal_compact(teks):
+            console.print(f"\n  [bold #f0603c]✗ {_esc(teks.splitlines()[0])}[/]"
+                          f"[red]{_esc(' '.join(teks.splitlines()[1:]))}[/red]\n")
+            return
         console.print("  [#9fc93c]✓ ingatan terpasang[/] [dim]— lanjutkan "
                       "seperti biasa.[/]\n")
-        teks = (hasil["teks"] or "").strip()
         if teks:
             console.print(Padding(_md(teks), (0, 3, 1, 3)))
 
