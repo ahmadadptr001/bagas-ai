@@ -49,6 +49,8 @@ from . import tema
 # sekali saat impor, sehingga pergantian tema di tengah sesi tak pernah
 # sampai ke sini. HIJAU/MERAH tetap konstanta — warna SEMANTIK (sukses/
 # bahaya), bukan bagian identitas tema.
+
+
 def EMAS() -> str:
     return "fg:" + tema.p("aksen")
 
@@ -655,9 +657,19 @@ def checkbox(message: str = "", choices: Sequence[Any] = (), hint: str = "",
 
 
 # ----------------------------------------------------------------- confirm
-def confirm(message: str = "", default: bool = True, warna: str = KUNING,
+def confirm(message: str = "", default: bool = True, warna: str = "",
             ringkas: bool = True, **_lain: Any) -> bool:
-    """Konfirmasi Ya/Tidak mendatar. Batal (esc) dianggap TIDAK."""
+    """Konfirmasi Ya/Tidak mendatar. Batal (esc) dianggap TIDAK.
+
+    `warna` HARUS string kosong secara bawaan — BUKAN `KUNING` begitu saja.
+    Dulu tertulis `warna: str = KUNING`: yang terikat ke parameter adalah
+    OBJEK FUNGSI-NYA (default dievaluasi sekali saat def), sehingga fragmen
+    FormattedText bergaya callable dan prompt_toolkit meledak saat menggambar
+    ("argument of type 'function' is not iterable") — kotak konfirmasi tak
+    pernah muncul di mana pun confirm dipakai. Pola yang benar sama dengan
+    select()/checkbox(): bawaan string kosong, dinormalkan DI SINI dengan
+    MEMANGGIL fungsi paletnya."""
+    warna = warna or KUNING()
     if not _interaktif():
         return default
     keadaan = {"ya": bool(default)}
@@ -721,6 +733,8 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
     if kaki is None:
         kaki = kaki_aktif
     if not _interaktif():
+        import getpass
+
         try:
             return input(f"{message}: ") if not rahasia else getpass.getpass(f"{message}: ")
         except (EOFError, KeyboardInterrupt):
@@ -736,7 +750,10 @@ def _prompt_teks(message: str, hint: str, *, rahasia: bool = False,
     buf.accept_handler = _terima
 
     lebar = _lebar_kotak()
-    warna = warna or ORANYE()
+    # Dulu tertulis `warna = warna or ORANYE()` padahal fungsi ini TAK PUNYA
+    # parameter warna — UnboundLocalError di tiap prompt interaktif, yang
+    # ditelan pemanggil lalu terdegradasi diam-diam ke getpass polos.
+    warna = ORANYE()
     judul_di_dalam = bool(message) and get_cwidth(message) > lebar - 8
 
     def bagian_atas() -> FormattedText:

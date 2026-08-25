@@ -265,13 +265,33 @@ _KREDENSIAL = {
 
 
 def _tanya_ya_tidak(pesan: str, bawaan: bool = False) -> bool:
-    """Confirm yang AMAN non-interaktif: gagal membaca stdin berarti tidak."""
-    try:
-        from .ui.menu import inquirer
+    """Pertanyaan Ya/Tidak yang TAK PERNAH membisukan pertanyaannya.
 
-        return bool(inquirer.confirm(message=pesan, default=bawaan).execute())
+    Prompt kotak (ui/menu) dicoba dulu. Bila ia GAGAL karena alasan teknis
+    apa pun, JANGAN menganggapnya jawaban "tidak" — dulu kegagalan render
+    diam-diam dibaca sebagai penolakan dan wizard langsung "Dibatalkan"
+    tanpa pengguna sempat membaca pertanyaannya. Jawaban hanya sah kalau
+    benar-benar diminta: jatuhlah ke input() polos yang pasti tampil di
+    terminal mana pun. KeyboardInterrupt/EOFError tetap diteruskan — itu
+    pengguna yang membatalkan sungguhan."""
+    try:
+        from .ui.menu import _interaktif, inquirer
+
+        if _interaktif():
+            hasil = inquirer.confirm(message=pesan, default=bawaan).execute()
+            return bool(hasil)
+        # Terminal tak interaktif: prompt kotak akan MELAYANKAN bawaan tanpa
+        # bertanya — jangan biarkan. Jalur input() di bawah yang bertanya.
+    except (KeyboardInterrupt, EOFError):
+        raise
     except Exception:
-        return False
+        pass  # prompt kotak bermasalah -> jalur cadangan di bawah
+    try:
+        tandanya = "Y/n" if bawaan else "y/N"
+        jawab = input(f"{pesan} [{tandanya}]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        raise
+    return jawab in ("y", "ya", "yes", "j")
 
 
 def _isi_kredensial(console: Console, env: dict[str, str], nama: str) -> bool:
