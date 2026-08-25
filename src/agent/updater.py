@@ -13,7 +13,10 @@ benar-benar dijalankan ikut ter-update, bukan cuma repo-nya.
 """
 from __future__ import annotations
 
-import hashlib
+import logging as _logging
+
+log = _logging.getLogger(__name__)
+
 import json
 import os
 import re

@@ -6,7 +6,7 @@ import contextvars
 import json
 import inspect
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, get_args, get_origin, get_type_hints
 
 # Pemetaan tipe Python -> tipe JSON Schema.

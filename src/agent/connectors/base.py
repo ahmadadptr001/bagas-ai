@@ -26,7 +26,7 @@ from typing import Any, Callable
 from .. import config
 from .browser import (
     BrowserError, WebBusyError, WebChatRusakError, WebKonteksPenuhError,
-    WebLampiranPenuhError, WebLimitError, hub, nama_browser, profile_dir,
+    WebLampiranPenuhError, WebLimitError, hub, nama_browser,
     set_windows_visible,
 )
 

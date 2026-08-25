@@ -48,6 +48,8 @@ daripada penanda yang bisu hanya karena satu berkas gagal diambil. Begitu
 """
 from __future__ import annotations
 
+from typing import Any
+
 import logging
 import math
 import struct

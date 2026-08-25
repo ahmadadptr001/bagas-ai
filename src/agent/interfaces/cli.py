@@ -22,7 +22,6 @@ import sys
 import textwrap
 import threading
 import time
-import unicodedata
 from typing import Any
 
 try:  # keyboard non-blocking (Windows): ketikan-selama-giliran & Ctrl+C
@@ -92,7 +91,6 @@ from rich.panel import Panel  # noqa: E402
 from rich.rule import Rule  # noqa: E402
 from rich.style import Style  # noqa: E402
 from rich.syntax import Syntax  # noqa: E402
-from rich.table import Table  # noqa: E402
 from rich.text import Text  # noqa: E402
 from rich.theme import Theme  # noqa: E402
 
@@ -101,15 +99,14 @@ try:
 except Exception:  # pragma: no cover
     Figlet = None  # type: ignore
 
-from .. import config, interaction, llm, longmem, models, osinfo, permissions, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
+from .. import config, interaction, llm, longmem, models, osinfo, prefs, projectindex, scripts, telegram_perms, updater, workspace  # noqa: E402
 from .. import dengar as _dengar  # noqa: E402
 from .. import session as session_mod  # noqa: E402
 from .. import tanda as _tanda  # noqa: E402
 from .. import suara as _suara  # noqa: E402
 from .. import tempelan as _tempelan  # noqa: E402
 from ..ui.ascii_art import (  # noqa: E402
-    BLOCK_H, BLOCK_W, image_dimensions,
-    image_to_blocks_pixels, is_image_path, is_video_path,
+    BLOCK_W, image_to_blocks_pixels, is_image_path, is_video_path,
 )
 from ..tools.screen import IMAGE_MARK  # noqa: E402
 from ..core import Agent  # noqa: E402
@@ -504,7 +501,7 @@ def _gema_prompt(teks: str, prefix: str = "", antre: bool = False) -> Text:
     lebar_isi = max(16, console.width - 6 - cell_len(prefix))
     baris: list[str] = []
     for paraf in bersih.split("\n"):
-        kata, kini = [], ""
+        kini = ""
         for k in paraf.split(" "):
             calon = f"{kini} {k}".strip() if kini else k
             if kini and cell_len(calon) > lebar_isi:
@@ -1607,7 +1604,6 @@ def _bar_status(agent: Agent, total: int) -> Text:
     terus dan pemanggilnya tak perlu ikut berubah — yang dibuang cuma
     tampilannya (lihat status_bar di main untuk alasan yang sama).
     """
-    s = agent.tokens_session
     spec = agent.model_spec
     SEP = "  │  "
     teks = {
@@ -3539,7 +3535,6 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         steps.clear()
         step_ctr["n"] = 0
         cur_step.clear()
-        turn_start = time.time()
         if not tui_mode["on"]:
             process_classic(text)
             return
@@ -4175,7 +4170,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         steps.clear()
         step_ctr["n"] = 0
         cur_step.clear()
-        turn_start = time.time()
+        turn_start = time.time()   # durasi giliran utk _turn_footer di akhir
 
         def say(content: str, akhir: bool = False) -> None:
             """Tampilkan ucapan/narasi bagas-ai: 1 header per giliran, indentasi rapi.
@@ -5089,9 +5084,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         if pilihan in ("off", "mati", "on", "hidup"):
             nyala = pilihan in ("on", "hidup")
             _prefs.save(tim=nyala)
-            kata = "AKTIF" if nyala else "MATI"
             warna = "#9fc93c" if nyala else tema.p("aksen_terang")
-            console.print(f"  [{warna}]✓ tim spesialis {kata}[/]\n")
+            console.print(f"  [{warna}]✓ tim spesialis "
+                          f"{'AKTIF' if nyala else 'MATI'}[/]\n")
             return
 
         aktif = bool(_prefs.load().get("tim", True))
@@ -6212,7 +6207,6 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         })
     # Status bar PERMANEN di paling bawah (selalu terlihat & rapi).
     def status_bar():
-        s = agent.tokens_session
         spec = agent.model_spec
         # Seluruh model berbasis browser -> penanda selalu sama.
         kind = "🌐" if spec.is_web else "🤖"

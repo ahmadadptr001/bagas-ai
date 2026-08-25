@@ -12,7 +12,6 @@ import os
 import shlex
 import shutil
 
-from .. import config
 from .base import tool
 from .files import _display, _safe_path
 from .shell import _execute, _guard

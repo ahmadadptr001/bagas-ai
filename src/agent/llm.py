@@ -383,39 +383,10 @@ def _base_kwargs(
     return kwargs
 
 
-def chat_completion(
-    messages: list[dict[str, Any]],
-    *,
-    tools: list[dict[str, Any]] | None = None,
-    model: str | None = None,
-    temperature: float | None = None,
-    stream: bool = False,
-    extra_body: dict[str, Any] | None = None,
-    max_tokens: int | None = None,
-    provider: str = "",
-    cancel_event: Any = None,
-    on_retry: Callable[[int, float, Exception], None] | None = None,
-) -> Any:
-    """Panggil chat completions (non-stream) dengan retry tahan-banting."""
-    client = get_client(provider)
-    kwargs = _base_kwargs(messages, tools, model, temperature, extra_body,
-                          stream, max_tokens)
-
-    def _do() -> Any:
-        try:
-            response = client.chat.completions.create(**kwargs)
-        except Exception as exc:  # noqa: BLE001
-            if _apakah_konteks_penuh(exc):
-                raise KonteksPenuh(str(exc)) from exc
-            raise
-        # Saat throttle, NVIDIA bisa membalas 200 tanpa choices -> sementara.
-        if not stream and not getattr(response, "choices", None):
-            raise EmptyResponseError(
-                "Respons kosong dari NVIDIA (kemungkinan rate limit 40 RPM)."
-            )
-        return response
-
-    return _call_with_retry(_do, cancel_event=cancel_event, on_retry=on_retry)
+# chat_completion() NON-STREAM DIHAPUS: tak punya satu pun pemanggil sejak
+# seluruh giliran memakai stream_completion (token realtime + reasoning),
+# dan salinan logika retry/konteks-penuhnya cuma menjadi tempat drift.
+# Hidupkan kembali dari riwayat git bila suatu saat benar-benar diperlukan.
 
 
 def _pasang_watchdog(stream: Any, state: dict[str, Any]) -> threading.Thread | None:

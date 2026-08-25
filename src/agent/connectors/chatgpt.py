@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Any
 
 from .base import WebConnector
-from .browser import BrowserError
 
 
 class ChatGPTConnector(WebConnector):

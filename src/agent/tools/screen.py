@@ -9,7 +9,6 @@ file mana yang harus dilampirkan — jadi tool lain yang menghasilkan gambar
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 from .base import tool
 from .files import _display, _safe_path

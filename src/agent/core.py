@@ -2937,7 +2937,7 @@ class Agent:
         konteks percakapan tetap utuh tapi bisa lama; ganti model bisa lanjut
         sekarang tapi mulai dari chat kosong di situs lain. Hanya pengguna yang
         tahu mana yang cocok, jadi ia yang memilih — bukan ditebak."""
-        from . import connectors, interaction, models
+        from . import interaction, models
 
         # catalog_aktif: model yang sedang DITUNDA tak boleh ditawarkan sebagai
         # jalan keluar — set_model akan menolaknya, dan pengguna sudah telanjur
