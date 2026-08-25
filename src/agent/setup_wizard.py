@@ -2,10 +2,12 @@
 
 Dipanggil lewat `bagas-ai login` (atau `bagas-ai setup`). TAK ADA kredensial
 WAJIB: model (web) memakai akun yang sudah kamu pakai sehari-hari dan login
-sekali lewat jendela browser saat model pertama kali dipilih. Dua yang
-ditanyakan wizard — NVIDIA_API_KEY & bot Telegram — keduanya OPSIONAL dan boleh
-dilewati; melewatinya cuma menutup model (API) dan mode telegram, bukan
-menggagalkan pemasangan.
+sekali lewat jendela browser saat model pertama kali dipilih. Yang ditanyakan
+wizard — NVIDIA_API_KEY, OPENROUTER_API_KEY, & bot Telegram — semuanya OPSIONAL
+dan boleh dilewati; melewatinya cuma menutup model (API) dan mode telegram,
+bukan menggagalkan pemasangan. Kredensial yang SUDAH terisi di .env dilewati
+otomatis; menggantinya tetap bisa lewat pertanyaan "Ganti kredensial". Wizard
+dibuka DISCLAIMER yang wajib disetujui sebelum apa pun ditanya atau disimpan.
 """
 from __future__ import annotations
 
@@ -150,6 +152,45 @@ def validate_nvidia_key(key: str) -> tuple[bool, str]:
     return False, f"HTTP {r.status_code} {detail}".strip()
 
 
+def validate_openrouter_key(key: str) -> tuple[bool, str]:
+    """Cek OPENROUTER_API_KEY dengan SATU permintaan chat sungguhan.
+
+    Sama alasannya dengan validate_nvidia_key: endpoint yang benar-benar
+    memeriksa kredensial adalah chat/completions. Modelnya ox-alpha sendiri —
+    key yang valid untuk model lain tak menjamin model ini bisa dipakai.
+    """
+    try:
+        r = requests.post(
+            f"{config.OPENROUTER_BASE_URL.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json"},
+            json={"model": "stealth/ox-alpha",
+                  "messages": [{"role": "user", "content": "hi"}],
+                  "max_tokens": 1, "stream": False},
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        return False, f"koneksi gagal: {str(e)[:80]}"
+    if r.status_code == 200:
+        return True, "key valid"
+    if r.status_code == 401:
+        return False, "key ditolak (No auth credentials)"
+    if r.status_code == 402:
+        # 402 = kredit habis. Key-nya BENAR; menyatakannya tidak valid akan
+        # menyuruh pengguna mengganti key yang sebenarnya benar.
+        return True, "key diterima (kredit habis — isi saldo dulu di dashboard)"
+    if r.status_code == 429:
+        # Ditolak karena RAMAI/rate limit, bukan karena salah.
+        return True, "key diterima (endpoint sedang penuh / rate limit)"
+    detail = ""
+    try:
+        err = r.json().get("error")
+        detail = (err.get("message") if isinstance(err, dict) else str(err))[:80]
+    except ValueError:
+        detail = r.text[:80]
+    return False, f"HTTP {r.status_code} {detail or 'gagal'}".strip()
+
+
 def validate_telegram(token: str) -> tuple[bool, str]:
     """Cek token bot Telegram via getMe. Return (ok, keterangan/username)."""
     url = f"https://api.telegram.org/bot{token}/getMe"
@@ -187,12 +228,85 @@ def _prompt_secret(console: Console, message: str) -> str:
         return getpass.getpass(message + " ").strip()
 
 
+# Teks disclaimer yang WAJIB disetujui sebelum wizard menanyakan/menyimpan
+# apa pun. Jujur soal kuasa agent: ia menjalankan perintah & menulis berkas.
+_DISKLAIMER = (
+    "[bold]bagas-ai adalah agent AI[/bold] yang atas permintaanmu dapat:\n"
+    "  • menjalankan perintah & kode di komputer ini,\n"
+    "  • membaca/menulis berkas di folder kerja,\n"
+    "  • mengakses internet (web & API model).\n"
+    "\n"
+    "Percakapan dan konteks dikirim ke layanan model pilihanmu (situs web-AI\n"
+    "atau API NVIDIA/OpenRouter). API key yang ditempel di wizard ini disimpan\n"
+    "LOKAL di ~/.bagasai/.env dan hanya dikirim ke penyedianya saat autentikasi.\n"
+    "\n"
+    "[bold]Seluruh risiko pemakaian menjadi tanggungan pengguna.[/bold] Periksa\n"
+    "setiap perintah/berkas yang kamu setujui — bagas-ai bisa keliru."
+)
+
+# Kredensial yang ditangani wizard: nama env -> validator + prompt + info.
+_KREDENSIAL = {
+    "NVIDIA_API_KEY": {
+        "validator": validate_nvidia_key,
+        "prompt": "Tempel NVIDIA_API_KEY:",
+        "info": "Key gratis: https://build.nvidia.com",
+    },
+    "OPENROUTER_API_KEY": {
+        "validator": validate_openrouter_key,
+        "prompt": "Tempel OPENROUTER_API_KEY:",
+        "info": "Buat key: https://openrouter.ai/keys (awalan sk-or-...)",
+    },
+    "TELEGRAM_BOT_TOKEN": {
+        "validator": validate_telegram,
+        "prompt": "Tempel token bot Telegram:",
+        "info": "Buat bot & token di https://t.me/BotFather (/newbot)",
+    },
+}
+
+
+def _tanya_ya_tidak(pesan: str, bawaan: bool = False) -> bool:
+    """Confirm yang AMAN non-interaktif: gagal membaca stdin berarti tidak."""
+    try:
+        from .ui.menu import inquirer
+
+        return bool(inquirer.confirm(message=pesan, default=bawaan).execute())
+    except Exception:
+        return False
+
+
+def _isi_kredensial(console: Console, env: dict[str, str], nama: str) -> bool:
+    """Tanya + validasi SATU kredensial, simpan ke env bila valid.
+
+    Return True bila tersimpan. Input kosong atau jawaban "tidak" pada tawaran
+    coba-lagi berhenti tanpa mengubah apa pun.
+    """
+    meta = _KREDENSIAL[nama]
+    console.print(f"  [dim]{meta['info']}[/dim]")
+    while True:
+        nilai = _prompt_secret(console, meta["prompt"]).strip()
+        if not nilai:
+            return False
+        console.print("  [dim]Memeriksa…[/dim]")
+        ok, ket = meta["validator"](nilai)
+        if ok:
+            console.print(f"  [bold green]✓ {ket}[/bold green]\n")
+            env[nama] = nilai
+            return True
+        console.print(f"  [red]✗ {ket}[/red]\n")
+        if not _tanya_ya_tidak("Coba lagi?", default=True):
+            return False
+
+
 def run(console: Console | None = None) -> bool:
     """Wizard setup interaktif. Return True bila konfigurasi tersimpan.
 
-    Dulu mengembalikan True hanya bila API key valid. Kini tak ada kredensial
-    WAJIB, jadi wizard berhasil selama file .env bisa ditulis — kedua
-    pertanyaannya (NVIDIA_API_KEY, bot Telegram) boleh dilewati."""
+    Urutannya: disclaimer (WAJIB disetujui) -> deteksi kredensial -> tawaran
+    isi yang belum ada -> tawaran ganti yang sudah ada -> simpan. Kredensial
+    yang SUDAH ADA di .env DILEWATI (tidak ditanya ulang); menggantinya tetap
+    bisa lewat pertanyaan "Ganti kredensial" di akhir. Tak ada kredensial
+    WAJIB: menolak/menlewati semua pertanyaan tetap menghasilkan pemasangan
+    yang sah, dan menolak disclaimer membatalkan wizard tanpa menulis apa pun.
+    """
     console = console or Console()
     env = _read_env(config.ENV_FILE)
     for k, v in _DEFAULTS.items():
@@ -208,97 +322,63 @@ def run(console: Console | None = None) -> bool:
         "lewat[/dim] [bold cyan]/model[/bold cyan][dim].[/dim]\n"
     )
 
-    # --- NVIDIA API key (opsional) ---
-    # Ditawarkan, TIDAK dipaksa: melewatinya hanya menutup model (API), dan itu
-    # dikatakan terus terang supaya pengguna tahu apa yang ia lewatkan alih-alih
-    # menebak nanti saat /model menolak entri nvidia/*.
-    punya = bool(env.get("NVIDIA_API_KEY", "").strip())
-    console.print(
-        "  [dim]Model[/dim] [bold]nvidia/*[/bold] [dim]lewat API (tanpa "
-        "browser, jauh lebih cepat) butuh NVIDIA_API_KEY.[/dim]\n"
-        f"  [dim]Key gratis di[/dim] [cyan]https://build.nvidia.com[/cyan]"
-        + ("  [dim](sudah ada di .env)[/dim]" if punya else "")
-        + "\n"
-    )
-    want_key = False
-    try:
-        from .ui.menu import inquirer
-
-        want_key = inquirer.confirm(
-            message=("Ganti NVIDIA_API_KEY sekarang? (opsional)" if punya
-                     else "Isi NVIDIA_API_KEY sekarang? (opsional)"),
-            default=False,
-        ).execute()
-    except Exception:
-        want_key = False
-
-    if want_key:
-        while True:
-            key = _prompt_secret(console, "Tempel NVIDIA_API_KEY:").strip()
-            if not key:
-                break
-            console.print("  [dim]Memeriksa key…[/dim]")
-            ok, info = validate_nvidia_key(key)
-            if ok:
-                console.print(f"  [bold green]✓ {info}[/bold green]\n")
-                env["NVIDIA_API_KEY"] = key
-                break
-            console.print(f"  [red]✗ {info}[/red]\n")
-            try:
-                from .ui.menu import inquirer
-
-                if not inquirer.confirm(
-                    message="Coba key lain?", default=True
-                ).execute():
-                    break
-            except Exception:
-                break
-
-    # --- Telegram (opsional) ---
-    want_tg = False
-    try:
-        from .ui.menu import inquirer
-
-        want_tg = inquirer.confirm(
-            message="Hubungkan bot Telegram sekarang? (opsional)", default=False
-        ).execute()
-    except Exception:
-        want_tg = False
-
-    if want_tg:
+    # --- Disclaimer: WAJIB disetujui sebelum apa pun ditanya/disimpan ------
+    console.print(Panel(
+        _DISKLAIMER, title="disclaimer", border_style="yellow", padding=(0, 2),
+    ))
+    if not _tanya_ya_tidak("Saya sudah membaca & MENYETUJUI ketentuan di atas"):
         console.print(
-            "  [dim]Buat bot & token di[/dim] [cyan]https://t.me/BotFather[/cyan]"
-            " [dim](/newbot).[/dim]"
+            "  [yellow]Dibatalkan — tak ada yang diubah.[/yellow]\n"
+            "  [dim]Jalankan lagi 'bagas-ai login' bila berubah pikiran.[/dim]"
         )
-        while True:
-            token = _prompt_secret(console, "Tempel token bot Telegram:").strip()
-            if not token:
-                break
-            console.print("  [dim]Memeriksa token…[/dim]")
-            ok, info = validate_telegram(token)
-            if ok:
-                console.print(
-                    f"  [bold green]✓ Bot terhubung[/bold green] "
-                    f"[dim]({info})[/dim]\n"
-                )
-                env["TELEGRAM_BOT_TOKEN"] = token
-                break
-            console.print(f"  [red]✗ Token gagal:[/red] {info}\n")
-            try:
-                from .ui.menu import inquirer
+        return False
 
-                if not inquirer.confirm(
-                    message="Coba token lain?", default=True
-                ).execute():
-                    break
-            except Exception:
-                break
+    # --- Deteksi kredensial -------------------------------------------------
+    # Yang SUDAH ada DILEWATI (tidak ditanya ulang); yang belum ada
+    # ditawarkan satu per satu. Statusnya dicetak dulu supaya pengguna tahu
+    # kenapa beberapa pertanyaan tidak muncul.
+    console.print("  [bold]Status kredensial:[/bold]")
+    ada_awal: list[str] = []
+    belum: list[str] = []
+    for nama in _KREDENSIAL:
+        terisi = bool(env.get(nama, "").strip())
+        console.print(
+            f"    • {nama}: "
+            + ("[green]✓ terdeteksi[/green] [dim](dilewati)[/dim]"
+               if terisi else "[yellow]belum ada[/yellow]")
+        )
+        (ada_awal if terisi else belum).append(nama)
+    console.print("")
+
+    for nama in belum:
+        if _tanya_ya_tidak(f"Isi {nama} sekarang? (opsional)"):
+            _isi_kredensial(console, env, nama)
+
+    # --- Fitur ganti token yang sudah ada -----------------------------------
+    # Terpisah dari deteksi supaya pemasangan baru cepat lewat; pengguna lama
+    # tetap bisa mengganti key/token tanpa menyunting .env manual.
+    if ada_awal and _tanya_ya_tidak(
+        "Ganti kredensial yang sudah ada? (opsional)"
+    ):
+        pilih: str | None = None
+        try:
+            from .ui.menu import Choice, inquirer
+
+            pilih = inquirer.select(
+                message="Ganti yang mana?",
+                choices=[Choice(n, n) for n in ada_awal],
+                pointer="❯",
+            ).execute()
+        except Exception:
+            pilih = None
+        if pilih:
+            _isi_kredensial(console, env, pilih)
 
     # --- Simpan ---
     _write_env(config.ENV_FILE, env)
     console.print(f"  [green]✔ Konfigurasi disimpan:[/green] [dim]{config.ENV_FILE}[/dim]")
     console.print(
         "\n  [bold]Selesai![/bold] Ketik [bold cyan]bagas-ai[/bold cyan] untuk mulai chat"
-        + ("  ·  [bold cyan]bagas-ai telegram[/bold cyan] untuk bot." if want_tg else ".")
+        " ·  [bold cyan]bagas-ai telegram[/bold cyan] untuk bot."
     )
     return True
