@@ -3732,6 +3732,11 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 diambil = [t for t in prompt_queue if not _perintah(t)]
                 if diambil:
                     prompt_queue[:] = [t for t in prompt_queue if _perintah(t)]
+                    # Tutup label "· mengantre" di riwayat: tanpa baris ini,
+                    # gema yang membeku sejak saat pengantrean tak pernah
+                    # jelas sudah dikerjakan atau hilang.
+                    _commit([_oneline(_TM(
+                        "  [dim]· antrean disisipkan ke giliran[/dim]"))])
                 # Pesan sisipan tak lewat gelung utama, jadi penanda tempelannya
                 # harus dikembangkan di sini juga — kalau tidak, AI menerima
                 # tulisan "[tempelan #1 · 312 baris · 14,2 KB]" alih-alih log
