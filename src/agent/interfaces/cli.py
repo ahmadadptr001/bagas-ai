@@ -4601,15 +4601,13 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         console.print(Padding(_md(hasil["teks"]), (0, 3, 1, 3)))
 
     def do_send_compact(arg: str = "") -> None:
-        """/send-compact — unggah berkas memory ke percakapan web sekarang.
+        """/send-compact — pasang berkas memory ke percakapan sekarang.
 
         Pasangan /compact: yang itu menyimpan, yang ini memasang. Dipakai
         sesudah /new, sehingga chat yang bersih langsung tahu sudah sampai mana
-        pekerjaannya — tanpa mengetik ulang puluhan ribu karakter."""
-        if not agent.model_spec.is_web:
-            console.print("  [yellow]/send-compact hanya untuk model web."
-                          "[/yellow]\n")
-            return
+        pekerjaannya — tanpa mengetik ulang puluhan ribu karakter. Jalurnya
+        mengikuti model: web = berkasnya diunggah ke situs; API (mis. ox-alpha)
+        = intinya disuntikkan ke riwayat oleh core."""
         state = {"pesan": "menyiapkan berkas ingatan…"}
 
         def render():

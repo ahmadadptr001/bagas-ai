@@ -1777,10 +1777,10 @@ class Agent:
         else:
             catatan = (
                 "- Percakapan ini jalan terus; tak ada yang dikirim ke mana pun.\n\n"
-                "Model (API) tak punya kotak chat untuk diunggahi, jadi TAK ADA "
-                "/send-compact di sini dan berkas ini TIDAK ikut sendiri ke "
-                "giliran berikutnya. Sesudah `/new`, suruh saja bagas-ai membaca "
-                "berkas di atas — ia bisa membukanya sendiri dengan tool.")
+                "Sesudah `/new`, pasang lagi dengan `/send-compact`: di jalur "
+                "API intinya DISUNTIKKAN ke riwayat (ringkasan giliran + ekor "
+                "terakhir). Peta proyek & memorimu tak ikut disuntik — "
+                "keduanya memang otomatis ada di sesi mana pun.")
         return (
             f"Ingatan tersimpan di `{berkas[0].parent}`:\n"
             + "\n".join(f"  - {p.name}" for p in berkas) + "\n\n"
@@ -1821,15 +1821,99 @@ class Agent:
             on_notice(f"{sebab} — ingatannya kusimpan ({len(berkas)} berkas); "
                       "`/new` lalu `/send-compact` untuk lanjut di chat bersih")
 
+    def _pasang_memory_api(self, path: Any = None,
+                           on_status: Any = None) -> str:
+        """/send-compact di jalur API: suntikkan inti berkas ingatan ke
+        riwayat percakapan yang sekarang.
+
+        Jalur WEB mengunggah berkasnya ke situs; jalur API tak punya komposer
+        — tapi justru KITA yang pegang riwayat dan mengirimnya ulang tiap
+        request, jadi "memasang" berarti menambahkan INTInya sebagai pesan
+        konteks. Yang diambil ringkasan giliran + ekor percakapan terakhir,
+        BUKAN seluruh JSON: menyuntik 200 KB berarti membakar token itu lagi
+        di SETIAP giliran berikutnya. Peta proyek & memori pengguna tak ikut
+        disuntik — keduanya sudah otomatis ada di system prompt sesi mana
+        pun."""
+        if path:
+            berkas = konteks.sekelompok(path)
+        elif [p for p in self._memory_terakhir if Path(p).is_file()]:
+            berkas = list(self._memory_terakhir)
+        else:
+            berkas = konteks.terbaru(konteks.AWALAN)
+        berkas = [Path(p) for p in berkas if Path(p).is_file()]
+        if not berkas:
+            return ("Belum ada berkas ingatan yang tersimpan. Jalankan "
+                    "`/compact` dulu di percakapan yang ingin kamu bawa.")
+        if len(konteks.kode(berkas)) != len(berkas):
+            return ("Berkas memory tak terbaca / bukan buatan bagas-ai: "
+                    + ", ".join(p.name for p in berkas))
+        if on_status:
+            on_status("memasang ingatan ke percakapan…")
+
+        ringkas: list[tuple[str, str]] = []
+        ekor: list[tuple[str, str]] = []
+        terlihat: set[tuple[str, str]] = set()
+        for p in berkas:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - bagian rusak dilewati saja
+                continue
+            for r in (data.get("ringkasan_giliran") or []):
+                if isinstance(r, dict) and r.get("isi"):
+                    pasangan = (str(r.get("dari", "?")),
+                                " ".join(str(r["isi"]).split()))
+                    if pasangan not in terlihat:
+                        terlihat.add(pasangan)
+                        ringkas.append(pasangan)
+            verbatim = data.get("percakapan_terakhir_apa_adanya") or {}
+            for g in (verbatim.get("giliran") or [])[-10:]:
+                if isinstance(g, dict) and g.get("isi"):
+                    pasangan = (str(g.get("dari", "?")),
+                                " ".join(" ".join(g["isi"]).split())[:600])
+                    if pasangan not in terlihat:
+                        terlihat.add(pasangan)
+                        ekor.append(pasangan)
+
+        batas = 24_000          # ±6 rb token — murah untuk SETIAP request
+        bagian: list[str] = []
+        if ringkas:
+            bagian.append(
+                "== RINGKASAN PERMINTAAN & JAWABAN (lama ke baru) ==\n"
+                + "\n".join(f"[{d}] {i}" for d, i in ringkas))
+        if ekor:
+            bagian.append(
+                "== EKOR PERCAKAPAN TERAKHIR (dipangkas) ==\n"
+                + "\n".join(f"[{d}] {i}" for d, i in ekor[-12:]))
+        teks = "\n\n".join(bagian)[:batas]
+        if not teks:
+            return ("Berkas ingatannya ada, tapi tidak memuat giliran "
+                    "percakapan — cuma konteks proyek (yang memang sudah "
+                    "otomatis ada di sesi ini). Tak ada yang perlu dipasang.")
+        self.memory.add({
+            "role": "user",
+            "content": (
+                f"[SISTEM] Konteks sesi sebelumnya ({len(berkas)} berkas "
+                f"memory) dipasang agar kerjanya bisa dilanjutkan:\n\n{teks}\n"
+                "[SISTEM] Ini CATATAN LAMPAU, bukan permintaan baru — jangan "
+                "mengerjakan apa pun darinya sampai pengguna meminta."),
+        })
+        rincian = (f"{konteks.jumlah_giliran(berkas)} giliran, "
+                   f"±{konteks.ukuran(berkas) // 1024} KB\n"
+                   + "\n".join(f"  - {p.parent.name}/{p.name}" for p in berkas))
+        return (f"Ingatan dipasang ke percakapan ({len(teks)} karakter "
+                f"disuntik: ringkasan + ekor terakhir):\n{rincian}")
+
     def kirim_memory(self, path: Any = None, on_status: Any = None,
                      on_notice: Any = None) -> str:
-        """/send-compact: unggah berkas memory ke percakapan web.
+        """/send-compact: pasang berkas memory ke percakapan sekarang.
 
-        Dipakai SESUDAH /new: chat barunya menerima aturan protokol di badan
-        pesan dan seluruh ingatan sebelumnya sebagai lampiran JSON."""
+        Dipakai SESUDAH /new supaya percakapan bersih langsung tahu sudah
+        sampai mana. Jalurnya beda mekanisme: model WEB menerima BERKASNYA
+        diunggah ke situs; model API menerima intinya DISUNTIKKAN ke riwayat
+        (lihat _pasang_memory_api)."""
         from . import connectors
         if not self.model_spec.is_web:
-            return "Perintah ini hanya untuk model web."
+            return self._pasang_memory_api(path, on_status=on_status)
         # URUTAN PEMILIHANNYA PENTING, dan inilah bug yang pernah terjadi:
         #   1. path yang disebut pengguna;
         #   2. berkas yang BARUSAN ditulis /compact di sesi ini (diingat
