@@ -468,27 +468,32 @@ def _oneline(t: Text) -> Text:
     return t
 
 
-# Gema prompt di transkrip — GARIS VERTIKAL LURUS agak tebal (▌) di tiap
-# baris, dibalut strip gelap netral. Warnanya ikut TEMA AKTIF (ui/tema.py),
-# dibaca saat dipanggil supaya /theme langsung terasa tanpa mulai ulang.
-def _gema_prompt(teks: str, prefix: str = "") -> Text:
+# Gema prompt di transkrip — PANAH ❯ berwarna aksen di depan kalimat, TANPA
+# strip latar. Warna ikut TEMA AKTIF (ui/tema.py), dibaca saat dipanggil
+# supaya /theme langsung terasa tanpa mulai ulang.
+def _gema_prompt(teks: str, prefix: str = "", antre: bool = False) -> Text:
     """Gema pesan pengguna di transkrip — penanda batas antar-giliran.
 
-    Bentuknya garis vertikal LURUS & agak tebal (▌) yang memanjang di tiap
-    baris (termasuk lipatan), seluruh baris dibalut strip gelap — kontras
-    tinggi tapi netral, mudah ditemukan sekali lihat saat menggulung riwayat.
+    Bentuknya SEDERHANA & PANTAS: panah ❯ tebal berwarna aksen di depan
+    kalimat, teksnya terang, tanpa latar. Dulu seluruh blok dibungkus garis
+    vertikal ▌ + strip latar gelap — bentuk yang NYARIS SAMA dengan blok
+    pratinjau hasil langkah (▏ + latar), sehingga pesan yang diketik di
+    tengah giliran (muncul persis di bawah langkah semisal read_file)
+    terbaca sebagai keluaran mesin, bukan KATA pengguna. Kini keduanya
+    jelas beda: panah = manusia, blok bergaris = mesin.
+
+    `antre=True` dipakai saat pesan diketik SELAGI giliran berjalan: sumber
+    kebingungan klasik ("kok prompt-ku muncul di tengah kerja AI?") dijawab
+    langsung oleh satu kata redup di ekornya.
 
     Lipatan dihitung SENDIRI (bukan Text.wrap: ia tak memecah tanpa justify)
-    memakai lebar sel tampilan rich, supaya emoji/CJK tak menggeser garis."""
+    memakai lebar sel tampilan rich, supaya emoji/CJK tak menggeser layout."""
     from rich.cells import cell_len
 
     bersih = _bersih_kendali(teks).strip()
     if not bersih:
         return _KOSONG
-    gema_bg = tema.p("gema_bg")
-    garis = tema.p("gema_garis")
-    teks_gaya = f"bold {tema.p('gema_teks')} on {gema_bg}"
-    lebar_isi = max(16, console.width - 2 * 2 - 2 - cell_len(prefix))
+    lebar_isi = max(16, console.width - 6 - cell_len(prefix))
     baris: list[str] = []
     for paraf in bersih.split("\n"):
         kata, kini = [], ""
@@ -503,15 +508,16 @@ def _gema_prompt(teks: str, prefix: str = "") -> Text:
 
     hasil = Text(no_wrap=True, overflow="ellipsis")
     for i, b in enumerate(baris):
-        if i:
-            hasil.append("\n  ")
-        else:
+        if i == 0:
             hasil.append("  ")
-        # Garis ikut berlatar strip supaya menyambung mulus dengan isinya.
-        hasil.append("▌ ", style=f"bold {garis} on {gema_bg}")
-        if i == 0 and prefix:
-            hasil.append(prefix, style=f"bold {garis} on {gema_bg}")
-        hasil.append(b, style=teks_gaya)
+            hasil.append("❯ ", style=f"bold {tema.p('aksen')}")
+            if prefix:
+                hasil.append(prefix, style=f"bold {tema.p('aksen')}")
+        else:
+            hasil.append("\n    ")   # lanjutan sejajar di bawah panah
+        hasil.append(b, style=f"bold {tema.p('gema_teks')}")
+    if antre:
+        hasil.append("  · mengantre", style="dim italic")
     return hasil
 
 
@@ -2874,7 +2880,7 @@ def _dorong_ke_bawah(renderables: list) -> None:
 # ---------------------------------------------------------------------------
 # Loop utama
 # ---------------------------------------------------------------------------
-def main(resume: bool = False) -> None:
+def main(resume: bool = False, resume_id: str = "") -> None:
     console.clear()
     # Persiapan cepat (deteksi OS, baca sesi, peta proyek). Bar loading BERTAHAP
     # sudah ditampilkan saat impor pustaka (di __main__._preload_with_bar) — fase
@@ -2882,8 +2888,40 @@ def main(resume: bool = False) -> None:
     # BESAR yang butuh baca banyak file, tampilkan bar tersendiri.
     os_status = osinfo.sync_to_memory()
 
+    def _daftar_sesi() -> None:
+        """Daftar ID sesi terbaru folder ini — teman bagi galat --resume."""
+        try:
+            kandidat = session_mod.list_sessions()[:5]
+        except Exception:  # noqa: BLE001
+            kandidat = []
+        if not kandidat:
+            console.print("  [dim](belum ada sesi tersimpan di folder ini)[/dim]")
+            return
+        console.print("  [dim]Sesi terakhir di folder ini:[/dim]")
+        for s in kandidat:
+            kapan = time.strftime("%d %b %H:%M", time.localtime(s.updated))
+            console.print(
+                f"    [cyan]{s.id}[/cyan] [dim]· {kapan} · "
+                f"{session_mod.user_msg_count(s)} pesan[/dim]")
+
     resumed = False
-    if resume:
+    if resume_id:
+        # --resume <ID>: lanjutkan sesi PERSIS itu. Awalan unik diterima
+        # (session.find); galatnya dijelaskan BESERTA pilihan yang ada —
+        # "ID tak ketemu" telanjang hanya melahirkan tebakan berulang.
+        try:
+            session = session_mod.find(resume_id)
+        except ValueError as exc:
+            # Penutupnya [/], BUKAN [/bold]: versi rich ini menolak tag
+            # penutup beratribut yang tak persis sama dengan pembukanya.
+            console.print(f"  [bold #f0603c]✗ {_esc(str(exc))}[/]\n")
+            _daftar_sesi()
+            return
+        if session is None:
+            console.print("  [bold #f0603c]✗ ID sesi kosong.[/bold]")
+            return
+        resumed = True
+    elif resume:
         session = session_mod.latest()
         if session:
             resumed = True
@@ -3828,7 +3866,10 @@ def main(resume: bool = False) -> None:
                     # sengaja tak ada — lihat gelung utama.)
                     # Baris kosong DI ATAS gema: tanpa itu, gema menempel ke
                     # konten sebelumnya (jawaban/baris langkah terakhir).
-                    _commit([_KOSONG, _gema_prompt(teks)])
+                    # antre=True: tanpa tanda ini, pesan yang muncul persis
+                    # di bawah langkah berjalan (mis. read_file) terbaca
+                    # seolah bagian dari mesin, bukan kata pengguna.
+                    _commit([_KOSONG, _gema_prompt(teks, antre=True)])
                     # Perintah menunggu; tanpa keterangan ini ia tampak
                     # "terkirim tapi tak terjadi apa-apa" sampai giliran usai.
                     if _perintah(teks):
@@ -4641,7 +4682,9 @@ def main(resume: bool = False) -> None:
             return
         voice_state.pop("terucap", None)
         # Jalur antrean tak punya gema lain — di sini ia satu-satunya.
-        _tambah_konten([Text("\n"), _gema_prompt(teks, prefix="🎙 ")])
+        # antre=True: perintah suara yang mengantre pun jelas statusnya.
+        _tambah_konten([Text("\n"),
+                        _gema_prompt(teks, prefix="🎙 ", antre=True)])
         with antre_lock:
             prompt_queue.append(teks)
         # DUA keadaan yang sangat berbeda, dan dulu keduanya diberi kalimat yang
@@ -6391,7 +6434,14 @@ def main(resume: bool = False) -> None:
     except Exception:  # noqa: BLE001
         pass
     console.clear()
-    console.print("\n  [#fcc048]⬢ bagas-ai[/]  [dim]— sampai jumpa! 👋[/dim]\n")
+    console.print("\n  [#fcc048]⬢ bagas-ai[/]  [dim]— sampai jumpa! 👋[/dim]")
+    # ID sesi DICETAK SAAT KELUAR: inilah satu-satunya momen pengguna pasti
+    # melihatnya, padahal itulah kunci untuk melanjutkan kerja ini lewat
+    # `bagas-ai --resume <id>` — dari folder yang sama.
+    console.print(
+        f"  [dim]ID sesi ini:[/dim] [bold {tema.p('aksen2')}]{_esc(session.id)}[/] "
+        f"[dim]· lanjutkan nanti:[/dim] "
+        f"[cyan]bagas-ai --resume {_esc(session.id)}[/cyan]\n")
 
 
 if __name__ == "__main__":
