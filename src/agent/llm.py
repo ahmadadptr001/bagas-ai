@@ -100,10 +100,54 @@ _TRANSIENT_KEYWORDS = (
 # Selain ini, 5xx dianggap sementara.
 _FATAL_STATUS = {400, 401, 403, 404, 405, 422}
 
+# Kata kunci pada pesan HTTP 400 yang berarti RIWAYAT MELEWATI JENDELA
+# KONTEKS model — bukan permintaan salah. Dibedakan supaya core bisa BERTINDAK
+# (pangkas riwayat lalu ulangi) alih-alih melaporkan kegagalan misterius.
+_KATA_KONTEKS_PENUH = (
+    "context length", "context window", "maximum context", "context_limit",
+    "too many tokens", "token limit", "exceeds the maximum",
+    "input length", "input tokens exceed", "prompt is too long",
+    "reduce the length", "percih panjang",
+)
+
+
+class KonteksPenuh(Exception):
+    """Permintaan ditolak karena riwayat melebihi jendela konteks model.
+
+    FATAL untuk retry biasa (mengulang payload yang sama pasti ditolak lagi)
+    — tapi SEMBUH oleh core: riwayat dipangkas lalu giliran dilanjutkan.
+    Dibedakan dari BadRequestError mentah supaya pesan ke pengguna bukan
+    sekadar "400 Bad Request" tanpa jalan keluar."""
+
+    def __init__(self, asli: str = "") -> None:
+        super().__init__(asli or "riwayat melebihi jendela konteks model")
+        self.asli = asli
+
+
+def _teks_menyebut_konteks_penuh(teks: str) -> bool:
+    """True bila teks galat menyebut kelebihan konteks/token."""
+    t = (teks or "").lower()
+    return any(k in t for k in _KATA_KONTEKS_PENUH)
+
+
+def _apakah_konteks_penuh(exc: Exception) -> bool:
+    """Deteksi HTTP 400 'konteks penuh' dari exception openai apa pun.
+
+    Isi galatnya tersebar di .message / .body / str() tergantung jalur
+    (OpenRouter membalas {"error":{"message":...,"code":400}}), jadi ketiganya
+    digabung lalu dicocokkan kata kuncinya."""
+    o = _openai
+    if o is None or not isinstance(exc, o.BadRequestError):
+        return False
+    gabung = " ".join(str(getattr(exc, a, "") or "") for a in ("message", "body"))
+    return _teks_menyebut_konteks_penuh(gabung + " " + str(exc))
+
 
 def _is_transient(exc: Exception) -> bool:
     """True bila error layak dicoba ulang (rate limit / throttle / gangguan)."""
-    if isinstance(exc, Cancelled):
+    if isinstance(exc, (Cancelled, KonteksPenuh)):
+        # KonteksPenuh: mengulang payload yang sama PASTI ditolak lagi —
+        # pemulihannya bukan retry, melainkan pangkas riwayat (di core).
         return False
     if isinstance(exc, (EmptyResponseError, _StallTimeout)):
         return True
@@ -354,7 +398,12 @@ def chat_completion(
                           stream, max_tokens)
 
     def _do() -> Any:
-        response = client.chat.completions.create(**kwargs)
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if _apakah_konteks_penuh(exc):
+                raise KonteksPenuh(str(exc)) from exc
+            raise
         # Saat throttle, NVIDIA bisa membalas 200 tanpa choices -> sementara.
         if not stream and not getattr(response, "choices", None):
             raise EmptyResponseError(
@@ -443,7 +492,12 @@ def stream_completion(
         pass
 
     def _do() -> tuple[str, list[dict[str, Any]], Any]:
-        stream = client.chat.completions.create(**kwargs)
+        try:
+            stream = client.chat.completions.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if _apakah_konteks_penuh(exc):
+                raise KonteksPenuh(str(exc)) from exc
+            raise
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_slots: dict[int, dict[str, str]] = {}

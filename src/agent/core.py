@@ -967,6 +967,19 @@ def _mime_vidio(path: str) -> str | None:
     return mime if mime in _MIME_VIDIO else None
 
 
+def _potong_alasan(asli: str, maks: int = 90) -> str:
+    """Penyebab singkat 'konteks penuh' untuk satu baris notifikasi."""
+    teks = " ".join((asli or "").split())
+    # Buang prefiks khas openrouter/openai yang cuma menambah kebisingan.
+    for awalan in ("Error code: 400 - ", "Bad Request: ",
+                   "400 - ", "error: "):
+        if teks.lower().startswith(awalan.lower()):
+            teks = teks[len(awalan):]
+    if len(teks) > maks:
+        teks = teks[:maks].rstrip() + "…"
+    return teks or "riwayat melebihi jendela konteks"
+
+
 def _pesan_dengan_media(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Konversi pesan user berpenanda [LAMPIR-MEDIA]<path> jadi multimodal.
 
@@ -2429,6 +2442,10 @@ class Agent:
         schemas = tools.get_schemas(self.tool_names)
         guard = 0
         safety = max(self.max_iterations, 60)
+        # Pemulih konteks penuh: berapa kali riwayat dipangkas giliran ini.
+        # Dua tingkat (14 -> 6 entri) — sesudah itu memang tak ada lagi yang
+        # aman dibuang dan pengguna diarahkan ke /compact.
+        pangkas_ke = 0
         seen_tools: dict[str, str] = {}
         dup_hits = 0
         total_calls = 0
@@ -2532,6 +2549,31 @@ class Agent:
                     cancel_event=cancel_event,
                     on_retry=_on_retry,
                 )
+            except llm.KonteksPenuh as exc:
+                # Riwayat melebihi jendela konteks model (HTTP 400 khusus).
+                # Mengulang payload yang sama pasti ditolak lagi — satu-satunya
+                # jalan: buang pesan TERLAMA lalu ulangi. Permintaan pengguna
+                # yang sedang berjalan SELALU ikut tersimpan (ia entri paling
+                # akhir), jadi tugasnya tak hilang — cuma sejarah awal yang
+                # dikorbankan, dan itu sudah terwakili ringkasan /compact.
+                pangkas_ke += 1
+                sisa = self.memory.potong_awal(14 if pangkas_ke == 1 else 6)
+                if sisa <= 2 or pangkas_ke > 2:
+                    final = (
+                        "Konteks model ini penuh dan tetap penuh sesudah "
+                        "riwayat lama dipangkas. Jalankan `/compact` untuk "
+                        "menyimpan kerja, lalu `/new` + `/send-compact` "
+                        "untuk melanjutkan di percakapan bersih.")
+                    self.memory.add_assistant_text(final)
+                    self._persist()
+                    return final
+                if on_notice:
+                    on_notice(
+                        "konteks model penuh "
+                        f"({_potong_alasan(exc.asli)}) — riwayat lama "
+                        f"dipangkas (sisa {sisa} entri), permintaanmu "
+                        "diulangi otomatis")
+                continue
             except llm.StreamStalled:
                 # Stream berhenti mengirim data berulang kali. Naikkan effort
                 # lalu ULANGI: memory belum disentuh di putaran ini, jadi

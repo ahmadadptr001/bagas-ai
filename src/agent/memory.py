@@ -114,6 +114,28 @@ class Memory:
         self._messages = self._messages[:1] + body
         self._trim()
 
+    def potong_awal(self, simpan_terakhir: int = 14) -> int:
+        """Buang pesan TERLAMA saat konteks model penuh. Return jumlah sisa.
+
+        Sistem prompt (indeks 0) selalu selamat; sisanya menyimpan N entri
+        TERAKHIR — yang paling menentukan kelanjutan kerja. Pasangan tool
+        yang terpotong setengahnya langsung dirapikan repair_dangling_tools()
+        di akhir: endpoint menolak riwayat yang memuat respons `tool` tanpa
+        induk `assistant.tool_calls`, dan sebaliknya.
+        """
+        if len(self._messages) <= 2:
+            return len(self._messages)
+        system = self._messages[0]
+        ekor = self._messages[-(simpan_terakhir):]
+        # Jangan sampai ekornya DIBUKA oleh respons 'tool' yatim.
+        while ekor and ekor[0].get("role") == "tool":
+            ekor = ekor[1:]
+        if not ekor:
+            return 0
+        self._messages = [system] + ekor
+        self.repair_dangling_tools()
+        return len(self._messages)
+
     def _trim(self) -> None:
         if len(self._messages) <= self.max_messages:
             return
