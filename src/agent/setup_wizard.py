@@ -297,8 +297,9 @@ def _tanya_ya_tidak(pesan: str, bawaan: bool = False) -> bool:
 def _isi_kredensial(console: Console, env: dict[str, str], nama: str) -> bool:
     """Tanya + validasi SATU kredensial, simpan ke env bila valid.
 
-    Return True bila tersimpan. Input kosong atau jawaban "tidak" pada tawaran
-    coba-lagi berhenti tanpa mengubah apa pun.
+    Return True bila tersimpan. Key/token SALAH -> pesan galatnya tampil lalu
+    input dibuka LAGI (Enter pada "Coba lagi?" = langsung mencoba; jawaban
+    tidak / input kosong berhenti tanpa mengubah apa pun).
     """
     meta = _KREDENSIAL[nama]
     console.print(f"  [dim]{meta['info']}[/dim]")
@@ -312,8 +313,13 @@ def _isi_kredensial(console: Console, env: dict[str, str], nama: str) -> bool:
             console.print(f"  [bold green]✓ {ket}[/bold green]\n")
             env[nama] = nilai
             return True
-        console.print(f"  [red]✗ {ket}[/red]\n")
-        if not _tanya_ya_tidak("Coba lagi?", default=True):
+        console.print(
+            f"  [bold #f0603c]✗ {nama} tidak valid:[/bold #f0603c] "
+            f"[red]{ket}[/red]\n")
+        # Parameternya `bawaan` — dulu tertulis default=True di sini dan
+        # TypeError-nya baru meledak SAAT key pertama salah, tepat di jalur
+        # yang paling sering dilewati pengguna baru.
+        if not _tanya_ya_tidak("Coba lagi?", bawaan=True):
             return False
 
 
