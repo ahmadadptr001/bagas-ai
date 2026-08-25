@@ -95,6 +95,11 @@ _TRANSIENT_KEYWORDS = (
     "overloaded", "capacity", "try again", "temporarily", "unavailable",
     "timeout", "timed out", "connection", "throttl", "429", "server error",
     "bad gateway", "gateway timeout", "worker", "quota", "busy",
+    # CATATAN: "Provider returned error" (raw 'ERROR') SENGAJA TIDAK di sini.
+    # Ia sering kali KONTEKS PENYAMAR: riwayat menengah + media base64 sudah
+    # melewati jendela provider, padahal pesannya generik. Retry buta hanya
+    # membuang ±5 menit — pemulihnya ada di core (_api_loop): lepas media,
+    # pangkas riwayat, ulangi.
 )
 # Kode status FATAL (percuma diulang): permintaan salah / auth / model tak ada.
 # Selain ini, 5xx dianggap sementara.

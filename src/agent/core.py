@@ -980,6 +980,31 @@ def _potong_alasan(asli: str, maks: int = 90) -> str:
     return teks or "riwayat melebihi jendela konteks"
 
 
+# Pesan 400/413 yang jelas-jelas BUKAN soal ukuran — naikkan apa adanya,
+# jangan dibuang waktu utk ladder pemangkasan yang pasti tak menolong.
+_KATA_FATAL_400 = ("api key", "authentic", "unauthorized", "not found",
+                   "permission", "invalid model", "does not exist",
+                   "no endpoints found")
+
+
+def _layak_pulih(exc: Exception) -> bool:
+    """True bila kegagalan 400/413 layak dicoba pulih (lepas media/pangkas).
+
+    Provider kerap menyembunyikan konteks-penuh di balik pesan generik
+    ("Provider returned error", raw 'ERROR') — kalau kita menunggu kata
+    'context length', pemulihnya tak pernah bangun. Maka SEMUA 400/413
+    diberi kesempatan ladder, KECUALI yang jelas fatal (auth/model)."""
+    o = llm._oa()
+    if not isinstance(exc, o.BadRequestError):
+        return False
+    status = getattr(exc, "status_code", None)
+    if status not in (400, 413):
+        return False
+    teks = str(getattr(exc, "message", "") or "") + " " + str(exc)
+    teks = teks.lower()
+    return not any(k in teks for k in _KATA_FATAL_400)
+
+
 def _pastikan_tugas_aktif(memory: Memory, teks: str) -> bool:
     """Pastikan permintaan pengguna yang SEDANG dikerjakan selamat dari
     pemangkasan. Return True bila ia diselamatkan (disisipkan ulang).
@@ -1016,6 +1041,7 @@ _BATAS_TOTAL_MEDIA = 24 * 1024 * 1024  # total gabungan dalam satu pesan
 def _pesan_dengan_media(messages: list[dict[str, Any]],
                         cache: dict[str, str | None] | None = None,
                         lewat: list[str] | None = None,
+                        blokir_media: bool = False,
                         ) -> list[dict[str, Any]]:
     """Konversi pesan user berpenanda [LAMPIR-MEDIA]<path> jadi multimodal.
 
@@ -1024,6 +1050,10 @@ def _pesan_dengan_media(messages: list[dict[str, Any]],
     sudah tak ada / formatnya tak didukung dibuang diam-diam: riwayat lama
     (resume) sering menyimpan path yang sudah terhapus, dan mengirim data-URL
     kosong justru membuat seluruh request ditolak.
+
+    `blokir_media=True`: SEMUA marker diperlakukan absen — dipakai pemulih
+    saat provider konsisten menolak permintaan ber-media (400 "Provider
+    returned error"): giliran diselamatkan tanpa gambar/video daripada mati.
 
     `cache` (opsional): {path: data-url atau None} milik SATU giliran —
     diisi sekali lalu dipakai ulang tiap putaran rantai tool, supaya berkas
@@ -1045,8 +1075,9 @@ def _pesan_dengan_media(messages: list[dict[str, Any]],
             out.append(m)
             continue
         baris = c.splitlines()
-        paths = [ln[len(_MEDIA_LAMPIR):].strip() for ln in baris
-                 if ln.startswith(_MEDIA_LAMPIR)]
+        paths = [] if blokir_media else [
+            ln[len(_MEDIA_LAMPIR):].strip() for ln in baris
+            if ln.startswith(_MEDIA_LAMPIR)]
         teks = "\n".join(ln for ln in baris
                          if not ln.startswith(_MEDIA_LAMPIR)).strip()
         parts: list[dict[str, Any]] = [{"type": "text", "text": teks}] if teks else []
@@ -1079,10 +1110,15 @@ def _pesan_dengan_media(messages: list[dict[str, Any]],
                 continue
             jenis = "image_url" if url.startswith("data:image/") else "video_url"
             parts.append({"type": jenis, jenis: {"url": url}})
-        if len(parts) > 1:  # ada teks DAN minimal satu media sah
+        # Multimodal HANYA bila ada bagian media sungguhan; satu text-part
+        # polos dikirim sebagai string biasa (bentuk yang paling aman).
+        media_parts = [q for q in parts if q.get("type") != "text"]
+        if media_parts:
+            if parts[0].get("type") == "text" and not parts[0]["text"]:
+                parts.pop(0)
             out.append({**m, "content": parts})
         else:
-            out.append({**m, "content": teks})
+            out.append({**m, "content": teks or "(lampiran media)"})
     return out
 
 
@@ -2618,6 +2654,10 @@ class Agent:
         media_cache: dict[str, str | None] = {}
         media_lewat: list[str] = []
         media_sudah_dikabari = False
+        # Pemulih "Provider returned error": setelah penyedia konsisten
+        # menolak permintaan ber-media, seluruh giliran ini lanjut TANPA
+        # media (penanda dianggap absen oleh _pesan_dengan_media).
+        media_diblokir = False
         # Permintaan pengguna giliran ini — pegang TEKS-nya sejak awal:
         # bila KonteksPenuh memaksa pemangkasan dan ia tergesang keluar,
         # _pastikan_tugas_aktif menyisipkannya kembali.
@@ -2724,32 +2764,54 @@ class Agent:
                     cancel_event=cancel_event,
                     on_retry=_on_retry,
                 )
-            except llm.KonteksPenuh as exc:
-                # Riwayat melebihi jendela konteks model (HTTP 400 khusus).
-                # Mengulang payload yang sama pasti ditolak lagi — satu-satunya
-                # jalan: buang pesan TERLAMA lalu ulangi. Permintaan pengguna
-                # yang sedang berjalan SELALU ikut tersimpan (ia entri paling
-                # akhir), jadi tugasnya tak hilang — cuma sejarah awal yang
-                # dikorbankan, dan itu sudah terwakili ringkasan /compact.
+            except llm.Cancelled:
+                raise
+            except Exception as exc:
+                # SATU pintu pemulih utk semua kegagalan "permintaan ditolak":
+                # KonteksPenuh (terdeteksi eksplisit) ATAU 400/413 generik dari
+                # provider yang menyamar sebagai "Provider returned error".
+                #
+                # URUTAN ADALAH NYAWA: dulu `except Exception` berdiri DI ATAS
+                # `except llm.KonteksPenuh` — padahal KonteksPenuh subclass-
+                # nya, jadi selalu tertangkap di sini duluan lalu `raise`
+                # ulang keluar; handler pangkasnya TAK PERNAH jalan dan
+                # pengguna menabrak ✖ terus pada sesi panjang.
+                if isinstance(exc, llm.KonteksPenuh):
+                    penyebab = "konteks model penuh"
+                elif _layak_pulih(exc):
+                    penyebab = "provider menolak permintaan"
+                else:
+                    raise          # bukan keluarga ini: biarkan naik seperti biasa
+
                 pangkas_ke += 1
+                # Media base64 sering JUMLAH PENYEBAB utamanya — bila ada,
+                # blokir sejak langkah pertama; mengulang dengan media yang
+                # sama hanya memastikan ditolak lagi.
+                if any(v for v in media_cache.values()) and not media_diblokir:
+                    media_diblokir = True
+                    if on_notice:
+                        on_notice(f"{penyebab} — dicoba ulang TANPA lampiran "
+                                  "gambar/video")
+                    continue
                 sisa = self.memory.potong_awal(14 if pangkas_ke == 1 else 6)
                 # Jaga OBJEKTIF: bila permintaan aktif ikut terpangkas,
                 # sisipkan ulang ringkasnya — tanpa ini model melanjutkan
-                # rantai tool tanpa tahu tugasnya apa.
+                # rantai tool tanpa tahu tugasnya apa ("hai"/"lanjut" pun
+                # gagal karena seluruh riwayat ikut di setiap request).
                 _pastikan_tugas_aktif(self.memory, tugas_aktif)
                 if sisa <= 2 or pangkas_ke > 2:
                     final = (
-                        "Konteks model ini penuh dan tetap penuh sesudah "
-                        "riwayat lama dipangkas. Jalankan `/compact` untuk "
-                        "menyimpan kerja, lalu `/new` + `/send-compact` "
+                        f"{penyebab.capitalize()} dan tetap gagal sesudah "
+                        "media & riwayat lama dilepas. Jalankan `/compact` "
+                        "untuk menyimpan kerja, lalu `/new` + `/send-compact` "
                         "untuk melanjutkan di percakapan bersih.")
                     self.memory.add_assistant_text(final)
                     self._persist()
                     return final
                 if on_notice:
                     on_notice(
-                        "konteks model penuh "
-                        f"({_potong_alasan(exc.asli)}) — riwayat lama "
+                        f"{penyebab} ({_potong_alasan(
+                            getattr(exc, 'asli', '') or str(exc))}) — riwayat "
                         f"dipangkas (sisa {sisa} entri), permintaanmu "
                         "diulangi otomatis")
                 continue
