@@ -1265,21 +1265,24 @@ _MENU_MAKS = 8
 #      scrollback milik terminal — aplikasi tak punya cara tahu baris apa yang
 #      ada di koordinat yang diklik, apalagi menulis ulang di sana.
 #
-# Maka hasilnya ditampilkan saja SEKARANG, di tempatnya, dengan latar abu-abu
-# gelap sebagai pembeda — dibatasi beberapa baris supaya keluaran 400 baris tak
-# menenggelamkan riwayat.
+# Maka hasilnya ditampilkan saja SEKARANG, di tempatnya — dibatasi beberapa
+# baris supaya keluaran 400 baris tak menenggelamkan riwayat.
 _PRATINJAU_BARIS = 8
-# Latar panel hasil (mode mengalir) mengikuti tema — dibaca per-render.
-def _BG_HASIL() -> str:
-    return tema.p("menu_bg")
 
 
 def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
-    """Blok pratinjau keluaran sebuah langkah, berlatar abu-abu gelap.
+    """Blok pratinjau keluaran langkah — REL KIRI tipis + teks tenang.
 
-    Baris kosong di ujung dibuang lebih dulu: keluaran perintah hampir selalu
-    berakhir dengan newline, dan tanpa ini blok abu-abunya punya baris kosong
-    menggantung yang membuatnya terlihat seperti salah render."""
+    Dulu tiap baris dipadatkan jadi PITA berlatar gelap selebar terminal;
+    SEMUA langkah (read_file, run_command, hasil web — bukan satu jenis
+    tool) jadi deretan pita tebal yang melelahkan mata dan nyaris tak bisa
+    dibedakan dari blok lain di sekitarnya. Kini satu bahasa dengan gutter
+    diff editor: rel `│` redup (merah bila gagal), isi warna teks biasa —
+    nyaman dibaca lama, tetap terlihat SATU blok berkat relnya.
+
+    Baris kosong di ujung dibuang lebih dulu: keluaran perintah hampir
+    selalu berakhir dengan newline, dan tanpa ini bloknya punya baris
+    kosong menggantung yang tampak seperti salah render."""
     isi = [ln.rstrip() for ln in lines]
     while isi and not isi[-1].strip():
         isi.pop()
@@ -1291,21 +1294,15 @@ def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
     tampil = isi[:_PRATINJAU_BARIS]
     if sisa > 0:
         tampil.append(f"… {sisa} baris lagi")
-    lebar = max(20, console.width - 5)
-    gaya = f"on {_BG_HASIL()}"
-    tepi = "#f0603c" if gagal else tema.p("tepi")
+    rel = "#f0603c" if gagal else tema.p("tepi_redup")
+    warna_teks = "#f0603c" if gagal else tema.p("teks")
     out = []
     for i, ln in enumerate(tampil):
-        baris = Text("     ")
-        # Garis tepi kiri: penanda "ini satu blok", jauh lebih murah daripada
-        # bingkai penuh yang bakal beradu dengan kotak chat satu-satunya.
-        baris.append("▏", style=f"{tepi} {gaya}")
         redup = sisa > 0 and i == len(tampil) - 1
-        baris.append(" " + ln, style=f"{tema.p('redup') + ' italic' if redup else tema.p('teks')} {gaya}")
-        baris.truncate(lebar, overflow="ellipsis")
-        pad = lebar - baris.cell_len
-        if pad > 0:
-            baris.append(" " * pad, style=gaya)
+        gaya = "dim italic" if redup else warna_teks
+        baris = Text("     ")
+        baris.append("│ ", style=rel)
+        baris.append(ln, style=gaya)
         out.append(_oneline(baris))
     return out
 
