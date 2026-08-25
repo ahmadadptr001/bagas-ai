@@ -1498,6 +1498,13 @@ class Agent:
         # berkas memory supaya model tak menyimpulkan bahwa percakapannya
         # memang dimulai dari situ.
         self._riwayat_terpotong = False
+        # Snapshot ingatan SEBELUM pemangkasan pemulih konteks: tanpa ini,
+        # /compact setelah pemulihan menghasilkan berkas ±3 KB kosongan —
+        # riwayat yang dipangkas hilang total dari bekal /send-compact.
+        self._snapshot_terakhir: list = []
+        # Pernah menjalankan tangga pemangkasan? Dipakai /compact untuk
+        # menjelaskan MENGAPA gilirannya sedikit.
+        self._pernah_pangkas = False
         # Sudah pernah memberi tahu bahwa percakapan ini melewati ambang?
         # Sekali per percakapan; kabar yang sama tiap giliran cuma berisik.
         self._kabar_panjang = False
@@ -1962,8 +1969,17 @@ class Agent:
                 "- Percakapan ini jalan terus; tak ada yang dikirim ke mana pun.\n\n"
                 "Sesudah `/new`, pasang lagi dengan `/send-compact`: di jalur "
                 "API intinya DISUNTIKKAN ke riwayat (ringkasan giliran + ekor "
-                "terakhir). Peta proyek & memorimu tak ikut disuntik — "
-                "keduanya memang otomatis ada di sesi mana pun.")
+                "percakapan terakhir). Peta proyek & memorimu tak ikut "
+                "disuntik — keduanya memang otomatis ada di sesi mana pun.")
+            if getattr(self, "_pernah_pangkas", False):
+                catatan += ("\n\nCatatan: jumlah giliran kecil karena riwayat "
+                            "panjang perlu dipangkas otomatis agar muat konteks "
+                            "model.")
+                if self._snapshot_terakhir:
+                    catatan += (" Salinan lengkap SEBELUM pemangkasan: "
+                                + ", ".join(
+                                    p.name for p in self._snapshot_terakhir)
+                                + ".")
         return (
             f"Ingatan tersimpan di `{berkas[0].parent}`:\n"
             + "\n".join(f"  - {p.name}" for p in berkas) + "\n\n"
@@ -2102,6 +2118,27 @@ class Agent:
                    + "\n".join(f"  - {p.parent.name}/{p.name}" for p in berkas))
         return (f"Ingatan dipasang ke percakapan ({len(teks)} karakter "
                 f"disuntik: ringkasan + ekor terakhir):\n{rincian}")
+
+    def _pulih_konteks(self, pangkas_ke: int, tugas: str) -> int:
+        """Satu anak tangga pemulih konteks. Return jumlah entri tersisa.
+
+        SEBELUM pangkasan pertama, riwayat penuh DI-SNAPSHOT ke berkas memory
+        (jalur /compact) — pemangkasan itu destruktif, dan tanpa snapshot
+        pekerjaan yang diselamatkan dari provider justru hilang dari bekal
+        `/send-compact` (bug nyata: /compact pasca-pemulihan menghasilkan
+        berkas ±3 KB tanpa satu pun giliran)."""
+        # pangkas_ke sudah +1 saat dipanggil dari handler (anak tangga pertama
+        # = 1), jadi ambang snapshotnya <= 1 — bukan == 0.
+        if pangkas_ke <= 1 and not self._snapshot_terakhir:
+            try:
+                snap = self.simpan_memory()
+                if snap:
+                    self._snapshot_terakhir = list(snap)
+            except Exception:  # noqa: BLE001 - snapshot gagal tak boleh
+                pass           # menggagalkan penyelamatan giliran
+        sisa = self.memory.potong_awal(14 if pangkas_ke == 1 else 6)
+        _pastikan_tugas_aktif(self.memory, tugas)
+        return sisa
 
     def kirim_memory(self, path: Any = None, on_status: Any = None,
                      on_notice: Any = None) -> str:
@@ -2766,56 +2803,10 @@ class Agent:
                 )
             except llm.Cancelled:
                 raise
-            except Exception as exc:
-                # SATU pintu pemulih utk semua kegagalan "permintaan ditolak":
-                # KonteksPenuh (terdeteksi eksplisit) ATAU 400/413 generik dari
-                # provider yang menyamar sebagai "Provider returned error".
-                #
-                # URUTAN ADALAH NYAWA: dulu `except Exception` berdiri DI ATAS
-                # `except llm.KonteksPenuh` — padahal KonteksPenuh subclass-
-                # nya, jadi selalu tertangkap di sini duluan lalu `raise`
-                # ulang keluar; handler pangkasnya TAK PERNAH jalan dan
-                # pengguna menabrak ✖ terus pada sesi panjang.
-                if isinstance(exc, llm.KonteksPenuh):
-                    penyebab = "konteks model penuh"
-                elif _layak_pulih(exc):
-                    penyebab = "provider menolak permintaan"
-                else:
-                    raise          # bukan keluarga ini: biarkan naik seperti biasa
-
-                pangkas_ke += 1
-                # Media base64 sering JUMLAH PENYEBAB utamanya — bila ada,
-                # blokir sejak langkah pertama; mengulang dengan media yang
-                # sama hanya memastikan ditolak lagi.
-                if any(v for v in media_cache.values()) and not media_diblokir:
-                    media_diblokir = True
-                    if on_notice:
-                        on_notice(f"{penyebab} — dicoba ulang TANPA lampiran "
-                                  "gambar/video")
-                    continue
-                sisa = self.memory.potong_awal(14 if pangkas_ke == 1 else 6)
-                # Jaga OBJEKTIF: bila permintaan aktif ikut terpangkas,
-                # sisipkan ulang ringkasnya — tanpa ini model melanjutkan
-                # rantai tool tanpa tahu tugasnya apa ("hai"/"lanjut" pun
-                # gagal karena seluruh riwayat ikut di setiap request).
-                _pastikan_tugas_aktif(self.memory, tugas_aktif)
-                if sisa <= 2 or pangkas_ke > 2:
-                    final = (
-                        f"{penyebab.capitalize()} dan tetap gagal sesudah "
-                        "media & riwayat lama dilepas. Jalankan `/compact` "
-                        "untuk menyimpan kerja, lalu `/new` + `/send-compact` "
-                        "untuk melanjutkan di percakapan bersih.")
-                    self.memory.add_assistant_text(final)
-                    self._persist()
-                    return final
-                if on_notice:
-                    on_notice(
-                        f"{penyebab} ({_potong_alasan(
-                            getattr(exc, 'asli', '') or str(exc))}) — riwayat "
-                        f"dipangkas (sisa {sisa} entri), permintaanmu "
-                        "diulangi otomatis")
-                continue
             except llm.StreamStalled:
+                # URUTAN NYAWA (pelajaran 2026-08-26): handler SPESIFIK wajib
+                # di ATAS except Exception — dulu ia di bawahnya sehingga
+                # selalu tertelan duluan dan pemulih macet tak pernah jalan.
                 # Stream berhenti mengirim data berulang kali. Naikkan effort
                 # lalu ULANGI: memory belum disentuh di putaran ini, jadi
                 # konteksnya masih utuh dan tak ada pekerjaan yang hilang.
@@ -2836,6 +2827,50 @@ class Agent:
                 if on_notice:
                     on_notice(changed or
                               "respons macet — dibatalkan & diulang otomatis")
+                continue
+            except Exception as exc:
+                # SATU pintu pemulih utk semua kegagalan "permintaan ditolak":
+                # KonteksPenuh (terdeteksi eksplisit) ATAU 400/413 generik dari
+                # provider yang menyamar sebagai "Provider returned error".
+                #
+                # URUTAN ADALAH NYAWA: dulu `except Exception` berdiri DI ATAS
+                # `except llm.KonteksPenuh` — padahal KonteksPenuh subclass-
+                # nya, jadi selalu tertangkap di sini duluan lalu `raise`
+                # ulang keluar; handler pangkasnya TAK PERNAH jalan dan
+                # pengguna menabrak ✖ terus pada sesi panjang.
+                if isinstance(exc, llm.KonteksPenuh):
+                    penyebab = "konteks model penuh"
+                elif _layak_pulih(exc):
+                    penyebab = "provider menolak permintaan"
+                else:
+                    raise          # bukan keluarga ini: biarkan naik seperti biasa
+
+                pangkas_ke += 1
+                self._pernah_pangkas = True
+                # Anak tangga 0: media base64 sering penyebab utamanya —
+                # lepas dulu (TANPA menghitung pemangkasan riwayat).
+                if any(v for v in media_cache.values()) and not media_diblokir:
+                    media_diblokir = True
+                    if on_notice:
+                        on_notice(f"{penyebab} — dicoba ulang TANPA lampiran "
+                                  "gambar/video")
+                    continue
+                sisa = self._pulih_konteks(pangkas_ke, tugas_aktif)
+                if sisa <= 2 or pangkas_ke > 2:
+                    final = (
+                        f"{penyebab.capitalize()} dan tetap gagal sesudah "
+                        "media & riwayat lama dilepas. Jalankan `/compact` "
+                        "untuk menyimpan kerja, lalu `/new` + `/send-compact` "
+                        "untuk melanjutkan di percakapan bersih.")
+                    self.memory.add_assistant_text(final)
+                    self._persist()
+                    return final
+                if on_notice:
+                    on_notice(
+                        f"{penyebab} ({_potong_alasan(
+                            getattr(exc, 'asli', '') or str(exc))}) — riwayat "
+                        f"dipangkas (sisa {sisa} entri), permintaanmu "
+                        "diulangi otomatis")
                 continue
 
             # Media yang DILEWATI diumumkan SEKALI (putaran pertama yang

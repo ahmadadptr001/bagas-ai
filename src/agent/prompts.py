@@ -510,6 +510,35 @@ def build_context_payload(
                 for r in riwayat
             ],
         }
+    elif messages:
+        # JALUR API: riwayat mentah web tak ada, tapi /send-compact tetap
+        # butuh EKOR percakapan — dulu berkas memory API cuma memuat peta &
+        # ringkasan pendek (±3 KB, "0 giliran") sehingga pasca-/new pekerjaan
+        # hilang. Ambil ekor dari pesan internal terakhir (user + jawaban
+        # final; [SISTEM], hasil tool & penanda media dibersihkan).
+        ekor = []
+        for m in (messages or [])[-12:]:
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            c = m.get("content")
+            if not isinstance(c, str):
+                continue
+            baris = [ln for ln in c.splitlines()
+                     if ln.strip() and not ln.startswith(("[SISTEM]",
+                                                          "[LAMPIR-MEDIA]"))]
+            if not baris:
+                continue
+            ekor.append({"dari": "saya" if role == "user" else "bagas-ai",
+                         "isi": "\n".join(baris)[:1200].splitlines()})
+        if ekor:
+            payload["percakapan_terakhir_apa_adanya"] = {
+                "keterangan": (
+                    "Ekor percakapan internal jalur API (user + jawaban "
+                    "final, tanpa langkah tool) — urut lama ke baru."),
+                "dipotong_dari_awal": len(messages or []) > 12,
+                "giliran": ekor,
+            }
     return payload
 
 
