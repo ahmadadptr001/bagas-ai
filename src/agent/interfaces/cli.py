@@ -1510,6 +1510,69 @@ def _retempel_live(live) -> None:
     live.refresh()
 
 
+def _jaga_ukuran_layar(keadaan: dict) -> None:
+    """Watchdog resize (thread latar) — SATU pintu untuk semua jalur.
+
+    Dua keluhan lama yang akarnya sama:
+      - perubahan TINGGI meninggalkan deretan '\\n' kosong di atas kotak
+        (dorongan berbasis tinggi LAMA dieksekusi dua jalur sekaligus ->
+        dobel celah);
+      - kotak turun ke dasar tapi BOX GHOST tertinggal di posisi lama
+        (buku catatan baris prompt_toolkit lepas setelah terminal me-wrap
+        ulang scrollback secara native).
+
+    Solusinya: deteksi perubahan ukuran SEKALI di sini, lalu
+      - giliran berjalan : re-tempel region live + refresh SEGERA;
+      - idle             : hapus-satu-baris ke bawah dari kursor (buang sisa
+                           box lama) dan paksa prompt_toolkit menggambar
+                           ulang + sinkronkan posisi kursor.
+    Gelung giliran lama punya handler sendiri; itu DIHAPUS supaya tidak
+    dobel mendorong baris kosong."""
+    try:
+        if not (sys.stdout.isatty() and sys.stdin.isatty()):
+            return
+    except Exception:  # noqa: BLE001
+        return
+    terakhir = None
+    while keadaan.get("jalan"):
+        time.sleep(0.25)
+        try:
+            kini = console.size
+        except Exception:  # noqa: BLE001
+            continue
+        if kini == terakhir:
+            continue
+        pertama = terakhir is None
+        terakhir = kini
+        if pertama:
+            continue                     # baseline awal: belum ada yang berubah
+        live = _LIVE.get("live")
+        if live is not None and getattr(live, "is_running", False):
+            try:
+                _retempel_live(live)
+                live.refresh()
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        # IDLE: bersihkan sisa region lama lalu minta ptk menggambar ulang.
+        try:
+            sys.stdout.write("\r")
+            sys.stdout.flush()
+            out = _KELUARAN_PT.get("out")
+            if out is None and not _KELUARAN_PT["menyerah"]:
+                from prompt_toolkit.output.defaults import create_output
+                out = _KELUARAN_PT["out"] = create_output(stdout=sys.stdout)
+            if out is not None and not _KELUARAN_PT["menyerah"]:
+                out.erase_down()
+                out.flush()
+            app = keadaan.get("app")
+            if app is not None:
+                app.invalidate()
+                app.request_absolute_cursor_position()
+        except Exception:  # noqa: BLE001 - non-tty / dibongkar: diam saja
+            pass
+
+
 # --- bar status permanen ---------------------------------------------------
 #
 # Bar ini PASANGAN TETAP kotak chat: kotak selalu menempel persis di atasnya,
@@ -3991,20 +4054,11 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                         _flush_konten()
                         if console.size != _last_size:
                             _last_size = console.size
-                            # JANGAN stop/clear/start: clear() memadamkan
-                            # SELURUH layar tiap kali ukuran terdeteksi berubah
-                            # — itulah kilat "kedip-kedip" yang paling kentara.
-                            # _retempel_live menempelkan region ke dasar lagi
-                            # (terminal yang membesar meninggalkannya menggantung)
-                            # lalu memicu refresh sekali; tanpa itu pun tick
-                            # berikutnya (≤167ms) merapikan lebarnya.
-                            # Live yang sedang di-STOP (menu ask_user tampil)
-                            # TIDAK boleh di-refresh: refresh() mencetak
-                            # Control() ke console dan akan merusak menu
-                            # inquirer — cukup catat ukuran barunya saja.
-                            if not _LIVE["paused"]:
-                                _retempel_live(live)
-                                live.refresh()   # langsung rapi, tanpa nunggu tick
+                            # Penanganan resize kini PUSAT di watchdog
+                            # (_jaga_ukuran_layar): re-tempel + refresh segera
+                            # dijalankan SEKALI di sana. Dulu jalur ini juga
+                            # mendorong baris kosong -> dobel celah kosong di
+                            # atas kotak tiap tinggi layar berubah.
                         if input_paused["on"]:
                             # ask_user sedang tampil -> JANGAN baca console;
                             # biarkan inquirer yang menerima seluruh ketikan.
@@ -4261,14 +4315,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                         _flush_konten()
                         if console.size != _last_size:
                             _last_size = console.size
-                            # Sama seperti mode mengalir: tanpa stop/clear/start
-                            # — _retempel_live cukup (menempel ke dasar lagi
-                            # lalu rich merapikan region sendiri).
-                            # Tapi jangan saat Live di-stop (menu ask_user):
-                            # refresh() akan mencetak Control() ke console.
-                            if not _LIVE["paused"]:
-                                _retempel_live(live)
-                                live.refresh()   # langsung rapi, tanpa nunggu tick
+                            # Resize ditangani pusat di _jaga_ukuran_layar —
+                            # lihat catatan pada mode mengalir.
                         worker_thread.join(timeout=0.1)
                     except KeyboardInterrupt:
                         if not interrupted:
@@ -6287,6 +6335,12 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                          style=_buat_pt_style(), completer=SlashCompleter())
 
     kotak_chat = _buat_kotak()
+    # Watchdog resize: SATU thread memantau ukuran terminal untuk idle maupun
+    # giliran — re-tempel region live, hapus box ghost, buang baris kosong
+    # liar akibat rewrap native (lihat _jaga_ukuran_layar).
+    ukuran_state: dict = {"jalan": True, "app": kotak_chat.app}
+    threading.Thread(target=_jaga_ukuran_layar, args=(ukuran_state,),
+                     name="bagasai-resize", daemon=True).start()
 
     # Pada idle pertama, konten startup sudah dorong ke dasar layar secara manual
     # (lihat main()), jadi _ke_dasar_layar() di tanya() TIDAK dipanggil — push
@@ -6485,6 +6539,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         _br.shutdown()
     except Exception:  # noqa: BLE001
         pass
+    ukuran_state["jalan"] = False   # hentikan watchdog resize
     console.clear()
     console.print("\n  [#fcc048]⬢ bagas-ai[/]  [dim]— sampai jumpa! 👋[/dim]")
     # Satu baris, langsung PAKAI: cara lanjutkan = sekaligus ID-nya.
