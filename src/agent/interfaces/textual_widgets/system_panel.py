@@ -14,6 +14,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 from rich.text import Text
 
+from ... import config
 from ...ui import tema
 
 
@@ -80,6 +81,31 @@ class SystemPanel(Widget):
         if gpu_metrik:
             t.append("     ", style=tema.p("redup"))
             t.append(gpu_metrik, style=tema.p("redup"))
+            t.append("\n")
+
+        # Footer panel: folder project aktif — sama dengan yang dipakai
+        # tools file/shell (config.PROJECT_ROOT), jadi tak pernah bohong
+        # tentang di mana bagas-ai sedang bekerja.
+        t.append("─" * 28 + "\n", style=tema.p("tepi_redup"))
+        try:
+            root = str(config.PROJECT_ROOT)
+        except Exception:  # noqa: BLE001 — config tak terbaca
+            root = ""
+        if root:
+            # Potong KEPALA path (bukan ekor): nama folder & induknya yang
+            # penting, drive/root lama boleh jadi "…".
+            label = "📁 "
+            muat = 28 - len(label)
+            tampil = root.replace("\\", "/")
+            if len(tampil) > muat:
+                tampil = "…" + tampil[-(muat - 1):]
+                # Beri potongan di batas folder, bukan di tengah nama —
+                # "…JECTS/ai-agent" lebih buram daripada "…/ai-agent".
+                spasi = tampil.find("/")
+                if 0 < spasi < len(tampil) - 1:
+                    tampil = "…" + tampil[spasi + 1:]
+            t.append(label, style=tema.p("redup"))
+            t.append(tampil, style=tema.p("redup"))
             t.append("\n")
 
         if self._content:
