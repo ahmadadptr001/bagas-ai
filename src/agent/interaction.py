@@ -49,3 +49,12 @@ def ask_choice(question: str, options: list[str], multiple: bool = False) -> str
             "Ajukan pertanyaan sebagai teks biasa saja."
         )
     return handler(question, options, multiple)
+
+
+def ask_user(question: str, options: list[str], multiple: bool = False) -> str:
+    """Tanya pengguna lewat menu pilihan interaktif (alias ramah dari ask_choice).
+
+    Menggunakan handler yang sama (konteks eksekusi bila diset, else default CLI).
+    Di antarmuka non-interaktif mengembalikan pesan teks biasa.
+    """
+    return ask_choice(question, options, multiple)

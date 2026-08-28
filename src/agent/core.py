@@ -1448,6 +1448,17 @@ class Agent:
         # berpikir di situsnya, jadi tak ada nilai yang perlu disimpan.
         self.effort: str | None = None
         self._init_effort()
+        # Varian model SITUS (mis. "GLM-5.2", "K2.6") yang dipilih lewat
+        # /model. Tidak dipasang di sini: memasangnya berarti membuka browser
+        # hanya untuk memilih menu. Nilai ini DIPAKAI _run_connector tepat
+        # sebelum kirim pertama giliran berikutnya (lihat di sana).
+        self._web_varian: str | None = None
+        # Varian yang SUDAH terpasang di browser tiap layanan — ingatan untuk
+        # membedakan "browser terbuka dengan model lain" (perlu jendela baru)
+        # dari "model yang sama" (cukup tab baru; lihat pasang_model_web).
+        # Key = nama layanan (connector), bukan varian: satu layanan satu
+        # jendela browser.
+        self._web_terpasang: dict[str, str] = {}
         # Berapa kali effort dinaikkan SENDIRI dalam satu giliran (batasnya
         # config.MAX_ESCALATIONS). Direset di tiap run().
         self._escalations = 0
@@ -1551,8 +1562,36 @@ class Agent:
         return self.model_spec.id
 
     def set_model(self, name: str) -> str:
+        """Pindah model. `name` boleh:
+          - alias/id/label layanan atau model API seperti biasa;
+          - "<layanan> <varian>" (bentuk pilihan menu /model, mis.
+            "glm GLM-5.2") — layanan + varian model SITUSNYA;
+          - nama varian polos ("GLM-5.2", "K2.6") bila tak ambigu.
+        Varian TIDAK diklik di sini (butuh browser hidup); ia ditandai
+        menunggu di _web_varian lalu dipasang _run_connector tepat sebelum
+        kirim pertama giliran berikutnya."""
+        varian: str | None = None
+        spec: models.ModelSpec | None = None
+        # Bentuk "<layanan> <varian>" dari menu /model.
+        if " " in name.strip():
+            alias, _, sisa = name.strip().partition(" ")
+            try:
+                kandidat = models.cari(alias)
+            except ValueError:
+                kandidat = None
+            if kandidat is not None and kandidat.is_web and sisa.strip():
+                spec, varian = kandidat, sisa.strip()
+        if spec is None:
+            # Nama varian polos -> layanan pemilik varian itu.
+            ketemu = models.resolve_varian(name)
+            if ketemu is not None:
+                spec = models.cari(ketemu[0])
+                varian = ketemu[1]
+        if spec is None:
+            spec = models.resolve(name)
+        self._web_varian = varian
         before = self.model_spec.connector
-        self.model_spec = models.resolve(name)
+        self.model_spec = models._pastikan_aktif(spec)
         if self.model_spec.connector != before:
             # Pindah layanan (mis. Kimi web -> Qwen web): state percakapan web
             # TIDAK boleh terbawa. Tanpa ini, layanan baru dikira sudah menerima
@@ -1568,7 +1607,143 @@ class Agent:
         # memamerkan effort yang sebenarnya tak pernah dikirim ke server.
         self._init_effort()
         prefs.save(model=self.model_spec.id, effort=self.effort)
+        if varian:
+            return f"{self.model_spec.label} · {varian}"
         return self.model_spec.label
+
+    def pasang_model_web(self, varian: str | None = None,
+                         on_status: Any = None,
+                         on_notice: Any = None) -> str:
+        """Buka/atur browser untuk model web yang BARU SAJA dipilih (/model).
+
+        Tiga keadaan yang dibedakan (permintaan pengguna):
+          1. browser BELUM terbuka      -> buka jendela + pilih variannya;
+          2. browser terbuka, model LAIN -> tutup jendela lama, buka JENDELA
+             BARU dengan varian yang dipilih;
+          3. browser terbuka, model SAMA -> buka TAB BARU di jendela itu,
+             lampirkan berkas konteks, lalu minta model MEMBACANYA lewat
+             tool read_file bawaan situsnya.
+
+        Dipanggil dari thread worker UI SETELAH set_model() — di sini memang
+        boleh memblokir (menunggu jendela/login) lama.
+
+        Return pesan hasil untuk ditampilkan ke pengguna."""
+        from . import connectors as _con
+        from .connectors import browser as _browser
+
+        svc = self.model_spec.connector
+        conn = _con.get_connector(svc)
+        label = self.model_spec.label
+
+        def _status(msg: str) -> None:
+            if on_status is not None:
+                on_status(msg)
+
+        def _kabar(msg: str) -> None:
+            if on_notice is not None:
+                on_notice(msg)
+
+        # Varian boleh None (pilihan cuma nama layanan, mis. "dola-web").
+        varian = varian or self._web_varian
+        terpasang = self._web_terpasang.get(svc)
+        hidup = _browser.browser_hidup(svc)
+        sama = bool(hidup and varian and terpasang == varian)
+
+        if hidup and terpasang and terpasang != varian:
+            # Keadaan 2: jendela lain sedang memakai model berbeda. Tanpa ini
+            # varian barunya diklik DI ATAS percakapan model lama — situs
+            # memindahkan seluruh chatnya ke model baru, persis yang tak
+            # diinginkan pengguna yang memilih "jendela baru".
+            _status(f"menutup jendela {label} yang memakai {terpasang}…")
+            _browser.tutup_service(svc)
+            # Jendela baru = chat baru: kaitan chat lama tak berlaku lagi,
+            # konteksnya akan dikirim ulang otomatis pada pesan pertama.
+            self._lupakan_chat_web()
+            self._web_ctx_sent = False
+            self._web_chars = 0
+
+        try:
+            if sama:
+                # Keadaan 3: TAB baru di jendela yang sama — percakapan lama
+                # utuh di tabnya, dan tab baru langsung diberi konteks lewat
+                # berkas yang disuruh dibaca read_file.
+                _status(f"membuka tab baru {label}…")
+                conn.open_new_chat(new_tab=True, on_status=on_status,
+                                   on_notice=on_notice)
+                hasil = self._kirim_konteks_tab(conn, varian,
+                                                on_status=on_status,
+                                                on_notice=on_notice)
+                return hasil
+            # Keadaan 1 / jendela baru: sambungkan (login bila perlu), lalu
+            # klik variannya di situsnya.
+            _status(f"membuka {label}…")
+            conn.connect(on_status=on_status, on_notice=on_notice)
+            if varian:
+                _status(f"memilih model {varian} di {label}…")
+                conn.set_web_option(varian)
+                self._web_varian = None
+                self._web_terpasang[svc] = varian
+                return f"jendela {label} siap dengan model {varian}"
+            self._web_terpasang[svc] = ""
+            return f"jendela {label} siap"
+        except Exception as exc:  # noqa: BLE001 — kegagalan tak mematikan app
+            _kabar(f"⚠ {exc}")
+            return f"⚠ tak bisa membuka {label}: {exc}"
+
+    def _kirim_konteks_tab(self, conn: Any, varian: str | None,
+                           on_status: Any = None,
+                           on_notice: Any = None) -> str:
+        """Tab baru (model yang sama): bawa konteksnya ke chat di tab itu.
+
+        Polanya persis _padatkan_web (konteks-penuh saat situs menolak chat
+        lama): simpan ingatan -> kirim sebagai BERKAS terlampir lewat
+        _kirim_konteks -> pengantarnya menyuruh model MEMBACA berkasnya
+        (tool read_file situsnya). Jalur _kirim_konteks dipakai apa adanya
+        supaya verifikasi kode-periksa & cadangan teksnya ikut bekerja."""
+        _status = (lambda m: on_status(m)) if on_status else (lambda m: None)
+        # Kaitan chat lama tak berlaku: kita sekarang berada di chat BARU di
+        # tab baru. Tanpa ini, pesan berikutnya malah membuka chat lama dan
+        # seluruh konteks yang barusan dikirim tertinggal di tab sebelah.
+        self._lupakan_chat_web()
+        _status("menyimpan riwayat percakapan…")
+        berkas = self.simpan_memory()
+
+        def kirim(teks: str, new_chat: bool, open_chat_id: Any,
+                  attachments: list | None = None) -> str:
+            return conn.send(
+                teks, on_status=on_status, on_notice=on_notice,
+                new_chat=bool(new_chat),
+                open_chat_id=str(open_chat_id or ""),
+                attachments=list(attachments or []))
+
+        if berkas:
+            # Imbuhan khas jalur tab-baru: sebut nama toolnya (read_file)
+            # eksplisit — pengantarnya (milik jalur konteks-pertama) sengaja
+            # generik "BUKA dan baca" karena tiap situs menamai tool bawaannya
+            # sendiri; di sini pengguna memintanya disebut tegas.
+            pengantar = self._pengantar_memory(
+                [p.name for p in berkas], konteks.kode(berkas),
+                lanjutan=True) + (
+                "\nPakai tool read_file-mu untuk membaca tiap berkasnya.")
+            self._kirim_konteks(
+                kirim, conn, berkas=berkas, kode=konteks.kode(berkas),
+                pengantar=pengantar,
+                teks_penuh=self._konteks_teks(), new_chat=False,
+                open_chat_id="", on_status=on_status, on_notice=on_notice)
+        else:
+            with self._tanpa_catatan():
+                kirim(self._konteks_teks(), False, "")
+        dibuat = getattr(conn, "last_chat_id", "") or ""
+        if dibuat:
+            self._link_web_chat(dibuat)
+        # Konteks sudah berada di chat tab baru: pesan pertama tak boleh
+        # mengirimkannya lagi (dobel, dan bisa kena batas lampiran situs).
+        self._web_ctx_sent = True
+        self._web_terpasang[self.model_spec.connector] = varian or ""
+        return (f"tab baru {self.model_spec.label} siap"
+                + (f" ({varian})" if varian else "")
+                + " — konteks terkirim sebagai berkas, menunggu dibaca "
+                  "read_file")
 
     def _init_effort(self) -> None:
         """Tetapkan effort awal dari prefs, disaring tabel kapabilitas model.
@@ -2794,8 +2969,12 @@ class Agent:
                     extra_body=extra,
                     max_tokens=spec.max_tokens,
                     # Penyedia endpoint menentukan klien (base_url + API key):
-                    # nvidia -> NVIDIA_API_KEY, openrouter -> OPENROUTER_API_KEY.
+                    # nvidia -> NVIDIA_API_KEY, openrouter -> OPENROUTER_API_KEY,
+                    # opencode -> tanpa key pun jalan (anonim; key opsional).
+                    # api_style memilih protokol endpoint: "responses" utk model
+                    # Zen yang hanya dilayani di /responses.
                     provider=spec.provider,
+                    api_style=getattr(spec, "api_style", "chat"),
                     on_content=on_content,
                     on_reasoning=_on_reasoning,
                     cancel_event=cancel_event,
@@ -2813,11 +2992,12 @@ class Agent:
                 stall_rounds += 1
                 if stall_rounds > 3:
                     final = (
-                        "Maaf, model terus macet (berhenti mengirim respons) "
+                        f"Maaf, model terus macet (berhenti mengirim respons) "
                         "meski sudah kubatalkan & kuulang otomatis beberapa "
-                        "kali. Kemungkinan server NVIDIA sedang bermasalah "
-                        "— coba lagi sebentar lagi, atau ganti model "
-                        "dengan /model (model (web) tak lewat server ini)."
+                        f"kali. Kemungkinan server {spec.provider} sedang "
+                        "bermasalah — coba lagi sebentar lagi, atau ganti "
+                        "model dengan /model (model (web) tak lewat server "
+                        "ini)."
                     )
                     self.memory.add_assistant_text(final)
                     self._persist()
@@ -3313,6 +3493,28 @@ class Agent:
         prompt_chars = 0
         reply_chars = 0
         answer = ""
+
+        # Varian model situs ("GLM-5.2", "K2.6") yang dipilih lewat /model:
+        # dipasang SEKARANG — browser memang sedang hidup untuk giliran ini.
+        # Diklik sekali lalu NOLKAN; kegagalannya tak fatal (varian bawaan
+        # situs tetap dipakai), cukup diberitahu lewat on_notice.
+        if self._web_varian:
+            varian = self._web_varian
+            self._web_varian = None
+            _status(f"memilih model {varian} di {self.model_spec.label}…")
+            try:
+                conn.set_web_option(varian)
+                # Catat agar /model berikutnya tahu varian apa yang sedang
+                # jalan di jendela ini (lihat pasang_model_web).
+                self._web_terpasang[self.model_spec.connector] = varian
+            except Exception as exc:  # noqa: BLE001 — jangan gagalkan giliran
+                if on_notice is not None:
+                    try:
+                        on_notice(
+                            f"⚠ varian '{varian}' tak terpasang di "
+                            f"{self.model_spec.label}: {exc}")
+                    except Exception:  # noqa: BLE001
+                        pass
 
         def _sync_tokens() -> None:
             """Perbarui hitungan token (estimasi) agar penghitung di UI hidup

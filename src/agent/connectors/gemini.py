@@ -266,16 +266,22 @@ class GeminiConnector(WebConnector):
     )
     web_model_button = _BTN_MODE
     # Nama varian ("3.5 Flash-Lite", dst) berupa angka+kata teknis yang TIDAK
-    # diterjemahkan, jadi aman dipakai sebagai teks klik. Kecuali sakelar
-    # penalaran yang labelnya kalimat biasa — itu ditulis sebagai beberapa
-    # alternatif dipisah "|" dan ditangani _click_menu_text di bawah.
-    web_actions = (
+    # diterjemahkan, jadi aman dipakai sebagai teks klik. Sakelar penalaran
+    # (bukan varian model) ditulis sebagai beberapa alternatif dipisah "|" dan
+    # ditangani _click_menu_text di bawah.
+    #
+    # Pecahan /model vs /effort: tiga varian pertama adalah MODEL (punya nama
+    # sendiri di situsnya) -> web_models; sakelar penalaran adalah USAHA
+    # BERPIKIR -> web_efforts.
+    web_models = (
         ("3.5 Flash-Lite", ("3.5 Flash-Lite",),
          "jawaban tercepat", _BTN_MODE),
         ("3.6 Flash", ("3.6 Flash",),
          "bantuan serbaguna (bawaan)", _BTN_MODE),
         ("3.1 Pro", ("3.1 Pro",),
          "matematika & coding tingkat lanjut", _BTN_MODE),
+    )
+    web_efforts = (
         ("Penalaran diperluas",
          ("Penalaran yang diperluas|Extended reasoning|Expanded reasoning",),
          "sakelar: berpikir lebih dalam untuk masalah kompleks", _BTN_MODE),

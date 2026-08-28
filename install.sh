@@ -8,7 +8,8 @@
 #
 # Langkah: cek Python 3.10+ → dapatkan sumber (folder ini / git / ZIP) →
 # pasang sebagai perintah global → unduh Chromium untuk Playwright → cek
-# Brave → rapikan PATH → wizard login (opsional; tanpa API key).
+# Brave → rapikan PATH → cek/pasang opencode CLI (opsional) → wizard login
+# (opsional; tanpa API key).
 #
 # Variabel lingkungan (opsional):
 #   BAGASAI_REPO        URL repo alternatif
@@ -279,6 +280,29 @@ else
   fi
   export PATH="$BIN_DIR:$PATH"
   note "Buka terminal baru (atau: source $SHELL_RC) bila 'bagas-ai' belum dikenali."
+fi
+
+# --- 4b. opencode CLI (opsional) ---
+# Model opencode/* di bagas-ai memakai API OpenCode Zen secara LANGSUNG dan
+# GRATIS TANPA key (akses anonim per-IP), jadi CLI ini murni OPSIONAL —
+# dipasang hanya bila kamu memakai opencode sendiri. Satu manfaat sampingnya:
+# `opencode auth login` menyimpan key yang dipakai bagas-ai otomatis (kuota
+# pribadi alih-alih kuota anonim). Gagal pun TIDAK menggagalkan pemasangan.
+step "Memeriksa opencode CLI (opsional)"
+if command -v opencode >/dev/null 2>&1; then
+  ok "opencode sudah terpasang"
+  note "model opencode/* di bagas-ai gratis tanpa key; login (opencode auth"
+  note "login) hanya untuk kuota pribadi di CLI-nya sendiri"
+else
+  note "memasang opencode lewat skrip resminya..."
+  if curl -fsSL https://opencode.ai/install | bash >/dev/null 2>&1; then
+    ok "opencode terpasang"
+    note "opsional: opencode auth login untuk kuota pribadi"
+  else
+    warn "pemasangan opencode gagal — bagas-ai tetap terpasang."
+    note "pasang manual nanti: curl -fsSL https://opencode.ai/install | bash"
+    note "atau: npm install -g opencode-ai  (butuh Node.js)"
+  fi
 fi
 
 # --- 5. Wizard setup (bot Telegram opsional; TIDAK ada API key) ---

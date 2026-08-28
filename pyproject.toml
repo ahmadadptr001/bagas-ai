@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.1.107"
+version = "1.1.108"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,10 @@ dependencies = [
     # dependensi yang ikut terpasang sejak awal.
     "openai>=1.30.0",
     "rich>=13.0.0",
+    # WAJIB: framework TUI untuk antarmuka chat baru (textual_app.py).
+    # Menggantikan prompt_toolkit sebagai motor UI utama — prompt_toolkit
+    # tetap dibutuhkan sebagai fallback untuk menu setup_wizard.
+    "textual>=1.0.0",
     # WAJIB: kotak chat, menu interaktif (ui/menu.py), dan seluruh line editing
     # dibangun di atasnya. Selama ini cuma kebetulan ikut terpasang lewat
     # InquirerPy — padahal InquirerPy sendiri sudah tak dipakai lagi, jadi di

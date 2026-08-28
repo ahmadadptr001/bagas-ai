@@ -657,20 +657,33 @@ class WebConnector:
     # mengosongkan jawaban DIBATALKAN otomatis (lihat JS_TO_MARKDOWN & _el_text).
     strip_selectors: tuple[str, ...] = ()
 
-    # --- Aksi UI yang bisa DIKLIK program di situs (permintaan pengguna: ganti
-    #     varian model & mode berpikir dari terminal via /effort). Tiap aksi =
-    #     (label tampil, urutan teks yang diklik berurutan, deskripsi). Urutan
-    #     >1 elemen dipakai untuk menu bertingkat (mis. buka "Effort" lalu "High").
+    # --- Aksi UI yang bisa DIKLIK program di situs. Tiap aksi =
+    #     (label tampil, urutan teks yang diklik berurutan, deskripsi[,
+    #      selector tombol pembuka]). Urutan >1 elemen dipakai untuk menu
+    #     bertingkat (mis. buka "Effort" lalu "High").
+    #
+    #     DIPISAH menurut pertanyaan yang dijawabnya (rombak /model & /effort):
+    #       web_models  = VARIAN MODEL situs ("GLM-5.2", "K3", "GPT-4o") —
+    #                     ditawarkan /model, BUKAN lagi /effort;
+    #       web_efforts = USAHA BERPIKIR ("Berpikir: Max", "Deep Think") —
+    #                     inilah isi /effort yang sebenarnya.
+    #     `web_actions` adalah GABUNGAN keduanya (property): satu jalur klik
+    #     untuk set_web_option; pencariannya per-label jadi urutan tak penting.
+    web_models: tuple[tuple, ...] = ()
+    web_efforts: tuple[tuple, ...] = ()
     # Tombol pembuka menu BAWAAN (dipakai bila aksi tak menyebut tombolnya
     # sendiri). Situs bisa punya LEBIH DARI SATU kontrol — mis. chat.qwen.ai
     # menaruh pemilih model di ATAS dan pemilih mode di dekat kotak input —
     # jadi tiap aksi boleh menentukan tombol pembukanya sendiri (elemen ke-4).
     web_model_button: str = ""
-    # (label, urutan teks yang diklik, keterangan[, selector tombol pembuka])
-    web_actions: tuple[tuple, ...] = ()
+
+    @property
+    def web_actions(self) -> tuple[tuple, ...]:
+        """Semua aksi klik varian model + usaha berpikir (lihat web_models)."""
+        return tuple(self.web_models) + tuple(self.web_efforts)
     # MODE KERJA situs — beda maksud dari web_actions, jadi sengaja dipisah.
     #
-    #   web_actions = varian MODEL & usaha berpikir (dipakai /effort);
+    #   web_actions = varian MODEL & usaha berpikir (dipakai /model & /effort);
     #   web_modes   = tombol yang mengubah APA yang dihasilkan situs —
     #                 "Create Image", "Create Video", "Deep Search", dsb.
     #
@@ -876,6 +889,7 @@ class WebConnector:
         on_status: StatusCb | None = None,
         on_notice: Callable[[str], None] | None = None,
         cancel_event: Any = None,
+        new_tab: bool = False,
     ) -> bool:
         """Buka percakapan BARU di browser SEKARANG — dipanggil saat /new.
 
@@ -883,7 +897,11 @@ class WebConnector:
         chat lama (browser baru pindah saat pesan berikutnya dikirim), method
         ini langsung menyuruh tab browser membuka chat baru lewat tombol situs
         atau navigasi URL, jadi layar pengguna langsung berpindah saat /new
-        dijalankan."""
+        dijalankan.
+
+        ``new_tab=True`` membuka TAB BARU alih-alih menavigasi tab yang ada —
+        percakapan lama dibiarkan utuh di tabnya (dipakai /model saat varian
+        yang sama dipilih ulang; lihat Agent.pasang_model_web)."""
         from .. import llm  # impor tunda: hindari siklus impor
 
         self._kabar = on_notice
@@ -899,6 +917,8 @@ class WebConnector:
         status(f"membuka percakapan baru di {self.label}…")
 
         def _open_on_hub(h: Any) -> bool:
+            if new_tab:
+                h.new_tab(self.service)
             _, did_login = self._acquire_ready_page(
                 h, status, check_cancel, force_new_chat=True)
             return did_login
@@ -989,11 +1009,12 @@ class WebConnector:
         return _sekali()
 
     def set_web_option(self, label: str) -> str:
-        """Klik OPSI di UI web (varian model / mode berpikir) — dipakai /effort.
-        `label` = label aksi dari web_options() (mis. "K3", "Effort: High").
+        """Klik OPSI di UI web (varian model / effort / mode) — dipakai
+        /model, /effort, dan /mode. `label` = label aksi dari
+        web_model_options()/web_options()/web_mode_options().
 
-        web_modes ikut dicari supaya /mode bisa memakai jalur yang sama persis:
-        mekanismenya identik, yang beda cuma pengelompokannya di menu."""
+        Ketiganya memakai jalur yang sama persis: mekanismenya identik,
+        yang beda cuma pengelompokannya di menu."""
         entry = next((a for a in tuple(self.web_actions) + tuple(self.web_modes)
                       if a[0] == label), None)
         if entry is None:
@@ -1034,9 +1055,20 @@ class WebConnector:
         page.wait_for_timeout(600)
         return f"mode kerja {self.label} dimatikan — kembali ke chat biasa"
 
+    def web_model_options(self) -> list[tuple[str, str]]:
+        """Daftar (label, deskripsi) VARIAN MODEL situs — untuk /model.
+
+        Inilah "jenis-jenis model" yang dulu ikut numpang di /effort: nama
+        model sungguhan situsnya ("GLM-5.2", "K3", "GPT-4o"), bukan lagi nama
+        umum layanan. Kosong berarti pemilih modelnya belum dipetakan."""
+        return [(a[0], a[2]) for a in self.web_models]
+
     def web_options(self) -> list[tuple[str, str]]:
-        """Daftar (label, deskripsi) varian model/berpikir — untuk /effort."""
-        return [(a[0], a[2]) for a in self.web_actions]
+        """Daftar (label, deskripsi) USAHA BERPIKIR situs — untuk /effort.
+
+        Hanya web_efforts (Berpikir: Max, Deep Think, Thinking effort, dst.)
+        — varian model sudah pindah ke /model lewat web_model_options()."""
+        return [(a[0], a[2]) for a in self.web_efforts]
 
     def web_mode_options(self) -> list[tuple[str, str]]:
         """Daftar (label, deskripsi) MODE KERJA situs — untuk /mode.

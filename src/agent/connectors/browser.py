@@ -1126,6 +1126,24 @@ class BrowserHub:
         self._ctx[service] = (ctx, page)
         return page
 
+    def new_tab(self, service: str) -> Any:
+        """TAB BARU untuk service ini; tab lama dibiarkan TERBUKA.
+
+        Dipakai /model saat varian yang dipilih SAMA dengan yang sedang jalan
+        di browser: percakapan lama utuh di tabnya, agent pindah ke tab baru.
+        HARUS dipanggil dari thread hub (lewat submit)."""
+        entry = self._ctx.get(service)
+        if entry is None:
+            # Belum ada browser sama sekali -> jalur biasa (meluncurkan).
+            return self.page_for(service, headless=False)
+        ctx, _page_lama = entry
+        try:
+            page_baru = ctx.new_page()
+        except Exception:  # noqa: BLE001 - context mati: luncurkan ulang
+            return self.page_for(service, headless=False)
+        self._ctx[service] = (ctx, page_baru)
+        return page_baru
+
     def dispose(self, timeout: float = 6.0, paksa: bool = False) -> bool:
         """Bubarkan hub ini SEUTUHNYA: context ditutup, driver Playwright
         dihentikan, thread-nya diakhiri. True bila semuanya berhasil rapi.
@@ -1682,3 +1700,40 @@ def reset_hub(service: str | None = None) -> None:
         # jadi thread hub bisa menyelesaikan job-nya. Beri satu kesempatan lagi
         # untuk berhenti rapi; kalau tetap tidak bisa, akhiri paksa.
         h.dispose(timeout=4.0, paksa=True)
+
+
+def browser_hidup(service: str) -> bool:
+    """True bila hub punya page yang MASIH HIDUP untuk service ini.
+
+    Dipakai /model untuk membedakan tiga keadaan: browser belum terbuka,
+    browser terbuka dengan model lain, atau browser terbuka dengan model
+    yang sama (lihat Agent.pasang_model_web). Pemeriksaan dijalankan DI
+    thread hub lewat submit — objek Playwright tak boleh disentuh dari
+    thread lain."""
+    with _HUB_LOCK:
+        h = _HUB
+    if h is None or h._mati:
+        return False
+    try:
+        return bool(h.submit(
+            lambda hb: service in hb._ctx and hb._alive(hb._ctx[service][1]),
+            timeout=15))
+    except Exception:  # noqa: BLE001 - hub racun/antre penuh: anggap mati
+        return False
+
+
+def tutup_service(service: str) -> None:
+    """Tutup browser milik service ini supaya pemakaian berikutnya membuka
+    JENDELA BARU. Dipakai /model saat model diganti di tengah jalan: jendela
+    lama (dan percakapannya) ditutup, bukan dipakai paksa untuk model lain.
+
+    Best-effort: kegagalan di sini tak fatal — page_for tetap bisa meluncurkan
+    ulang nanti."""
+    with _HUB_LOCK:
+        h = _HUB
+    if h is None:
+        return
+    try:
+        h.submit(lambda hb: hb.drop(service), timeout=15)
+    except Exception:  # noqa: BLE001 - drop gagal: biarkan page_for bereskan
+        pass

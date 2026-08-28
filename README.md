@@ -77,6 +77,26 @@ Wizard akan:
 > API key gratis bisa diambil di penyedia model dan langsung ditempel saat login.
 > Config global tersimpan di `~/.bagasai/` (Windows: `C:\Users\<nama>\.bagasai\`).
 
+### Model gratis lewat OpenCode Zen
+
+Tujuh model **gratis TANPA API key** (akses anonim, kuota per-IP) tersedia
+lewat gateway [OpenCode Zen](https://opencode.ai/docs/zen) — semuanya berada
+di posisi teratas daftar `/model`: `opencode/big-pickle`, `opencode/hy3-free`,
+`opencode/ling-3.0-flash-fin-free`, `opencode/mimo-v2.5-free`,
+`opencode/muse-spark-1.2-contributor-free`, `opencode/nemotron-3-ultra-free`,
+`opencode/nemotron-3.5-lightning-free`.
+
+Tidak ada syarat apa pun — langsung:
+
+1. Pilih modelnya lewat `/model` (contoh: `/model big-pickle`).
+2. Selesai — tidak perlu login, tidak perlu key.
+
+Ingin kuota pribadi alih-alih kuota anonim per-IP? `OPENCODE_API_KEY`
+opsional: ambil gratis di **https://opencode.ai/auth**, lalu tulis
+`OPENCODE_API_KEY=...` di `~/.bagasai/.env` — atau cukup jalankan
+`opencode auth login` bila CLI opencode terpasang (installer menawarkan
+memasangnya; bagas-ai membaca key-nya otomatis dari auth.json CLI itu).
+
 ---
 
 ## ▶️ Jalankan

@@ -7,7 +7,8 @@
 #
 # Langkah: cek Python 3.10+ -> dapatkan sumber (folder ini / git / ZIP) ->
 # pip install -> unduh Chromium untuk Playwright -> cek Brave -> rapikan PATH
-# (registry) -> wizard login (opsional; tanpa API key).
+# (registry) -> cek/pasang opencode CLI (opsional) -> wizard login (opsional;
+# tanpa API key).
 #
 # Variabel lingkungan (opsional):
 #   BAGASAI_REPO        URL repo alternatif
@@ -302,6 +303,38 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     $inSession = @($env:Path -split ';' | Where-Object { "$_".TrimEnd('\') -ieq $BinDir.TrimEnd('\') })
     if ($inSession.Count -eq 0) { $env:Path = "$($env:Path);$BinDir" }
     Note "Tutup lalu buka terminal BARU bila 'bagas-ai' belum dikenali."
+}
+
+# --- 4b. opencode CLI (opsional) ---
+# Model opencode/* di bagas-ai memakai API OpenCode Zen secara LANGSUNG dan
+# GRATIS TANPA key (akses anonim per-IP), jadi CLI ini murni OPSIONAL -
+# dipasang hanya bila kamu memakai opencode sendiri. Satu manfaat sampingnya:
+# "opencode auth login" menyimpan key yang dibaca bagas-ai otomatis (kuota
+# pribadi alih-alih kuota anonim).
+# Ke gagal pun TIDAK menggagalkan pemasangan bagas-ai.
+Step "Memeriksa opencode CLI (opsional)"
+$OpenCode = Get-Command opencode -ErrorAction SilentlyContinue
+if ($OpenCode) {
+    Ok "opencode sudah terpasang ($($OpenCode.Source))"
+    Note "model opencode/* di bagas-ai gratis tanpa key; opencode auth login"
+    Note "hanya untuk kuota pribadi di CLI-nya sendiri"
+} else {
+    $Npm = Get-Command npm -ErrorAction SilentlyContinue
+    if ($Npm) {
+        Note "memasang opencode lewat npm (butuh beberapa menit)..."
+        $rc = Invoke-Quiet npm @("install", "-g", "opencode-ai")
+        if ($rc -eq 0) {
+            Ok "opencode terpasang"
+            Note "opsional: opencode auth login untuk kuota pribadi"
+        } else {
+            Warn "npm install opencode gagal (exit $rc) - bagas-ai tetap terpasang."
+            Note "pasang manual nanti: npm install -g opencode-ai"
+            Note "atau: scoop install opencode / choco install opencode"
+        }
+    } else {
+        Note "opencode belum terpasang - bagas-ai (dan model opencode/*)"
+        Note "tetap jalan tanpanya; pasang via npm/scoop/choco bila mau."
+    }
 }
 
 # --- 5. Wizard setup (bot Telegram opsional; TIDAK ada API key) ---

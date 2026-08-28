@@ -223,7 +223,7 @@ class KimiConnector(WebConnector):
         r"\bplease\s+wait\s+or\s+upgrade\b",
     )
 
-    # --- /effort: pemilih model + usaha berpikir ---
+    # --- /model: varian model | /effort: usaha berpikir (submenu) ---
     # DIPETAKAN LANGSUNG pada sesi login. Berbeda dari Qwen yang kontrolnya
     # tersebar di dua tempat, Kimi menaruh SEMUANYA di balik satu pembuka
     # `.current-model` (berlabel mis. "K2.6 Standard") di baris komposer:
@@ -244,11 +244,14 @@ class KimiConnector(WebConnector):
     menu_item_selector = (".effort-option", ".effort-item", ".model-item",
                           ".toolkit-item")
     web_model_button = _BTN_MODEL
-    web_actions = (
+    web_models = (
         ("K2.6", ("K2.6",), "obrolan cepat, balasan singkat", _BTN_MODEL),
-        ("K3", ("K3",), "chat & agent, model andalan", _BTN_MODEL),
-        ("K3 Swarm", ("K3 Swarm",),
-         "pencarian masif & pemrosesan borongan", _BTN_MODEL),
+        # K3 DIHAPUS dari daftar (2026-08-29): varian BERBAYAR — memilihnya
+        # di /model membuat tiap giliran kena tagihan. Entri lain (K2.6)
+        # gratis. Kode kliknya tak dihapus; menambahkannya kembali = tambah
+        # satu baris di bawah.
+    )
+    web_efforts = (
         ("Thinking effort: Standard", ("Thinking effort", "Standard"),
          "usaha berpikir standar", _BTN_MODEL),
         ("Thinking effort: High", ("Thinking effort", "High"),

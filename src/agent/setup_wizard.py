@@ -2,12 +2,16 @@
 
 Dipanggil lewat `bagas-ai login` (atau `bagas-ai setup`). TAK ADA kredensial
 WAJIB: model (web) memakai akun yang sudah kamu pakai sehari-hari dan login
-sekali lewat jendela browser saat model pertama kali dipilih. Yang ditanyakan
-wizard — NVIDIA_API_KEY, OPENROUTER_API_KEY, & bot Telegram — semuanya OPSIONAL
-dan boleh dilewati; melewatinya cuma menutup model (API) dan mode telegram,
-bukan menggagalkan pemasangan. Kredensial yang SUDAH terisi di .env dilewati
-otomatis; menggantinya tetap bisa lewat pertanyaan "Ganti kredensial". Wizard
-dibuka DISCLAIMER yang wajib disetujui sebelum apa pun ditanya atau disimpan.
+sekali lewat jendela browser saat model pertama kali dipilih, dan model
+opencode/* (API) GRATIS tanpa key sama sekali. Yang ditanyakan wizard —
+NVIDIA_API_KEY, OPENROUTER_API_KEY, & bot Telegram — semuanya OPSIONAL dan
+boleh dilewati; melewatinya cuma menutup model (API) nvidia/openrouter dan
+mode telegram, bukan menggagalkan pemasangan. Kredensial yang SUDAH terisi
+di .env dilewati otomatis; menggantinya tetap bisa lewat pertanyaan "Ganti
+kredensial". Wizard dibuka DISCLAIMER yang wajib disetujui sebelum apa pun
+ditanya atau disimpan. (OPENCODE_API_KEY tak perlu ditanyakan: tanpa key pun
+model opencode/* jalan; kalau kelak diisi manual / lewat `opencode auth
+login`, config membacanya sendiri — lihat config._baca_key_opencode.)
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ _ENV_ORDER = [
     "CHAT_MODEL",
     "NVIDIA_API_KEY",
     "OPENROUTER_API_KEY",
+    "OPENCODE_API_KEY",
     "CONNECTOR_BROWSER_CHANNEL",
     "VOICE_JANGKAUAN",
     "TELEGRAM_BOT_TOKEN",
@@ -46,6 +51,13 @@ _ENV_KOMENTAR = {
     "OPENROUTER_API_KEY": [
         "# Kunci untuk model (API) openrouter/* (mis. ox-alpha) - OPSIONAL.",
         "# Ambil key: https://openrouter.ai/keys (awalan sk-or-...).",
+    ],
+    "OPENCODE_API_KEY": [
+        "# OPSIONAL — model opencode/* SUDAH GRATIS tanpa key ini",
+        "# (akses anonim per-IP ke OpenCode Zen). Key dari",
+        "# https://opencode.ai/auth hanya menaikkan kuota pribadi, dan",
+        "# kalau `opencode auth login` pernah dijalankan, bagas-ai membacanya",
+        "# otomatis dari auth.json CLI-nya (tak perlu ditulis di sini).",
     ],
     "CONNECTOR_BROWSER_CHANNEL": [
         "# Browser yang dipakai connector. Pilihan: brave, chrome,",
@@ -237,8 +249,9 @@ _DISKLAIMER = (
     "  • mengakses internet (web & API model).\n"
     "\n"
     "Percakapan dan konteks dikirim ke layanan model pilihanmu (situs web-AI\n"
-    "atau API NVIDIA/OpenRouter). API key yang ditempel di wizard ini disimpan\n"
-    "LOKAL di ~/.bagasai/.env dan hanya dikirim ke penyedianya saat autentikasi.\n"
+    "atau API NVIDIA/OpenRouter/OpenCode Zen). API key yang ditempel di wizard\n"
+    "ini disimpan LOKAL di ~/.bagasai/.env dan hanya dikirim ke penyedianya\n"
+    "saat autentikasi.\n"
     "\n"
     "[bold]Seluruh risiko pemakaian menjadi tanggungan pengguna.[/bold] Periksa\n"
     "setiap perintah/berkas yang kamu setujui — bagas-ai bisa keliru."
@@ -256,6 +269,9 @@ _KREDENSIAL = {
         "prompt": "Tempel OPENROUTER_API_KEY:",
         "info": "Buat key: https://openrouter.ai/keys (awalan sk-or-...)",
     },
+    # Tak ada entri OPENCODE_API_KEY: model opencode/* gratis dan jalan TANPA
+    # key, jadi menanyakannya di wizard hanya membebani pengguna baru. Key
+    # tetap dihormati bila diisi manual di .env / lewat `opencode auth login`.
     "TELEGRAM_BOT_TOKEN": {
         "validator": validate_telegram,
         "prompt": "Tempel token bot Telegram:",
@@ -352,7 +368,7 @@ def run(console: Console | None = None) -> bool:
     console.print(Panel(
         _DISKLAIMER, title="disclaimer", border_style="yellow", padding=(0, 2),
     ))
-    if not _tanya_ya_tidak("Saya sudah membaca & MENYETUJUI ketentuan di atas"):
+    if not _tanya_ya_tidak("Saya sudah membaca & MENYETUJUI ketentuan di atas", bawaan=True):
         console.print(
             "  [yellow]Dibatalkan — tak ada yang diubah.[/yellow]\n"
             "  [dim]Jalankan lagi 'bagas-ai login' bila berubah pikiran.[/dim]"

@@ -1,9 +1,11 @@
-"""Klien endpoint API OpenAI-compatible (NVIDIA & OpenRouter) + retry
-tahan-banting.
+"""Klien endpoint API OpenAI-compatible (NVIDIA, OpenRouter & OpenCode Zen)
++ retry tahan-banting.
 
 Modul ini melayani jalur model bagas-ai yang berbasis API: model `nvidia/*`
-(integrate.api.nvidia.com) dan `openrouter/*` (openrouter.ai/api/v1, kunci
-OPENROUTER_API_KEY). Jalur lainnya (model `web/*`) tak menyentuh berkas ini
+(integrate.api.nvidia.com), `openrouter/*` (openrouter.ai/api/v1, kunci
+OPENROUTER_API_KEY), dan `opencode/*` (opencode.ai/zen/v1 — model gratisnya
+jalan TANPA key, akses anonim per-IP; OPENCODE_API_KEY opsional). Jalur
+lainnya (model `web/*`) tak menyentuh berkas ini
 sama sekali — ia lewat agent/connectors + Agent._run_connector, dan padanan
 penanganan "sementara" di sana berbentuk lain sesuai medianya (WebBusyError
 untuk server penuh, WebLimitError untuk kuota situs habis).
@@ -325,13 +327,32 @@ _OPENROUTER_HEADERS = {
 }
 
 
+def _headers_tanpa_auth(provider: str) -> dict[str, Any]:
+    """Header per-request yang membuang Authorization untuk Zen TANPA key.
+
+    Model opencode/* gratis jalan secara anonim (kuota per-IP), tapi klien
+    dibuat dengan api_key dummy (lihat get_client). Omit() adalah cara resmi
+    SDK openai untuk "jangan kirim header ini" — tanpanya SDK justru
+    melempar TypeError "Could not resolve authentication method" saat
+    Authorization-nya kosong. Kosong bila provider bukan opencode atau key
+    tersedia (key asli tetap dikirim sebagai Bearer).
+    """
+    if provider == "opencode" and not config.OPENCODE_API_KEY:
+        from openai._base_client import Omit  # noqa: PLC0415 — impor tunda, selaras _oa()
+        return {"Authorization": Omit()}
+    return {}
+
+
 def get_client(provider: str = ""):
     """Klien OpenAI diarahkan ke endpoint penyedia (dibuat sekali per penyedia).
 
     provider="" atau "nvidia" -> integrate.api.nvidia.com (NVIDIA_API_KEY);
-    provider="openrouter"     -> openrouter.ai/api/v1 (OPENROUTER_API_KEY).
+    provider="openrouter"     -> openrouter.ai/api/v1 (OPENROUTER_API_KEY);
+    provider="opencode"       -> opencode.ai/zen/v1 (TANPA key pun jalan —
+                                 model gratisnya anonim; OPENCODE_API_KEY
+                                 hanya opsional).
     """
-    p = provider if provider in ("nvidia", "openrouter") else "nvidia"
+    p = provider if provider in ("nvidia", "openrouter", "opencode") else "nvidia"
     client = _clients.get(p)
     if client is None:
         if p == "openrouter":
@@ -342,6 +363,22 @@ def get_client(provider: str = ""):
                 timeout=config.REQUEST_TIMEOUT,
                 max_retries=0,  # retry ditangani _call_with_retry di atas
                 default_headers=_OPENROUTER_HEADERS,
+            )
+        elif p == "opencode":
+            # OpenCode Zen: gateway OpenAI-compatible. Tanpa header atribusi
+            # ( itu kebutuhan khusus OpenRouter) — Zen tak memintanya.
+            #
+            # TANPA require_api_key: model gratisnya jalan secara ANONIM
+            # (TERUKUR 2026-08-29: request tanpa Authorization dibalas 200).
+            # SDK openai memang mewajibkan api_key non-kosong saat klien
+            # dibuat, makanya dipakai dummy lalu header Authorization-nya
+            # dibuang per-request lewat _headers_tanpa_auth() — dummy key tak
+            # bisa sekadar dikirim: key PALSU terukur dibalas 401 AuthError.
+            client = _oa().OpenAI(
+                base_url=config.OPENCODE_BASE_URL,
+                api_key=config.OPENCODE_API_KEY or "tanpa-key",
+                timeout=config.REQUEST_TIMEOUT,
+                max_retries=0,
             )
         else:
             config.require_api_key("nvidia")
@@ -445,6 +482,7 @@ def stream_completion(
     extra_body: dict[str, Any] | None = None,
     max_tokens: int | None = None,
     provider: str = "",
+    api_style: str = "chat",
     on_content: Any = None,
     on_reasoning: Any = None,
     cancel_event: Any = None,
@@ -458,11 +496,24 @@ def stream_completion(
     throttle di awal/tengah, seluruh panggilan diulang otomatis dengan backoff
     lewat `_call_with_retry`, dan `on_retry` mengabari UI.
 
+    `api_style="chat"` (bawaan) -> /chat/completions; `api_style="responses"`
+    -> /responses (Responses API — dipakai model OpenCode Zen yang hanya
+    dilayani di sana, mis. muse-spark-1.2-contributor-free).
+
     Mengembalikan (teks_final, daftar_tool_calls, usage).
     """
+    if api_style == "responses":
+        return _stream_responses(
+            messages, tools=tools, model=model, temperature=temperature,
+            extra_body=extra_body, max_tokens=max_tokens, provider=provider,
+            on_content=on_content, on_reasoning=on_reasoning,
+            cancel_event=cancel_event, on_retry=on_retry)
     client = get_client(provider)
     kwargs = _base_kwargs(messages, tools, model, temperature, extra_body,
                           True, max_tokens)
+    _noauth = _headers_tanpa_auth(provider)
+    if _noauth:
+        kwargs["extra_headers"] = _noauth
     try:
         import httpx  # dependensi openai — pasti ada sesudah get_client()
         kwargs["timeout"] = httpx.Timeout(
@@ -604,6 +655,274 @@ def stream_completion(
                 raise EmptyResponseError(
                     "Stream kosong (kemungkinan rate limit 40 RPM)."
                 )
+        return content, tool_calls, usage
+
+    return _call_with_retry(
+        _do, cancel_event=cancel_event, on_retry=on_retry,
+        stall_escape=max(1, config.MAX_STALLS_PER_CALL),
+    )
+
+
+# --- gaya Responses API (OpenCode Zen /responses) -----------------------------
+#
+# Sebagian model OpenCode Zen (mis. muse-spark-1.2-contributor-free) HANYA
+# dilayani di endpoint /responses — TERUKUR 2026-08-29: /chat/completions
+# membalas "Internal server error" untuk model itu, sedangkan /responses
+# menjawab normal. Protokolnya beda keluarga (OpenAI Responses API, bukan
+# Chat Completions), tapi gateway Zen MENERIMA peran chat ("system"/"user"/
+# "assistant") di `input` — TERUKUR — jadi pesan tinggal dialihkan bentuknya:
+#   - pesan polos      -> {"role": ..., "content": ...}
+#   - tool_calls asis. -> satu item {"type":"function_call", call_id/name/args}
+#   - hasil tool       -> {"type":"function_call_output", call_id, output}
+# Definisi tool juga diratakan: {type, function:{name,...}} gaya chat DITOLAK
+# ("missing required field `name`" — TERUKUR), bentuk resminya {type, name,
+# description, parameters}.
+
+def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pesan gaya chat -> daftar item input Responses API."""
+    items: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        # Lampiran multimodal (image_url/video_url) tak didukung jalur ini:
+        # di Zen hanya model /chat/completions yang menerima media. Di sini
+        # medianya dilepas diam-diam — teksnya tetap dikirim.
+        konten = msg.get("content")
+        if isinstance(konten, list):
+            teks = []
+            for bag in konten:
+                if isinstance(bag, dict) and bag.get("type") == "text":
+                    teks.append(bag.get("text") or "")
+            konten = "\n".join(teks)
+        if role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": str(msg.get("tool_call_id") or ""),
+                "output": str(konten or ""),
+            })
+            continue
+        if role == "assistant" and msg.get("tool_calls"):
+            # Satu pesan assistant bisa memuat BEBERAPA panggilan: di Responses
+            # tiap panggilan adalah item sendiri. `call_id` (bukan `id`) adalah
+            # kunci yang dikirim balik oleh function_call_output.
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function") or {}
+                items.append({
+                    "type": "function_call",
+                    "call_id": str(tc.get("id") or ""),
+                    "name": str(fn.get("name") or ""),
+                    "arguments": str(fn.get("arguments") or ""),
+                })
+            if konten:
+                items.append({"role": "assistant", "content": str(konten)})
+            continue
+        items.append({"role": str(role or "user"), "content": str(konten or "")})
+    return items
+
+
+def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Definisi tool gaya chat -> bentuk datar Responses API."""
+    out: list[dict[str, Any]] = []
+    for t in tools or []:
+        fn = t.get("function") if isinstance(t, dict) else None
+        if not isinstance(fn, dict) or not fn.get("name"):
+            continue  # tool non-function tak ada padanannya di jalur ini
+        out.append({
+            "type": "function",
+            "name": fn.get("name"),
+            "description": fn.get("description") or "",
+            "parameters": fn.get("parameters")
+                          or {"type": "object", "properties": {}},
+        })
+    return out
+
+
+class _UsageResponses:
+    """Jembatan usage Responses -> atribut gaya chat yang dibaca TokenUsage.
+
+    Nama medan utamanya memang beda (input/output vs prompt/completion), tapi
+    detailnya kebetulan sama nama (cached_tokens, reasoning_tokens) — cukup
+    dua alias + usaha kecil untuk `cost` (Zen melaporkannya sebagai STRING).
+    """
+
+    def __init__(self, u: Any) -> None:
+        self.prompt_tokens = getattr(u, "input_tokens", 0) or 0
+        self.completion_tokens = getattr(u, "output_tokens", 0) or 0
+        try:
+            self.cost = float(getattr(u, "cost", 0) or 0)
+        except (TypeError, ValueError):
+            self.cost = 0.0
+        self.prompt_tokens_details = getattr(u, "input_tokens_details", None)
+        self.completion_tokens_details = getattr(u, "output_tokens_details", None)
+
+
+def _stream_responses(
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    extra_body: dict[str, Any] | None = None,
+    max_tokens: int | None = None,
+    provider: str = "",
+    on_content: Any = None,
+    on_reasoning: Any = None,
+    cancel_event: Any = None,
+    on_retry: Callable[[int, float, Exception], None] | None = None,
+) -> tuple[str, list[dict[str, Any]], Any]:
+    """Streaming via /responses — protokol Responses API (lihat catatan blok).
+
+    Sama semangatnya dengan stream_completion: token realtime lewat
+    on_content/on_reasoning, panggilan tool diakumulasi per-index, watchdog
+    menjaga stream yang macet, dan hasil akhirnya (teks + tool_calls + usage)
+    sama bentuknya dengan jalur chat supaya core tak perlu tahu bedanya."""
+    client = get_client(provider)
+    kwargs: dict[str, Any] = {
+        "model": model or config.NVIDIA_DEFAULT_MODEL,
+        "input": _responses_input(messages),
+        "stream": True,
+        "temperature": (
+            temperature if temperature is not None else config.TEMPERATURE
+        ),
+        "top_p": config.TOP_P,
+    }
+    if max_tokens:
+        # Responses menyebutnya max_output_tokens, bukan max_tokens.
+        kwargs["max_output_tokens"] = max_tokens
+    rt = _responses_tools(tools)
+    if rt:
+        kwargs["tools"] = rt
+        kwargs["tool_choice"] = "auto"
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    _noauth = _headers_tanpa_auth(provider)
+    if _noauth:
+        kwargs["extra_headers"] = _noauth
+    try:
+        import httpx  # dependensi openai — pasti ada sesudah get_client()
+        kwargs["timeout"] = httpx.Timeout(
+            connect=15.0, read=config.TTFT_TIMEOUT, write=60.0, pool=15.0
+        )
+    except Exception:  # noqa: BLE001 — tanpa httpx pun tetap jalan
+        pass
+
+    def _do() -> tuple[str, list[dict[str, Any]], Any]:
+        try:
+            stream = client.responses.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if _apakah_konteks_penuh(exc):
+                raise KonteksPenuh(str(exc)) from exc
+            raise
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        # Kunci = output_index item function_call: satu respons bisa memuat
+        # beberapa panggilan, dan argumennya mengalir per-potongan.
+        tool_slots: dict[int, dict[str, str]] = {}
+        usage = None
+        finish_reason = None
+        state: dict[str, Any] = {
+            "ts": time.monotonic(), "mulai": False, "macet": False,
+            "selesai": False,
+        }
+        watchdog = _pasang_watchdog(stream, state)
+        try:
+            try:
+                for ev in stream:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise Cancelled()
+                    state["ts"] = time.monotonic()
+                    tipe = getattr(ev, "type", "")
+                    if tipe == "response.output_text.delta":
+                        piece = getattr(ev, "delta", None)
+                        if piece:
+                            state["mulai"] = True
+                            content_parts.append(piece)
+                            if on_content:
+                                on_content(piece)
+                    elif tipe in ("response.reasoning_text.delta",
+                                  "response.reasoning_summary_text.delta"):
+                        piece = getattr(ev, "delta", None)
+                        if piece:
+                            state["mulai"] = True
+                            reasoning_parts.append(piece)
+                            if on_reasoning:
+                                on_reasoning(piece)
+                            elif on_content:
+                                on_content(piece)
+                    elif tipe == "response.output_item.added":
+                        item = getattr(ev, "item", None)
+                        if getattr(item, "type", "") == "function_call":
+                            state["mulai"] = True
+                            tool_slots[getattr(ev, "output_index",
+                                               len(tool_slots))] = {
+                                "id": str(getattr(item, "call_id", "") or ""),
+                                "name": str(getattr(item, "name", "") or ""),
+                                "arguments": "",
+                            }
+                    elif tipe == "response.function_call_arguments.delta":
+                        idx = getattr(ev, "output_index", None)
+                        slot = tool_slots.get(idx)
+                        piece = getattr(ev, "delta", None)
+                        if slot is not None and piece:
+                            slot["arguments"] += piece
+                    elif tipe in ("response.completed",
+                                  "response.incomplete"):
+                        resp = getattr(ev, "response", None)
+                        if getattr(resp, "usage", None):
+                            usage = _UsageResponses(resp.usage)
+                        finish_reason = getattr(resp, "status", "completed")
+                    elif tipe == "response.failed":
+                        resp = getattr(ev, "response", None)
+                        err = getattr(resp, "error", None)
+                        raise Exception(
+                            getattr(err, "message", None)
+                            or f"respons gagal: {getattr(resp, 'status', '?')}")
+                    elif tipe == "error":
+                        raise Exception(str(getattr(ev, "message", "")
+                                            or getattr(ev, "code", "error")))
+            except Cancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if state["macet"]:
+                    raise _StallTimeout(
+                        f"stream diam >{config.STREAM_STALL_TIMEOUT:.0f} dtk "
+                        "sesudah token pertama"
+                    ) from exc
+                if _apakah_konteks_penuh(exc):
+                    raise KonteksPenuh(str(exc)) from exc
+                raise
+        finally:
+            state["selesai"] = True
+            if watchdog is not None:
+                watchdog.join(timeout=1.0)
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
+        tool_calls = [tool_slots[i] for i in sorted(tool_slots)]
+        # Penyelamatan yang sama dengan jalur chat: model menuliskan panggilan
+        # tool sebagai teks/XML alih-alih function-calling asli.
+        if not tool_calls and content and _HAS_TOOLTEXT.search(content):
+            parsed = _extract_text_tool_calls(content)
+            if parsed:
+                tool_calls = parsed
+            cleaned = _re.sub(r"<tool_call>.*?</tool_call>", "", content,
+                              flags=_re.DOTALL | _re.IGNORECASE)
+            cleaned = _re.sub(r"<function\s*=.*?</function>", "", cleaned,
+                              flags=_re.DOTALL | _re.IGNORECASE)
+            cleaned = _re.sub(r"<tool_call>.*$", "", cleaned,
+                              flags=_re.DOTALL | _re.IGNORECASE)
+            cleaned = _re.sub(r"<function\s*=.*$", "", cleaned,
+                              flags=_re.DOTALL | _re.IGNORECASE)
+            content = cleaned.strip()
+        if not content and reasoning and not tool_calls:
+            content = reasoning.strip()
+        if not content and not tool_calls:
+            if finish_reason is None:
+                raise EmptyResponseError(
+                    "Stream /responses kosong (kemungkinan rate limit).")
         return content, tool_calls, usage
 
     return _call_with_retry(

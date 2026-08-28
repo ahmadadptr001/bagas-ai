@@ -127,18 +127,19 @@ class QwenConnector(WebConnector):
         '[class*="mode-select-dropdown-item"]:visible',
     )
 
-    # --- /effort: model (bar atas), berpikir (komposer), mode (menu alat) ---
+    # --- /model: varian model (bar atas) | /effort: berpikir (komposer) ---
     web_model_button = _BTN_MODEL
-    # Urutan menentukan tampilan di /effort. Sakelar BERPIKIR ditaruh paling
-    # atas karena itulah arti /effort yang sebenarnya; varian model dan mode
-    # alat menyusul.
-    web_actions = (
+    # Sakelar BERPIKIR milik /effort sejati; varian model (nama sungguhan
+    # situsnya) kini ditawarkan /model lewat web_models.
+    web_efforts = (
         ("Berpikir: Auto", ("Auto",),
          "situs yang memutuskan perlu berpikir atau tidak", _BTN_THINK),
         ("Berpikir: Thinking", ("Thinking",),
          "paksa mode berpikir — jawaban lebih dalam, lebih lambat", _BTN_THINK),
         ("Berpikir: Fast", ("Fast",),
          "tanpa berpikir — balasan paling cepat", _BTN_THINK),
+    )
+    web_models = (
         ("Qwen3.8-Max", ("Qwen3.8-Max",),
          "model flagship terbaru (bar atas)", _BTN_MODEL),
         ("Qwen3.7-Plus", ("Qwen3.7-Plus",),

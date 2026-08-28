@@ -274,9 +274,10 @@ class ChatGPTConnector(WebConnector):
         return False
 
     # --- mode ---
-    # ChatGPT punya mode model (GPT-4o, o1, o3, dll) dan mode reasoning.
-    # Selector tombol pembuka menu model — spesifik ke model selector,
-    # bukan tombol generik yang bisa salah sasaran.
+    # Selector tombol pembuka menu model — dulu dipakai pemilih varian
+    # (GPT-4o/o1/o3); kini varian dihilangkan (lihat web_models di bawah),
+    # tapi selector ini dibiarkan: situs bisa memunculkannya kembali untuk
+    # akun berbayar, dan web_model_button tak dipakai bila web_models kosong.
     menu_item_selector = (
         '[data-testid="model-switcher-dropdown"] [role="option"]',
         '[data-testid="model-switcher-dropdown"] button',
@@ -292,19 +293,13 @@ class ChatGPTConnector(WebConnector):
         'button:has-text("GPT-4o")',
     )
 
-    # Aksi /effort: ganti model & mode reasoning dari terminal.
-    # ChatGPT punya model selector dropdown dan sakelar reasoning.
-    web_actions = (
-        ("GPT-4o", ("GPT-4o",), "model serbaguna (bawaan)"),
-        ("GPT-4o mini", ("GPT-4o mini",), "cepat & ringan"),
-        ("o1", ("o1",), "reasoning mendalam"),
-        ("o3", ("o3",), "reasoning tingkat lanjut"),
-        ("o3-mini", ("o3-mini",), "reasoning cepat"),
-        ("o4-mini", ("o4-mini",), "reasoning ringan & cepat"),
-    )
-    # /mode memakai jalur yang sama (model selector) — tanpa ini menu /mode
-    # tampil KOSONG karena web_mode_options() hanya membaca web_modes.
-    web_modes = web_actions
+    # Varian model — KOSONG: chatgpt.com (diukur ulang 2026-08-29) tak lagi
+    # menyediakan pemilih varian model (GPT-4o/o1/o3/…) di bilah atas untuk
+    # akun gratis; daftar lama jadi tombol yang mustahil diklik. Tanpa
+    # web_models, /model menampilkan "chatgpt-web" satu baris saja.
+    web_models = ()
+    # /mode juga kosong — dulu web_modes sekadar alias web_models.
+    web_modes = ()
 
     min_layout_width = 1280
     min_layout_height = 800

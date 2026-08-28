@@ -6,12 +6,14 @@ bagas-ai punya DUA jalur model yang cara kerjanya berbeda mendasar:
      Playwright memakai akun pengguna sendiri. Konteks dipegang SITUSNYA,
      tool dipanggil lewat protokol teks [[TOOL]], dan /effort berarti
      MENGKLIK tombol mode berpikir di halamannya.
-  2. API (`nvidia/...`, `openrouter/...`) — endpoint OpenAI-compatible.
-     Konteks dipegang KITA (dikirim ulang tiap request), tool memakai
-     function-calling ASLI, dan /effort berarti mengirim parameter
-     `extra_body`. Penyedianya dibedakan lewat ModelSpec.provider:
+  2. API (`nvidia/...`, `openrouter/...`, `opencode/...`) — endpoint
+     OpenAI-compatible. Konteks dipegang KITA (dikirim ulang tiap request),
+     tool memakai function-calling ASLI, dan /effort berarti mengirim
+     parameter `extra_body`. Penyedianya dibedakan lewat ModelSpec.provider:
        - "nvidia"      : integrate.api.nvidia.com (NVIDIA_API_KEY)
        - "openrouter"  : openrouter.ai/api/v1     (OPENROUTER_API_KEY)
+       - "opencode"    : opencode.ai/zen/v1       (TANPA key — gratis anonim;
+                          OPENCODE_API_KEY hanya opsional)
 
 Karena itu `ModelSpec.is_web` adalah satu-satunya titik percabangan; lihat
 core.Agent.run().
@@ -75,10 +77,15 @@ class ModelSpec:
     ditunda: bool = False
 
     # --- khusus jalur API (kosong/nol untuk model web) ----------------------
-    # Penyedia endpoint: "nvidia" (integrate.api.nvidia.com) atau
-    # "openrouter" (openrouter.ai/api/v1). Menentukan klien, API key, dan
-    # pesan galat mana yang dipakai.
+    # Penyedia endpoint: "nvidia" (integrate.api.nvidia.com), "openrouter"
+    # (openrouter.ai/api/v1), atau "opencode" (opencode.ai/zen/v1 — gateway
+    # OpenCode Zen). Menentukan klien, API key, dan pesan galat mana yang
+    # dipakai.
     provider: str = "nvidia"
+    # Gaya protokol endpoint: "chat" (/chat/completions — bawaan) atau
+    # "responses" (/responses, protokol OpenAI Responses API). Sebagian model
+    # Zen HANYA dilayani di /responses (TERUKUR: muse-spark-contributor-free).
+    api_style: str = "chat"
     # ID model APA ADANYA di endpoint penyedia. Dipisah dari `id` karena `id`
     # adalah identitas internal bagas-ai (tersimpan di prefs) sedangkan ini
     # yang dikirim ke server; menyatukan keduanya membuat ID tersimpan tak bisa
@@ -112,7 +119,8 @@ class ModelSpec:
 
     @property
     def is_api(self) -> bool:
-        """True bila model ini lewat endpoint API (butuh API key penyedia)."""
+        """True bila model ini lewat endpoint API (kebanyakan butuh API key
+        penyedia; kecuali opencode/* yang gratis & anonim)."""
         return not self.connector
 
     @property
@@ -175,11 +183,87 @@ _DITUNDA = {"dola-web"}
 
 # Alias pendek -> spesifikasi. Urutan menentukan nomor pada /model.
 MODELS: dict[str, ModelSpec] = {
+    # --- jalur OpenCode Zen (opencode.ai/zen/v1) — PALING ATAS ---------------
+    # Semua entri di bawah GRATIS dan jalan TANPA API key (akses anonim
+    # per-IP, TERUKUR 2026-08-29 — key dari opencode.ai/auth hanya opsional).
+    # Kebijakan reasoning tiap model BELUM diukur — jadi tak ada upaya saklar
+    # yang dijanjikan duluan; api_style "responses" hanya untuk model yang
+    # memang TERUKUR hanya dilayani di endpoint /responses.
+    "big-pickle": ModelSpec(
+        id="opencode/big-pickle",
+        label="Big Pickle (API)",
+        provider="opencode",
+        api_model="big-pickle",
+        multimodal=False,
+        note=("Via OpenCode Zen — GRATIS tanpa API key; model pilihan tim "
+              "opencode untuk agent koding"),
+        max_tokens=16384,
+    ),
+    "hy3-free": ModelSpec(
+        id="opencode/hy3-free",
+        label="Hy3 Free (API)",
+        provider="opencode",
+        api_model="hy3-free",
+        multimodal=False,
+        note="Via OpenCode Zen — GRATIS tanpa API key",
+        max_tokens=16384,
+    ),
+    "ling-3.0-flash-fin-free": ModelSpec(
+        id="opencode/ling-3.0-flash-fin-free",
+        label="Ling 3.0 Flash Fin Free (API)",
+        provider="opencode",
+        api_model="ling-3.0-flash-fin-free",
+        multimodal=False,
+        note="Via OpenCode Zen — GRATIS tanpa API key",
+        max_tokens=16384,
+    ),
+    "mimo-v2.5-free": ModelSpec(
+        id="opencode/mimo-v2.5-free",
+        label="MiMo-V2.5 Free (API)",
+        provider="opencode",
+        api_model="mimo-v2.5-free",
+        multimodal=False,
+        note="Via OpenCode Zen — GRATIS tanpa API key",
+        max_tokens=16384,
+    ),
+    "muse-spark-1.2-contributor-free": ModelSpec(
+        id="opencode/muse-spark-1.2-contributor-free",
+        label="Muse Spark 1.2 Contributor Free (API)",
+        provider="opencode",
+        api_model="muse-spark-1.2-contributor-free",
+        multimodal=False,
+        api_style="responses",  # TERUKUR: /chat/completions membalas error 500
+        note="Via OpenCode Zen — GRATIS tanpa API key (hanya endpoint /responses)",
+        max_tokens=16384,
+    ),
+    "nemotron-3-ultra-free": ModelSpec(
+        id="opencode/nemotron-3-ultra-free",
+        label="Nemotron 3 Ultra Free (API)",
+        provider="opencode",
+        api_model="nemotron-3-ultra-free",
+        multimodal=False,
+        note="Via OpenCode Zen — GRATIS tanpa API key",
+        max_tokens=16384,
+    ),
+    "nemotron-3.5-lightning-free": ModelSpec(
+        id="opencode/nemotron-3.5-lightning-free",
+        label="Nemotron 3.5 Lightning Free (API)",
+        provider="opencode",
+        api_model="nemotron-3.5-lightning-free",
+        multimodal=False,
+        # Saat pengukuran awal (2026-08-29) upstream Zen untuk model ini masih
+        # membalas 404 "Provider returned error" di /chat/completions — pasang
+        # masuk tapi beri catatan jujur; penyedianya sendiri yang bermasalah.
+        note=("Via OpenCode Zen — GRATIS tanpa API key (upstream-nya kadang "
+              "404; bila gagal, pilih varian lain)"),
+        max_tokens=16384,
+    ),
+
     "chatgpt-web": ModelSpec(
         id="web/chatgpt",
         label="ChatGPT (web)",
         connector="chatgpt",
-        note="Via browser chatgpt.com — GPT-4o/4.1, kuat di coding & reasoning",
+        note="Via browser chatgpt.com — tanpa varian model, kuat di coding & reasoning",
     ),
     "kimi-web": ModelSpec(
         id="web/kimi",
@@ -330,6 +414,9 @@ def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
                 "https://openrouter.ai/keys — atau pilih model (web) mana "
                 "pun, yang tak butuh key sama sekali."
             )
+        # Catatan: model opencode/* TAK PERLU melewati pemeriksaan ini —
+        # model gratisnya jalan anonim tanpa key (config.has_api_key selalu
+        # True untuk "opencode"), jadi tak ada cabang penolakannya di sini.
         raise ValueError(
             f"Model {spec.label} lewat API NVIDIA dan butuh {env_name}, "
             f"yang belum diisi. Isi di {config.ENV_FILE} "
@@ -414,6 +501,78 @@ def is_known_id(model_id: str) -> bool:
     memakai ini untuk MENYIMPAN ULANG preferensi ke model hasil pemetaan —
     tanpa itu, peringatan yang sama muncul tiap kali bagas-ai dijalankan."""
     return any(spec.id == model_id and spec.aktif for spec in MODELS.values())
+
+
+# --- varian model SITUS (rombak /model & /effort) ---------------------------
+# Nama umum ("ChatGPT", "Qwen", "GLM") sudah tak layak jadi pilihan /model:
+# yang pengguna pilih sebenarnya adalah VARIAN di dalam situsnya —
+# "GLM-5.2", "K3", "Qwen3.8-Max". Daftar itu hidup di tiap connector
+# (WebConnector.web_models) karena hanya di sana nama & selektornya terukur.
+# Fungsi-fungsi di bawah menjembatani models <-> connectors tanpa membuat
+# siklus impor (connectors mengimpor config; models tidak boleh mengimpor
+# connectors di level modul).
+
+def _varian_layanan() -> dict[str, list[tuple[str, str]]]:
+    """alias layanan web -> daftar (label_varian, deskripsi) dari connectornya.
+
+    Gagal total (Playwright tak ada / impor error) -> kosong: /model tetap
+    menampilkan layanan, hanya tanpa pemulia varian."""
+    hasil: dict[str, list[tuple[str, str]]] = {}
+    try:
+        from . import connectors  # impor tunda: connectors butuh Playwright?
+        for key, spec in MODELS.items():
+            if not (spec.is_web and spec.connector):
+                continue
+            try:
+                conn = connectors.get_connector(spec.connector)
+            except Exception:  # noqa: BLE001 — connector tak terdaftar
+                continue
+            ops = conn.web_model_options()
+            if ops:
+                hasil[key] = ops
+    except Exception:  # noqa: BLE001 — Playwright tak terpasang, dsb.
+        pass
+    return hasil
+
+
+def pilihan_model() -> list[str]:
+    """Daftar pilihan untuk menu /model: nama MODEL SUNGGUHAN.
+
+    Tiap layanan web memuai jadi tiap variannya ("glm GLM-5.2", "glm
+    GLM-5-Turbo", …) memakai bentuk "<alias> <varian>" — itulah yang
+    diterima Agent.set_model. Bila connectornya tak bisa diimpor, layanan
+    itu tetap tampil satu baris (nama layanannya) supaya /model tak kosong.
+    Model API tampil apa adanya."""
+    out: list[str] = []
+    varian = _varian_layanan()
+    for key, spec in MODELS.items():
+        if spec.is_web:
+            ops = varian.get(key)
+            if ops:
+                out.extend(f"{key} {label}" for label, _desc in ops)
+            else:
+                out.append(key)
+        else:
+            out.append(key)
+    return out
+
+
+def resolve_varian(name: str) -> tuple[str, str] | None:
+    """Nama varian polos ("GLM-5.2", "k2.6") -> (alias_layanan, label_varian).
+
+    None bila bukan nama varian yang dikenal (pemanggil jatuh ke resolve()
+    biasa). Pencocokan case-insensitive terhadap label varian para layanan
+    web; ambigu (nama sama di dua layanan) -> layanan PERTAMA di urutan
+    katalog menang, karena itulah urutan yang dilihat pengguna di /model."""
+    key = name.strip()
+    if not key:
+        return None
+    lower = key.lower()
+    for alias, ops in _varian_layanan().items():
+        for label, _desc in ops:
+            if label.lower() == lower:
+                return alias, label
+    return None
 
 
 # random_fallback() DIHAPUS: pemakainya dulu _escalate (naik-kelas otomatis) dan

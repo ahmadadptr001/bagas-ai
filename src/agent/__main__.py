@@ -44,6 +44,7 @@ Penggunaan:
   bagas-ai              Buka sesi chat BARU di folder saat ini
   bagas-ai --resume     Lanjutkan percakapan terakhir di folder ini
   bagas-ai --resume ID  Lanjutkan sesi ber-ID itu (ID dicetak saat kamu keluar)
+  bagas-ai --legacy     Pakai CLI lama (prompt_toolkit + Rich Live)
   bagas-ai login        Wizard: hubungkan bot Telegram (opsional)
   bagas-ai add-dir <p>  Tambah folder konteks agar bagas-ai memahaminya
   bagas-ai update       Cek & terapkan pembaruan dari GitHub
@@ -318,6 +319,7 @@ def _preload_with_bar() -> None:
         ("logo", "pyfiglet"),
         ("pencarian web", "ddgs"),
         ("inti agent", f"{pkg}.core"),
+        ("textual ui", f"{pkg}.interfaces.textual_app"),
         ("antarmuka", f"{pkg}.interfaces.cli"),
     ]
     total = len(steps)
@@ -396,8 +398,34 @@ def main() -> None:
 
     if mode in ("chat", "cli"):
         _preload_with_bar()  # bar loading BERTAHAP selama impor pustaka (~1 dtk)
-        from .interfaces.cli import main as run
-        run(resume=resume, resume_id=resume_id)
+        # --legacy memaksa CLI lama (prompt_toolkit + Rich Live)
+        if "--legacy" in flags:
+            from .interfaces.cli import main as run
+            run(resume=resume, resume_id=resume_id)
+            return
+        # Default: Textual UI baru; fallback ke CLI lama bila textual tak ada
+        try:
+            from .interfaces.textual_app import BagasAIApp
+            from .core import Agent
+            from . import session as session_mod
+            from .session import Session
+
+            if resume and resume_id:
+                ses = session_mod.find(resume_id)
+            elif resume:
+                ses = session_mod.latest()
+            else:
+                ses = Session.create()
+            if ses is None:
+                ses = Session.create()
+
+            agent = Agent(session=ses)
+            app = BagasAIApp(agent=agent, resume=resume,
+                             resume_id=resume_id)
+            app.run()
+        except ImportError:
+            from .interfaces.cli import main as run
+            run(resume=resume, resume_id=resume_id)
         return
     if mode == "telegram":
         from . import osinfo

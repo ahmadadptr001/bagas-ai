@@ -185,12 +185,28 @@ class GlmConnector(WebConnector):
     min_layout_width = 1280
     min_layout_height = 800
 
-    # --- /effort: tingkat berpikir (chip komposer) + varian model (bar atas) ---
+    # --- /model: varian model (bar atas) | /effort: tingkat berpikir (chip) ---
     # TERCACAH dari menu yang dibuka sungguhan. Panel chip berisi dua tingkat
     # (High/Max, ditandai data-selected) plus sakelar "Deep Think" yang
-    # menyalakan/mematikan penalarannya.
+    # menyalakan/mematikan penalarannya. Pemisahan web_models/web_efforts
+    # mengikuti pertanyaan yang dijawabnya: "model mana?" vs "berapa dalam
+    # berpikirnya?"
     web_model_button = _BTN_MODEL
-    web_actions = (
+    web_models = (
+        # GLM-5.3-Flash (2026-08-29): varian tercepat generasi 5.3 — kini sudah
+        # tampil di pemilih model chat.z.ai.
+        ("GLM-5.3-Flash", ("GLM-5.3-Flash",),
+         "generasi terbaru, paling cepat", _BTN_MODEL),
+        ("GLM-5.2", ("GLM-5.2",),
+         "flagship: paling kuat untuk koding & tugas panjang", _BTN_MODEL),
+        ("GLM-5-Turbo", ("GLM-5-Turbo",),
+         "cepat untuk obrolan, koding, dan tugas agentic", _BTN_MODEL),
+        ("GLM-5.1", ("GLM-5.1",), "flagship generasi sebelumnya", _BTN_MODEL),
+        ("GLM-5V-Turbo", ("GLM-5V-Turbo",),
+         "model VISI — pilih ini bila banyak melampirkan gambar", _BTN_MODEL),
+        ("GLM-4.7", ("GLM-4.7",), "model klasik, ringan", _BTN_MODEL),
+    )
+    web_efforts = (
         ("Berpikir: Max", ("Max",),
          "penalaran paling dalam (bawaan situs)", _BTN_EFFORT),
         ("Berpikir: High", ("High",),
@@ -202,14 +218,6 @@ class GlmConnector(WebConnector):
          "nyalakan penalaran (jawaban lebih dalam, lebih lambat)", _BTN_EFFORT),
         ("Deep Think: mati", ("Deep Think", "off"),
          "matikan penalaran — balasan paling cepat", _BTN_EFFORT),
-        ("GLM-5.2", ("GLM-5.2",),
-         "flagship: paling kuat untuk koding & tugas panjang", _BTN_MODEL),
-        ("GLM-5-Turbo", ("GLM-5-Turbo",),
-         "cepat untuk obrolan, koding, dan tugas agentic", _BTN_MODEL),
-        ("GLM-5.1", ("GLM-5.1",), "flagship generasi sebelumnya", _BTN_MODEL),
-        ("GLM-5V-Turbo", ("GLM-5V-Turbo",),
-         "model VISI — pilih ini bila banyak melampirkan gambar", _BTN_MODEL),
-        ("GLM-4.7", ("GLM-4.7",), "model klasik, ringan", _BTN_MODEL),
     )
 
     # --- /mode: pencarian web ---

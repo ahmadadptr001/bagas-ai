@@ -62,10 +62,12 @@ def _get_bool(name: str, default: bool) -> bool:
 
 
 # --- Model ---
-# bagas-ai mendukung TIGA jalur model:
+# bagas-ai mendukung EMPAT jalur model:
 #  1. Browser-based (web/...) — login sekali lewat Chrome, kredensial milik sendiri
 #  2. API NVIDIA (nvidia/...) — pakai NVIDIA_API_KEY ke integrate.api.nvidia.com/v1
 #  3. API OpenRouter (openrouter/...) — pakai OPENROUTER_API_KEY ke openrouter.ai/api/v1
+#  4. API OpenCode Zen (opencode/...) — GRATIS tanpa key (anonim) ke
+#     opencode.ai/zen/v1; key hanya opsional (big-pickle, *-free — models.py)
 #
 # Default: web/glm (browser). Pilih lewat /model; pilihan terakhir otomatis tersimpan.
 # Konfigurasi NVIDIA API (opsional; hanya untuk model nvidia/*):
@@ -75,6 +77,61 @@ NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidi
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL: str = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+# Konfigurasi OpenCode Zen (untuk model opencode/*). Model bertanda "Free" di
+# https://opencode.ai/docs/zen jalan TANPA key sama sekali — akses anonim
+# per-IP (TERUKUR 2026-08-29: request tanpa Authorization dibalas 200). Key
+# dari https://opencode.ai/auth hanya OPSIONAL (mis. untuk kuota akun sendiri)
+# dan kalau `opencode auth login` pernah dijalankan, terbaca otomatis dari
+# auth.json CLI-nya (lihat _baca_key_opencode).
+OPENCODE_API_KEY: str = os.getenv("OPENCODE_API_KEY", "").strip()
+OPENCODE_BASE_URL: str = os.getenv(
+    "OPENCODE_BASE_URL", "https://opencode.ai/zen/v1").strip()
+
+
+def _baca_key_opencode() -> str:
+    """Key OpenCode Zen dari auth.json milik CLI `opencode`, bila ada.
+
+    `opencode auth login` (atau /connect di TUI-nya) menyimpan kredensial di
+    auth.json — skemanya {<providerID>: {type:"api", key} | {type:"oauth",
+    access, expires}} dan ID penyedia Zen adalah "opencode". Membacanya berarti
+    pengguna cukup login SEKALI lewat CLI itu dan model opencode/* langsung
+    jalan di bagas-ai tanpa menyalin-tempel apa pun ke .env.
+
+    Kunci OAuth BISA KEDALUWARSA (`expires`, detik epoch); yang lewat masa
+    berlakunya diabaikan — penyegarannya memang hanya dikerjakan CLI-nya.
+    Semua kegagalan (berkas tak ada, JSON rusak, skema berubah) diam-diam
+    mengembalikan "": env .env tetap menang, dan tak ada yang rusak.
+    """
+    try:
+        import json
+        import time
+        base = os.getenv("XDG_DATA_HOME") or ""
+        kandidat = [
+            Path(base) / "opencode" / "auth.json" if base else None,
+            Path.home() / ".local" / "share" / "opencode" / "auth.json",
+        ]
+        berkas = next((p for p in kandidat if p and p.is_file()), None)
+        if berkas is None:
+            return ""
+        entri = json.loads(berkas.read_text(encoding="utf-8")).get("opencode")
+        if not isinstance(entri, dict):
+            return ""
+        if entri.get("type") == "api":
+            return str(entri.get("key") or "").strip()
+        if entri.get("type") == "oauth":
+            kedalu = entri.get("expires") or 0
+            try:
+                masih_hidup = int(kedalu) > time.time()
+            except (TypeError, ValueError):
+                masih_hidup = False
+            return str(entri.get("access") or "").strip() if masih_hidup else ""
+    except Exception:  # noqa: BLE001 — ini pemulia, bukan syarat
+        return ""
+    return ""
+
+
+if not OPENCODE_API_KEY:
+    OPENCODE_API_KEY = _baca_key_opencode()
 # Model default bila memakai jalur NVIDIA (hanya berlaku saat model nvidia/*
 # dipilih tanpa menyebut api_model-nya -- praktis cuma jaring pengaman).
 #
@@ -86,7 +143,7 @@ NVIDIA_DEFAULT_MODEL: str = os.getenv(
     "NVIDIA_DEFAULT_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip()
 
 CHAT_MODEL: str = os.getenv("CHAT_MODEL", "web/glm").strip()
-if not CHAT_MODEL.startswith(("web/", "nvidia/", "openrouter/")):
+if not CHAT_MODEL.startswith(("web/", "nvidia/", "openrouter/", "opencode/")):
     CHAT_MODEL = "web/glm"
 
 # --- Telegram ---
@@ -304,11 +361,12 @@ ENV_FILE = CONFIG_HOME / ".env"
 _PROVIDER_KEY_ENV = {
     "nvidia": "NVIDIA_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "opencode": "OPENCODE_API_KEY",
 }
 
 
 def api_key_env(provider: str = "") -> str:
-    """Nama env var kunci untuk satu penyedia ('nvidia'/'openrouter')."""
+    """Nama env var kunci untuk satu penyedia ('nvidia'/'openrouter'/'opencode')."""
     return _PROVIDER_KEY_ENV.get(provider, "NVIDIA_API_KEY")
 
 
@@ -321,9 +379,15 @@ def has_api_key(provider: str = "") -> bool:
     """
     if provider == "openrouter":
         return bool(OPENROUTER_API_KEY)
+    if provider == "opencode":
+        # Model opencode/* GRATIS dan jalan TANPA key (akses anonim per-IP —
+        # TERUKUR 2026-08-29). has_api_key dipakai pemanggilnya sebagai gerbang
+        # "bolehkah model provider ini dipakai", jadi jawabannya selalu True;
+        # OPENCODE_API_KEY murni opsional di sisi klien (llm.get_client).
+        return True
     if provider == "nvidia":
         return bool(NVIDIA_API_KEY)
-    return bool(NVIDIA_API_KEY) or bool(OPENROUTER_API_KEY)
+    return bool(NVIDIA_API_KEY) or bool(OPENROUTER_API_KEY) or bool(OPENCODE_API_KEY)
 
 
 def require_api_key(provider: str = "") -> None:
