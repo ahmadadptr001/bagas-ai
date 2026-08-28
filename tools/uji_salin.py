@@ -1,7 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Uji salin-otomatis MessageList: seret tombol kiri -> teks tersalin.
+"""Uji salin-otomatis MessageList — seleksi per KARAKTER seperti terminal.
 
 Jalankan: PYTHONIOENCODING=utf-8 python tools/uji_salin.py
+
+Yang dicek:
+1. Seret = seleksi per karakter (bukan per baris penuh): menyeret
+   sebagian baris tersalin sebagian.
+2. Klik polos menghapus sorotan (dan tetap membuka blok write()).
+3. Seret ke atas (arah terbalik) tetap benar.
+4. Klik GANDA = satu kata; klik TIGA KALI = satu baris penuh.
+5. render_line membalik hanya rentang terpilih (baris luar tetap polos).
+6. Pemetaan kolom-sel → karakter benar untuk teks lebar-2 (CJK/emoji).
 """
 import asyncio
 import sys
@@ -20,84 +29,120 @@ class AppUji(App):
         yield MessageList(id="messages")
 
 
+async def tunggu(pilot, kondisi, maks=100, jeda=0.05,
+                 pesan="kondisi tak terpenuhi"):
+    for _ in range(maks):
+        await pilot.pause(jeda)
+        if kondisi():
+            return
+    raise AssertionError(pesan)
+
+
+def klik(pilot, ml, x, y, jeda=0.01):
+    """Klik polos (down+up di titik sama) tanpa seret."""
+    return _seret(pilot, ml, x, y, x, y, jeda=jeda)
+
+
+def _seret(pilot, ml, x1, y1, x2, y2, jeda=0.01):
+    async def langkah():
+        await pilot.mouse_down(ml, offset=(x1, y1), button=1)
+        if (x1, y1) != (x2, y2):
+            ml.post_message(MouseMove(ml, x2, y2, 0, x2 - x1, y2 - y1,
+                                      1, False, False, False))
+        await pilot.mouse_up(ml, offset=(x2, y2))
+        await pilot.pause(0.05)
+    return langkah()
+
+
 async def main() -> int:
     gagal = 0
 
     async with AppUji().run_test(size=(60, 20)) as pilot:
         ml = pilot.app.query_one("#messages", MessageList)
-        # 20 baris notice; tiap baris ~1 baris layar pada lebar 60
-        for i in range(20):
-            ml.append_notice(f"baris ke-{i}")
+        ml.append_notice("alpha beta gamma")
+        ml.append_notice("delta epsilon zeta")
+        ml.append_notice("漢字テスト omega 🎮 end")
         await pilot.pause()
         await pilot.pause()
 
-        def seret(y1: int, y2: int) -> None:
-            """Seret tombol kiri dari baris layar y1 ke y2 (widget-relatif)."""
-            asyncio.get_event_loop()
-
-        # --- 1) seret ke bawah: baris 2 -> 5 -----------------------------
-        ok = await pilot.mouse_down(ml, offset=(2, 2), button=1)
-        assert ok, "mouse_down tak sampai ke widget"
-        ml.post_message(MouseMove(ml, 2, 5, 0, 3, 1, False, False, False))
-        await pilot.pause()
-        lo, hi = ml._salin_lo, ml._salin_hi
-        if not (lo is not None and hi is not None and hi > lo):
-            print(f"GAGAL: sorotan tak terbentuk (lo={lo} hi={hi})")
-            gagal += 1
-        await pilot.mouse_up(ml, offset=(2, 5))
-        await pilot.pause()
-        await pilot.pause()
-        klip = pilot.app._clipboard
-        if "baris ke-" not in klip:
-            print(f"GAGAL: clipboard kosong/salah: {klip!r}")
-            gagal += 1
-        else:
-            baris = [b for b in klip.split("\n") if b.strip()]
-            print(f"OK: tersalin {len(baris)} baris: {baris[0]!r}..{baris[-1]!r}")
-            if len(baris) < 2:
-                print("GAGAL: harus >= 2 baris")
+        def cek(nama, kondisi, detail=""):
+            nonlocal gagal
+            if kondisi:
+                print(f"OK: {nama}")
+            else:
+                print(f"GAGAL: {nama} {detail}")
                 gagal += 1
-        # sorotan tetap terlihat setelah tombol dilepas
-        if ml._salin_lo is None or ml._salin_hi is None:
-            print("GAGAL: sorotan hilang sebelum klik berikutnya")
-            gagal += 1
 
-        # --- 2) klik polos menghapus sorotan -----------------------------
-        await pilot.mouse_down(ml, offset=(2, 10), button=1)
-        await pilot.mouse_up(ml, offset=(2, 10))
-        await pilot.pause()
-        if ml._salin_lo is not None or ml._salin_hi is not None:
-            print("GAGAL: klik polos tak menghapus sorotan")
-            gagal += 1
-        else:
-            print("OK: klik polos menghapus sorotan")
+        # ── 1. seret per karakter pada SATU baris ─────────────────────
+        # "alpha beta gamma" terindentasi 2 spasi: kolom 2..7 = "alpha "
+        await _seret(pilot, ml, 2, 0, 7, 0)
+        cek("seret sebagian baris tersalin sebagian",
+            pilot.app._clipboard.endswith("alpha") and "beta" not in pilot.app._clipboard,
+            f"klip={pilot.app._clipboard!r}")
+        cek("sorotan tetap tampil setelah lepas",
+            ml._salin_lo is not None and ml._salin_hi is not None
+            and ml._salin_lo != ml._salin_hi)
 
-        # --- 3) seret ke atas (arah terbalik) ----------------------------
-        await pilot.mouse_down(ml, offset=(2, 8), button=1)
-        ml.post_message(MouseMove(ml, 2, 4, 0, -4, 1, False, False, False))
-        await pilot.pause()
-        await pilot.mouse_up(ml, offset=(2, 4))
-        await pilot.pause()
-        await pilot.pause()
-        klip = pilot.app._clipboard
-        if "baris ke-" not in klip:
-            print(f"GAGAL: seret-ke-atas tak tersalin: {klip!r}")
-            gagal += 1
-        else:
-            print("OK: seret ke atas ikut tersalin")
+        # ── 2. klik polos menghapus sorotan ──────────────────────────
+        await klik(pilot, ml, 2, 10)
+        cek("klik polos menghapus sorotan",
+            ml._salin_lo is None or ml._salin_lo == ml._salin_hi)
 
-        # --- 4) render_line menyorot rentang ------------------------------
-        # pasang sorotan manual lalu pastikan baris dalam rentang berubah
-        ml._salin_lo, ml._salin_hi = 3, 5
+        # ── 3. seret dua baris, batas per karakter ───────────────────
+        # baris 0 "  alpha beta gamma": dari awal "beta" (kolom 8) ke
+        # baris 1 "  delta epsilon zeta" tepat sebelum "epsilon" (kolom 8).
+        await _seret(pilot, ml, 8, 0, 8, 1)
+        cek("seret lintas baris terpotong per karakter",
+            pilot.app._clipboard.split("\n")[0] == "beta gamma"
+            and pilot.app._clipboard.split("\n")[-1].strip() == "delta"
+            and "alpha" not in pilot.app._clipboard
+            and "epsilon" not in pilot.app._clipboard,
+            f"klip={pilot.app._clipboard!r}")
+
+        # ── 4. klik ganda = satu kata; 3x = satu baris ───────────────
+        # Beri jeda supaya klik-ganda seksi ini tak menyambung ke mouse_down
+        # seksi 3 (cascade deteksi ganda).
+        await pilot.pause(0.6)
+        await klik(pilot, ml, 8, 0)   # klik tunggal dulu (reset)
+        await klik(pilot, ml, 8, 0)   # klik ganda: "beta"
+        cek("klik ganda menyeleksi satu kata",
+            ml._salin_lo == (0, 8) and ml._salin_hi == (0, 12),
+            f"lo={ml._salin_lo} hi={ml._salin_hi}")
+        cek("klik ganda menyalin kata",
+            "beta" in pilot.app._clipboard
+            and "gamma" not in pilot.app._clipboard,
+            f"klip={pilot.app._clipboard!r}")
+
+        await klik(pilot, ml, 8, 0)   # klik ketiga: seluruh baris
+        # len(teks) = panjang penuh strip (termasuk spasi perapihan).
+        cek("klik tiga kali menyeleksi satu baris",
+            ml._salin_lo == (0, 0) and ml._salin_hi == (0, 18),
+            f"lo={ml._salin_lo} hi={ml._salin_hi}")
+
+        # klik tunggal setelah itu mereset mode & sorotan
+        await pilot.pause(0.6)  # lewati jeda klik ganda
+        await klik(pilot, ml, 8, 0)
+        cek("klik tunggal mereset sorotan",
+            ml._salin_lo is None or ml._salin_lo == ml._salin_hi)
+
+        # ── 5. render_line: hanya rentang terpilih yang terbalik ─────
+        ml._salin_lo, ml._salin_hi = (0, 2), (0, 7)
+        ml._salin_mode = "huruf"
         ml.refresh()
         await pilot.pause()
-        s_normal = ml.render_line(0).text
-        s_sorot = ml.render_line(4).text
-        if s_sorot.rstrip() == s_normal.rstrip() and s_sorot == ml.render_line(6).text:
-            print("PERINGATAN: tak bisa memastikan sorotan lewat teks; "
-                  "cek manual visual saja")
-        else:
-            print("OK: render_line mengembalikan baris sorotan")
+        teks_lo = ml.render_line(0).text
+        cek("render membalik hanya rentang terpilih",
+            teks_lo.lstrip().startswith("alpha"),
+            f"render={teks_lo!r}")
+
+        # ── 6. pemetaan lebar-2 (CJK/emoji) ──────────────────────────
+        # baris 2: "  漢字テスト omega 🎮 end" — 漢=2 sel di kolom 2-3.
+        # Klik di kolom 4 (tengah 字) harus membulatkan ke batas
+        # karakter, dan seret 2..4 menyalin "漢".
+        ml._salin_lo = ml._salin_hi = None
+        await _seret(pilot, ml, 2, 2, 4, 2)
+        cek("seret teks lebar-2 akurat per karakter",
+            "漢" in pilot.app._clipboard and "字" not in pilot.app._clipboard, f"klip={pilot.app._clipboard!r}")
 
     print("\nSEMUA LULUS" if gagal == 0 else f"\n{gagal} uji GAGAL")
     return 0 if gagal == 0 else 1

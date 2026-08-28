@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Uji PlanSidebar (layout lebar/sempit) + handler ask_* di UI Textual.
+"""Uji InfoSidebar (sistem + rencana, layout lebar/sempit) + ask_* di UI Textual.
 
 Jalankan: PYTHONIOENCODING=utf-8 python tools/uji_plan_sidebar.py
 
 Yang dicek:
-1. plan() dipanggil di layar LEBAR (>= _LEBAR_MIN) -> sidebar kanan tampil,
-   PlanPanel footer disembunyikan (jangan dobel).
-2. plan_step() memindahkan penanda done/active.
+1. Layar LEBAR (>= _LEBAR_MIN): sidebar kanan tampil SEJAK AWAL walau belum
+   ada rencana — seksi Sistem (CPU/RAM/Disk/GPU) selalu ada.
+2. plan() -> seksi Rencana muncul di sidebar, PlanPanel footer sembunyi
+   (jangan dobel). plan_step() memindahkan penanda done/active.
 3. Terminal disempitkan -> rencana pindah ke PlanPanel footer, sidebar hilang;
    dilebarkan lagi -> kembali ke sidebar.
-4. core.run() mereset rencana (plan_tool.reset) -> kedua panel kosong.
-5. Handler ask_choice TERPASANG (ask_user tak lagi "[tidak interaktif]"):
+4. Rencana TUNTAS: tampil ±8 dtk lalu seksi Rencana hilang sendiri — tapi
+   sidebar tetap ada, dan rencana tak berkedip muncul lagi. Rencana BARU
+   dari model membuat seksi muncul kembali.
+5. core.run() mereset rencana (plan_tool.reset) -> panel kosong.
+6. Handler ask_choice TERPASANG (ask_user tak lagi "[tidak interaktif]"):
    - pilih satu (Enter),
    - pilih banyak (spasi tandai, Enter),
    - isian bebas "✎ Tulis jawaban sendiri…".
@@ -25,6 +29,7 @@ sys.path.insert(0, r"C:/Users/user/Documents/PROJECTS/ai-agent/src")
 
 from agent.interfaces.textual_app import BagasAIApp, _OPSI_TULIS
 from agent.interfaces.textual_widgets import (PlanPanel, PlanSidebar,
+                                               InfoSidebar, SystemPanel,
                                                SelectScreen, MultiSelectScreen,
                                                TextPromptScreen)
 from agent.tools import plan_tool
@@ -54,23 +59,33 @@ async def tunggu(pilot, kondisi, maks=80, jeda=0.05, pesan="kondisi tak terpenuh
 
 async def uji_plan(app, pilot):
     plan = app.query_one("#plan", PlanPanel)
-    sidebar = app.query_one("#plan-sidebar", PlanSidebar)
+    seksi = app.query_one("#plan-side", PlanSidebar)
+    sidebar = app.query_one("#sidebar", InfoSidebar)
+    sistem = app.query_one("#system-panel", SystemPanel)
 
-    # Layar lebar: sidebar muncul, footer tidak (jangan dobel)
-    plan_tool.plan(["langkah pertama", "langkah kedua", "langkah ketiga"], 1)
+    # Layar lebar: sidebar tampil SEJAK AWAL walau belum ada rencana —
+    # seksi Sistem selalu ada di ukuran dashboard.
     await tunggu(pilot, lambda: sidebar.display,
-                 pesan="sidebar harus tampil di layar lebar")
+                 pesan="sidebar harus tampil di layar lebar walau tanpa rencana")
+    assert not seksi.display, "seksi rencana harus kosong saat belum ada plan()"
+    assert "CPU" in sistem.terakhir, sistem.terakhir
+    assert "RAM" in sistem.terakhir, sistem.terakhir
+
+    # plan() -> seksi Rencana muncul di sidebar, footer sembunyi (jangan dobel)
+    plan_tool.plan(["langkah pertama", "langkah kedua", "langkah ketiga"], 1)
+    await tunggu(pilot, lambda: seksi.display,
+                 pesan="seksi rencana harus tampil di sidebar saat plan()")
     await pilot.pause()
     assert not plan.display, "PlanPanel footer harus sembunyi di layar lebar"
-    isi = sidebar.terakhir
+    isi = seksi.terakhir
     assert "langkah pertama" in isi, isi
     assert "Rencana 0/3" in isi, isi
 
     # plan_step: langkah 1 selesai, langkah 2 aktif
     plan_tool.plan_step(2)
-    await tunggu(pilot, lambda: "Rencana 1/3" in sidebar.terakhir,
+    await tunggu(pilot, lambda: "Rencana 1/3" in seksi.terakhir,
                  pesan="hitungan selesai harus maju ke 1/3")
-    isi = sidebar.terakhir
+    isi = seksi.terakhir
     assert "▸ langkah kedua" in isi, isi
     assert "✓ langkah pertama" in isi, isi
 
@@ -86,10 +101,51 @@ async def uji_plan(app, pilot):
     await tunggu(pilot, lambda: sidebar.display and not plan.display,
                  pesan="lebar kembali: rencana harus kembali ke sidebar")
 
-    # reset (dipanggil core.run tiap giliran baru) -> kedua panel kosong
+    # reset (dipanggil core.run tiap giliran baru) -> panel rencana kosong,
+    # tapi SIDEBAR tetap tampil (seksi Sistem tak ikut hilang).
     plan_tool.reset()
-    await tunggu(pilot, lambda: not sidebar.display and not plan.display,
+    await tunggu(pilot, lambda: not seksi.display and not plan.display,
                  pesan="reset: kedua panel rencana harus kosong")
+    assert sidebar.display, "sidebar sistem harus tetap tampil setelah reset"
+
+
+async def uji_semput_tuntas(app, pilot):
+    """Rencana tuntas: tampil ±8 dtk lalu hilang sendiri, tanpa berkedip."""
+    plan = app.query_one("#plan", PlanPanel)
+    seksi = app.query_one("#plan-side", PlanSidebar)
+    sidebar = app.query_one("#sidebar", InfoSidebar)
+
+    plan_tool.plan(["tugas satu", "tugas dua"], 1)
+    await tunggu(pilot, lambda: seksi.display,
+                 pesan="seksi rencana harus tampil")
+    # Tandai semua selesai (current > jumlah langkah).
+    plan_tool.plan_step(3)
+    await tunggu(pilot, lambda: "Rencana 2/2" in seksi.terakhir,
+                 pesan="semua langkah harus tercentang")
+    assert seksi.display, "rencana tuntas harus TAMPIL dulu ±8 dtk"
+
+    # Setelah ±8 dtk seksi rencana hilang sendiri, TAPI sidebar (sistem)
+    # tetap ada. maks 250 x 0.05 dtk = 12.5 dtk — cukup untuk 8 dtk + poll.
+    await tunggu(pilot, lambda: not seksi.display, maks=260,
+                 pesan="rencana tuntas harus hilang sendiri setelah 8 dtk")
+    assert sidebar.display, "sidebar sistem harus TETAP tampil"
+    assert not plan.display, "footer juga harus kosong"
+    # Anti-kedip: 3 dtk berikut seksi tetap tersembunyi (bug lama: cache
+    # dikosongkan -> poll menganggap rencana baru -> muncul lagi tiap 8 dtk).
+    for _ in range(60):
+        await pilot.pause(0.05)
+    assert not seksi.display, "rencana tuntas tak boleh berkedip muncul lagi"
+    # State plan_tool tak dilupakan: masih utuh sampai giliran baru.
+    snap = plan_tool.get_state()
+    assert snap["steps"] == ["tugas satu", "tugas dua"], snap
+
+    # Rencana BARU dari model -> seksi muncul lagi (flag disembunyikan lepas).
+    plan_tool.plan(["tugas lain A", "tugas lain B"], 1)
+    await tunggu(pilot, lambda: "tugas lain A" in seksi.terakhir,
+                 pesan="rencana baru harus muncul lagi setelah auto-hide")
+    plan_tool.reset()
+    await tunggu(pilot, lambda: not seksi.display,
+                 pesan="reset akhir: seksi rencana harus kosong")
 
 
 async def uji_ask(app, pilot):
@@ -221,6 +277,50 @@ async def uji_recall(app, pilot, pintu):
     await pilot.pause()
 
 
+async def uji_batal_antre(app, pilot, pintu, ag):
+    """Ctrl+C saat giliran berjalan -> pesan antrean MAJU sebagai giliran
+    baru begitu worker yang dibatalkan benar-benar mati (dulu: tersangkut
+    sampai pengguna mengirim pesan lagi)."""
+    from agent.interfaces.textual_widgets import ChatBox, QueueStrip
+    chatbox = app.query_one("#chatbox", ChatBox)
+    inputw = app.query_one("#chat-input")
+    strip = app.query_one("#queue-strip", QueueStrip)
+    ag.dijalankan.clear()
+
+    # Giliran A berjalan (tertahan pintu), lalu dua prompt mengantre.
+    pintu.clear()
+    inputw.value = "tugas A"
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause(0.15)
+    assert app.is_turn_active
+    for teks in ("tugas B", "tugas C"):
+        inputw.value = teks
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+    assert strip._items == ["tugas B", "tugas C"]
+
+    # Batalkan: UI langsung idle, antrean menunggu worker lama mati.
+    app._cancel_event.set()
+    app._stop_turn()
+    await pilot.pause(0.2)
+    assert not app.is_turn_active, "UI harus idle segera setelah batal"
+
+    # Worker lama selesai (pintu dibuka) -> antrean MAJU sendiri sebagai
+    # giliran baru. Giliran lanjutan bisa selesai sangat cepat (pintu
+    # terbuka), jadi yang ditunggu BUKTI EKSEKUSINYA — agent.run dipanggil
+    # dengan batch B+C — bukan momen is_turn_active yang transien.
+    pintu.set()
+    await tunggu(pilot, lambda: len(ag.dijalankan) >= 2,
+                 maks=120, pesan="antrean harus maju sebagai giliran baru "
+                                 "setelah pembatalan")
+    await tunggu(pilot, lambda: not app.is_turn_active and not strip._items,
+                 maks=120, pesan="giliran lanjutan (B+C) harus selesai "
+                                 "dan strip antrean kosong")
+    assert ag.dijalankan == ["tugas A", "tugas B\ntugas C"], ag.dijalankan
+
+
 async def main():
     pintu = threading.Event()
     pintu.set()  # giliran palsu langsung selesai
@@ -229,10 +329,13 @@ async def main():
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.2)
         await uji_plan(app, pilot)
+        await uji_semput_tuntas(app, pilot)
         await uji_ask(app, pilot)
         await uji_recall(app, pilot, pintu)
-    print("OK - sidebar rencana (lebar/sempit/reset) + ask_* (satu/banyak/"
-          "isian bebas) + panah-atas antrean/riwayat semuanya berfungsi")
+        await uji_batal_antre(app, pilot, pintu, ag)
+    print("OK - sidebar sistem+rencana (lebar/sempit/reset/auto-hide tuntas) "
+          "+ ask_* (satu/banyak/isian bebas) + panah-atas antrean/riwayat "
+          "+ antrean maju setelah dibatalkan semuanya berfungsi")
 
 
 asyncio.run(main())

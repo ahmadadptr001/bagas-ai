@@ -79,6 +79,65 @@ def _pagari_pohon(text: str) -> str:
     return "```text\n" + text + "\n```"
 
 
+# Batas baris kode saat blok write() DIBUKA — di atas itu tetap dipangkas
+# (dengan keterangan) supaya render ribuan baris tak membekukan UI.
+_MAKS_BLOK_BUKA = 400
+
+
+class _BlokTulis:
+    """Renderable "write(nama_file)" yang bisa diciutkan.
+
+    Ringkas dulu (maks. ``muat`` baris isi, bawaan 7); klik baris judulnya
+    di MessageList untuk membuka/menutup (lihat on_mouse_up di sana —
+    RichLog tak bisa menampung widget interaktif, jadi toggle-nya lewat
+    klik baris + gambar ulang). Nama sengaja BUKAN berawalan underscore
+    kembar ``_render``: ini protokol __rich__ Rich, bukan internal Textual.
+    """
+
+    def __init__(self, path: str, kode: str, is_new: bool = False,
+                 muat: int = 7, sintaks=None):
+        self.path = path
+        self.kode = (kode or "").rstrip("\n")
+        self.is_new = is_new
+        self.muat = muat
+        self.terbuka = False
+        self._sintaks = sintaks  # list[Text] per baris (opsional)
+
+    def __rich__(self, console=None, options=None) -> Text:
+        baris = self.kode.split("\n") if self.kode else []
+        t = Text()
+        t.append(f"\n  {'▾' if self.terbuka else '▸'} ",
+                 style=f"bold {tema.p('aksen')}")
+        t.append(f"write({self.path})", style=f"bold {tema.p('aksen2')}")
+        if self.is_new:
+            t.append(" (baru)", style=tema.p("aksen_terang"))
+        t.append(f" — {len(baris)} baris", style=tema.p("redup"))
+        t.append("\n")
+
+        tampil = baris if self.terbuka else baris[:self.muat]
+        dipangkas = False
+        if self.terbuka and len(tampil) > _MAKS_BLOK_BUKA:
+            tampil = tampil[:_MAKS_BLOK_BUKA]
+            dipangkas = True
+        for i, b in enumerate(tampil):
+            t.append("  │ ", style=tema.p("tepi_redup"))
+            if self._sintaks and i < len(self._sintaks):
+                t.append_text(self._sintaks[i].copy())
+            else:
+                t.append(b, style=tema.p("teks"))
+            t.append("\n")
+
+        if not self.terbuka and len(baris) > self.muat:
+            t.append(f"  … +{len(baris) - self.muat} baris — klik judul "
+                     "untuk membuka\n", style=tema.p("redup"))
+        elif self.terbuka:
+            if dipangkas:
+                t.append(f"  … (dipangkas di {_MAKS_BLOK_BUKA} baris)\n",
+                         style=tema.p("redup"))
+            t.append("  ⌃ klik judul untuk menutup\n", style=tema.p("redup"))
+        return t
+
+
 class MessageList(RichLog, can_focus=False):
     """Riwayat percakapan yang bisa digulir; mengisi ruang sisa layar."""
 
@@ -104,13 +163,21 @@ class MessageList(RichLog, can_focus=False):
         self._stream_rendered = False
         self._stream_preview_len = 0
         # Seleksi salin-otomatis (lihat "Salin otomatis" di bawah).
-        # _salin_jangkar: baris jangkar saat tombol kiri ditahan (None = tak
-        # sedang menyeret). _salin_lo/_salin_hi: rentang tersorot — TETAP
-        # hidup setelah tombol dilepas supaya sorotannya terlihat, lenyap saat
+        # Seleksi adalah rentang karakter: jangkar & ujung berupa
+        # (baris_konten, indeks_karakter). _salin_mode menentukan
+        # granularitas: "huruf" (seret), "kata" (klik ganda), "baris"
+        # (klik 3x). _salin_lo/_salin_hi: rentang tersorot — TETAP hidup
+        # setelah tombol dilepas supaya sorotannya terlihat, lenyap saat
         # klik berikutnya.
-        self._salin_jangkar: int | None = None
-        self._salin_lo: int | None = None
-        self._salin_hi: int | None = None
+        self._salin_mode: str = "huruf"
+        self._salin_jangkar: tuple[int, int] | None = None
+        self._salin_lo: tuple[int, int] | None = None
+        self._salin_hi: tuple[int, int] | None = None
+        # Deteksi klik ganda/tiga kali: waktu & posisi klik kiri terakhir.
+        self._klik_terakhir: tuple[float, int, int] | None = None
+        # Baris-judul -> blok write() yang bisa dibuka/ditutup dengan klik.
+        # Dibangun ulang tiap gambar ulang (lihat _catat_blok).
+        self._blok_klik: dict[int, _BlokTulis] = {}
 
     # --- Inti penulisan ------------------------------------------------
 
@@ -130,9 +197,20 @@ class MessageList(RichLog, can_focus=False):
         if simpan:
             self._items.append(renderable)
         try:
+            awal = len(self.lines)
             self.write(renderable, width=self._lebar())
+            self._catat_blok(renderable, awal)
         except Exception:  # noqa: BLE001 — jangan sampai UI mati karena render
             pass
+
+    def _catat_blok(self, item: RenderableType, awal_baris: int) -> None:
+        """Catat baris judul blok write() yang barusan ditulis.
+
+        Tulisan yang ditunda RichLog (ukuran belum diketahui) tak menambah
+        ``self.lines`` — pemetaannya nanti dibangun ulang oleh _gambar_ulang.
+        """
+        if isinstance(item, _BlokTulis) and awal_baris < len(self.lines):
+            self._blok_klik[awal_baris] = item
 
     # --- Gambar ulang saat lebar berubah -------------------------------
 
@@ -176,10 +254,13 @@ class MessageList(RichLog, can_focus=False):
         try:
             items = list(self._items)
             self.clear()
+            self._blok_klik.clear()
             lebar = self._lebar()
             for it in items:
                 try:
+                    awal = len(self.lines)
                     self.write(it, width=lebar)
+                    self._catat_blok(it, awal)
                 except Exception:  # noqa: BLE001
                     pass
             self._items.clear()
@@ -192,14 +273,17 @@ class MessageList(RichLog, can_focus=False):
     #
     # RichLog (Textual 8.2.8) tidak punya seleksi teks bawaan, dan terminal
     # sendiri tak bisa menyalin teks milik aplikasi TUI penuh-layar (mouse
-    # kita yang menangkapnya). Karena itu seleksi dibuat sendiri SEBARIS:
-    # tahan tombol kiri lalu seret — baris yang dilintas tersorot — lepaskan
-    # dan isinya LANGSUNG tersalin ke clipboard.
+    # kita yang menangkapnya). Karena itu seleksi dibuat sendiri, bergaya
+    # seleksi terminal biasa: seret = per karakter, klik ganda = per kata,
+    # klik tiga kali = per baris. Lepaskan tombol dan isinya LANGSUNG
+    # tersalin ke clipboard.
     #
-    # Kenapa per baris penuh (bukan per karakter): lebar sel terminal tak
-    # seragam (emoji, huruf CJK lebar dua), jadi pemetaan kolom mouse ->
-    # karakter hanya bisa ditebak. Baris penuh tak pernah salah isi; polanya
-    # sama dengan copy-mode tmux.
+    # Kolom mouse adalah KOLOM SEL (emoji/CJK lebar 2), sementara teks
+    # tersimpan sebagai karakter — pemetaannya memakai rich.cells.cell_len
+    # per karakter (lihat _posisi_sel). Batas seleksi pada baris pertama /
+    # terakhir dipotong per karakter; baris di antaranya otomatis penuh.
+
+    _JEDA_KLIK_GANDA = 0.5  # dtk — batas klik dianggap ganda/tiga kali
 
     def _baris_konten(self, y: float) -> int:
         """Ubah y mouse (relatif widget) menjadi nomor baris konten."""
@@ -210,62 +294,273 @@ class MessageList(RichLog, can_focus=False):
         n = max(0, int(y) + geser)
         return min(n, max(0, len(self.lines) - 1))
 
+    def _strip(self, baris: int) -> Strip | None:
+        """Strip baris konten ke-n, atau None bila di luar jangkauan."""
+        try:
+            s = self.lines[baris]
+        except Exception:  # noqa: BLE001 — indeks basi (log terpangkas)
+            return None
+        return s if isinstance(s, Strip) else None
+
+    @staticmethod
+    def _posisi_sel(teks: str, kolom: int) -> int:
+        """Kolom sel -> indeks karakter: lompati karakter lebar-2 penuh.
+
+        ``kolom`` di-CLAMP ke panjang teks. Kolom yang jatuh DI TENGAH
+        karakter lebar-2 (CJK/emoji) dibulatkan ke ujung terdekatnya —
+        tebakan terbaik yang bisa dilakukan tanpa data layout terminal."""
+        from rich.cells import cell_len
+
+        posisi = 0  # kolom sel yang sudah dilalui
+        for i, ch in enumerate(teks):
+            lebar = cell_len(ch)
+            if posisi + lebar > kolom:
+                # Kolom jatuh di tengah karakter lebar-2: bulatkan ke
+                # ujung terdekat.
+                return i if (kolom - posisi) <= (lebar // 2) else i + 1
+            posisi += lebar
+        return len(teks)
+
+    @staticmethod
+    def _kolom_sel(teks: str, indeks: int) -> int:
+        """Indeks karakter -> kolom sel (kebalikan _posisi_sel)."""
+        from rich.cells import cell_len
+
+        return cell_len(teks[:indeks])
+
+    def _titik_mouse(self, event) -> tuple[int, int]:
+        """(baris, indeks_karakter) dari event mouse."""
+        baris = self._baris_konten(event.y)
+        s = self._strip(baris)
+        if s is None:
+            return baris, 0
+        # Kolom widget + scroll horizontal — RichLog bisa digeser ke samping.
+        try:
+            kolom = int(event.x) + int(self.scroll_offset.x)
+        except Exception:  # noqa: BLE001
+            kolom = int(event.x)
+        return baris, self._posisi_sel(s.text, kolom)
+
+    def _batas_kata(self, teks: str, pos: int) -> tuple[int, int]:
+        """Rentang kata yang memuat ``pos``: [awal, akhir) gaya terminal.
+
+        Kata = rangkaian karakter sejenis (alfanumerik vs tanda baca vs
+        spasi) — pola yang sama dengan klik-ganda di terminal desktop."""
+        n = len(teks)
+        if n == 0:
+            return 0, 0
+        pos = min(max(pos, 0), n - 1)
+
+        def _kelas(c: str) -> int:
+            if c.isspace():
+                return -1
+            return 1 if (c.isalnum() or c == "_") else 0
+
+        k = _kelas(teks[pos])
+        awal = pos
+        while awal > 0 and _kelas(teks[awal - 1]) == k:
+            awal -= 1
+        akhir = pos + 1
+        while akhir < n and _kelas(teks[akhir]) == k:
+            akhir += 1
+        return awal, akhir
+
     def on_mouse_down(self, event) -> None:
         if getattr(event, "button", -1) != 1:
             return
+        import time as _waktu
+
+        titik = self._titik_mouse(event)
+        sekarang = _waktu.monotonic()
+        ganda = False
+        # Klik di baris JUDUL blok write() tak pernah jadi klik ganda:
+        # dua klik cepat di sana = buka lalu tutup blok (toggle lama),
+        # bukan seleksi kata atas teks judul.
+        if self._blok_klik.get(titik[0]) is None:
+            if self._klik_terakhir is not None:
+                t_lama, x_lama, y_lama = self._klik_terakhir
+                # Posisi dibandingkan longgar (±1 sel): klik ganda manusia tak
+                # pernah jatuh di piksel yang persis sama.
+                if (sekarang - t_lama <= self._JEDA_KLIK_GANDA
+                        and abs(event.x - x_lama) <= 1
+                        and abs(event.y - y_lama) <= 1):
+                    ganda = True
+        self._klik_terakhir = (sekarang, event.x, event.y)
+
+        if ganda:
+            baris, pos = titik
+            s = self._strip(baris)
+            teks = s.text if s is not None else ""
+            # Ganda kedua berturut-turut pada baris sama = tiga kali ->
+            # seluruh baris (mode "baris").
+            if (self._salin_mode == "kata"
+                    and self._salin_lo is not None
+                    and self._salin_lo[0] == baris
+                    and self._salin_hi is not None
+                    and self._salin_hi[0] == baris):
+                self._salin_mode = "baris"
+                self._salin_jangkar = (baris, 0)
+                self._salin_lo = (baris, 0)
+                self._salin_hi = (baris, len(teks))
+            else:
+                awal, akhir = self._batas_kata(teks, pos)
+                self._salin_mode = "kata"
+                self._salin_jangkar = (baris, awal)
+                self._salin_lo = (baris, awal)
+                self._salin_hi = (baris, akhir)
+            self.refresh()
+            return
+
         # Klik baru selalu memulai seleksi segar — sorotan lama (bila ada)
         # ikut lenyap.
-        self._salin_jangkar = self._baris_konten(event.y)
-        self._salin_lo = self._salin_hi = self._salin_jangkar
+        self._salin_mode = "huruf"
+        self._salin_jangkar = titik
+        self._salin_lo = self._salin_hi = titik
         self.refresh()
 
     def on_mouse_move(self, event) -> None:
         if getattr(event, "button", -1) != 1 or self._salin_jangkar is None:
             return
-        b = self._baris_konten(event.y)
-        if b != self._salin_hi:
-            lo, hi = sorted((self._salin_jangkar, b))
-            if (lo, hi) != (self._salin_lo, self._salin_hi):
-                self._salin_lo, self._salin_hi = lo, hi
-                self.refresh()
+        titik = self._titik_mouse(event)
+        mode = self._salin_mode
+        if mode == "huruf":
+            ujung = titik
+        elif mode == "kata":
+            baris, pos = titik
+            s = self._strip(baris)
+            teks = s.text if s is not None else ""
+            awal, akhir = self._batas_kata(teks, pos)
+            jangkar_baris, jangkar_pos = self._salin_jangkar
+            if baris == jangkar_baris:
+                ujung = (baris, akhir if pos >= jangkar_pos else awal)
+            else:
+                ujung = (baris, akhir if baris > jangkar_baris else awal)
+        else:  # "baris"
+            baris = titik[0]
+            s = self._strip(baris)
+            n = len(s.text) if s is not None else 0
+            ujung = (baris, n if baris >= self._salin_jangkar[0] else 0)
+        lo, hi = self._urut(self._salin_jangkar, ujung)
+        if (lo, hi) != (self._salin_lo, self._salin_hi):
+            self._salin_lo, self._salin_hi = lo, hi
+            self.refresh()
 
     def on_mouse_up(self, event) -> None:
         if getattr(event, "button", -1) != 1 or self._salin_jangkar is None:
             return
         jangkar, self._salin_jangkar = self._salin_jangkar, None
-        lo, hi = sorted((jangkar, self._baris_konten(event.y)))
+        if self._salin_mode in ("kata", "baris"):
+            # Klik ganda/tiga kali: seleksi sudah terbentuk di mouse_down;
+            # langsung salin.
+            teks = self._teks_salin(self._salin_lo, self._salin_hi)
+            if teks:
+                self._salin_ke_clipboard(
+                    teks, self._salin_hi[0] - self._salin_lo[0] + 1)
+            return
+        titik = self._titik_mouse(event)
+        lo, hi = self._urut(jangkar, titik)
         if lo == hi:
-            # Klik polos tanpa seret: tak ada yang disalin; sorotan (yang
-            # memang cuma satu baris tadi) dibersihkan.
+            # Klik polos: kalau jatuh di JUDUL blok write(), buka/tutup
+            # isinya (RichLog tak bisa menampung widget interaktif, jadi
+            # toggle-nya gambar ulang seluruh riwayat).
+            blok = self._blok_klik.get(lo[0])
+            if blok is not None:
+                blok.terbuka = not blok.terbuka
+                self._gambar_ulang()
+                return
+            # Selain itu: tak ada yang disalin; sorotan (yang memang cuma
+            # satu titik tadi) dibersihkan.
             self._salin_lo = self._salin_hi = None
             self.refresh()
             return
+        self._salin_lo, self._salin_hi = lo, hi
         teks = self._teks_salin(lo, hi)
         if teks:
-            self._salin_ke_clipboard(teks, hi - lo + 1)
+            self._salin_ke_clipboard(teks, hi[0] - lo[0] + 1)
             # Sorotan DIBIARKAN tampil: satu-satunya umpan balik visual apa
             # yang barusan tersalin.
+
+    @staticmethod
+    def _urut(a: tuple[int, int], b: tuple[int, int]
+              ) -> tuple[tuple[int, int], tuple[int, int]]:
+        """(lo, hi) dari dua titik (baris, indeks)."""
+        return (a, b) if a <= b else (b, a)
 
     def render_line(self, y: int) -> Strip:
         strip = super().render_line(y)
         lo, hi = self._salin_lo, self._salin_hi
-        if lo is None or hi is None:
+        if lo is None or hi is None or lo == hi:
             return strip
         try:
             baris = int(y + self.scroll_offset.y)
-            if lo <= baris <= hi:
-                return strip.apply_style(RichStyle(reverse=True))
         except Exception:  # noqa: BLE001 — sorotan tak boleh mematikan render
-            pass
+            return strip
+        if not (lo[0] <= baris <= hi[0]):
+            return strip
+        teks = strip.text
+        if baris == lo[0] and baris == hi[0]:
+            bagian = (lo[1], hi[1])
+        elif baris == lo[0]:
+            bagian = (lo[1], len(teks))
+        elif baris == hi[0]:
+            bagian = (0, hi[1])
+        else:
+            return strip.apply_style(RichStyle(reverse=True))
+        try:
+            return self._potong_strip(strip, teks, *bagian) \
+                .apply_style(RichStyle(reverse=True))
+        except Exception:  # noqa: BLE001 — pemotongan gagal: sorot penuh
+            return strip.apply_style(RichStyle(reverse=True))
+
+    def _potong_strip(self, strip: Strip, teks: str,
+                      awal: int, akhir: int) -> Strip:
+        """Strip utuh dengan gaya asli, disiapkan agar hanya rentang
+        teks[awal:akhir] yang terbalik — pemanggilnya yang memasang style.
+
+        Cara kerjanya membelah strip jadi tiga bagian pada batas SEL
+        (kiri-tengah-kanan) lalu menyatukannya kembali: gaya segmen aslinya
+        utuh, dan apply_style(reverse) pada hasilnya membalik persis
+        rentang tengah karena bagian kiri/kanan diganti blank."""
+        if awal >= akhir or awal >= len(teks):
+            return Strip.blank(strip.cell_length)
+        akhir = min(akhir, len(teks))
+        awal_sel = self._kolom_sel(teks, awal)
+        akhir_sel = self._kolom_sel(teks, akhir)
+        if akhir_sel <= awal_sel:
+            return Strip.blank(strip.cell_length)
+        potongan = strip.divide([awal_sel, akhir_sel])
+        if len(potongan) == 3:
+            kiri, tengah, kanan = potongan
+            return Strip.join([
+                Strip.blank(awal_sel), tengah,
+                Strip.blank(max(0, strip.cell_length - akhir_sel))])
+        if len(potongan) == 2:
+            kiri, tengah = potongan
+            return Strip.join([
+                Strip.blank(awal_sel), tengah])
         return strip
 
-    def _teks_salin(self, lo: int, hi: int) -> str:
-        """Teks polos baris lo..hi (Strip.text), tanpa baris kosong pengapit."""
-        try:
-            potong = self.lines[lo:hi + 1]
-        except Exception:  # noqa: BLE001 — indeks basi (log sudah terpangkas)
-            return ""
-        baris = [s.text.rstrip() for s in potong if s is not None]
+    def _teks_salin(self, lo: tuple[int, int], hi: tuple[int, int]) -> str:
+        """Teks polos rentang lo..hi; baris penuh dirapikan (rstrip).
+
+        Baris pertama/terakhir dipotong per karakter sesuai batas seleksi;
+        baris kosong pengapit dibuang supaya tempelan tak berongga."""
+        if lo[0] == hi[0]:
+            s = self._strip(lo[0])
+            if s is None:
+                return ""
+            return s.text[lo[1]:hi[1]].rstrip()
+        baris: list[str] = []
+        pertama = self._strip(lo[0])
+        if pertama is not None:
+            baris.append(pertama.text[lo[1]:].rstrip())
+        for n in range(lo[0] + 1, hi[0]):
+            s = self._strip(n)
+            if s is not None:
+                baris.append(s.text.rstrip())
+        terakhir = self._strip(hi[0])
+        if terakhir is not None:
+            baris.append(terakhir.text[:hi[1]].rstrip())
         while baris and not baris[0].strip():
             baris.pop(0)
         while baris and not baris[-1].strip():
