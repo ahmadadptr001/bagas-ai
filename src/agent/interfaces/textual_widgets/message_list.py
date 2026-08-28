@@ -447,6 +447,75 @@ class MessageList(RichLog, can_focus=False):
             self._emit(Text(f"  … (diff dipotong: {len(diff)} baris)",
                             style=tema.p("redup")))
 
+    def append_write_block(self, path: str, kode: str, is_new: bool = False,
+                           muat: int = 7) -> "_BlokTulis":
+        """Blok "write(nama_file)" — isi kode maks. ``muat`` baris dulu,
+        klik judulnya untuk membuka/menutup penuh.
+
+        write_file menulis ulang SELURUH isi berkas, jadi diff unified-nya
+        nyaris tak bermakna (semua baris "berubah"); blok ringkas + sintaks
+        berwarna jauh lebih terbaca. edit_file/edit_files tetap lewat
+        append_diff.
+        """
+        blok = _BlokTulis(path, kode, is_new=is_new, muat=muat,
+                          sintaks=self._syntax_highlight(path, kode))
+        self._emit(blok)
+        return blok
+
+    def append_diff_replay(self, rec: dict) -> None:
+        """Render ulang record diff TERSIMPAN (role 'diff') — transkrip --resume.
+
+        Kembaran cli._replay_diff: isi lengkap file lamanya memang tak
+        disimpan (cuma teks unified yang sudah terpangkas), tapi pita
+        hijau/merah, nomor baris, dan header statusnya sama seperti saat
+        diff itu pertama tampil — potongan kode tak lenyap saat sesi
+        dibuka kembali.
+        """
+        import re
+
+        path = str(rec.get("path") or "?")
+        if rec.get("deleted"):
+            icon, label = "🗑", "dihapus"
+        else:
+            icon, label = ("✨", "dibuat") if rec.get("is_new") else ("📝", "diubah")
+        header = Text(f"\n  {icon} ")
+        header.append(path, style=f"bold {tema.p('aksen2')}")
+        header.append(f" ({label})", style=tema.p("redup"))
+        self._emit(header)
+
+        add_style = "#a3ccad on #0d2312"
+        del_style = "#cca3a3 on #230d0d"
+        gut_add = "#4f8f5c on #08170b"
+        gut_del = "#96565a on #170808"
+        ctx_style = "grey50"
+
+        ln_old = ln_new = 0
+        ada_baris = False
+        for line in str(rec.get("diff") or "").split("\n"):
+            if line.startswith("@@"):
+                m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)", line)
+                if m:
+                    ln_old, ln_new = int(m.group(1)), int(m.group(2))
+                if ada_baris:
+                    self._emit(Text("  ⋮", style=tema.p("redup")))
+                continue
+            tag, isi = line[:1], line[1:]
+            if rec.get("deleted") or tag == "-":
+                ln_old += 1
+                t = Text(f"  {ln_old:>4} - ", style=gut_del)
+                t.append(isi, style=del_style)
+            elif tag == "+":
+                ln_new += 1
+                t = Text(f"  {ln_new:>4} + ", style=gut_add)
+                t.append(isi, style=add_style)
+            else:
+                ln_old += 1
+                ln_new += 1
+                t = Text(f"  {ln_new:>4}   ", style=ctx_style)
+                t.append(isi, style=ctx_style)
+            self._emit(t)
+            ada_baris = True
+
     def _syntax_highlight(self, path: str, code: str):
         """Kembalikan daftar ``Text`` per baris berwarna, atau None."""
         if not code or len(code) > 400_000:

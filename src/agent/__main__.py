@@ -411,7 +411,25 @@ def main() -> None:
             from .session import Session
 
             if resume and resume_id:
-                ses = session_mod.find(resume_id)
+                # Galat ID (tak ketemu / ambigu) dijelaskan BESERTA daftar
+                # sesi yang ada — kembaran cli.py; tanpa ini jalur Textual
+                # mati dengan traceback mentah.
+                try:
+                    ses = session_mod.find(resume_id)
+                except ValueError as exc:
+                    print(f"✗ {exc}")
+                    try:
+                        kandidat = session_mod.list_sessions()[:5]
+                    except Exception:  # noqa: BLE001
+                        kandidat = []
+                    if kandidat:
+                        print("Sesi terakhir di folder ini:")
+                        for s in kandidat:
+                            print(f"  {s.id} · {session_mod.user_msg_count(s)}"
+                                  " pesan")
+                    return
+                if ses is None:
+                    ses = Session.create()
             elif resume:
                 ses = session_mod.latest()
             else:
@@ -423,6 +441,16 @@ def main() -> None:
             app = BagasAIApp(agent=agent, resume=resume,
                              resume_id=resume_id)
             app.run()
+            # Pesan penutup SETELAH UI Textual ditutup (terminal sudah
+            # kembali normal): satu baris, langsung PAKAI — cara lanjutkan
+            # sekaligus ID-nya, kembaran cli.py. Persist sekali lagi di sini:
+            # jalan keluar selain ctrl+c/ctrl+d (mis. galat) tetap menyimpan.
+            try:
+                agent._persist()
+            except Exception:  # noqa: BLE001 — penyimpanan tak boleh menggelapkan pesan
+                pass
+            print(f"\n  bagas-ai — sampai jumpa! 👋")
+            print(f"  bagas-ai --resume {ses.id} untuk melanjutkan\n")
         except ImportError:
             from .interfaces.cli import main as run
             run(resume=resume, resume_id=resume_id)

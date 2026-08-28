@@ -569,6 +569,10 @@ class BagasAIApp(App):
     def _show_welcome(self):
         """Display welcome screen with logo and tagline."""
         msg_list = self.query_one("#messages", MessageList)
+        # --resume: gema transkrip percakapan sebelumnya SEBELUM sambutan —
+        # tanpa ini sesi lanjutan terlihat kosong, seolah baru dimulai
+        # (cli.py memang punya replay ini; UI Textual dulunya tidak).
+        self._replay_riwayat(msg_list)
         msg_list.append_notice(
             "Selamat datang di bagas-ai! Ketik pesan atau /help untuk bantuan.",
             style=f"italic {tema.p('aksen_terang')}"
@@ -578,6 +582,35 @@ class BagasAIApp(App):
             f"({'🌐 web' if self.agent.model_spec.is_web else '🤖 api'})",
             style=tema.p("redup")
         )
+
+    def _replay_riwayat(self, msg_list: MessageList):
+        """Gema pesan & diff tersimpan dari sesi yang dilanjutkan (--resume).
+
+        Hanya role user/assistant/diff — pesan system, tool, dan record
+        internal lain tak ada gunanya di layar. Diff direplay lewat
+        ``append_diff_replay`` supaya potongan kode sesi sebelumnya tetap
+        terlihat, bukan lenyap begitu sesi dibuka kembali.
+        """
+        try:
+            riwayat = list(getattr(self.agent, "memory", None).messages)
+        except AttributeError:
+            return
+        replay = [m for m in riwayat
+                  if m.get("role") in ("user", "assistant", "diff")]
+        if not replay:
+            return
+        msg_list.append_notice("── percakapan sebelumnya ──",
+                               style=tema.p("tepi_redup"))
+        for m in replay:
+            role, content = m.get("role"), (m.get("content") or "")
+            if role == "user":
+                msg_list.append_user_message(content)
+            elif role == "diff":
+                msg_list.append_diff_replay(m)
+            elif content:
+                msg_list.append_ai_message(content)
+        msg_list.append_notice("── lanjut di bawah ──",
+                               style=tema.p("tepi_redup"))
 
     def _refresh_status(self):
         """Periodic status bar refresh."""
@@ -1888,6 +1921,8 @@ class BagasAIApp(App):
         self._safe_call(self._show_tool_result, name, result, args)
 
     def _show_tool_result(self, name: str, result: str, args: dict = None):
+        # Pratinjau diff/blok write() sudah ditampilkan di _show_tool_start
+        # (sebelum file tersentuh); hasil langkah cukup baris jejak ringkas.
         msg_list = self.query_one("#messages", MessageList)
         msg_list.append_tool_step(name, args or {}, result[:200])
         progress = self.query_one("#progress", TurnProgressBar)
