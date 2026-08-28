@@ -119,6 +119,47 @@ TEMA: dict[str, dict] = {
         "menu_aktif_bg": "#c792ea", "menu_aktif_teks": "#170f22",
         "menu_meta_bg": "#150e1e", "menu_meta_teks": "#9a8aad",
     },
+    # Dua tema "modern" ala Visual Studio Code (Dark/Light Modern) —
+    # paletnya diambil dari nilai resminya: editor #1e1e1e / #ffffff,
+    # aksen biru #3794ff / #005fb8, seleksi biru #04395e / #cfe4fb.
+    # Keduanya SATU KELUARGA: sama-sama biru VS Code, hanya beda sisi
+    # terangnya — jadi pengguna tak perlu belajar dua bahasa warna.
+    "vsdark": {
+        "label": "Kode Gelap",
+        "desc": "ala VS Code Dark Modern — biru profesional di abu pekat",
+        "aksen": "#3794ff", "aksen2": "#4ec9b0",
+        "aksen_terang": "#9cdcfe", "tepi": "#3c3c3c",
+        "tepi_redup": "#2b2b2b", "redup": "#9d9d9d", "teks": "#cccccc",
+        "grad": ["#cfe6ff", "#9cdcfe", "#569cd6", "#3794ff",
+                 "#1f6fd0", "#0f4c8c", "#082d54"],
+        "gema_bg": "#1e1e1e", "gema_garis": "#cccccc", "gema_teks": "#ffffff",
+        "bg_footer": "#181818", "merek_footer": "#3794ff",
+        "model_footer": "#cccccc", "sep_footer": "#2b2b2b",
+        "muted_footer": "#9d9d9d", "cmd_footer": "#3794ff",
+        "exit_footer": "#f14c4c", "git_footer": "#89d185",
+        "ubah_footer": "#d7ba7d",
+        "menu_bg": "#1f1f1f", "menu_teks": "#cccccc",
+        "menu_aktif_bg": "#04395e", "menu_aktif_teks": "#ffffff",
+        "menu_meta_bg": "#181818", "menu_meta_teks": "#9d9d9d",
+    },
+    "vslight": {
+        "label": "Kode Terang",
+        "desc": "ala VS Code Light Modern — bersih & kontras untuk siang hari",
+        "aksen": "#005fb8", "aksen2": "#0a7d6f",
+        "aksen_terang": "#0a5ca8", "tepi": "#c8c8c8",
+        "tepi_redup": "#e0e0e0", "redup": "#6f6f6f", "teks": "#3b3b3b",
+        "grad": ["#d6ecff", "#b3d8f8", "#7ab8ef", "#4a9be0",
+                 "#2a80cc", "#005fb8", "#00457f"],
+        "gema_bg": "#ffffff", "gema_garis": "#3b3b3b", "gema_teks": "#1f1f1f",
+        "bg_footer": "#f8f8f8", "merek_footer": "#005fb8",
+        "model_footer": "#3b3b3b", "sep_footer": "#e5e5e5",
+        "muted_footer": "#6f6f6f", "cmd_footer": "#005fb8",
+        "exit_footer": "#cd3131", "git_footer": "#107c10",
+        "ubah_footer": "#8a5a00",
+        "menu_bg": "#ffffff", "menu_teks": "#3b3b3b",
+        "menu_aktif_bg": "#cfe4fb", "menu_aktif_teks": "#1f1f1f",
+        "menu_meta_bg": "#f8f8f8", "menu_meta_teks": "#6f6f6f",
+    },
 }
 
 # Hex WARISAN (skema emas lama) -> kunci palet. Dipakai terjemah() supaya

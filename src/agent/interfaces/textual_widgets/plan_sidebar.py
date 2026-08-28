@@ -1,12 +1,15 @@
-"""PlanSidebar — panel rencana versi DOCK KANAN (layar lebar/desktop).
+"""PlanSidebar — seksi rencana di dalam InfoSidebar (dock kanan, layar lebar).
 
-Isi sama dengan PlanPanel (footer), tapi doknya di kanan: rencana panjang
-tak lagi memakan tinggi footer (yang mengecilkan area chat). "Aktif" di
-layar lebar; otomatis disembunyikan saat terminal menyempit — yang dipakai
-cukup PlanPanel inline di footer (lihat BagasAIApp._perbarui_layout_plan).
+SEKSI, bukan lagi widget dock sendirian: sejak sidebar kanan menjadi panel
+informasi umum (kesehatan sistem + rencana, lihat info_sidebar.py), widget
+ini tinggal bagian "◈ Rencana" yang muncul HANYA saat model memanggil
+plan()/plan_step() — selebihnya sidebar menampilkan seksi Sistem saja.
 
-Sumber datanya plan_tool (tool `plan()`/`plan_step()` milik model), di-poll
-ringan dari app tiap ~300 ms — mekanisme yang sama dengan cli.py._panel_plan.
+Sumber datanya plan_tool (tool ``plan()``/``plan_step()`` milik model),
+di-poll ringan dari app tiap ~300 ms — mekanisme yang sama dengan
+cli.py._panel_plan. Rencana yang TUNTAS tampil sebentar (centang penuh)
+lalu disembunyikan otomatis oleh app — state plan_tool tetap utuh sampai
+giliran baru (lihat BagasAIApp._poll_plan).
 """
 from __future__ import annotations
 
@@ -19,17 +22,13 @@ from ...ui import tema
 
 
 class PlanSidebar(Widget):
-    """Panel rencana docked kanan — aktif hanya di layar lebar."""
+    """Seksi rencana di sidebar kanan — tampil hanya saat ada rencana."""
 
     DEFAULT_CSS = """
     PlanSidebar {
-        dock: right;
-        width: 32;
-        height: 100%;
+        height: auto;
         display: none;
-        background: $t-gema_bg;
-        border-left: tall $t-tepi_redup;
-        padding: 0 1;
+        padding: 0;
     }
     """
 
@@ -38,6 +37,8 @@ class PlanSidebar(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._content: Static | None = None
+        # Teks render terakhir (plain) — dipakai harness pengujian.
+        self.terakhir: str = ""
 
     def compose(self):
         yield Static("", id="plan-side-content")
@@ -47,19 +48,19 @@ class PlanSidebar(Widget):
         self.display = False
 
     def update_plan(self, steps: list[dict]):
-        """Sinkronkan isi sidebar (dipanggil app bersama PlanPanel)."""
+        """Sinkronkan isi seksi rencana (dipanggil app bersama PlanPanel)."""
         self.steps = steps
-        if self._content and steps:
+        if steps:
             teks = self._render_langkah(steps)
             # Versi plain disimpan agar harness/pengetesan bisa membaca isi
             # tanpa bergantung pada API internal Static Textual.
             self.terakhir = teks.plain
             self._content.update(teks)
+        self.display = bool(steps)
 
     def _render_langkah(self, steps: list[dict]) -> Text:
-        """Versi sidebar dari panel rencana: tanpa truncasi per-lebar
-        (sidebar punya lebar sendiri yang stabil), teks panjang dibungkus
-        OptionList tidak dipakai di sini — Static memotongnya rapi.
+        """Rencana versi sidebar: tanpa truncasi per-lebar (sidebar punya
+        lebar sendiri yang stabil).
 
         Nama sengaja BUKAN ``_render`` — itu metode internal Widget milik
         Textual dan tertimpa kita bikin render seluruh app mogok.
@@ -86,5 +87,7 @@ class PlanSidebar(Widget):
 
     def clear(self):
         self.steps = []
+        self.terakhir = ""
         if self._content:
             self._content.update("")
+        self.display = False

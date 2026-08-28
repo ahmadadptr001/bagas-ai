@@ -271,65 +271,71 @@ Screen {
 }
 
 /* ── Modal (menu pilih / konfirmasi / input) ────────────────────────── */
+/* Gaya modal DIBAKUKAN di luar tema: backdrop PEKAT (85% hitam) supaya */
+/* dialog menonjol dari isi apa pun di belakangnya, panel DARK GRAY,    */
+/* border PUTIH. Di tema terang sekalipun modal tetap gelap — dialog    */
+/* adalah "lapisan di atas aplikasi", bukan bagian dari palet tema.     */
 
-SelectScreen, ConfirmScreen, TextPromptScreen {
+/* MultiSelectScreen tak mewarisi SelectScreen (beda tipe hasil), tapi
+   pakai struktur DOM yang sama — selektornya diikutkan di sini. */
+SelectScreen, MultiSelectScreen, ConfirmScreen, TextPromptScreen {
     align: center middle;
-    background: $t-gema_bg 60%;
+    background: #000000 85%;
 }
 
 #select-container, #confirm-container, #text-container {
-    background: $t-menu_bg;
-    color: $t-menu_teks;
-    border: round $t-aksen;
+    background: #2b2b2b;
+    color: #f0f0f0;
+    border: round #ffffff;
     padding: 1 2;
 }
 
 #select-title, #confirm-title, #text-title {
-    color: $t-aksen_terang;
+    color: #ffffff;
     text-style: bold;
 }
 
 #select-hint, #text-hint, #select-empty {
-    color: $t-menu_meta_teks;
+    color: #b8b8b8;
 }
 
 #select-options {
-    background: $t-menu_bg;
-    color: $t-menu_teks;
+    background: #2b2b2b;
+    color: #f0f0f0;
     border: none;
     scrollbar-size-vertical: 1;
 }
 
 #select-options > .option-list--option {
     background: transparent;
-    color: $t-menu_teks;
+    color: #f0f0f0;
 }
 
 #select-options > .option-list--option-highlighted {
-    background: $t-menu_sorot;
-    color: $t-menu_teks;
+    background: #4a4a4a;
+    color: #ffffff;
     text-style: bold;
 }
 
 #select-options > .option-list--option-hover {
-    background: $t-tepi_redup;
-    color: $t-menu_teks;
+    background: #3d3d3d;
+    color: #ffffff;
 }
 
 #text-input {
-    background: $t-gema_bg;
-    color: $t-teks;
-    border: round $t-tepi;
+    background: #1e1e1e;
+    color: #ffffff;
+    border: round #ffffff;
 }
 
 #confirm-btn-yes, #confirm-btn-no {
-    color: $t-menu_meta_teks;
-    background: $t-menu_bg;
+    color: #b8b8b8;
+    background: #2b2b2b;
 }
 
 ConfirmScreen Static.-active {
-    background: $t-menu_sorot;
-    color: $t-menu_teks;
+    background: #4a4a4a;
+    color: #ffffff;
     text-style: bold;
 }
 

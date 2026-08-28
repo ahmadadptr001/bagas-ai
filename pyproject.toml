@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.1.108"
+version = "1.1.109"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,6 +52,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "requests>=2.31.0",
+    # WAJIB untuk seksi "◈ Sistem" di sidebar InfoSidebar (textual_app.py):
+    # cpu/memory/disk di-poll tiap ~2 dtk. Bukan syarat mati — tanpa psutil
+    # panel sistemnya kosong dan sisa app jalan normal — tapi didaftarkan
+    # karena monitoring kesehatan mesin adalah fitur inti sidebar.
+    "psutil>=5.9.0",
 ]
 
 # Perintah global yang bisa dipanggil dari terminal mana pun.

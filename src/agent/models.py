@@ -99,6 +99,10 @@ class ModelSpec:
     # dikirim sebagai {reasoning: {"enabled": bool}} — bukan lewat
     # chat_template_kwargs. Menang atas reasoning_key bila keduanya terisi.
     reasoning_param: str = ""
+    # ALTERNATIF gaya OpenCode Zen: effort dikirim sebagai field TINGKAT ATAS
+    # {<param>: "low"|"medium"|"high"} — sama seperti flag CLI `opencode run
+    # --variant high`. Saat ini paramnya "variant". Menang atas reasoning_param.
+    effort_param: str = ""
     # Tingkatan yang DITAWARKAN /effort. () = model ini tak punya effort, dan
     # menu akan mengatakannya terus-terang alih-alih memberi pilihan palsu.
     effort_levels: tuple[str, ...] = ()
@@ -111,6 +115,9 @@ class ModelSpec:
     max_tokens: int = 16384
     # Catatan jujur yang ditempel di menu /effort bila ada yang perlu diakui.
     effort_catatan: str = ""
+    # Tampil berlabel "(rekomendasi)" di menu /model — penanda pilihan
+    # utama bagas-ai, bukan janji kualitas: model tanpa label tetap sah.
+    rekomendasi: bool = False
 
     @property
     def is_web(self) -> bool:
@@ -153,6 +160,15 @@ class ModelSpec:
         lvl = effort if effort in self.effort_levels else self.effort_default
         if not lvl:
             return None
+        # Gaya OpenCode Zen: field tingkat atas `variant` — persis padanan
+        # `opencode run --variant low|medium|high`. Nama tingkatannya memang
+        # JUJUR low/medium/high (bukan label terjemahan), jadi dipakai apa
+        # adanya; tingkat luar daerah (mis. "langsung") jatuh ke bawaan —
+        # Zen tak punya varian "mati".
+        if self.effort_param:
+            nilai = lvl if lvl in ("low", "medium", "high") \
+                else _EFFORT_API.get(lvl)
+            return {self.effort_param: nilai} if nilai else None
         # Gaya OpenRouter: parameter resminya `reasoning.enabled` di level
         # atas body (contoh resmi OpenRouter), bukan chat_template_kwargs.
         if self.reasoning_param:
@@ -195,9 +211,13 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="big-pickle",
         multimodal=False,
+        effort_param="variant",
+        effort_levels=("low", "medium", "high"),
+        effort_default="medium",
         note=("Via OpenCode Zen — GRATIS tanpa API key; model pilihan tim "
               "opencode untuk agent koding"),
         max_tokens=16384,
+        rekomendasi=True,
     ),
     "hy3-free": ModelSpec(
         id="opencode/hy3-free",
@@ -205,8 +225,12 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="hy3-free",
         multimodal=False,
+        effort_param="variant",
+        effort_levels=("low", "medium", "high"),
+        effort_default="medium",
         note="Via OpenCode Zen — GRATIS tanpa API key",
         max_tokens=16384,
+        rekomendasi=True,
     ),
     "ling-3.0-flash-fin-free": ModelSpec(
         id="opencode/ling-3.0-flash-fin-free",
@@ -214,8 +238,12 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="ling-3.0-flash-fin-free",
         multimodal=False,
+        effort_param="variant",
+        effort_levels=("low", "medium", "high"),
+        effort_default="medium",
         note="Via OpenCode Zen — GRATIS tanpa API key",
         max_tokens=16384,
+        rekomendasi=True,
     ),
     "mimo-v2.5-free": ModelSpec(
         id="opencode/mimo-v2.5-free",
@@ -223,8 +251,12 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="mimo-v2.5-free",
         multimodal=False,
+        effort_param="variant",
+        effort_levels=("low", "medium", "high"),
+        effort_default="medium",
         note="Via OpenCode Zen — GRATIS tanpa API key",
         max_tokens=16384,
+        rekomendasi=True,
     ),
     "muse-spark-1.2-contributor-free": ModelSpec(
         id="opencode/muse-spark-1.2-contributor-free",
@@ -232,9 +264,13 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="muse-spark-1.2-contributor-free",
         multimodal=False,
+        effort_param="variant",
+        effort_levels=("low", "medium", "high"),
+        effort_default="medium",
         api_style="responses",  # TERUKUR: /chat/completions membalas error 500
         note="Via OpenCode Zen — GRATIS tanpa API key (hanya endpoint /responses)",
         max_tokens=16384,
+        rekomendasi=True,
     ),
     "nemotron-3-ultra-free": ModelSpec(
         id="opencode/nemotron-3-ultra-free",
@@ -242,8 +278,12 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="nemotron-3-ultra-free",
         multimodal=False,
+        effort_param="variant",
+        effort_levels=("low", "medium", "high"),
+        effort_default="medium",
         note="Via OpenCode Zen — GRATIS tanpa API key",
         max_tokens=16384,
+        rekomendasi=True,
     ),
     "nemotron-3.5-lightning-free": ModelSpec(
         id="opencode/nemotron-3.5-lightning-free",
@@ -251,6 +291,9 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="nemotron-3.5-lightning-free",
         multimodal=False,
+        effort_param="variant",
+        effort_levels=("low", "medium", "high"),
+        effort_default="medium",
         # Saat pengukuran awal (2026-08-29) upstream Zen untuk model ini masih
         # membalas 404 "Provider returned error" di /chat/completions — pasang
         # masuk tapi beri catatan jujur; penyedianya sendiri yang bermasalah.
@@ -533,6 +576,43 @@ def _varian_layanan() -> dict[str, list[tuple[str, str]]]:
     except Exception:  # noqa: BLE001 — Playwright tak terpasang, dsb.
         pass
     return hasil
+
+
+def kategori_model(spec: ModelSpec) -> str:
+    """Nama kategori model di menu /model — PEMISAH antar kelompok.
+
+    Tiga kelompok: OpenCode Zen (gratis, tanpa key), AI web (browser), dan
+    API ber-key. Urutan kemunculannya mengikuti urutan MODELS, jadi kategori
+    tak perlu didaftarkan terpisah."""
+    if spec.provider == "opencode":
+        return "OpenCode Zen — gratis, tanpa API key"
+    if spec.is_web:
+        return "AI Web — via browser"
+    return "API — butuh API key"
+
+
+def pilihan_model_grup() -> list[tuple[str, list[tuple[str, str]]]]:
+    """Menu /model TERKELOMPOK: [(kategori, [(tampilan, nilai), …]), …].
+
+    Kembaran berkelompok dari pilihan_model(): tiap layanan web tetap memuai
+    jadi variannya, dan tiap opsi membawa (tampilan, nilai) — tampilan boleh
+    berlabel "(rekomendasi)" / berubah gaya, nilai tetap alias yang
+    diterima Agent.set_model."""
+    grup: dict[str, list[tuple[str, str]]] = {}
+    varian = _varian_layanan()
+    for key, spec in MODELS.items():
+        if spec.is_web:
+            ops = varian.get(key)
+            if ops:
+                items = [f"{key} {label}" for label, _desc in ops]
+            else:
+                items = [key]
+        else:
+            items = [key]
+        label_bebas = " (rekomendasi)" if spec.rekomendasi else ""
+        grup.setdefault(kategori_model(spec), []).extend(
+            (it + label_bebas, it) for it in items)
+    return list(grup.items())
 
 
 def pilihan_model() -> list[str]:

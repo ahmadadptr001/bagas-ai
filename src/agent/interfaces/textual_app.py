@@ -13,6 +13,7 @@ Usage::
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,10 +24,10 @@ from textual.containers import Vertical
 from textual.reactive import reactive
 
 from .textual_widgets import (
-    StatusBar, ChatBox, MessageList, PlanPanel, PlanSidebar,
-    ImagePreview, TurnProgressBar, LogoWidget, StreamingPreview,
-    ThinkingBlock, SelectScreen, MultiSelectScreen, ConfirmScreen,
-    TextPromptScreen, ThemeScreen, QueueStrip,
+    StatusBar, ChatBox, MessageList, PlanPanel, PlanSidebar, InfoSidebar,
+    SystemPanel, ImagePreview, TurnProgressBar, LogoWidget,
+    StreamingPreview, ThinkingBlock, SelectScreen, MultiSelectScreen,
+    ConfirmScreen, TextPromptScreen, ThemeScreen, QueueStrip,
 )
 from ..ui.textual_theme import generate_css, variabel as variabel_tema
 from ..ui import tema
@@ -71,9 +72,10 @@ class BagasAIApp(App):
     │       ChatBox (input)           │  ← user input
     │       StatusBar (footer)        │  ← always visible
     └─────────────────────────────────┘
-    Layar LEBAR (≥ _LEBAR_MIN kolom, "dashboard"): PlanPanel diganti
-    PlanSidebar yang di-dock di KANAN — rencana tak lagi memakan tinggi
-    footer. Lihat _perbarui_layout_plan.
+    Layar LEBAR (≥ _LEBAR_MIN kolom, "dashboard"): InfoSidebar di-dock di
+    KANAN — kesehatan sistem real time (CPU/RAM/disk/GPU) selalu tampil,
+    plus rencana tugas saat model memakai plan(). Rencana tuntas hilang
+    sendiri setelah beberapa detik. Lihat _perbarui_layout_plan.
     """
 
     CSS = ""  # Will be set dynamically from theme
@@ -137,6 +139,20 @@ class BagasAIApp(App):
         # Snapshot rencana terakhir (lihat _poll_plan) — dipakai untuk
         # menggambar ulang panel saat layout berpindah sidebar <-> footer.
         self._plan_cache: list[dict] = []
+        # Rencana TUNTAS: waktu (time.monotonic) saat semua langkah
+        # selesai — panel rencana tampil ±8 dtk lalu hilang sendiri
+        # (lihat _poll_plan). State plan_tool TIDAK disentuh: reset()
+        # hanya boleh dipanggil core.run() saat giliran baru, jadi sistem
+        # tak pernah "melupakan" rencana yang belum digantikan.
+        self._plan_selesai_pada: float | None = None
+        # Rencana tuntas yang SUDAH disembunyikan. Cache TIDAK dikosongkan
+        # saat menyembunyikan (kalau dikosongkan, poll berikutnya melihat
+        # steps != cache dan rencana berkedip muncul-hilang tiap 8 dtk);
+        # flag inilah yang membuat _perbarui_layout_plan tetap menahan
+        # seksi rencana sampai giliran baru (plan_tool.reset via core.run).
+        self._plan_disembunyikan: bool = False
+        # Info GPU terakhir dari thread nvidia-smi (lihat _poll_gpu).
+        self._gpu_info: dict = {"nama": "…", "metrik": ""}
         # SATU referensi bound-method untuk handler pilihan. Akses ulang
         # ``self._handler_pilihan`` menghasilkan objek bound method BARU
         # (tak pernah `is` sama), jadi pasang/lepas handler memakai
@@ -199,11 +215,12 @@ class BagasAIApp(App):
     def compose(self) -> ComposeResult:
         yield LogoWidget(id="logo")
         yield MessageList(agent=self.agent, id="messages")
-        # Sidebar rencana versi desktop: dock KANAN, aktif saat terminal
-        # cukup lebar (kelas -lebar). Di bawah itu ia disembunyikan dan
-        # rencana tampil inline sebagai PlanPanel di footer — persis
-        # perilaku lama (lihat _perbarui_layout_plan).
-        yield PlanSidebar(id="plan-sidebar")
+        # Sidebar info versi desktop: dock KANAN, aktif saat terminal
+        # cukup lebar (kelas -lebar). Isinya kesehatan sistem real time
+        # (selalu) + rencana tugas (saat model memakai plan()). Di bawah
+        # itu sidebar disembunyikan dan rencana tampil inline sebagai
+        # PlanPanel di footer — perilaku lama (lihat _perbarui_layout_plan).
+        yield InfoSidebar(id="sidebar")
         # Strip antrean DI AREA TERMINAL — nempel di bawah jawaban
         # terakhir, bukan di area box footer di atas kotak chat.
         yield QueueStrip(id="queue-strip")
@@ -240,6 +257,20 @@ class BagasAIApp(App):
         # tiap giliran baru, jadi panel otomatis kosong saat giliran berganti.
         self.set_interval(0.3, self._poll_plan)
 
+        # Kesehatan sistem (CPU/RAM/disk) tiap 2 dtk — psutil cepat, aman
+        # di thread UI. GPU dibaca thread terpisah (nvidia-smi = proses
+        # eksternal yang membekukan render bila dijalankan di thread UI).
+        self.set_interval(2.0, self._poll_sistem)
+        self._thread_gpu = threading.Thread(
+            target=self._poll_gpu, daemon=True)
+        self._thread_gpu.start()
+
+        # _poll_plan early-return saat steps == cache (keduanya kosong di
+        # awal), jadi tata layout SEKARANG: begitu terminal cukup lebar,
+        # sidebar sistem tampil sejak detik pertama tanpa menunggu rencana
+        # pertama atau event resize.
+        self._perbarui_layout_plan()
+
     def on_unmount(self):
         """Lepas handler pilihan saat app ditutup.
 
@@ -258,8 +289,13 @@ class BagasAIApp(App):
     def _poll_plan(self):
         """Baca snapshot plan_tool dan tampilkan ke panel yang benar.
 
-        Dijalankan tiap 0.3 dtk di thread UI. Snapshot dibandingkan dengan
-        cache supaya panel tidak digambar ulang saat tidak ada perubahan.
+        Dijalankan tiap 0.3 dtk di thread UI. Rencana yang TUNTAS
+        (current > jumlah langkah) tetap tampil ±8 dtk sebagai daftar
+        centang penuh, lalu PANEL-nya disembunyikan — tapi cache & state
+        plan_tool TIDAK di-reset: reset() hanya milik core.run() saat
+        giliran baru. Jadi begitu terminal berpindah layout, rencana
+        tuntas tadi tetap bisa muncul lagi, dan sistem tak pernah
+        "melupakan" rencana yang belum digantikan giliran berikutnya.
         """
         try:
             from ..tools import plan_tool
@@ -277,15 +313,119 @@ class BagasAIApp(App):
                                                   else "pending"),
             })
         if steps == self._plan_cache:
+            # Tak ada perubahan — tapi jeda tampil rencana tuntas bisa
+            # lewat tanpa perubahan langkah, cek penghabisan di sini.
+            self._mungkin_sembunyikan_tuntas()
             return
         self._plan_cache = steps
+        # Rencana BARU dari model (bukan hantu cache) — tampilkan lagi
+        # walau rencana sebelumnya baru saja disembunyikan.
+        self._plan_disembunyikan = False
+        # Baru tuntas? Catat waktunya. Masih berjalan? buang penandanya.
+        if steps and all(s["status"] == "done" for s in steps):
+            if self._plan_selesai_pada is None:
+                self._plan_selesai_pada = time.monotonic()
+        else:
+            self._plan_selesai_pada = None
         self._perbarui_layout_plan()
+        self._mungkin_sembunyikan_tuntas()
+
+    def _mungkin_sembunyikan_tuntas(self, paksa: bool = False):
+        """Sembunyikan panel rencana bila sudah tuntas ±8 dtk.
+
+        Ini PENYEMBUNYIAN TAMPILAN semata — self._plan_cache dan state
+        plan_tool dibiarkan apa adanya: cache supaya poll berikutnya tak
+        menganggapnya "rencana baru" (kedipan), state plan_tool karena
+        reset() hanya milik core.run() saat giliran baru. Beralih layout
+        (sempit<->lebar) pun tak membangkitkan hantu rencana tamat.
+        """
+        if self._plan_selesai_pada is None or self._plan_disembunyikan:
+            return
+        if not paksa and time.monotonic() - self._plan_selesai_pada < 8.0:
+            return
+        self._plan_selesai_pada = None
+        self._plan_disembunyikan = True
+        self._perbarui_layout_plan()
+
+    # ─── Kesehatan sistem (sidebar lebar) ─────────────────────────────
+
+    def _poll_sistem(self):
+        """Segarkan seksi Sistem di sidebar (dipanggil tiap 2 dtk)."""
+        try:
+            panel = self.query_one("#system-panel", SystemPanel)
+        except Exception:  # noqa: BLE001 — sidebar belum ada / dibongkar
+            return
+        try:
+            import psutil
+            cpu = psutil.cpu_percent(interval=None)  # non-blocking
+            ram = psutil.virtual_memory()
+            ram_teks = f"{ram.used / (1 << 30):.0f}/{ram.total / (1 << 30):.0f}G"
+            disk = psutil.disk_usage(str(Path.home().anchor or "/"))
+            disk_teks = (f"{disk.used / (1 << 30):.0f}/"
+                         f"{disk.total / (1 << 30):.0f}G")
+        except Exception:  # noqa: BLE001 — psutil tak ada: kosongkan metrik
+            panel.clear()
+            return
+        try:
+            panel.terapkan(
+                cpu=cpu,
+                ram_persen=ram.percent, ram_teks=ram_teks,
+                disk_persen=disk.percent, disk_teks=disk_teks,
+                gpu_nama=self._gpu_info.get("nama", ""),
+                gpu_metrik=self._gpu_info.get("metrik", ""),
+            )
+        except Exception:  # noqa: BLE001 — UI sedang ditutup
+            pass
+
+    def _poll_gpu(self):
+        """Baca info GPU dari THREAD TERSENDIRI (bukan thread UI).
+
+        nvidia-smi adalah proses eksternal — di thread UI ia membekukan
+        render ±100-300 ms tiap kali dipanggil. Thread ini hidup sepanjang
+        app, menulis hasil ke self._gpu_info yang dibaca _poll_sistem.
+        """
+        import subprocess
+        while True:
+            nama, metrik = "", ""
+            try:
+                out = subprocess.run(
+                    ["nvidia-smi",
+                     "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=4,
+                ).stdout.strip().splitlines()
+                if out:
+                    bag = [b.strip() for b in out[0].split(",")]
+                    nama = bag[0]
+                    if len(bag) >= 4:
+                        metrik = f"{bag[1]}% · {bag[2]}/{bag[3]} MiB"
+            except Exception:  # noqa: BLE001 — tak ada nvidia-smi
+                nama, metrik = "", ""
+            if not nama:
+                # Fallback nama GPU via WMI (tanpa metrik — tak ada cara
+                # baca utilisasi GPU lintas vendor yang ringan di Windows).
+                try:
+                    out = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "(Get-CimInstance Win32_VideoController |"
+                         " Select-Object -First 1).Name"],
+                        capture_output=True, text=True, timeout=6,
+                    ).stdout.strip()
+                    if out:
+                        nama = out
+                except Exception:  # noqa: BLE001
+                    pass
+            self._gpu_info = {"nama": nama, "metrik": metrik}
+            # nvidia-smi butuh jeda; WMI juga. 5 dtk cukup halus.
+            time.sleep(5.0)
 
     def _perbarui_layout_plan(self, lebar: bool | None = None):
         """Pindahkan rencana antara sidebar kanan (lebar) dan footer (sempit).
 
-        ``lebar`` biasanya dihitung dari ukuran app — TAPI saat dipanggil
-        dari ``on_resize`` nilainya harus dari ``event.size``: dispatch MRO
+        Sidebar info (#sidebar) adalah WADAH dock-kanan berisi seksi
+        Sistem (selalu, hanya di layar lebar) dan seksi Rencana. ``lebar``
+        biasanya dihitung dari ukuran app — TAPI saat dipanggil dari
+        ``on_resize`` nilainya harus dari ``event.size``: dispatch MRO
         menjalankan handler kita SEBELUM ``App._on_resize`` memperbarui
         ``self._size``, jadi ``self.size`` masih lebar LAMA di situ.
         Kelas Screen tidak dipakai karena hanya melekat pada screen AKTIF —
@@ -294,7 +434,8 @@ class BagasAIApp(App):
         """
         try:
             plan = self.query_one("#plan", PlanPanel)
-            sidebar = self.query_one("#plan-sidebar", PlanSidebar)
+            sidebar = self.query_one("#plan-side", PlanSidebar)
+            wadah = self.query_one("#sidebar", InfoSidebar)
         except Exception:  # noqa: BLE001 — widget sedang dibongkar
             return
         if lebar is None:
@@ -303,17 +444,24 @@ class BagasAIApp(App):
             except Exception:  # noqa: BLE001
                 lebar = False
         steps = self._plan_cache
+        if self._plan_disembunyikan:
+            # Rencana tuntas yang sudah "dipensiunkan" — seksi rencana
+            # tidak dimunculkan lagi sampai giliran baru menulis rencana
+            # baru (flag dilepas di _poll_plan saat steps berubah).
+            steps = []
         if not steps:
             plan.clear()
             sidebar.clear()
-            sidebar.display = False
+            # Sidebar TETAP tampil di layar lebar — seksi Sistem selalu ada;
+            # yang hilang hanya seksi rencananya.
+            wadah.display = lebar
             return
         if lebar:
             sidebar.update_plan(steps)
-            sidebar.display = True
+            wadah.display = True
             plan.clear()  # sembunyikan versi footer — jangan dobel
         else:
-            sidebar.display = False
+            wadah.display = False
             sidebar.clear()
             plan.update_plan(steps)
             try:
@@ -702,19 +850,25 @@ class BagasAIApp(App):
             self._show_model_menu()
 
     def _show_model_menu(self):
-        """Menu pilihan model — NAMA MODEL SUNGGUHAN, bukan nama umum.
+        """Menu pilihan model — NAMA MODEL SUNGGUHAN, dikelompokkan per
+        kategori dengan pemisah (OpenCode Zen / AI web / API ber-key).
 
         Tiap layanan web memuai jadi tiap variannya ("GLM-5.2", "K2.6",
         "Qwen3.8-Max") dari web_models connectornya; model API tampil
-        apa adanya."""
+        apa adanya. Model rekomendasi berlabel "(rekomendasi)" (bold),
+        tapi nilai yang dikembalikan tetap alias murninya."""
         from .. import models as models_mod
+        from .textual_widgets.modal_screens import _SEP
 
+        options: list = []
         try:
-            model_list = models_mod.pilihan_model()
+            for kategori, items in models_mod.pilihan_model_grup():
+                options.append((_SEP, kategori))
+                options.extend(items)
         except Exception:  # noqa: BLE001 — katalog gagal dimuat
-            model_list = []
-        if not model_list:
-            model_list = [self.agent.model_spec.label]
+            options = []
+        if not options:
+            options = [self.agent.model_spec.label]
         current = self.agent.model_spec.label
         if getattr(self.agent, "_web_varian", None):
             current += f" · {self.agent._web_varian}"
@@ -724,7 +878,7 @@ class BagasAIApp(App):
 
         self.push_screen(SelectScreen(
             title=f"Model (saat ini: {current})",
-            options=model_list,
+            options=options,
         ), on_select)
 
     def _setelah_ganti_model(self, result: str | None):

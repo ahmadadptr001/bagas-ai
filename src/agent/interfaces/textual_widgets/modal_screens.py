@@ -15,6 +15,10 @@ from rich.text import Text
 
 from ...ui import tema
 
+# Penanda baris PEMISAH kategori di SelectScreen.options: opsi berbentuk
+# (_SEP, "Nama Kategori") dirender sebagai judul kategori (bukan pilihan).
+_SEP = "\x00SEP"
+
 
 class SelectScreen(ModalScreen[str]):
     """Modal screen untuk select menu (pilih satu).
@@ -89,9 +93,41 @@ class SelectScreen(ModalScreen[str]):
                  hint: str = "", **kwargs):
         super().__init__(**kwargs)
         self.title_text = title
+        # Opsi boleh string polos ATAU (tampilan, nilai): tampilan adalah
+        # apa yang dilihat pengguna (bisa berlabel/gaya), nilai adalah
+        # string yang dikembalikan dismiss(). String polos = keduanya sama.
         self.options = options or []
         self.hint_text = hint or "↑↓ pilih · ⏎ konfirmasi · esc batal"
         self.result: str | None = None
+
+    def _nilai(self, index: int | None) -> str | None:
+        """Nilai asli opsi pada ``index`` (bukan prompt yang dirender)."""
+        if index is None or not (0 <= index < len(self.options)):
+            return None
+        opt = self.options[index]
+        return opt[1] if isinstance(opt, tuple) else opt
+
+    def _tampilan(self, opt):
+        """Teks yang dirender di OptionList — pemisah kategori atau
+        opsi berlabel "(rekomendasi)" (bold, sesuai permintaan)."""
+        if isinstance(opt, tuple):
+            tampil, _nilai_asli = opt
+            if tampil == _SEP:
+                # Baris PEMISAH kategori: nama kategori bold + garis.
+                t = Text("\n")
+                t.append(opt[1], style="bold")
+                t.append("  " + "─" * 34, style="dim")
+                return t
+            if tampil.endswith(" (rekomendasi)"):
+                base = tampil[:-len(" (rekomendasi)")]
+                t = Text(base + " ")
+                t.append("(rekomendasi)", style="bold")
+                return t
+            return tampil
+        return opt
+
+    def _adalah_separator(self, opt) -> bool:
+        return isinstance(opt, tuple) and opt[0] == _SEP
 
     def compose(self):
         with Vertical(id="select-container"):
@@ -99,7 +135,11 @@ class SelectScreen(ModalScreen[str]):
             if self.options:
                 opt_list = OptionList(id="select-options")
                 for opt in self.options:
-                    opt_list.add_option(Option(opt))
+                    # Pemisah kategori DISABLED: tak bisa disorot/dipilih —
+                    # panah melewatinya, jadi navigasi tetap mulus.
+                    opt_list.add_option(Option(
+                        self._tampilan(opt),
+                        disabled=self._adalah_separator(opt)))
                 yield opt_list
             else:
                 yield Static("(no options)", id="select-empty")
@@ -113,9 +153,15 @@ class SelectScreen(ModalScreen[str]):
         opt_list = self.query_one("#select-options", OptionList)
         # Tanpa ini ``highlighted`` bisa None: Enter ditangkap binding
         # priority di Screen lalu ``action_confirm`` pulang tanpa bunyi —
-        # modal tampak "macet" dan tidak bisa dikonfirmasi.
+        # modal tampak "macet" dan tidak bisa dikonfirmasi. Sorot opsi
+        # pertama yang BUKAN pemisah (baris kategori disabled).
         if opt_list.highlighted is None:
-            opt_list.highlighted = 0
+            for i, opt in enumerate(self.options):
+                if not self._adalah_separator(opt):
+                    opt_list.highlighted = i
+                    break
+            else:
+                opt_list.highlighted = 0
         opt_list.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected):
@@ -134,10 +180,16 @@ class SelectScreen(ModalScreen[str]):
         self._pilih(opt_list.highlighted)
 
     def _pilih(self, index: int | None):
-        """Kembalikan string asli pada ``index`` (bukan prompt yang dirender)."""
-        if index is None or not (0 <= index < len(self.options)):
+        """Kembalikan nilai asli pada ``index`` (bukan prompt yang dirender).
+
+        Baris PEMISAH kategori tak bisa dipilih: klik/Enter di atasnya
+        diabaikan supaya tak ada "kategori" yang terkirim sebagai pilihan."""
+        nilai = self._nilai(index)
+        if nilai is None:
             return
-        self.result = self.options[index]
+        if self._adalah_separator(self.options[index]):
+            return
+        self.result = nilai
         self.dismiss(self.result)
 
     def action_cancel(self):

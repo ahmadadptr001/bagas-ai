@@ -12,6 +12,8 @@ from .chat_box import ChatBox
 from .message_list import MessageList
 from .plan_panel import PlanPanel
 from .plan_sidebar import PlanSidebar
+from .system_panel import SystemPanel
+from .info_sidebar import InfoSidebar
 from .image_preview import ImagePreview
 from .progress_bar import TurnProgressBar
 from .logo import LogoWidget
@@ -27,6 +29,8 @@ __all__ = [
     "MessageList",
     "PlanPanel",
     "PlanSidebar",
+    "SystemPanel",
+    "InfoSidebar",
     "ImagePreview",
     "TurnProgressBar",
     "LogoWidget",
