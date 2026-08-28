@@ -1560,12 +1560,49 @@ class BagasAIApp(App):
         2. ``_turn_id`` tidak dinaikkan — ``_turn_complete`` dari giliran
            yang dibatalkan tetap diproses (turn_id masih cocok), jadi
            hasilnya dirender seolah-olah giliran tidak pernah dibatalkan.
+
+        Pesan yang mengantre saat pembatalan MAJU sebagai giliran baru:
+        pemrosesan antreannya ditunda sampai worker lama benar-benar mati
+        (lihat _antre_maju_setelah_batal) — dua agent.run yang jalan
+        bersamaan saling menginjak memory/connector.
         """
         self._cancel_event.set()
         # Naikkan turn_id: hasil/error dari worker lama kini "basi" dan
         # diabaikan oleh _turn_complete/_turn_error.
         self._turn_id += 1
+        # Referensi worker HARUS dipegang SEBELUM _bersihkan_turn_ui —
+        # ia meng-nol-kan _worker_thread, dan antrean hanya boleh maju
+        # setelah worker ini benar-benar mati.
+        wt = self._worker_thread
         self._bersihkan_turn_ui()
+        self._antre_maju_setelah_batal(wt)
+
+    def _antre_maju_setelah_batal(self, wt):
+        """Jalankan pesan antrean begitu worker yang dibatalkan mati.
+
+        Dulu antrean TERSANGKUT setelah Ctrl+C: _turn_error giliran lama
+        diabaikan (turn_id basi, memang benar), dan _process_queue hanya
+        dipanggil dari _turn_complete / pesan baru — jadi pesan yang sudah
+        mengantre diam menunggu pengguna mengetik lagi. Sekarang begitu
+        worker lama berhenti, antrean maju sebagai giliran baru, persis
+        seperti giliran yang selesai normal.
+
+        TAK BOLEH langsung _process_queue() di sini: worker lama mungkin
+        masih hidup beberapa detik (menunggu network/tool menghormati
+        cancel_event), dan agent.run kedua yang jalan paralel dengannya
+        menginjak state agent yang sama. Bergabung lewat thread daemon,
+        lalu lanjut di thread UI lewat _safe_call.
+        """
+        if wt is None or not wt.is_alive():
+            # Worker sudah mati / tak pernah ada — antrean boleh maju langsung.
+            self._process_queue()
+            return
+
+        def tunggu_lalu_maju():
+            wt.join(timeout=30.0)
+            self._safe_call(self._process_queue)
+
+        threading.Thread(target=tunggu_lalu_maju, daemon=True).start()
 
     def _stop_progress_timer(self):
         """Hentikan timer animasi progress bila masih hidup.
@@ -1741,6 +1778,107 @@ class BagasAIApp(App):
     def _show_tool_start(self, name: str, args: dict):
         progress = self.query_one("#progress", TurnProgressBar)
         progress.update_progress(0.0, f"⚙ {name}")
+        # Pratinjau perubahan file ditampilkan SEBELUM aksi — persis pola
+        # cli.py.on_tool: write_file => blok write() ringkas; edit_file/
+        # edit_files => diff berwarna; delete_file => isi yang akan hilang.
+        # Di sini (thread UI) file pun BELUM tersentuh, jadi isi lamanya
+        # masih bisa dibaca untuk di-diff.
+        self._pratinjau_file(name, args)
+
+    # Tool tulis/ubah yang pratinjaunya berupa diff/blok (selaras
+    # _TOOL_DIFF di cli.py).
+    _TOOL_DIFF = ("write_file", "edit_file", "edit_files", "append_file")
+
+    def _pratinjau_file(self, name: str, args: dict) -> None:
+        """Diff / blok write() sebelum tool mengubah isi disk.
+
+        Kalau prediksinya "tak akan berubah apa pun" (old == new pada file
+        yang ada), jangan tampilkan apa pun — tool-nya akan menolak dan
+        pesan galatnya yang tampil sebagai hasil langkah.
+        """
+        if not isinstance(args, dict):
+            return
+        try:
+            from ..tools.files import _safe_path
+        except Exception:  # noqa: BLE001 — modul belum siap
+            return
+        msg_list = None
+        try:
+            msg_list = self.query_one("#messages", MessageList)
+        except Exception:  # noqa: BLE001 — widget sedang dibongkar
+            return
+
+        def proses(path, sub_args, nama_tool):
+            try:
+                target = _safe_path(path)
+                ada = target.is_file()
+                lama = (target.read_text(encoding="utf-8",
+                                         errors="replace") if ada else "")
+            except Exception:  # noqa: BLE001 — baca gagal: tanpa pratinjau
+                return
+            if nama_tool == "write_file":
+                if ada and lama == (sub_args.get("content") or ""):
+                    return  # tak akan berubah
+                msg_list.append_write_block(
+                    path, sub_args.get("content") or "", is_new=not ada)
+                self._catat_diff_memory(path, lama,
+                                        sub_args.get("content") or "",
+                                        not ada)
+                return
+            # edit_file / append_file / suntingan satuan edit_files.
+            baru = self._hitung_sesudah(nama_tool, lama, sub_args)
+            if ada and lama == baru:
+                return  # akan ditolak/tanpa efek — jangan menyesatkan
+            msg_list.append_diff(path, lama, baru, is_new=not ada)
+            self._catat_diff_memory(path, lama, baru, not ada)
+
+        try:
+            if name == "edit_files":
+                for e in (args.get("edits") or []):
+                    if isinstance(e, dict) and e.get("path"):
+                        proses(e["path"], e, "edit_file")
+            elif name in self._TOOL_DIFF and args.get("path"):
+                proses(args["path"], args, name)
+        except Exception:  # noqa: BLE001 — pratinjau tak boleh mematikan UI
+            pass
+
+    @staticmethod
+    def _hitung_sesudah(name: str, lama: str, args: dict) -> str:
+        """Isi file SETELAH tool diterapkan — simulasi ringkas isi
+        cli._isi_sebelum_sesudah (cukup untuk pratinjau diff; kecocokan
+        longgar dsb. tetap urusan tool-nya)."""
+        if name == "append_file":
+            return lama + (args.get("content") or "")
+        if name == "edit_file":
+            cari = args.get("old_text") or ""
+            if not cari or cari not in lama:
+                return lama  # akan ditolak — tak ada diff
+            jml = args.get("count", 1)
+            try:
+                jml = int(jml)
+            except (TypeError, ValueError):
+                jml = 1
+            n = lama.count(cari) if jml == -1 else jml
+            return lama.replace(cari, args.get("new_text") or "", n)
+        return lama
+
+    def _catat_diff_memory(self, path: str, lama: str, baru: str,
+                           is_new: bool) -> None:
+        """Simpan pratinjau diff ke memory agar --resume tetap memilikinya."""
+        try:
+            import difflib
+            ag = self.agent
+            if ag is None or not hasattr(ag, "memory"):
+                return
+            d = list(difflib.unified_diff(lama.splitlines(), baru.splitlines(),
+                                          lineterm="", n=2))
+            if len(d) >= 2 and d[0].startswith("---"):
+                d = d[2:]
+            if len(d) > 400:
+                d = d[:400] + ["… (diff tersimpan dipangkas)"]
+            ag.memory.add_diff(path, "\n".join(d), is_new=is_new)
+        except Exception:  # noqa: BLE001 — memory opsional
+            pass
 
     def agent_on_result(self, name: str, result: str):
         """Tool finished — retrieve stored args by name."""
