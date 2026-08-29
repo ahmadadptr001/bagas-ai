@@ -13,6 +13,7 @@ from . import media  # noqa: F401,E402
 from . import scripts_tool  # noqa: F401,E402
 from . import interact_tool  # noqa: F401,E402
 from . import screen  # noqa: F401,E402
+from . import image_local  # noqa: F401,E402
 from . import search  # noqa: F401,E402
 from . import extras  # noqa: F401,E402
 from . import pro  # noqa: F401,E402
@@ -29,5 +30,7 @@ from . import katalog  # noqa: F401,E402
 # lewat endpoint terpisah. Gambar kini DILAMPIRKAN langsung ke percakapan web
 # (Agent.run(attachments=...) & take_screenshot), jadi situs AI web sendiri yang
 # melihatnya — dalam konteks percakapan yang sama, bukan panggilan sekali-pakai.
+# Untuk inspeksi yang SAMA SEKALI tidak mengunggah byte gambar, tersedia
+# image_local.py::read_image_local (Pillow + OCR/QR lokal opsional).
 
 __all__ = ["REGISTRY", "Tool", "execute", "get_schemas", "tool"]

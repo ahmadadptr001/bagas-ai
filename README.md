@@ -15,7 +15,8 @@ dari **terminal mana pun** — mirip CLI `claude`.
 | 🔎 **Pencarian web** | Cari info terkini via DuckDuckGo (tanpa API key). |
 | 📁 **File** | Baca, tulis, dan daftar file di folder kerja. |
 | 🖥️ **Eksekusi kode** | Jalankan Python & perintah shell (dengan timeout, bisa dimatikan). |
-| 🖼️ **Multimodal** | Analisis gambar. |
+| 🖼️ **Gambar lokal + multimodal** | `/image <path>` membaca metadata, warna, struktur, QR, dan OCR secara lokal tanpa upload; model vision tetap tersedia untuk analisis semantik. |
+| 📹 **Live screen** | `/live on` mengambil screenshot terbaru pada tiap pertanyaan dan melampirkannya ke model vision (`/video` adalah alias). |
 | 🧠 **Memori** | Ingat preferensi & fakta penting lintas sesi; simpan skrip reusable. |
 | 🔁 **Banyak model** | Ganti model kapan pun lewat `/model`. |
 
@@ -86,16 +87,27 @@ di posisi teratas daftar `/model`: `opencode/big-pickle`, `opencode/hy3-free`,
 `opencode/muse-spark-1.2-contributor-free`, `opencode/nemotron-3-ultra-free`,
 `opencode/nemotron-3.5-lightning-free`.
 
-Tidak ada syarat apa pun — langsung:
+Tidak perlu API key untuk mencoba — langsung:
 
 1. Pilih modelnya lewat `/model` (contoh: `/model big-pickle`).
 2. Selesai — tidak perlu login, tidak perlu key.
+
+Akses anonim tetap mempunyai kuota bersama/per-IP. Jika Zen membalas HTTP 429
+`FreeUsageLimitError`, itu berarti kuota gratis jaringan tersebut sedang habis,
+bukan kerusakan tool. Bagas-AI menampilkan penyebab ini secara spesifik dan
+tidak lagi mengulang request yang sama selama lima menit. Tunggu kuota tersedia,
+pakai kredensial akun, atau pilih model web lewat `/model`.
 
 Ingin kuota pribadi alih-alih kuota anonim per-IP? `OPENCODE_API_KEY`
 opsional: ambil gratis di **https://opencode.ai/auth**, lalu tulis
 `OPENCODE_API_KEY=...` di `~/.bagasai/.env` — atau cukup jalankan
 `opencode auth login` bila CLI opencode terpasang (installer menawarkan
 memasangnya; bagas-ai membaca key-nya otomatis dari auth.json CLI itu).
+
+Opsi `/effort` tidak mengirim field `variant` ke API OpenCode Zen. `--variant`
+pada CLI OpenCode adalah konfigurasi sisi klien yang dipetakan ke opsi masing-
+masing provider/model, bukan parameter universal endpoint; karena itu Bagas-AI
+hanya menawarkan effort untuk model API yang parameternya sudah terverifikasi.
 
 ---
 
@@ -113,8 +125,26 @@ bagas-ai help         # bantuan
 
 ### Perintah dalam chat
 
-`/menu` `/model` `/effort` `/new` `/delete` `/reset` `/memory` `/scripts`
-`/clear` `/update` `/help` `/exit`
+`/menu` `/model` `/effort` `/live` `/video` `/stream` `/mic` `/voice` `/image`
+`/new` `/delete` `/reset` `/memory` `/scripts` `/clear` `/update` `/help` `/exit`
+
+`/live on` hanya dapat diaktifkan jika model terpilih mendukung vision dan
+jalur lampiran gambar. Selama aktif, bagas-ai mengambil satu screenshot tepat
+sebelum setiap pertanyaan biasa dikirim; `/live off` menghentikannya dan
+menghapus screenshot sementara. `/video` mempunyai perilaku yang sama.
+
+`/mic on` membacakan kabar proses dan jawaban akhir; gunakan `/mic tes` untuk
+memeriksa suara. `/voice on` menyalakan mikrofon sebagai input perintah: sebut
+“bagas ai”, ucapkan perintah, lalu diam dua detik. Mikrofon selalu mulai dalam
+keadaan mati pada sesi baru dan statusnya terlihat permanen di footer.
+
+`/image "path gambar.png"` membuka gambar langsung melalui Python/Pillow di
+laptop dan menampilkan format, dimensi, frame, transparansi, warna dominan,
+kecerahan, sketsa luminans, QR (jika OpenCV tersedia), serta OCR (jika
+Tesseract lokal tersedia). Tidak ada byte gambar yang dikirim ke provider.
+Tool agent dengan perilaku yang sama bernama `read_image_local`. Karena ini
+bukan model vision lokal, pengenalan objek atau makna adegan yang mendalam tetap
+memerlukan model vision dan lampiran gambar.
 
 ---
 

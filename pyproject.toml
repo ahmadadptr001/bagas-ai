@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.1.114"
+version = "1.1.115"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,9 @@ dependencies = [
     # mesin bersih impornya bisa gagal saat startup.
     "prompt_toolkit>=3.0.39",
     "pyfiglet>=1.0.0",
+    # /live dan tool take_screenshot: tangkap layar lintas monitor lalu
+    # kecilkan PNG sebelum dikirim ke model vision.
+    "Pillow>=10.0.0",
     # Suara kabar berbahasa Indonesia yang natural (lihat suara.py). BUKAN
     # syarat mati: tanpa paket ini — atau saat laptop sedang luring — fitur
     # suaranya turun sendiri ke System.Speech bawaan Windows. Tetap didaftarkan

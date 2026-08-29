@@ -9,7 +9,8 @@ bagas-ai punya DUA jalur model yang cara kerjanya berbeda mendasar:
   2. API (`nvidia/...`, `openrouter/...`, `opencode/...`) — endpoint
      OpenAI-compatible. Konteks dipegang KITA (dikirim ulang tiap request),
      tool memakai function-calling ASLI, dan /effort berarti mengirim
-     parameter `extra_body`. Penyedianya dibedakan lewat ModelSpec.provider:
+     parameter `extra_body` hanya bila parameter modelnya memang terverifikasi.
+     Penyedianya dibedakan lewat ModelSpec.provider:
        - "nvidia"      : integrate.api.nvidia.com (NVIDIA_API_KEY)
        - "openrouter"  : openrouter.ai/api/v1     (OPENROUTER_API_KEY)
        - "opencode"    : opencode.ai/zen/v1       (TANPA key — gratis anonim;
@@ -99,9 +100,10 @@ class ModelSpec:
     # dikirim sebagai {reasoning: {"enabled": bool}} — bukan lewat
     # chat_template_kwargs. Menang atas reasoning_key bila keduanya terisi.
     reasoning_param: str = ""
-    # ALTERNATIF gaya OpenCode Zen: effort dikirim sebagai field TINGKAT ATAS
-    # {<param>: "low"|"medium"|"high"} — sama seperti flag CLI `opencode run
-    # --variant high`. Saat ini paramnya "variant". Menang atas reasoning_param.
+    # Field effort tingkat atas untuk endpoint yang MEMANG mendokumentasikannya.
+    # Jangan isi hanya karena sebuah CLI punya flag bernama sama: CLI OpenCode
+    # `--variant` adalah konfigurasi klien yang dipetakan ke opsi tiap provider,
+    # bukan field universal API Zen.
     effort_param: str = ""
     # Tingkatan yang DITAWARKAN /effort. () = model ini tak punya effort, dan
     # menu akan mengatakannya terus-terang alih-alih memberi pilihan palsu.
@@ -160,11 +162,8 @@ class ModelSpec:
         lvl = effort if effort in self.effort_levels else self.effort_default
         if not lvl:
             return None
-        # Gaya OpenCode Zen: field tingkat atas `variant` — persis padanan
-        # `opencode run --variant low|medium|high`. Nama tingkatannya memang
-        # JUJUR low/medium/high (bukan label terjemahan), jadi dipakai apa
-        # adanya; tingkat luar daerah (mis. "langsung") jatuh ke bawaan —
-        # Zen tak punya varian "mati".
+        # Gaya field effort tingkat atas (hanya untuk endpoint yang sudah
+        # diverifikasi menerima field tersebut).
         if self.effort_param:
             nilai = lvl if lvl in ("low", "medium", "high") \
                 else _EFFORT_API.get(lvl)
@@ -202,18 +201,17 @@ MODELS: dict[str, ModelSpec] = {
     # --- jalur OpenCode Zen (opencode.ai/zen/v1) — PALING ATAS ---------------
     # Semua entri di bawah GRATIS dan jalan TANPA API key (akses anonim
     # per-IP, TERUKUR 2026-08-29 — key dari opencode.ai/auth hanya opsional).
-    # Kebijakan reasoning tiap model BELUM diukur — jadi tak ada upaya saklar
-    # yang dijanjikan duluan; api_style "responses" hanya untuk model yang
-    # memang TERUKUR hanya dilayani di endpoint /responses.
+    # Kebijakan reasoning tiap model BELUM diukur — jadi /effort sengaja tidak
+    # ditawarkan. Flag CLI OpenCode `--variant` TIDAK dikirim mentah sebagai
+    # field API; dokumentasinya menjelaskan variant sebagai pemetaan opsi
+    # provider/model di sisi klien. api_style "responses" hanya untuk model
+    # yang memang TERUKUR hanya dilayani di endpoint /responses.
     "big-pickle": ModelSpec(
         id="opencode/big-pickle",
         label="Big Pickle (API)",
         provider="opencode",
         api_model="big-pickle",
         multimodal=False,
-        effort_param="variant",
-        effort_levels=("low", "medium", "high"),
-        effort_default="medium",
         note=("Via OpenCode Zen — GRATIS tanpa API key; model pilihan tim "
               "opencode untuk agent koding"),
         max_tokens=16384,
@@ -225,9 +223,6 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="hy3-free",
         multimodal=False,
-        effort_param="variant",
-        effort_levels=("low", "medium", "high"),
-        effort_default="medium",
         note="Via OpenCode Zen — GRATIS tanpa API key",
         max_tokens=16384,
         rekomendasi=True,
@@ -238,9 +233,6 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="ling-3.0-flash-fin-free",
         multimodal=False,
-        effort_param="variant",
-        effort_levels=("low", "medium", "high"),
-        effort_default="medium",
         note="Via OpenCode Zen — GRATIS tanpa API key",
         max_tokens=16384,
         rekomendasi=True,
@@ -251,9 +243,6 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="mimo-v2.5-free",
         multimodal=False,
-        effort_param="variant",
-        effort_levels=("low", "medium", "high"),
-        effort_default="medium",
         note="Via OpenCode Zen — GRATIS tanpa API key",
         max_tokens=16384,
         rekomendasi=True,
@@ -264,9 +253,6 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="muse-spark-1.2-contributor-free",
         multimodal=False,
-        effort_param="variant",
-        effort_levels=("low", "medium", "high"),
-        effort_default="medium",
         api_style="responses",  # TERUKUR: /chat/completions membalas error 500
         note="Via OpenCode Zen — GRATIS tanpa API key (hanya endpoint /responses)",
         max_tokens=16384,
@@ -278,9 +264,6 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="nemotron-3-ultra-free",
         multimodal=False,
-        effort_param="variant",
-        effort_levels=("low", "medium", "high"),
-        effort_default="medium",
         note="Via OpenCode Zen — GRATIS tanpa API key",
         max_tokens=16384,
         rekomendasi=True,
@@ -291,9 +274,6 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="nemotron-3.5-lightning-free",
         multimodal=False,
-        effort_param="variant",
-        effort_levels=("low", "medium", "high"),
-        effort_default="medium",
         # Saat pengukuran awal (2026-08-29) upstream Zen untuk model ini masih
         # membalas 404 "Provider returned error" di /chat/completions — pasang
         # masuk tapi beri catatan jujur; penyedianya sendiri yang bermasalah.

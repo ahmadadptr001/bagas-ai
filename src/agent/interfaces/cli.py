@@ -273,6 +273,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
     ("voice", "mikrofon: sebut \"bagas ai …\" lalu diam sejenak "
               "(on/off/tes/jangkau/dekat|normal|jauh)"),
+    ("image", "baca gambar lokal via Python tanpa upload"),
     ("compact", "simpan riwayat percakapan ke berkas memory"),
     ("send-compact", "kirim berkas memory terakhir ke percakapan sekarang"),
     ("add-dir", "tambah folder konteks"),
@@ -288,7 +289,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("permissions-bot", "atur izin siapa yang boleh kontrol via Telegram"),
     ("review", "cari bug & kesalahan sistem di seluruh proyek"),
     ("scan", "pindai ulang & segarkan peta proyek"),
-    ("live", "hidup/matikan tampilan mengalir dengan footer status"),
+    ("live", "screenshot layar tiap pertanyaan (on/off/status)"),
+    ("video", "alias mode screenshot /live"),
+    ("stream", "hidup/matikan tampilan mengalir dengan footer status"),
     ("memory", "memory jangka panjang"),
     ("scripts", "script memory"),
     ("update", "cek pembaruan"),
@@ -1681,7 +1684,9 @@ def _bar_status(agent: Agent, total: int) -> Text:
     SEP = "  │  "
     teks = {
         "merek": " ⬢ bagas-ai",
-        "model": f"{SEP}{'🌐' if spec.is_web else '🤖'} {spec.label}",
+        "model": (f"{SEP}{'🌐' if spec.is_web else '🤖'} {spec.label}"
+                  + (f"{SEP}📹 layar" if getattr(
+                      agent, "live_screen_active", False) else "")),
         "perintah": "/menu · /exit",
         "ctrlc": " atau ctrl+c",
         "exit": "/exit",
@@ -1701,6 +1706,9 @@ def _bar_status(agent: Agent, total: int) -> Text:
             bar.append(" ")
         bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
         bar.append(spec.label, style=f"bold {tema.p('model_footer')}")
+        if getattr(agent, "live_screen_active", False):
+            bar.append(SEP, style=tema.p("sep_footer"))
+            bar.append("📹 layar", style=f"bold {tema.p('aksen')}")
     if "git" in ada and git_branch:
         bar.append(SEP, style=tema.p("sep_footer"))
         bar.append("🌿 ", style=tema.p("git_footer"))
@@ -2346,6 +2354,7 @@ _PHASE = {
     "zip_extract": "membongkar",
     "take_screenshot": "memotret",
     "analyze_image": "menganalisis",
+    "read_image_local": "membaca gambar lokal",
     "attach_file": "mengunggah",
     "validate_project": "memvalidasi",
     "run_tests": "menguji",
@@ -3124,6 +3133,10 @@ def main(resume: bool = False, resume_id: str = "") -> None:
     # preferensi: mikrofon yang menyala sendiri di sesi berikutnya adalah
     # kejutan yang tak seorang pun minta.
     voice_state: dict = {"pendengar": None}
+    live_screen: dict = {"on": False}
+    # Dibaca _bar_status selama giliran aktif; status_bar() di bawah membaca
+    # dict yang sama saat idle.
+    agent.live_screen_active = False
     # Total token PERSISTEN lintas semua sesi ("dimanapun").
     # "sesi" (agent.tokens_session) kini persisten per-sesi (ikut saat --resume),
     # dan sudah termasuk di total global. Agar tidak dobel saat resume, base =
@@ -3170,6 +3183,35 @@ def main(resume: bool = False, resume_id: str = "") -> None:
     # (langkah/diff/jawaban di tumpukan bawah yang menempel ke dasar layar);
     # False = tampilan klasik (semua ke scrollback).
     tui_mode = {"on": True}
+
+    def _set_live_screen(aktif: bool) -> None:
+        live_screen["on"] = bool(aktif)
+        agent.live_screen_active = bool(aktif)
+        if not aktif:
+            try:
+                from ..tools.screen import clear_live_capture
+                clear_live_capture()
+            except Exception:  # noqa: BLE001 — cleanup best-effort
+                pass
+
+    def _live_attachments() -> list[str]:
+        """Screenshot tepat sebelum kirim; kegagalannya tidak membatalkan chat."""
+        if not live_screen["on"]:
+            return []
+        if not agent.supports_vision():
+            _set_live_screen(False)
+            console.print(
+                f"  [#f0603c]○ mode layar dimatikan:[/] "
+                f"{_esc(agent.model_spec.label)} tidak mendukung vision.\n")
+            return []
+        try:
+            from ..tools.screen import capture_live_screen
+            return [str(capture_live_screen())]
+        except Exception as exc:  # noqa: BLE001 — pertanyaan tetap jalan
+            console.print(
+                f"  [#f7d488]⚠ screenshot live gagal:[/] {_esc(str(exc))}\n"
+                "  [dim]pertanyaan tetap dikirim tanpa referensi layar.[/dim]\n")
+            return []
 
     def _step_label(name: str, args: dict) -> str:
         a = args if isinstance(args, dict) else {}
@@ -3814,7 +3856,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         _padat = _jeda_padat(view)
 
         def worker() -> None:
+            attachments: list[str] = []
             try:
+                attachments = _live_attachments()
                 result["answer"] = agent.run(
                     text, on_tool=_on_tool, on_message=_on_msg,
                     on_retry=_on_retry, cancel_event=cancel_event,
@@ -3828,6 +3872,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                     # sini — dan justru selama pikiran itulah model yang
                     # lambat memulai tampak seperti model yang mati.
                     on_reasoning=_on_pikir,
+                    attachments=attachments,
                     # on_token SENGAJA tak diteruskan: pratinjau kalimat yang
                     # sedang ditulis sudah dihapus dari layar, jadi tak ada lagi
                     # yang memakainya. Efek sampingnya justru menguntungkan —
@@ -3838,6 +3883,13 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
+            finally:
+                if attachments:
+                    try:
+                        from ..tools.screen import clear_live_capture
+                        clear_live_capture()
+                    except Exception:  # noqa: BLE001
+                        pass
 
         # Mouse capture SENGAJA tak dipakai lagi: dulu ia ada untuk klik-buka
         # langkah di region live, tapi ia MENELAN event scroll wheel (terminal
@@ -4286,7 +4338,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         result: dict = {"answer": None, "error": None}
 
         def worker() -> None:
+            attachments: list[str] = []
             try:
+                attachments = _live_attachments()
                 result["answer"] = agent.run(
                     text, on_tool=on_tool, on_message=say,
                     on_retry=on_retry, cancel_event=cancel_event,
@@ -4294,9 +4348,17 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                     on_status=lambda m: status_obj.note_phase(_fase_status(m)),
                     on_padat=_jeda_padat(status_obj),
                     on_reasoning=_on_pikir_klasik,
+                    attachments=attachments,
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
+            finally:
+                if attachments:
+                    try:
+                        from ..tools.screen import clear_live_capture
+                        clear_live_capture()
+                    except Exception:  # noqa: BLE001
+                        pass
 
         worker_thread = threading.Thread(target=worker, daemon=True)
         interrupted = False
@@ -5491,6 +5553,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             f"[{c}]/review[/]   cari bug seluruh proyek [{c}]/scan[/]     segarkan peta proyek\n"
             f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
             f"[{c}]/mode[/]     mode kerja situs       [{c}]/scripts[/]  script memory\n"
+            f"[{c}]/live[/]     konteks layar          [{c}]/image[/]    baca gambar lokal\n"
+            f"[{c}]/mic[/]      suara keluaran         [{c}]/voice[/]    input mikrofon\n"
             f"[{c}]/update[/]   cek pembaruan          [#f0603c]/exit[/]     keluar",
             title=tema.terjemah("[bold #fcc048]❔ Bantuan[/]"), title_align="left",
             border_style=tema.p("aksen"), box=box.ROUNDED, padding=(1, 2)))
@@ -6297,9 +6361,12 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             # dan "merekam" (apa pun yang terucap sekarang jadi perintah).
             mik = (f"{sep}<sesi>● merekam</sesi>" if _p.merekam
                    else f"{sep}<sesi>🎙 dengar</sesi>")
+        layar = (f"{sep}<sesi>📹 layar</sesi>"
+                 if live_screen["on"] else "")
         bagian = {
             "merek": " <brand>⬢ bagas-ai</brand>",
-            "model": f"{sep}{kind} <model>{spec.label}</model>{eff}{mik}",
+            "model": (f"{sep}{kind} <model>{spec.label}</model>"
+                      f"{eff}{mik}{layar}"),
             "perintah": "<cmd>/menu</cmd> <muted>·</muted> ",
             "ctrlc": " <muted>atau ctrl+c</muted>",
             "exit": "<exit>/exit</exit>",
@@ -6478,11 +6545,78 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 show_mic(text[4:].strip())
             elif cmd == "voice" or cmd.startswith("voice "):
                 show_voice(text[6:].strip())
+            elif cmd == "image" or cmd.startswith("image "):
+                bagian = text.split(maxsplit=1)
+                if len(bagian) != 2 or not bagian[1].strip():
+                    console.print(
+                        '  [yellow]Pakai: /image <path gambar>\n'
+                        '  Contoh: /image "foto UI.png"[/yellow]\n')
+                else:
+                    path_gambar = bagian[1].strip().strip('"').strip("'")
+                    console.print(
+                        f"  [dim]membaca {_esc(path_gambar)} dengan Python "
+                        "lokal…[/dim]")
+                    try:
+                        from ..tools.image_local import read_image_local
+                        hasil = read_image_local(path_gambar)
+                    except Exception as exc:  # noqa: BLE001
+                        hasil = f"[error] pembacaan gambar lokal gagal: {exc}"
+                    gaya = "red" if hasil.lstrip().startswith("[error]") else "dim"
+                    console.print(Padding(Text(hasil, style=gaya),
+                                          (0, _LPAD, 1, _LPAD)))
             elif cmd == "compact":
                 do_compact()
             elif cmd == "send-compact" or cmd.startswith("send-compact "):
                 do_send_compact(text[13:].strip())
-            elif cmd == "live":
+            elif (cmd in ("live", "video") or cmd.startswith("live ")
+                  or cmd.startswith("video ")):
+                bagian = text.split(maxsplit=1)
+                arg = bagian[1].strip().lower() if len(bagian) == 2 else "toggle"
+                hidup = {"on", "aktif", "hidup", "start", "mulai"}
+                mati = {"off", "mati", "stop", "berhenti"}
+                if arg in {"status", "cek"}:
+                    keadaan = "AKTIF" if live_screen["on"] else "MATI"
+                    console.print(
+                        f"  [dim]Mode layar {keadaan}. Saat aktif, satu "
+                        "screenshot terbaru dilampirkan pada setiap "
+                        "pertanyaan biasa.[/dim]\n")
+                elif arg not in hidup | mati | {"toggle"}:
+                    console.print(
+                        "  [yellow]Pakai: /live [on|off|status] "
+                        "(alias: /video)[/yellow]\n")
+                else:
+                    ingin_aktif = (not live_screen["on"] if arg == "toggle"
+                                   else arg in hidup)
+                    if not ingin_aktif:
+                        _set_live_screen(False)
+                        console.print(
+                            "  [dim]○ mode layar MATI — screenshot "
+                            "dihentikan.[/dim]\n")
+                    elif not agent.supports_vision():
+                        console.print(
+                            f"  [#f0603c]✗ mode layar tidak dapat diaktifkan: "
+                            f"{_esc(agent.model_spec.label)} tidak mendukung "
+                            "vision/lampiran gambar.[/]\n")
+                    else:
+                        try:
+                            from ..tools.screen import (
+                                clear_live_capture, screen_capture_available,
+                            )
+                            tersedia, alasan = screen_capture_available()
+                        except Exception as exc:  # noqa: BLE001
+                            tersedia, alasan = False, str(exc)
+                        if not tersedia:
+                            console.print(
+                                f"  [#f0603c]✗ mode layar tidak dapat "
+                                f"diaktifkan: {_esc(alasan)}[/]\n")
+                        else:
+                            clear_live_capture()
+                            _set_live_screen(True)
+                            console.print(
+                                "  [#9fc93c]✓ mode layar AKTIF[/] [dim]— "
+                                "screenshot terbaru dikirim bersama tiap "
+                                "pertanyaan; /live off untuk berhenti.[/dim]\n")
+            elif cmd == "stream":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:
                     console.print("  [#9fc93c]✓ tampilan mengalir AKTIF[/] "
@@ -6524,6 +6658,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         _suara.tutup()
     except Exception:  # noqa: BLE001
         pass
+    _set_live_screen(False)
     # Mikrofon DILEPAS. Thread-nya daemon (takkan menahan proses), tapi aliran
     # audionya memegang perangkat: tanpa ini indikator "sedang merekam" di
     # Windows bisa menyala beberapa saat sesudah bagas-ai ditutup.

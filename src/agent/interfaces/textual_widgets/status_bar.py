@@ -74,6 +74,8 @@ class StatusBar(Widget):
 
     model_label: reactive[str] = reactive("")
     is_web: reactive[bool] = reactive(False)
+    live_screen: reactive[bool] = reactive(False)
+    voice_state: reactive[str] = reactive("")
 
     def __init__(self, agent: "Agent | None" = None, **kwargs):
         super().__init__(**kwargs)
@@ -121,6 +123,9 @@ class StatusBar(Widget):
         segmen: dict[str, str] = {
             "merek": " ⬢ bagas-ai",
             "model": f"{sep}{'🌐' if is_web else '🤖'} {label}",
+            "live": f"{sep}📹 layar" if self.live_screen else "",
+            "voice": (f"{sep}● merekam" if self.voice_state == "merekam"
+                      else f"{sep}🎙 dengar" if self.voice_state else ""),
             "git": f"{sep}🌿 {branch}" if branch else "",
             "ubah": f"{sep}📝 {changed}" if changed else "",
             "perintah": f"{sep}/help · ",
@@ -130,6 +135,8 @@ class StatusBar(Widget):
         warna: dict[str, str] = {
             "merek": tema.p("merek_footer"),
             "model": tema.p("model_footer"),
+            "live": tema.p("aksen"),
+            "voice": tema.p("aksen"),
             "git": tema.p("git_footer"),
             "ubah": tema.p("ubah_footer"),
             "perintah": tema.p("cmd_footer"),
@@ -139,7 +146,8 @@ class StatusBar(Widget):
         bg = tema.p("bg_footer")
         warna_sep = tema.p("sep_footer")
 
-        kiri = [s for s in ("merek", "model", "git", "ubah") if segmen[s]]
+        kiri = [s for s in ("merek", "model", "live", "voice", "git", "ubah")
+                if segmen[s]]
         kanan = [s for s in ("perintah", "exit", "ctrlc") if segmen[s]]
 
         # Lepas segmen opsional sampai muat. Merek/model/exit selalu tampil.
@@ -189,6 +197,14 @@ class StatusBar(Widget):
         """Ganti label model (memicu gambar ulang lewat reactive)."""
         self.model_label = label
         self.is_web = is_web
+
+    def update_live_screen(self, aktif: bool) -> None:
+        """Tampilkan indikator privasi selama screenshot otomatis aktif."""
+        self.live_screen = bool(aktif)
+
+    def update_voice_state(self, keadaan: str = "") -> None:
+        """Tampilkan indikator privasi mikrofon: dengar atau merekam."""
+        self.voice_state = keadaan if keadaan in ("dengar", "merekam") else ""
 
     def refresh_theme(self) -> None:
         """Gambar ulang dengan warna tema baru."""

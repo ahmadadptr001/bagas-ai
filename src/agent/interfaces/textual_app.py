@@ -34,7 +34,7 @@ from ..ui import tema
 from .. import interaction
 from .. import session as session_mod
 from ..session import Session
-from .. import workspace, longmem, models
+from .. import workspace, longmem, models, prefs
 
 try:
     from pyfiglet import Figlet
@@ -128,9 +128,20 @@ class BagasAIApp(App):
         # None = belum sedang menjelajah (tekan up memulai dari yang terakhir).
         self._riwayat_masukan: list[str] = []
         self._hist_idx: int | None = None
-        self._voice_state: dict = {}
+        # /voice selalu mulai MATI dan tidak disimpan ke preferensi: perangkat
+        # mikrofon tak boleh menyala sendiri pada sesi berikutnya.
+        self._voice_state: dict = {
+            "pendengar": None,
+            "jangkauan": None,
+            "task_active": False,
+            "wanted": False,
+        }
         self._pending_gambar: dict = {}
+        self._image_task_active = False
         self._tui_mode = True
+        # /live: ambil SATU screenshot terbaru tepat sebelum tiap pertanyaan
+        # normal dikirim. Bukan perekaman video kontinu di latar belakang.
+        self._live_screen = False
         self._first_idle = True
         self._worker_thread: threading.Thread | None = None
         self._turn_id = 0
@@ -242,8 +253,10 @@ class BagasAIApp(App):
         self._show_welcome()
         self.query_one("#chatbox", ChatBox).focus()
 
-        # Start periodic refresh for status bar
-        self.set_interval(2.0, self._refresh_status)
+        # Status mikrofon harus cepat berubah dari "dengar" ke "merekam";
+        # jeda dua detik membuat indikator privasi terlambat sepanjang satu
+        # kalimat pendek. Render ini murah; pembacaan git tetap punya cache.
+        self.set_interval(0.4, self._refresh_status)
 
         # Tanpa ini, ask_user/ask_choice & permintaan izin permissions.py
         # mengembalikan "[tidak interaktif]" di UI Textual — handler default
@@ -282,6 +295,23 @@ class BagasAIApp(App):
             if interaction._default_handler is self._handler_pilihan_ref:
                 interaction.set_choice_handler(None)
         except Exception:  # noqa: BLE001 — sedang ditutup
+            pass
+        self._live_screen = False
+        try:
+            from ..tools.screen import clear_live_capture
+            clear_live_capture()
+        except Exception:  # noqa: BLE001 — pembersihan best-effort
+            pass
+        pendengar = self._voice_state.get("pendengar")
+        if pendengar is not None:
+            try:
+                pendengar.berhenti()
+            except Exception:  # noqa: BLE001 — app sedang ditutup
+                pass
+        try:
+            from .. import suara
+            suara.tutup()
+        except Exception:  # noqa: BLE001 — audio opsional
             pass
 
     # ─── Rencana (plan / plan_step) ───────────────────────────────────
@@ -635,7 +665,14 @@ class BagasAIApp(App):
 
     def _refresh_status(self):
         """Periodic status bar refresh."""
-        self.query_one("#statusbar", StatusBar).refresh()
+        bar = self.query_one("#statusbar", StatusBar)
+        pendengar = self._voice_state.get("pendengar")
+        keadaan = ""
+        if pendengar is not None and getattr(pendengar, "aktif", False):
+            keadaan = ("merekam" if getattr(pendengar, "merekam", False)
+                       else "dengar")
+        bar.update_voice_state(keadaan)
+        bar.refresh()
 
     # ─── Message Handling ──────────────────────────────────────────────
 
@@ -644,6 +681,8 @@ class BagasAIApp(App):
         text = event.text.strip()
         if not text:
             return
+        teks_tampil = text
+        lisan = self._voice_state.pop("terucap", None) == text
 
         # Echo user message
         msg_list = self.query_one("#messages", MessageList)
@@ -662,9 +701,38 @@ class BagasAIApp(App):
             self._handle_command(text)
             return
 
+        # Gambar hasil paste/drop disimpan sebagai path lokal oleh
+        # on_chatbox_pasted. Penanda [foto] hanya bentuk ringkas di kotak input;
+        # core memerlukan [GAMBAR] <path> agar benar-benar menjadi attachment.
+        # Dulu Textual tidak pernah menyimpan path ini sehingga model cuma
+        # menerima teks literal "[foto]".
+        if "[foto]" in text:
+            path_gambar = self._pending_gambar.get("path")
+            if not path_gambar:
+                msg_list.append_notice(
+                    "Gambar tempelan sudah tidak tersedia — tempel ulang file.",
+                    style=f"bold {tema.p('exit_footer')}",
+                )
+                return
+            from ..tools.screen import IMAGE_MARK
+            text = text.replace("[foto]", f"\n{IMAGE_MARK} {path_gambar}\n")
+            self._pending_gambar.clear()
+            try:
+                self.hide_image_preview()
+            except Exception:  # noqa: BLE001 — preview opsional
+                pass
+        elif self._pending_gambar:
+            # Pengguna menghapus marker [foto]; jangan menempelkan gambar lama
+            # secara diam-diam ke pesan berikutnya.
+            self._pending_gambar.clear()
+            try:
+                self.hide_image_preview()
+            except Exception:  # noqa: BLE001
+                pass
+
         # Catat ke riwayat masukan (panah-atas). Perintah "/" tak masuk —
         # riwayat ini untuk teks yang mau diedit-ulang, bukan menu.
-        self._riwayat_masukan.append(text)
+        self._riwayat_masukan.append(teks_tampil)
         if len(self._riwayat_masukan) > 100:
             del self._riwayat_masukan[:-100]
         self._hist_idx = None  # mulai ulang dari paling baru di up berikutnya
@@ -689,7 +757,8 @@ class BagasAIApp(App):
             self._process_queue()
             return
 
-        msg_list.append_user_message(text)
+        msg_list.append_user_message(teks_tampil,
+                                     prefix="🎙 " if lisan else "❯ ")
         self._start_turn(text)
 
     def on_chatbox_cancelled(self, event: ChatBox.Cancelled):
@@ -753,6 +822,7 @@ class BagasAIApp(App):
     def on_chatbox_pasted(self, event: ChatBox.Pasted):
         """Handle paste event — show image preview if media detected."""
         if event.is_media:
+            self._pending_gambar["path"] = event.media_path
             msg_list = self.query_one("#messages", MessageList)
             msg_list.append_notice(
                 f"  🖼 Gambar: {event.media_path}",
@@ -805,8 +875,11 @@ class BagasAIApp(App):
         elif cmd == "theme" or cmd.startswith("theme "):
             self._cmd_theme(text)
 
-        # ── Display ────────────────────────────────────────────────────
-        elif cmd == "live":
+        # ── Live screen & Display ──────────────────────────────────────
+        elif (cmd in ("live", "video") or cmd.startswith("live ")
+              or cmd.startswith("video ")):
+            self._cmd_live(text)
+        elif cmd == "stream":
             self._tui_mode = not self._tui_mode
             if self._tui_mode:
                 msg_list.append_notice("✓ Tampilan mengalir AKTIF",
@@ -814,6 +887,16 @@ class BagasAIApp(App):
             else:
                 msg_list.append_notice("○ Tampilan mengalir MATI",
                                       style=tema.p("redup"))
+
+        # ── Audio ──────────────────────────────────────────────────────
+        elif cmd == "mic" or cmd.startswith("mic "):
+            self._cmd_mic(text)
+        elif cmd == "voice" or cmd.startswith("voice "):
+            self._cmd_voice(text)
+
+        # ── Local image reader ─────────────────────────────────────────
+        elif cmd == "image" or cmd.startswith("image "):
+            self._cmd_image(text)
 
         # ── Memory ─────────────────────────────────────────────────────
         elif cmd == "memory" or cmd.startswith("memory "):
@@ -864,6 +947,439 @@ class BagasAIApp(App):
                 f"Perintah tidak dikenal: /{cmd}\nKetik /help untuk bantuan.",
                 style=f"bold {tema.p('exit_footer')}"
             )
+
+    # ─── Local Image Reader ───────────────────────────────────────────
+
+    def _cmd_image(self, text: str) -> None:
+        """Baca satu gambar di worker Python lokal, tanpa request provider."""
+        msg_list = self.query_one("#messages", MessageList)
+        bagian = text.strip().split(maxsplit=1)
+        if len(bagian) != 2 or not bagian[1].strip():
+            msg_list.append_notice(
+                'Pemakaian: /image <path gambar>\nContoh: /image "foto UI.png"',
+                style=f"bold {tema.p('exit_footer')}",
+            )
+            return
+        if self._image_task_active:
+            msg_list.append_notice(
+                "Pembacaan gambar lokal lain masih berjalan.",
+                style=f"bold {tema.p('exit_footer')}",
+            )
+            return
+        path = bagian[1].strip().strip('"').strip("'")
+        self._image_task_active = True
+        msg_list.append_notice(
+            f"Membaca {path} dengan Python lokal…",
+            style=tema.p("redup"),
+        )
+
+        def worker() -> None:
+            try:
+                from ..tools.image_local import read_image_local
+                hasil = read_image_local(path)
+            except Exception as exc:  # noqa: BLE001 — laporan ramah UI
+                hasil = f"[error] pembacaan gambar lokal gagal: {exc}"
+            self._safe_call(self._finish_image_read, hasil)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="bagasai-image-local").start()
+
+    def _finish_image_read(self, hasil: str) -> None:
+        self._image_task_active = False
+        self.query_one("#messages", MessageList).append_notice(
+            hasil,
+            style=(f"bold {tema.p('exit_footer')}"
+                   if hasil.lstrip().startswith("[error]") else tema.p("redup")),
+        )
+
+    # ─── Live Screen ──────────────────────────────────────────────────
+
+    def _set_live_screen(self, aktif: bool) -> None:
+        """Set state /live, indikator permanen, dan berkas sementaranya."""
+        self._live_screen = bool(aktif)
+        try:
+            self.query_one("#statusbar", StatusBar).update_live_screen(
+                self._live_screen)
+        except Exception:  # noqa: BLE001 — statusbar opsional/sedang tutup
+            pass
+        if not aktif:
+            try:
+                from ..tools.screen import clear_live_capture
+                clear_live_capture()
+            except Exception:  # noqa: BLE001 — cleanup tak boleh matikan UI
+                pass
+
+    def _cmd_live(self, text: str) -> None:
+        """Kelola /live (alias /video): on, off, status, atau toggle."""
+        msg_list = self.query_one("#messages", MessageList)
+        parts = text.strip().lower().split(maxsplit=1)
+        arg = parts[1].strip() if len(parts) == 2 else "toggle"
+        hidup = {"on", "aktif", "hidup", "start", "mulai"}
+        mati = {"off", "mati", "stop", "berhenti"}
+
+        if arg in {"status", "cek"}:
+            keadaan = "AKTIF" if self._live_screen else "MATI"
+            msg_list.append_notice(
+                f"Mode layar {keadaan}. Saat aktif, satu screenshot terbaru "
+                "dilampirkan pada setiap pertanyaan biasa.",
+                style=(f"bold {tema.p('aksen')}" if self._live_screen
+                       else tema.p("redup")),
+            )
+            return
+        if arg not in hidup | mati | {"toggle"}:
+            msg_list.append_notice(
+                "Pemakaian: /live [on|off|status] (alias: /video)",
+                style=f"bold {tema.p('exit_footer')}",
+            )
+            return
+
+        ingin_aktif = (not self._live_screen if arg == "toggle"
+                       else arg in hidup)
+        if not ingin_aktif:
+            self._set_live_screen(False)
+            msg_list.append_notice("○ Mode layar MATI — screenshot dihentikan.",
+                                   style=tema.p("redup"))
+            return
+
+        if not self.agent.supports_vision():
+            spec = self.agent.model_spec
+            msg_list.append_notice(
+                f"✗ Mode layar tidak dapat diaktifkan: {spec.label} tidak "
+                "mendukung vision/lampiran gambar. Pilih model vision lewat "
+                "/model.",
+                style=f"bold {tema.p('exit_footer')}",
+            )
+            return
+        try:
+            from ..tools.screen import (
+                clear_live_capture, screen_capture_available,
+            )
+            tersedia, alasan = screen_capture_available()
+        except Exception as exc:  # noqa: BLE001 — dependensi layar bermasalah
+            tersedia, alasan = False, str(exc)
+        if not tersedia:
+            msg_list.append_notice(
+                f"✗ Mode layar tidak dapat diaktifkan: {alasan}",
+                style=f"bold {tema.p('exit_footer')}",
+            )
+            return
+
+        clear_live_capture()
+        self._set_live_screen(True)
+        msg_list.append_notice(
+            "✓ Mode layar AKTIF — satu screenshot terbaru akan diambil dan "
+            "dikirim sebagai referensi pada setiap pertanyaan biasa. Gunakan "
+            "/live off untuk berhenti.",
+            style=f"bold {tema.p('aksen')}",
+        )
+
+    def _capture_live_attachment(self) -> list[str]:
+        """Ambil screenshot just-in-time di worker; gagal tidak membatalkan chat."""
+        if not self._live_screen:
+            return []
+        if not self.agent.supports_vision():
+            self._safe_call(self._live_model_tidak_mendukung)
+            return []
+        self.agent_on_status("mengambil screenshot layar…")
+        try:
+            from ..tools.screen import capture_live_screen
+            return [str(capture_live_screen())]
+        except Exception as exc:  # noqa: BLE001 — chat tetap harus terkirim
+            self.agent_on_notice(
+                f"⚠ Screenshot live gagal ({exc}); pertanyaan tetap dikirim "
+                "tanpa referensi layar.")
+            return []
+
+    def _live_model_tidak_mendukung(self) -> None:
+        """Matikan /live bila model berubah saat mode sedang aktif."""
+        if not self._live_screen:
+            return
+        label = self.agent.model_spec.label
+        self._set_live_screen(False)
+        self.query_one("#messages", MessageList).append_notice(
+            f"○ Mode layar dimatikan: {label} tidak mendukung vision.",
+            style=f"bold {tema.p('exit_footer')}",
+        )
+
+    # ─── Audio: /mic dan /voice ───────────────────────────────────────
+
+    def _audio_notice(self, pesan: str, *, error: bool = False) -> None:
+        self.query_one("#messages", MessageList).append_notice(
+            pesan,
+            style=(f"bold {tema.p('exit_footer')}" if error
+                   else tema.p("redup")),
+        )
+
+    def _start_audio_task(self, label: str, work) -> None:
+        """Jalankan rekam/cek audio yang lambat tanpa membekukan Textual."""
+        if self._voice_state.get("task_active"):
+            self._audio_notice("Proses audio lain masih berjalan.", error=True)
+            return
+        self._voice_state["task_active"] = True
+        self._audio_notice(label)
+
+        def worker() -> None:
+            try:
+                ok, pesan = work()
+            except Exception as exc:  # noqa: BLE001 — kegagalan audio ramah UI
+                ok, pesan = False, f"Audio gagal: {exc}"
+            self._safe_call(self._finish_audio_task, ok, pesan)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="bagasai-audio-command").start()
+
+    def _finish_audio_task(self, ok: bool, pesan: str) -> None:
+        self._voice_state["task_active"] = False
+        self._audio_notice(("✓ " if ok else "⚠ ") + pesan,
+                           error=not ok)
+
+    def _cmd_mic(self, text: str) -> None:
+        """Kelola pembacaan kabar/jawaban melalui pengeras suara."""
+        parts = text.strip().lower().split(maxsplit=1)
+        arg = parts[1].strip() if len(parts) == 2 else "status"
+        if arg in ("on", "hidup", "off", "mati"):
+            aktif = arg in ("on", "hidup")
+            prefs.save(suara=aktif)
+            if not aktif:
+                try:
+                    from .. import suara
+                    suara.diam()
+                except Exception:  # noqa: BLE001 — audio opsional
+                    pass
+            self._audio_notice(
+                f"{'✓' if aktif else '○'} Suara kabar "
+                f"{'AKTIF' if aktif else 'MATI'}.")
+            return
+
+        aktif = bool(prefs.load().get("suara", True))
+        if arg in ("tes", "test", "coba"):
+            if not aktif:
+                self._audio_notice(
+                    "Suara sedang mati — nyalakan dengan /mic on.", error=True)
+                return
+
+            def tes_mic():
+                from .. import suara
+                mesin = suara.mesin_tersedia()
+                if not mesin:
+                    return False, suara.alasan_diam()
+                suara.ucap(
+                    "Halo, ini suara bagas a i. Kabar dan jawaban model "
+                    "akan dibacakan seperti ini.")
+                return True, f"Contoh suara sedang diputar ({mesin[0]})."
+
+            self._start_audio_task("♪ Memeriksa mesin suara…", tes_mic)
+            return
+
+        if arg not in ("status", "cek"):
+            self._audio_notice(
+                "Pemakaian: /mic [on|off|tes|status]", error=True)
+            return
+        self._audio_notice(
+            f"♪ Suara kabar {'AKTIF' if aktif else 'MATI'} — "
+            "kabar proses dan jawaban akhir dibacakan. Gunakan /mic tes "
+            "untuk memeriksa pengeras suara.")
+
+    def _refresh_voice_status(self) -> None:
+        try:
+            self._refresh_status()
+        except Exception:  # noqa: BLE001 — statusbar sedang dibongkar
+            pass
+
+    def _begin_voice(self, sebelumnya=None) -> None:
+        """Mulai/restart pendengar mikrofon di thread terpisah."""
+        if self._voice_state.get("task_active"):
+            self._audio_notice("Proses audio lain masih berjalan.", error=True)
+            return
+        self._voice_state["wanted"] = True
+        self._voice_state["task_active"] = True
+        self._voice_state["pendengar"] = None
+        self._refresh_voice_status()
+        self._audio_notice("🎙 Menyiapkan dan mengkalibrasi mikrofon…")
+
+        def worker() -> None:
+            if sebelumnya is not None:
+                try:
+                    sebelumnya.berhenti()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                from .. import dengar
+                pendengar = dengar.Pendengar(
+                    self._voice_masuk,
+                    self._voice_kabar,
+                    jangkauan=self._voice_state.get("jangkauan"),
+                )
+                alasan = pendengar.mulai()
+            except Exception as exc:  # noqa: BLE001
+                pendengar, alasan = None, str(exc)
+            self._safe_call(self._voice_started, pendengar, alasan)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="bagasai-voice-start").start()
+
+    def _voice_started(self, pendengar, alasan: str) -> None:
+        self._voice_state["task_active"] = False
+        if not self._voice_state.get("wanted"):
+            if pendengar is not None:
+                threading.Thread(target=pendengar.berhenti,
+                                 daemon=True).start()
+            return
+        if alasan or pendengar is None:
+            self._voice_state["wanted"] = False
+            self._audio_notice(
+                f"Mikrofon tidak dapat dinyalakan: {alasan or 'tidak tersedia'}",
+                error=True,
+            )
+            self._refresh_voice_status()
+            return
+        self._voice_state["pendengar"] = pendengar
+        try:
+            from .. import dengar
+            threading.Thread(target=dengar.bunyi, args=(True,),
+                             daemon=True).start()
+            nama = dengar.nama_mikrofon() or "mikrofon bawaan"
+            jeda = dengar.JEDA_SELESAI
+        except Exception:  # noqa: BLE001
+            nama, jeda = "mikrofon bawaan", 2
+        self._audio_notice(
+            f"● Mikrofon AKTIF — {nama}. Sebut “bagas ai”, ucapkan "
+            f"perintah, lalu diam {jeda:.0f} detik. Ucapkan “batalkan” "
+            "untuk membuang rekaman.")
+        self._refresh_voice_status()
+
+    def _stop_voice(self) -> None:
+        self._voice_state["wanted"] = False
+        pendengar = self._voice_state.get("pendengar")
+        self._voice_state["pendengar"] = None
+        self._refresh_voice_status()
+        if pendengar is not None:
+            def worker() -> None:
+                try:
+                    pendengar.berhenti()
+                    from .. import dengar
+                    dengar.bunyi(False)
+                except Exception:  # noqa: BLE001
+                    pass
+            threading.Thread(target=worker, daemon=True,
+                             name="bagasai-voice-stop").start()
+        self._audio_notice("○ Mikrofon MATI.")
+
+    def _cmd_voice(self, text: str) -> None:
+        """Kelola mikrofon sebagai sumber prompt Textual."""
+        parts = text.strip().lower().split(maxsplit=1)
+        arg = parts[1].strip() if len(parts) == 2 else "status"
+        pendengar = self._voice_state.get("pendengar")
+        aktif = pendengar is not None and getattr(pendengar, "aktif", False)
+
+        if arg in ("off", "mati"):
+            self._stop_voice()
+            return
+        if arg in ("on", "hidup"):
+            if aktif:
+                self._audio_notice("Mikrofon sudah aktif.")
+            else:
+                self._begin_voice()
+            return
+        if arg in ("dekat", "normal", "jauh"):
+            self._voice_state["jangkauan"] = arg
+            self._audio_notice(f"Jangkauan mikrofon diubah ke {arg.upper()}.")
+            if aktif:
+                self._begin_voice(sebelumnya=pendengar)
+            else:
+                self._audio_notice("Setelan berlaku saat /voice on.")
+            return
+
+        if arg in ("tes", "test", "coba"):
+            if aktif:
+                self._audio_notice(
+                    "Matikan listener dengan /voice off sebelum tes agar "
+                    "perangkat mikrofon tidak dibuka dua kali.", error=True)
+                return
+            def tes_voice():
+                from .. import dengar
+                ok, alasan = dengar.siap()
+                if not ok:
+                    return False, alasan
+                teks_dengar, puncak = dengar.dengar_sekali(5.0)
+                if not teks_dengar:
+                    return False, (f"Tidak ada ucapan yang dikenali "
+                                   f"(puncak suara {puncak:.0f}).")
+                return True, (f"Terdengar: “{teks_dengar}” "
+                              f"(puncak {puncak:.0f}).")
+            self._start_audio_task(
+                "🎙 Merekam tes selama 5 detik; bicaralah sekarang…",
+                tes_voice,
+            )
+            return
+
+        if arg in ("jangkau", "jarak", "jangkauan"):
+            if aktif:
+                self._audio_notice(
+                    "Matikan listener dengan /voice off sebelum mengukur "
+                    "jangkauan mikrofon.", error=True)
+                return
+            def ukur_voice():
+                from .. import dengar
+                ok, alasan = dengar.siap()
+                if not ok:
+                    return False, alasan
+                hasil = dengar.ukur(
+                    6.0, jangkauan=self._voice_state.get("jangkauan"))
+                sampai = hasil["suara_p90"] > hasil["ambang"]
+                pesan = (
+                    f"Jangkauan {hasil['jangkauan']}: suara "
+                    f"{hasil['suara_p90']:.0f}, ambang {hasil['ambang']:.0f}"
+                )
+                if hasil.get("teks"):
+                    pesan += f", terdengar “{hasil['teks']}”"
+                if not sampai and hasil.get("saran"):
+                    pesan += f". Coba /voice {hasil['saran']}"
+                return sampai, pesan
+            self._start_audio_task(
+                "🎙 Diam sebentar untuk kalibrasi, lalu bicara selama 6 detik…",
+                ukur_voice,
+            )
+            return
+
+        if arg not in ("status", "cek"):
+            self._audio_notice(
+                "Pemakaian: /voice [on|off|tes|jangkau|dekat|normal|jauh]",
+                error=True,
+            )
+            return
+        jangkauan = (self._voice_state.get("jangkauan") or "bawaan")
+        galat = getattr(pendengar, "galat", "") if pendengar else ""
+        self._audio_notice(
+            f"🎙 Mikrofon {'AKTIF' if aktif else 'MATI'} · jangkauan "
+            f"{jangkauan}. Sebut “bagas ai” sebelum perintah."
+            + (f" Galat terakhir: {galat}" if galat else ""),
+            error=bool(galat),
+        )
+
+    def _voice_masuk(self, teks: str) -> None:
+        """Callback thread Pendengar: teruskan prompt ke thread UI."""
+        self._safe_call(self._voice_masuk_ui, teks)
+
+    def _voice_masuk_ui(self, teks: str) -> None:
+        teks = (teks or "").strip()
+        if not teks:
+            return
+        if self.is_turn_active:
+            self._riwayat_masukan.append(teks)
+            with self._antre_lock:
+                self._prompt_queue.append(teks)
+            self._perbarui_strip_antre()
+            self._audio_notice(f"🎙 Perintah suara mengantre: {teks}")
+            return
+        self._voice_state["terucap"] = teks
+        self.on_chatbox_submitted(ChatBox.Submitted(teks))
+
+    def _voice_kabar(self, pesan: str, batal: bool = False) -> None:
+        """Callback thread Pendengar untuk pembatalan/kegagalan audio."""
+        awalan = "🎙 " if batal else "⚠ Mikrofon: "
+        self._safe_call(self._audio_notice, awalan + str(pesan),
+                        error=not batal)
 
     # ─── New Session ───────────────────────────────────────────────────
 
@@ -963,6 +1479,8 @@ class BagasAIApp(App):
                 spec.label, spec.is_web)
         except Exception:  # noqa: BLE001 — statusbar opsional
             pass
+        if self._live_screen and not self.agent.supports_vision():
+            self._live_model_tidak_mendukung()
         if self.agent.model_spec.is_web:
             self._pasang_model_web(varian)
 
@@ -1510,7 +2028,12 @@ class BagasAIApp(App):
 ║ /model [nama]   Ganti model/varian              ║
 ║ /effort [level] Usaha berpikir (web & API)      ║
 ║ /theme [nama]   Ganti/lihat tema                ║
-║ /live           Toggle tampilan mengalir        ║
+║ /live [on|off]  Screenshot layar tiap pertanyaan║
+║ /video          Alias /live                     ║
+║ /stream         Toggle tampilan mengalir        ║
+║ /mic [on|off]   Bacakan kabar dan jawaban       ║
+║ /voice [on|off] Mikrofon jadi input              ║
+║ /image <path>   Baca gambar lokal via Python     ║
 ║ /compact        Compact context                 ║
 ║ /send-compact   Kirim memory ke percakapan      ║
 ║ /new            Sesi baru                       ║
@@ -1579,7 +2102,9 @@ class BagasAIApp(App):
         msg_list.begin_stream()
 
         def worker():
+            attachments: list[str] = []
             try:
+                attachments = self._capture_live_attachment()
                 result = self.agent.run(
                     text,
                     on_tool=self.agent_on_tool,
@@ -1594,10 +2119,18 @@ class BagasAIApp(App):
                     ambil_sisipan=self._ambil_sisipan,
                     on_tim=self.agent_on_tim,
                     on_padat=self.agent_on_padat,
+                    attachments=attachments,
                 )
                 self._safe_call(self._turn_complete, result, turn_id)
             except BaseException as exc:
                 self._safe_call(self._turn_error, exc, turn_id)
+            finally:
+                if attachments:
+                    try:
+                        from ..tools.screen import clear_live_capture
+                        clear_live_capture()
+                    except Exception:  # noqa: BLE001 — cleanup best-effort
+                        pass
 
         self._worker_thread = threading.Thread(target=worker, daemon=True)
         self._worker_thread.start()
@@ -1621,6 +2154,11 @@ class BagasAIApp(App):
         bersamaan saling menginjak memory/connector.
         """
         self._cancel_event.set()
+        try:
+            from .. import suara
+            suara.diam()
+        except Exception:  # noqa: BLE001 — suara opsional
+            pass
         # Naikkan turn_id: hasil/error dari worker lama kini "basi" dan
         # diabaikan oleh _turn_complete/_turn_error.
         self._turn_id += 1
@@ -1701,6 +2239,13 @@ class BagasAIApp(App):
         final_text = result or stream_text
         if final_text:
             msg_list.append_ai_message(final_text)
+            if prefs.load().get("suara", True):
+                try:
+                    from .. import suara
+                    suara.getar()
+                    suara.ucap(final_text, penuh=True)
+                except Exception:  # noqa: BLE001 — TTS tak boleh rusak giliran
+                    pass
         else:
             msg_list.append_notice("(no response)", style=tema.p("redup"))
 
@@ -1764,14 +2309,25 @@ class BagasAIApp(App):
             return
 
         self._bersihkan_turn_ui()
+        try:
+            from .. import suara
+            suara.diam()
+        except Exception:  # noqa: BLE001 — suara opsional
+            pass
 
         msg_list = self.query_one("#messages", MessageList)
         if isinstance(exc, KeyboardInterrupt):
             msg_list.append_notice("⚠ Dibatalkan oleh pengguna.",
                                   style=f"bold {tema.p('exit_footer')}")
         else:
+            try:
+                from ..llm import ProviderQuotaError
+                pesan = (str(exc) if isinstance(exc, ProviderQuotaError)
+                         else f"{type(exc).__name__}: {exc}")
+            except Exception:  # noqa: BLE001 — formatter tak boleh tutup UI
+                pesan = f"{type(exc).__name__}: {exc}"
             msg_list.append_notice(
-                f"⚠ Error: {type(exc).__name__}: {exc}",
+                f"⚠ {pesan}",
                 style=f"bold {tema.p('exit_footer')}"
             )
         self.query_one("#chatbox", ChatBox).focus()
@@ -1780,7 +2336,8 @@ class BagasAIApp(App):
 
     def agent_on_token(self, piece: str):
         """Streaming token from API model — forward to MessageList."""
-        self._safe_call(self._forward_token, piece)
+        if self._tui_mode:
+            self._safe_call(self._forward_token, piece)
 
     def _forward_token(self, piece: str):
         """Forward token to message list for streaming display.
@@ -1951,6 +2508,12 @@ class BagasAIApp(App):
 
     def agent_on_message(self, content: str):
         """AI narration before tool call."""
+        if prefs.load().get("suara", True):
+            try:
+                from .. import suara
+                suara.ucap(content)
+            except Exception:  # noqa: BLE001 — TTS tak boleh rusak callback
+                pass
         self._safe_call(self._show_narration, content)
 
     def _show_narration(self, content: str):

@@ -1,6 +1,8 @@
 openai>=1.30.0
 rich>=13.0.0
 pyfiglet>=1.0.0
+# /live dan tool take_screenshot.
+Pillow>=10.0.0
 ddgs>=6.0.0
 python-telegram-bot>=21.0
 fastapi>=0.110.0

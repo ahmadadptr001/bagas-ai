@@ -68,6 +68,10 @@ class Cancelled(Exception):
     """
 
 
+class ProviderQuotaError(Exception):
+    """Kuota layanan benar-benar habis dan retry cepat tidak akan menolong."""
+
+
 class StreamStalled(Exception):
     """Stream MACET berulang (tak ada data melewati batas) dan sudah dicoba
     ulang beberapa kali tanpa hasil.
@@ -97,11 +101,9 @@ _TRANSIENT_KEYWORDS = (
     "overloaded", "capacity", "try again", "temporarily", "unavailable",
     "timeout", "timed out", "connection", "throttl", "429", "server error",
     "bad gateway", "gateway timeout", "worker", "quota", "busy",
-    # CATATAN: "Provider returned error" (raw 'ERROR') SENGAJA TIDAK di sini.
-    # Ia sering kali KONTEKS PENYAMAR: riwayat menengah + media base64 sudah
-    # melewati jendela provider, padahal pesannya generik. Retry buta hanya
-    # membuang ±5 menit — pemulihnya ada di core (_api_loop): lepas media,
-    # pangkas riwayat, ulangi.
+    # "Provider returned error" sengaja tidak dianggap transient. Core mencoba
+    # payload aman (tanpa extra/media/schema tool), tetapi TIDAK memangkas
+    # riwayat kecuali errornya benar-benar menyebut konteks/ukuran.
 )
 # Kode status FATAL (percuma diulang): permintaan salah / auth / model tak ada.
 # Selain ini, 5xx dianggap sementara.
@@ -117,6 +119,35 @@ _KATA_KONTEKS_PENUH = (
     "reduce the length", "percih panjang", "payload too large",
     "request too large", "too large",
 )
+
+
+def _error_text(exc: Exception) -> str:
+    """Gabungkan bagian error SDK yang relevan tanpa header/request rahasia."""
+    bagian = [str(getattr(exc, "message", "") or "")]
+    body = getattr(exc, "body", None)
+    if body:
+        bagian.append(str(body))
+    bagian.append(str(exc))
+    return " ".join(x for x in bagian if x)
+
+
+def _is_free_usage_limit(exc: Exception) -> bool:
+    """True khusus limit gratis OpenCode/Console, bukan throttle sementara."""
+    teks = _error_text(exc).lower().replace("_", "")
+    return ("freeusagelimiterror" in teks
+            or ("free usage" in teks and "limit" in teks))
+
+
+def _quota_error(exc: Exception) -> ProviderQuotaError:
+    status = getattr(exc, "status_code", None)
+    kode = f"HTTP {status} " if status else ""
+    return ProviderQuotaError(
+        f"Kuota gratis OpenCode Zen untuk jaringan/akun ini sedang habis "
+        f"({kode}FreeUsageLimitError). Ini batas layanan, bukan kerusakan "
+        "tool Bagas-AI. Tunggu kuota tersedia lagi, masuk lewat `opencode "
+        "auth login`/isi OPENCODE_API_KEY untuk kuota akun, atau pilih model "
+        "web lewat /model."
+    )
 
 
 class KonteksPenuh(Exception):
@@ -296,6 +327,11 @@ def _call_with_retry(
         except Cancelled:
             raise
         except Exception as exc:  # noqa: BLE001
+            # Limit gratis anonim bersifat kuota per-IP/akun, bukan lonjakan
+            # sesaat. Mengulang payload yang sama selama RETRY_MAX_SECONDS
+            # hanya membuat pengguna menunggu lima menit untuk error yang sama.
+            if _is_free_usage_limit(exc):
+                raise _quota_error(exc) from exc
             if stall_escape is not None and _is_timeout(exc):
                 stalls += 1
                 if stalls >= stall_escape:

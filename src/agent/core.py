@@ -988,20 +988,35 @@ _KATA_FATAL_400 = ("api key", "authentic", "unauthorized", "not found",
 
 
 def _layak_pulih(exc: Exception) -> bool:
-    """True bila kegagalan 400/413 layak dicoba pulih (lepas media/pangkas).
+    """True hanya bila 400/413 benar-benar menunjukkan konteks terlalu besar.
 
-    Provider kerap menyembunyikan konteks-penuh di balik pesan generik
-    ("Provider returned error", raw 'ERROR') — kalau kita menunggu kata
-    'context length', pemulihnya tak pernah bangun. Maka SEMUA 400/413
-    diberi kesempatan ladder, KECUALI yang jelas fatal (auth/model)."""
+    Dulu SEMUA 400 dianggap konteks penuh. Akibatnya field tak dikenal, schema
+    tool yang ditolak, atau request invalid justru memangkas riwayat pengguna
+    dan berakhir dengan pesan menyesatkan "provider menolak permintaan".
+    Pemangkasan adalah tindakan destruktif, jadi sekarang wajib ada bukti.
+    """
     o = llm._oa()
     if not isinstance(exc, o.BadRequestError):
         return False
     status = getattr(exc, "status_code", None)
     if status not in (400, 413):
         return False
-    teks = str(getattr(exc, "message", "") or "") + " " + str(exc)
-    teks = teks.lower()
+    if status == 413:
+        return True
+    teks = (str(getattr(exc, "message", "") or "") + " "
+            + str(getattr(exc, "body", "") or "") + " " + str(exc)).lower()
+    return (not any(k in teks for k in _KATA_FATAL_400)
+            and llm._teks_menyebut_konteks_penuh(teks))
+
+
+def _permintaan_api_ditolak(exc: Exception) -> bool:
+    """True untuk request 400/413 yang bisa dicoba dengan payload minimal."""
+    o = llm._oa()
+    if not (isinstance(exc, o.BadRequestError)
+            and getattr(exc, "status_code", None) in (400, 413)):
+        return False
+    teks = (str(getattr(exc, "message", "") or "") + " "
+            + str(getattr(exc, "body", "") or "") + " " + str(exc)).lower()
     return not any(k in teks for k in _KATA_FATAL_400)
 
 
@@ -1560,6 +1575,27 @@ class Agent:
     @property
     def model(self) -> str:
         return self.model_spec.id
+
+    def supports_vision(self) -> bool:
+        """Apakah model aktif benar-benar bisa menerima gambar.
+
+        ``ModelSpec.multimodal`` cukup untuk jalur API. Pada jalur web kita
+        juga memeriksa connector-nya: beberapa situs punya model multimodal,
+        tetapi otomasi bagas-ai belum tentu punya jalur unggah berkas yang
+        terverifikasi. Pemeriksaan ini tidak membuka browser atau mengirim
+        apa pun.
+        """
+        spec = self.model_spec
+        if not spec.multimodal:
+            return False
+        if not spec.is_web:
+            return True
+        try:
+            from . import connectors
+            return connectors.get_connector(
+                spec.connector).supports_attachments()
+        except Exception:  # noqa: BLE001 — connector opsional/tidak siap
+            return False
 
     def set_model(self, name: str) -> str:
         """Pindah model. `name` boleh:
@@ -2866,10 +2902,13 @@ class Agent:
         media_cache: dict[str, str | None] = {}
         media_lewat: list[str] = []
         media_sudah_dikabari = False
-        # Pemulih "Provider returned error": setelah penyedia konsisten
-        # menolak permintaan ber-media, seluruh giliran ini lanjut TANPA
-        # media (penanda dianggap absen oleh _pesan_dengan_media).
+        # Pemulih request 400 GENERIK memakai pengurangan payload yang aman:
+        # parameter provider -> media -> schema tool. Tidak satu pun langkah
+        # ini memangkas riwayat; pemangkasan hanya untuk konteks-penuh yang
+        # terbukti lewat status/pesan khusus.
         media_diblokir = False
+        extra_diblokir = False
+        tools_diblokir = False
         # Permintaan pengguna giliran ini — pegang TEKS-nya sejak awal:
         # bila KonteksPenuh memaksa pemangkasan dan ia tergesang keluar,
         # _pastikan_tugas_aktif menyisipkannya kembali.
@@ -2888,7 +2927,7 @@ class Agent:
 
             # Dihitung ULANG tiap putaran: effort bisa BERUBAH di tengah giliran
             # akibat _escalate.
-            extra = spec.extra_body_for(self.effort)
+            extra = None if extra_diblokir else spec.extra_body_for(self.effort)
             prompt_est = _est_messages(self.memory.messages,
                                        extra_chars=schemas_est)
             # "fase": None -> belum ada apa pun, "pikir" -> pikiran mengalir,
@@ -2953,7 +2992,8 @@ class Agent:
 
             # Saat stagnasi terdeteksi, tool DIMATIKAN — model TERPAKSA
             # menjawab dengan teks (menyimpulkan), tak bisa mengulang tool lagi.
-            active_tools = None if force_final else (schemas or None)
+            active_tools = (None if force_final or tools_diblokir
+                            else (schemas or None))
             try:
                 content, tool_calls, usage = llm.stream_completion(
                     # Penanda [LAMPIR-MEDIA] di riwayat dikonversi jadi bagian
@@ -2961,7 +3001,8 @@ class Agent:
                     # putaran: endpoint API tak punya memori, jadi medianya
                     # wajib ikut di SETIAP request selama rantai tool berjalan.
                     _pesan_dengan_media(self.memory.messages,
-                                        cache=media_cache, lewat=media_lewat),
+                                        cache=media_cache, lewat=media_lewat,
+                                        blokir_media=media_diblokir),
                     tools=active_tools,
                     # api_model, BUKAN spec.id: `id` adalah identitas internal
                     # bagas-ai ("openrouter/ox-alpha") yang tak dikenal server.
@@ -3009,23 +3050,48 @@ class Agent:
                               "respons macet — dibatalkan & diulang otomatis")
                 continue
             except Exception as exc:
-                # SATU pintu pemulih utk semua kegagalan "permintaan ditolak":
-                # KonteksPenuh (terdeteksi eksplisit) ATAU 400/413 generik dari
-                # provider yang menyamar sebagai "Provider returned error".
-                #
-                # URUTAN ADALAH NYAWA: dulu `except Exception` berdiri DI ATAS
-                # `except llm.KonteksPenuh` — padahal KonteksPenuh subclass-
-                # nya, jadi selalu tertangkap di sini duluan lalu `raise`
-                # ulang keluar; handler pangkasnya TAK PERNAH jalan dan
-                # pengguna menabrak ✖ terus pada sesi panjang.
+                # 400 generik BUKAN bukti konteks penuh. Coba ulang dengan
+                # payload lebih konservatif, tetapi jangan sentuh riwayat.
+                # Ini menyelamatkan provider yang menolak extra_body/schema
+                # tanpa mengubah error request menjadi kehilangan konteks.
+                generik = (_permintaan_api_ditolak(exc)
+                           and not isinstance(exc, llm.KonteksPenuh)
+                           and not _layak_pulih(exc))
+                if generik:
+                    if extra and not extra_diblokir:
+                        extra_diblokir = True
+                        if on_notice:
+                            on_notice(
+                                "parameter effort/provider ditolak — dicoba "
+                                "ulang dengan parameter API standar")
+                        continue
+                    if any(v for v in media_cache.values()) \
+                            and not media_diblokir:
+                        media_diblokir = True
+                        if on_notice:
+                            on_notice(
+                                "format media ditolak — dicoba ulang tanpa "
+                                "lampiran gambar/video")
+                        continue
+                    if active_tools and not tools_diblokir:
+                        tools_diblokir = True
+                        if on_notice:
+                            on_notice(
+                                "schema tool ditolak endpoint — dicoba ulang "
+                                "tanpa function-calling untuk menyelamatkan "
+                                "jawaban")
+                        continue
+                    raise
+
+                # URUTAN ADALAH NYAWA: KonteksPenuh wajib dikenali sebelum
+                # error umum, baru riwayat boleh dipangkas.
                 if isinstance(exc, llm.KonteksPenuh):
                     penyebab = "konteks model penuh"
                 elif _layak_pulih(exc):
-                    penyebab = "provider menolak permintaan"
+                    penyebab = "payload/konteks model terlalu besar"
                 else:
                     raise          # bukan keluarga ini: biarkan naik seperti biasa
 
-                pangkas_ke += 1
                 self._pernah_pangkas = True
                 # Anak tangga 0: media base64 sering penyebab utamanya —
                 # lepas dulu (TANPA menghitung pemangkasan riwayat).
@@ -3035,6 +3101,7 @@ class Agent:
                         on_notice(f"{penyebab} — dicoba ulang TANPA lampiran "
                                   "gambar/video")
                     continue
+                pangkas_ke += 1
                 sisa = self._pulih_konteks(pangkas_ke, tugas_aktif)
                 if sisa <= 2 or pangkas_ke > 2:
                     final = (
@@ -3494,6 +3561,11 @@ class Agent:
         reply_chars = 0
         answer = ""
 
+        def _status(msg: str) -> None:
+            """Lapor status hanya bila pemanggil menyediakan salurannya."""
+            if on_status is not None:
+                on_status(msg)
+
         # Varian model situs ("GLM-5.2", "K2.6") yang dipilih lewat /model:
         # dipasang SEKARANG — browser memang sedang hidup untuk giliran ini.
         # Diklik sekali lalu NOLKAN; kegagalannya tak fatal (varian bawaan
@@ -3520,19 +3592,6 @@ class Agent:
             """Perbarui hitungan token (estimasi) agar penghitung di UI hidup
             selama giliran berjalan, bukan melompat di akhir."""
             self.tokens_live = (prompt_chars + reply_chars) // 4
-
-        def _status(msg: str) -> None:
-            """Lapor status HANYA bila pemanggil menyediakan salurannya.
-
-            on_status boleh None — dan memang None pada pemanggil non-CLI:
-            telegram_bot memanggil agent.run() tanpa on_status, begitu pula
-            interfaces/api.py. Memanggilnya langsung membuat jalur ulang-otomatis
-            mati dengan TypeError yang lalu ditelan `except Exception` di bawah,
-            sehingga pengguna Telegram/API menerima '[Connector …] gagal:
-            NoneType object is not callable' dan ulang-otomatis tak pernah
-            jalan — persis kebalikan dari tujuan fiturnya."""
-            if on_status is not None:
-                on_status(msg)
 
         # Berapa kali konteks sudah dipadatkan di giliran ini (lihat _send).
         padat = 0

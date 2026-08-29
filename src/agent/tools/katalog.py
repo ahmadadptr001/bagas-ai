@@ -54,7 +54,8 @@ INTI: tuple[str, ...] = (
 # extras".
 LAIN: dict[str, tuple[str, ...]] = {
     "aset": ("web_search_image", "web_extractor", "download_file",
-             "http_request", "attach_file", "analyze_image"),
+             "http_request", "attach_file", "analyze_image",
+             "read_image_local"),
     "media": ("media_info", "media_convert", "media_compress", "media_trim",
               "media_merge", "media_extract_audio", "media_thumbnail"),
     "arsip": ("zip_create", "zip_extract"),
