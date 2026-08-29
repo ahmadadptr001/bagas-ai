@@ -34,7 +34,7 @@ from ..ui import tema
 from .. import interaction
 from .. import session as session_mod
 from ..session import Session
-from .. import workspace, longmem
+from .. import workspace, longmem, models
 
 try:
     from pyfiglet import Figlet
@@ -419,7 +419,26 @@ class BagasAIApp(App):
             # nvidia-smi butuh jeda; WMI juga. 5 dtk cukup halus.
             time.sleep(5.0)
 
-    def _perbarui_layout_plan(self, lebar: bool | None = None):
+    def _sinkron_footer_sidebar(self, lebar_layar: int | None = None) -> None:
+        """Batasi footer sampai tepi kiri sidebar saat dashboard aktif.
+
+        ``#footer`` dan ``#sidebar`` sama-sama dock di Screen. Footer dengan
+        ``width: 100%`` akan menutupi divider sidebar pada area pra-jawaban,
+        chat, dan status bar. Lebar eksplisit ini membuat keduanya bertemu
+        tepat di satu batas sehingga garis sidebar utuh sampai bawah.
+        """
+        try:
+            footer = self.query_one("#footer", Vertical)
+            sidebar = self.query_one("#sidebar", InfoSidebar)
+            layar = int(lebar_layar if lebar_layar is not None
+                        else self.size.width)
+        except Exception:  # noqa: BLE001 — widget/layout belum siap
+            return
+        footer.styles.width = (max(1, layar - sidebar._lebar)
+                               if sidebar.display else "100%")
+
+    def _perbarui_layout_plan(self, lebar: bool | None = None,
+                              lebar_layar: int | None = None):
         """Pindahkan rencana antara sidebar kanan (lebar) dan footer (sempit).
 
         Sidebar info (#sidebar) adalah WADAH dock-kanan berisi seksi
@@ -455,6 +474,7 @@ class BagasAIApp(App):
             # Sidebar TETAP tampil di layar lebar — seksi Sistem selalu ada;
             # yang hilang hanya seksi rencananya.
             wadah.display = lebar
+            self._sinkron_footer_sidebar(lebar_layar)
             return
         if lebar:
             sidebar.update_plan(steps)
@@ -468,6 +488,7 @@ class BagasAIApp(App):
                 plan.check_collapse(self.size.height)
             except Exception:  # noqa: BLE001
                 pass
+        self._sinkron_footer_sidebar(lebar_layar)
 
     # ─── ask_user / ask_choice (dari thread pekerja) ──────────────────
 
@@ -2093,7 +2114,10 @@ class BagasAIApp(App):
         except Exception:  # noqa: BLE001 — panel opsional
             pass
         # event.size, BUKAN self.size: lihat catatan di _perbarui_layout_plan.
-        self._perbarui_layout_plan(event.size.width >= self._LEBAR_MIN)
+        self._perbarui_layout_plan(
+            event.size.width >= self._LEBAR_MIN,
+            lebar_layar=event.size.width,
+        )
 
     # ─── Image Preview ─────────────────────────────────────────────────
 
