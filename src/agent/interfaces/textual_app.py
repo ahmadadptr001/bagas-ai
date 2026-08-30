@@ -248,9 +248,7 @@ class BagasAIApp(App):
             yield ThinkingBlock(id="thinking-block")
             yield StreamingPreview(id="streaming-preview")
             yield TurnProgressBar(id="progress")
-            with Horizontal(id="chat-row"):
-                yield Button("≡", id="sidebar-toggle", variant="default")
-                yield ChatBox(id="chatbox")
+            yield ChatBox(id="chatbox")
             yield StatusBar(agent=self.agent, id="statusbar")
 
     def on_mount(self):
@@ -552,15 +550,15 @@ class BagasAIApp(App):
         self._sinkron_footer_sidebar(lebar_layar)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id not in ("sidebar-toggle", "sidebar-close"):
+        if event.button.id not in ("statusbar-sidebar-toggle", "sidebar-close"):
             return
         self._sidebar_mobile_open = (not self._sidebar_mobile_open
-                                     if event.button.id == "sidebar-toggle"
+                                     if event.button.id == "statusbar-sidebar-toggle"
                                      else False)
         sidebar = self.query_one("#sidebar", InfoSidebar)
         sidebar.display = self._sidebar_mobile_open
         try:
-            self.query_one("#sidebar-toggle", Button).label = "×" if self._sidebar_mobile_open else "≡"
+            self.query_one("#statusbar-sidebar-toggle", Button).label = "×" if self._sidebar_mobile_open else "☰"
         except Exception:
             pass
         self._sinkron_footer_sidebar()

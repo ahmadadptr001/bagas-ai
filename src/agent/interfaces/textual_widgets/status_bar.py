@@ -30,6 +30,7 @@ from rich.text import Text
 from textual.app import RenderResult
 from textual.reactive import reactive
 from textual.widget import Widget
+from textual.widgets import Button
 
 from ...ui import tema
 
@@ -80,6 +81,11 @@ class StatusBar(Widget):
     def __init__(self, agent: "Agent | None" = None, **kwargs):
         super().__init__(**kwargs)
         self._agent = agent
+
+    def compose(self):
+        # Ikon menu ditempatkan tepat di area merek footer; hanya terlihat
+        # pada breakpoint mobile dan event-nya ditangani BagasAIApp.
+        yield Button("☰", id="statusbar-sidebar-toggle", variant="default")
 
     # Tanpa compose() — StatusBar memakai render() langsung.
 

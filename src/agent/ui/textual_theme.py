@@ -127,8 +127,9 @@ Screen {
     background: $t-gema_bg;
 }
 
-#sidebar-toggle {
+#statusbar-sidebar-toggle {
     display: none;
+    dock: left;
     width: auto;
     min-width: 3;
     margin: 0;
@@ -137,8 +138,7 @@ Screen {
     background: $t-gema_bg;
     color: $t-aksen;
 }
-#chat-row { width: 100%; height: auto; }
-#chat-row #chatbox { width: 1fr; }
+#statusbar-sidebar-toggle { display: none; }
 #sidebar-close { display: none; width: 100%; height: 1; border: none; background: $t-gema_bg; color: $t-aksen; }
 
 /* Panel-panel bawah diberi margin-top: teks jawaban/prompt di atasnya
@@ -363,8 +363,11 @@ ConfirmScreen Static.-active {
 /* ── Responsif (kelas dipasang otomatis oleh breakpoints) ───────────── */
 
 Screen.-sempit #logo { display: none; }
-Screen.-sempit #sidebar-toggle { display: block; }
-Screen.-normal #sidebar-toggle { display: block; }
+Screen.-sempit #statusbar-sidebar-toggle, Screen.-normal #statusbar-sidebar-toggle {
+    display: block;
+}
+Screen.-sempit #statusbar { padding-left: 3; }
+Screen.-normal #statusbar { padding-left: 3; }
 Screen.-sempit #sidebar-close, Screen.-normal #sidebar-close { display: block; }
 Screen.-sempit #plan { max-height: 5; }
 Screen.-sempit #thinking-block { max-height: 4; }
