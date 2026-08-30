@@ -413,6 +413,7 @@ DEFAULT_ID = MODELS[_AKTIF[0]].id
 # mengetik nama yang dulu benar tak berujung "model tak dikenal" — kegagalan
 # yang menyesatkan, sebab situsnya sendiri masih mengalihkan cici.com ke Dola.
 _ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web"}
+_TIDAK_DIDUKUNG = {"opencode/hy3-free"}
 
 
 def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
@@ -497,7 +498,13 @@ def resolve(name: str) -> ModelSpec:
     Model yang ditunda tetap dikenali lalu ditolak dengan alasannya — bukan
     dijawab "tidak dikenal", yang akan membuat pengguna mengira model itu
     hilang lalu mencari-cari nama yang sebenarnya masih ada."""
-    return _pastikan_aktif(cari(name))
+    spec = cari(name)
+    if spec.id in _TIDAK_DIDUKUNG:
+        raise ValueError(
+            "Model Hy3 Free sedang tidak didukung OpenCode (401 ModelError). "
+            "Pilih big-pickle atau muse-spark-1.2-contributor-free."
+        )
+    return _pastikan_aktif(spec)
 
 
 def spec_for_id(model_id: str) -> ModelSpec:
@@ -511,6 +518,8 @@ def spec_for_id(model_id: str) -> ModelSpec:
     dialihkan ke bawaan. Kalau tidak, sesi berikutnya dimulai dengan model yang
     tak boleh dipilih, dan tiap /model justru menolak mengembalikannya.
     """
+    if model_id in _TIDAK_DIDUKUNG:
+        return MODELS["big-pickle"]
     for spec in MODELS.values():
         if spec.id == model_id and spec.aktif:
             return spec
@@ -523,7 +532,8 @@ def is_known_id(model_id: str) -> bool:
     Model yang ditunda sengaja dijawab False: pemanggilnya (Agent.__init__)
     memakai ini untuk MENYIMPAN ULANG preferensi ke model hasil pemetaan —
     tanpa itu, peringatan yang sama muncul tiap kali bagas-ai dijalankan."""
-    return any(spec.id == model_id and spec.aktif for spec in MODELS.values())
+    return model_id not in _TIDAK_DIDUKUNG and any(
+        spec.id == model_id and spec.aktif for spec in MODELS.values())
 
 
 # --- varian model SITUS (rombak /model & /effort) ---------------------------
