@@ -57,6 +57,7 @@ _SLASH_COMMANDS: list[tuple[str, str, bool]] = [
     ("/effort", "usaha berpikir (web & API)", True),
     ("/theme", "ganti tema warna", True),
     ("/compact", "padatkan konteks ke berkas ingatan", False),
+    ("/send-compact", "kirim memory terakhir ke percakapan", False),
     ("/memory", "kelola ingatan panjang", True),
     ("/add-dir", "tambah folder konteks", True),
     ("/dirs", "lihat folder konteks", False),
@@ -77,7 +78,7 @@ _SLASH_COMMANDS: list[tuple[str, str, bool]] = [
 ]
 
 _CMD_LEBAR = max(len(c) for c, _, _ in _SLASH_COMMANDS)
-_MAKS_BARIS = 8
+_MAKS_BARIS = 9
 
 
 class ChatInput(Input):

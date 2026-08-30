@@ -74,8 +74,9 @@ class BagasAIApp(App):
     └─────────────────────────────────┘
     Layar LEBAR (≥ _LEBAR_MIN kolom, "dashboard"): InfoSidebar di-dock di
     KANAN — kesehatan sistem real time (CPU/RAM/disk/GPU) selalu tampil,
-    plus rencana tugas saat model memakai plan(). Rencana tuntas hilang
-    sendiri setelah beberapa detik. Lihat _perbarui_layout_plan.
+    plus seksi planning yang selalu hadir (empty-state sebelum plan()).
+    Rencana tuntas kembali ke empty-state setelah beberapa detik. Lihat
+    _perbarui_layout_plan.
     """
 
     CSS = ""  # Will be set dynamically from theme
@@ -151,16 +152,16 @@ class BagasAIApp(App):
         # menggambar ulang panel saat layout berpindah sidebar <-> footer.
         self._plan_cache: list[dict] = []
         # Rencana TUNTAS: waktu (time.monotonic) saat semua langkah
-        # selesai — panel rencana tampil ±8 dtk lalu hilang sendiri
+        # selesai — langkah tampil ±8 dtk lalu kembali ke empty-state
         # (lihat _poll_plan). State plan_tool TIDAK disentuh: reset()
         # hanya boleh dipanggil core.run() saat giliran baru, jadi sistem
         # tak pernah "melupakan" rencana yang belum digantikan.
         self._plan_selesai_pada: float | None = None
-        # Rencana tuntas yang SUDAH disembunyikan. Cache TIDAK dikosongkan
-        # saat menyembunyikan (kalau dikosongkan, poll berikutnya melihat
+        # Rencana tuntas yang langkahnya SUDAH disembunyikan. Cache TIDAK
+        # dikosongkan (kalau dikosongkan, poll berikutnya melihat
         # steps != cache dan rencana berkedip muncul-hilang tiap 8 dtk);
-        # flag inilah yang membuat _perbarui_layout_plan tetap menahan
-        # seksi rencana sampai giliran baru (plan_tool.reset via core.run).
+        # flag inilah yang membuat _perbarui_layout_plan tetap menahan langkah
+        # selesai sampai giliran baru (plan_tool.reset via core.run).
         self._plan_disembunyikan: bool = False
         # Info GPU terakhir dari thread nvidia-smi (lihat _poll_gpu).
         self._gpu_info: dict = {"nama": "…", "metrik": ""}
@@ -228,7 +229,7 @@ class BagasAIApp(App):
         yield MessageList(agent=self.agent, id="messages")
         # Sidebar info versi desktop: dock KANAN, aktif saat terminal
         # cukup lebar (kelas -lebar). Isinya kesehatan sistem real time
-        # (selalu) + rencana tugas (saat model memakai plan()). Di bawah
+        # (selalu) + planning (selalu, dengan empty-state). Di bawah
         # itu sidebar disembunyikan dan rencana tampil inline sebagai
         # PlanPanel di footer — perilaku lama (lihat _perbarui_layout_plan).
         yield InfoSidebar(id="sidebar")
@@ -321,7 +322,7 @@ class BagasAIApp(App):
 
         Dijalankan tiap 0.3 dtk di thread UI. Rencana yang TUNTAS
         (current > jumlah langkah) tetap tampil ±8 dtk sebagai daftar
-        centang penuh, lalu PANEL-nya disembunyikan — tapi cache & state
+        centang penuh, lalu langkahnya kembali ke empty-state — tapi cache & state
         plan_tool TIDAK di-reset: reset() hanya milik core.run() saat
         giliran baru. Jadi begitu terminal berpindah layout, rencana
         tuntas tadi tetap bisa muncul lagi, dan sistem tak pernah
@@ -500,9 +501,9 @@ class BagasAIApp(App):
             steps = []
         if not steps:
             plan.clear()
-            sidebar.clear()
-            # Sidebar TETAP tampil di layar lebar — seksi Sistem selalu ada;
-            # yang hilang hanya seksi rencananya.
+            sidebar.clear(tampil=lebar)
+            # Sidebar dan seksi Planning TETAP tampil di layar lebar.
+            # Tanpa langkah aktif, PlanSidebar menggambar empty-state.
             wadah.display = lebar
             self._sinkron_footer_sidebar(lebar_layar)
             return
@@ -512,7 +513,7 @@ class BagasAIApp(App):
             plan.clear()  # sembunyikan versi footer — jangan dobel
         else:
             wadah.display = False
-            sidebar.clear()
+            sidebar.clear(tampil=False)
             plan.update_plan(steps)
             try:
                 plan.check_collapse(self.size.height)

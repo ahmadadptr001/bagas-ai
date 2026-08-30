@@ -1,6 +1,7 @@
 """Manajemen riwayat percakapan per sesi."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .prompts import SYSTEM_PROMPT
@@ -15,9 +16,14 @@ class Memory:
     """
 
     def __init__(
-        self, system_prompt: str = SYSTEM_PROMPT, max_messages: int = 40
+        self, system_prompt: str = SYSTEM_PROMPT, max_messages: int = 40,
+        max_chars: int = 48_000,
     ) -> None:
         self.max_messages = max_messages
+        # Batas pesan saja tidak cukup: satu hasil tool 20 KB dulu dihitung
+        # sama dengan satu jawaban pendek. Batas karakter adalah pendekatan
+        # tokenizer-independen (~12k token pada estimator aplikasi).
+        self.max_chars = max_chars
         self._messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt}
         ]
@@ -59,6 +65,7 @@ class Memory:
             self._messages[0] = msg
         else:
             self._messages.insert(0, msg)
+        self._trim()
 
     def reset(self) -> None:
         self._messages = self._messages[:1]  # sisakan hanya system prompt
@@ -137,11 +144,29 @@ class Memory:
         return len(self._messages)
 
     def _trim(self) -> None:
-        if len(self._messages) <= self.max_messages:
+        def ukuran(message: dict[str, Any]) -> int:
+            try:
+                return len(json.dumps(message, ensure_ascii=False,
+                                      default=str))
+            except (TypeError, ValueError):
+                return len(str(message))
+
+        total = sum(ukuran(m) for m in self._messages)
+        if (len(self._messages) <= self.max_messages
+                and (self.max_chars <= 0 or total <= self.max_chars)):
             return
         system = self._messages[0]
-        overflow = len(self._messages) - self.max_messages
-        remaining = self._messages[1 + overflow:]
+        remaining = self._messages[1:]
+        total = ukuran(system) + sum(ukuran(m) for m in remaining)
+        while len(remaining) > 1 and (
+            len(remaining) + 1 > self.max_messages
+            or (self.max_chars > 0 and total > self.max_chars)
+        ):
+            total -= ukuran(remaining.pop(0))
+            # Bila induk assistant.tool_calls ikut terpangkas, seluruh respons
+            # tool yang langsung mengikutinya juga harus dibuang.
+            while remaining and remaining[0].get("role") == "tool":
+                total -= ukuran(remaining.pop(0))
         # Jangan biarkan pesan pertama yang tersisa berupa 'tool' (harus
         # mengikuti panggilan tool sebelumnya) — buang sampai aman.
         while remaining and remaining[0].get("role") == "tool":

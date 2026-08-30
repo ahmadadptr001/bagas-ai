@@ -248,12 +248,29 @@ def invalidate() -> None:
     _MEMO["hold"] = False
 
 
-def as_prompt_block(root: Path | None = None) -> str:
-    """Peta proyek untuk system prompt (dibangun/di-cache otomatis)."""
+def as_prompt_block(root: Path | None = None,
+                    max_chars: int | None = None) -> str:
+    """Peta proyek untuk prompt, opsional dipotong tanpa memotong baris.
+
+    Cache tetap menyimpan peta penuh. Pembatas hanya diterapkan pada salinan
+    yang dikirim ke model sehingga payload memory dan fitur pencarian internal
+    tidak kehilangan detail.
+    """
     try:
-        return ensure(root)
+        teks = ensure(root)
     except Exception:
         return ""
+    if max_chars is None or max_chars <= 0 or len(teks) <= max_chars:
+        return teks
+    penanda = ("\n… [peta prompt dipadatkan; gunakan sasaran()/project_info "
+               "untuk detail yang relevan]")
+    if len(penanda) >= max_chars:
+        return penanda.strip()[:max_chars]
+    batas = int(max_chars) - len(penanda)
+    potong = teks.rfind("\n", 0, batas + 1)
+    if potong <= 0:
+        potong = batas
+    return teks[:potong].rstrip() + penanda
 
 
 def as_payload(root: Path | None = None) -> dict:

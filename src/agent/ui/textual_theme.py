@@ -228,7 +228,7 @@ Screen {
     display: none;
     width: 100%;
     height: auto;
-    max-height: 9;
+    max-height: 10;
     background: $t-menu_bg;
     color: $t-menu_teks;
     border: round $t-tepi_redup;

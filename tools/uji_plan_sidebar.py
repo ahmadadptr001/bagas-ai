@@ -4,15 +4,14 @@
 Jalankan: PYTHONIOENCODING=utf-8 python tools/uji_plan_sidebar.py
 
 Yang dicek:
-1. Layar LEBAR (>= _LEBAR_MIN): sidebar kanan tampil SEJAK AWAL walau belum
-   ada rencana — seksi Sistem (CPU/RAM/Disk/GPU) selalu ada.
+1. Layar LEBAR (>= _LEBAR_MIN): sidebar kanan dan seksi Planning tampil
+   SEJAK AWAL walau belum ada rencana; Sistem juga selalu ada.
 2. plan() -> seksi Rencana muncul di sidebar, PlanPanel footer sembunyi
    (jangan dobel). plan_step() memindahkan penanda done/active.
 3. Terminal disempitkan -> rencana pindah ke PlanPanel footer, sidebar hilang;
    dilebarkan lagi -> kembali ke sidebar.
-4. Rencana TUNTAS: tampil ±8 dtk lalu seksi Rencana hilang sendiri — tapi
-   sidebar tetap ada, dan rencana tak berkedip muncul lagi. Rencana BARU
-   dari model membuat seksi muncul kembali.
+4. Rencana TUNTAS: tampil ±8 dtk lalu kembali ke empty-state tanpa berkedip.
+   Rencana BARU dari model mengisi seksi yang sama kembali.
 5. core.run() mereset rencana (plan_tool.reset) -> panel kosong.
 6. Handler ask_choice TERPASANG (ask_user tak lagi "[tidak interaktif]"):
    - pilih satu (Enter),
@@ -63,18 +62,28 @@ async def uji_plan(app, pilot):
     sidebar = app.query_one("#sidebar", InfoSidebar)
     sistem = app.query_one("#system-panel", SystemPanel)
 
-    # Layar lebar: sidebar tampil SEJAK AWAL walau belum ada rencana —
-    # seksi Sistem selalu ada di ukuran dashboard.
+    # Layar lebar: sidebar dan seksi Planning tampil SEJAK AWAL walau belum
+    # ada rencana; seksi Sistem juga selalu ada di ukuran dashboard.
     await tunggu(pilot, lambda: sidebar.display,
                  pesan="sidebar harus tampil di layar lebar walau tanpa rencana")
-    assert not seksi.display, "seksi rencana harus kosong saat belum ada plan()"
+    assert seksi.display, "seksi planning wajib tampil di sidebar"
+    assert "Belum ada rencana aktif" in seksi.terakhir, seksi.terakhir
     assert "CPU" in sistem.terakhir, sistem.terakhir
     assert "RAM" in sistem.terakhir, sistem.terakhir
 
+    # Lebar minimum tidak boleh membuat divider 28 karakter membungkus di
+    # area isi yang hanya 25 kolom.
+    sidebar.terapkan_lebar(28, simpan=False)
+    await pilot.pause(0.1)
+    assert max(map(len, seksi.terakhir.splitlines())) <= sidebar.lebar_isi, \
+        (sidebar.lebar_isi, seksi.terakhir)
+    sidebar.terapkan_lebar(34, simpan=False)
+    await pilot.pause(0.1)
+
     # plan() -> seksi Rencana muncul di sidebar, footer sembunyi (jangan dobel)
     plan_tool.plan(["langkah pertama", "langkah kedua", "langkah ketiga"], 1)
-    await tunggu(pilot, lambda: seksi.display,
-                 pesan="seksi rencana harus tampil di sidebar saat plan()")
+    await tunggu(pilot, lambda: "langkah pertama" in seksi.terakhir,
+                 pesan="langkah plan() harus tampil di sidebar")
     await pilot.pause()
     assert not plan.display, "PlanPanel footer harus sembunyi di layar lebar"
     isi = seksi.terakhir
@@ -101,11 +110,12 @@ async def uji_plan(app, pilot):
     await tunggu(pilot, lambda: sidebar.display and not plan.display,
                  pesan="lebar kembali: rencana harus kembali ke sidebar")
 
-    # reset (dipanggil core.run tiap giliran baru) -> panel rencana kosong,
-    # tapi SIDEBAR tetap tampil (seksi Sistem tak ikut hilang).
+    # reset (dipanggil core.run tiap giliran baru) -> kembali ke empty-state,
+    # dan SIDEBAR tetap tampil.
     plan_tool.reset()
-    await tunggu(pilot, lambda: not seksi.display and not plan.display,
-                 pesan="reset: kedua panel rencana harus kosong")
+    await tunggu(pilot, lambda: (seksi.display and not plan.display and
+                                 "Belum ada rencana aktif" in seksi.terakhir),
+                 pesan="reset: planning sidebar harus kembali ke empty-state")
     assert sidebar.display, "sidebar sistem harus tetap tampil setelah reset"
 
 
@@ -116,25 +126,29 @@ async def uji_semput_tuntas(app, pilot):
     sidebar = app.query_one("#sidebar", InfoSidebar)
 
     plan_tool.plan(["tugas satu", "tugas dua"], 1)
-    await tunggu(pilot, lambda: seksi.display,
-                 pesan="seksi rencana harus tampil")
+    await tunggu(pilot, lambda: "tugas satu" in seksi.terakhir,
+                 pesan="langkah rencana harus tampil")
     # Tandai semua selesai (current > jumlah langkah).
     plan_tool.plan_step(3)
     await tunggu(pilot, lambda: "Rencana 2/2" in seksi.terakhir,
                  pesan="semua langkah harus tercentang")
     assert seksi.display, "rencana tuntas harus TAMPIL dulu ±8 dtk"
 
-    # Setelah ±8 dtk seksi rencana hilang sendiri, TAPI sidebar (sistem)
-    # tetap ada. maks 250 x 0.05 dtk = 12.5 dtk — cukup untuk 8 dtk + poll.
-    await tunggu(pilot, lambda: not seksi.display, maks=260,
-                 pesan="rencana tuntas harus hilang sendiri setelah 8 dtk")
+    # Setelah ±8 dtk langkah selesai kembali menjadi empty-state, TAPI seksi
+    # Planning dan sidebar tetap ada. maks 250 x 0.05 dtk = 12.5 dtk.
+    await tunggu(pilot,
+                 lambda: (seksi.display and
+                          "Belum ada rencana aktif" in seksi.terakhir),
+                 maks=260,
+                 pesan="rencana tuntas harus kembali ke empty-state")
     assert sidebar.display, "sidebar sistem harus TETAP tampil"
     assert not plan.display, "footer juga harus kosong"
     # Anti-kedip: 3 dtk berikut seksi tetap tersembunyi (bug lama: cache
     # dikosongkan -> poll menganggap rencana baru -> muncul lagi tiap 8 dtk).
     for _ in range(60):
         await pilot.pause(0.05)
-    assert not seksi.display, "rencana tuntas tak boleh berkedip muncul lagi"
+    assert "Belum ada rencana aktif" in seksi.terakhir, \
+        "rencana tuntas tak boleh berkedip muncul lagi"
     # State plan_tool tak dilupakan: masih utuh sampai giliran baru.
     snap = plan_tool.get_state()
     assert snap["steps"] == ["tugas satu", "tugas dua"], snap
@@ -144,8 +158,10 @@ async def uji_semput_tuntas(app, pilot):
     await tunggu(pilot, lambda: "tugas lain A" in seksi.terakhir,
                  pesan="rencana baru harus muncul lagi setelah auto-hide")
     plan_tool.reset()
-    await tunggu(pilot, lambda: not seksi.display,
-                 pesan="reset akhir: seksi rencana harus kosong")
+    await tunggu(pilot,
+                 lambda: (seksi.display and
+                          "Belum ada rencana aktif" in seksi.terakhir),
+                 pesan="reset akhir: planning harus kembali ke empty-state")
 
 
 async def uji_ask(app, pilot):

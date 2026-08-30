@@ -2,8 +2,9 @@
 
 Selalu tampil begitu terminal >= BagasAIApp._LEBAR_MIN kolom. Berisi:
 
-- PlanSidebar ("◈ Rencana") — muncul hanya saat model memakai plan()/
-  plan_step(); rencana yang tuntas tampil sebentar lalu hilang sendiri.
+- PlanSidebar ("◈ Rencana") — selalu muncul di sidebar; menampilkan
+  empty-state sampai model memakai plan()/plan_step(). Rencana yang tuntas
+  tampil sebentar lalu kembali ke empty-state.
 - SystemPanel ("◈ Sistem") — kesehatan mesin real time: CPU, RAM, disk,
   GPU bila terbaca.
 - FOOTER PATH: path LENGKAP folder project (di-wrap per batas folder,

@@ -57,6 +57,22 @@ async def main() -> int:
         await pilot.pause(0.3)
         cek("dropdown muncul saat '/'", dropdown.display,
             f"display={dropdown.display}")
+        cek("/send-compact terlihat di menu '/'",
+            any(c == "/send-compact" for c, _, _ in chatbox._matches),
+            f"matches={[c for c, _, _ in chatbox._matches]!r}")
+        cek("/dirs tidak tergeser dari menu '/'",
+            any(c == "/dirs" for c, _, _ in chatbox._matches),
+            f"matches={[c for c, _, _ in chatbox._matches]!r}")
+
+        # Regresi: handler /send-compact sudah ada, tetapi dulu perintahnya
+        # terlupa dari registry autocomplete Textual.
+        inp.value = "/send"
+        await pilot.pause(0.1)
+        cek("/send-compact muncul di autocomplete",
+            any(c == "/send-compact" for c, _, _ in chatbox._matches),
+            f"matches={[c for c, _, _ in chatbox._matches]!r}")
+        inp.value = "/"
+        await pilot.pause(0.1)
 
         # panah bawah -> sorotan bergerak
         await pilot.press("down")

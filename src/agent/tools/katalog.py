@@ -20,33 +20,30 @@ Aturan penempatan (dipakai saat menimbang tool baru):
 """
 from __future__ import annotations
 
+import re
+
 from .base import REGISTRY, tool
 
 # Tool yang IKUT di pesan pembuka. Dijaga tetap pendek — tiap tambahan di sini
 # harganya dibayar di SETIAP sesi, bukan cuma sesi yang memakainya.
 INTI: tuple[str, ...] = (
-    # berkas
+    # Jalur kerja harian. Operasi situasional (hapus/pindah/arsip/media/dll.)
+    # ditemukan lewat cari_tool/list_tools agar tidak membebani tiap request.
     "read_file", "read_files", "write_file", "edit_file", "edit_files",
-    "append_file", "delete_file", "list_dir", "make_dir",
-    # mencari di proyek
+    "append_file",
     "search_text", "search_multi_text", "glob_files",
-    # menjalankan
-    "run_command", "run_python", "run_command_bg", "bg_output", "bg_send",
-    # memastikan hasil
-    "validate_project", "run_tests", "project_info", "web_preview",
-    "take_screenshot",
-    # riwayat kode
-    "git_status", "git_diff", "git_log", "git_commit",
-    "git_stash", "git_blame",
-    # internet
+    "run_command", "run_python", "run_command_bg", "bg_output",
+    "validate_project", "project_info", "web_preview",
+    "git_status", "git_diff",
     "web_search", "fetch_url",
-    # konteks kerja & pengujian
-    "kerja_terakhir", "catat_kerja", "sasaran", "test_function",
-    # ke pengguna & alur kerja
-    "ask_user", "ask_user_telegram", "plan", "plan_step", "remember", "undo_changes",
-    # pintu ke sisanya
+    "kerja_terakhir", "catat_kerja", "sasaran",
+    "ask_user", "ask_user_telegram", "plan", "plan_step",
     "cari_tool", "list_tools",
 )
+
+# Jalur API memakai function-calling asli. Daftar awalnya sama dengan katalog
+# inti web; schema tambahan dimuat setelah model memanggil cari_tool/list_tools.
+API_INTI: tuple[str, ...] = INTI
 
 # Sisanya, dikelompokkan supaya bisa diminta per kebutuhan. Nama kategorinya
 # sengaja kata sehari-hari, bukan istilah teknis: yang mencarinya adalah model
@@ -59,13 +56,16 @@ LAIN: dict[str, tuple[str, ...]] = {
     "media": ("media_info", "media_convert", "media_compress", "media_trim",
               "media_merge", "media_extract_audio", "media_thumbnail"),
     "arsip": ("zip_create", "zip_extract"),
-    "berkas": ("move_file", "copy_file", "diff_files", "replace_in_files"),
+    "berkas": ("delete_file", "list_dir", "make_dir", "move_file",
+                "copy_file", "diff_files", "replace_in_files",
+                "undo_changes"),
     "sistem": ("clipboard_read", "clipboard_write", "notify", "open_path"),
     "skrip": ("save_script", "run_script", "list_scripts"),
-    "memori": ("list_memory", "forget"),
-    "proses": ("bg_stop", "bg_list"),
-    "git": ("git_show",),
-    "pro": ("find_todos", "code_metrics", "diagnose", "bookmark", "changelog"),
+    "memori": ("remember", "list_memory", "forget"),
+    "proses": ("bg_send", "bg_stop", "bg_list"),
+    "git": ("git_log", "git_commit", "git_stash", "git_blame", "git_show"),
+    "pro": ("run_tests", "test_function", "take_screenshot", "find_todos",
+            "code_metrics", "diagnose", "bookmark", "changelog"),
 }
 
 # Petunjuk khusus per kategori — dulu tinggal di pesan pembuka dan dibaca setiap
@@ -148,6 +148,20 @@ def ringkasan_kategori() -> str:
         for nama, isi in LAIN.items()
         if any(n in REGISTRY for n in isi)
     )
+
+
+_NAMA_BARIS_TOOL = re.compile(r"(?m)^- ([A-Za-z_][A-Za-z0-9_]*)\(")
+
+
+def nama_dari_daftar(teks: str) -> list[str]:
+    """Nama tool dari keluaran cari_tool/list_tools yang aman diekspos.
+
+    Parser hanya menerima format yang dibuat ``baris_tool`` dan memverifikasi
+    hasilnya terhadap registry, jadi teks bebas dari hasil tool tidak dapat
+    menyuntikkan nama fungsi sembarang.
+    """
+    return [nama for nama in _NAMA_BARIS_TOOL.findall(teks or "")
+            if nama in REGISTRY]
 
 
 # Kata tugas/isi umum yang BUKAN kata kunci pencarian tool. Dihilangkan supaya

@@ -38,6 +38,27 @@ _MAKS_PER_LANGKAH = 2
 # ditempel ke pesan tak pernah membengkak.
 _MAKS_CATATAN = 700
 
+_TUGAS_KOMPLEKS = re.compile(
+    r"\b(?:audit|review|bug|error|gagal|keamanan|security|auth|login|payment|"
+    r"migrasi|refactor|arsitektur|fitur|implement|install|deploy|database|api|"
+    r"uji|test|optimasi|performance)\b",
+    re.IGNORECASE,
+)
+
+
+def perlu_untuk_tugas(teks: str) -> bool:
+    """Aktifkan tim hanya bila tugas cukup kompleks atau berisiko.
+
+    Sapaan dan permintaan satu langkah pendek tidak mendapat blok perencana
+    maupun tinjauan spesialis. Sakelar /tim tetap menjadi pintu utama; fungsi
+    ini hanya mencegah kebisingan saat fiturnya aktif tetapi tidak relevan.
+    """
+    bersih = " ".join((teks or "").split())
+    if not bersih:
+        return False
+    return (len(bersih) >= 160 or "\n" in (teks or "")
+            or bool(_TUGAS_KOMPLEKS.search(bersih)))
+
 # Poin pemeriksaan yang menyuruh web_preview — hanya disertakan saat tool itu
 # aktif. Saat dijeda, seruan memakainya hanya membuah putaran browser untuk
 # jawaban "dinonaktifkan" (lihat config.WEB_PREVIEW).
