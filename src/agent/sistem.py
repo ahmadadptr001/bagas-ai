@@ -192,8 +192,7 @@ def cek_sistem() -> list[tuple[str | None, str]]:
     butuh = total_mb() / 1024
     bebas = d["disk_bebas_gb"]
     hasil.append((True if bebas >= 10 else None if bebas >= butuh else False,
-                  f"ruang disk bebas {bebas:.0f} GB "
-                  f"(butuh ±{butuh:.1f} GB)"
+                  f"ruang disk bebas {bebas:.0f} GB"
                   + ("" if bebas >= 10
                      else "  (data sesi & profil browser akan terus bertambah)"
                      if bebas >= butuh else "  — tidak cukup")))
@@ -222,7 +221,7 @@ def _tanda(status: str | None) -> str:
 
 
 def tampilkan() -> bool:
-    """Cetak cek sistem + Ketentuan + perkiraan ukuran.
+    """Cetak cek sistem serta disclaimer dan ketentuan.
 
     Return False bila ada kegagalan MUTLAK (sistem tak didukung)."""
     print()
@@ -238,21 +237,8 @@ def tampilkan() -> bool:
     for baris in KETENTUAN.splitlines():
         print("  " + baris if baris else "")
 
-    # Estimasi ruang disk tidak ditampilkan di installer; kebutuhan aktual
-    # tetap divalidasi oleh cek_sistem().
-    return not gagal
-
-    print()
-    print("=== PERKIRAAN RUANG DISK YANG DIPAKAI ===")
-    for nama, mb in PERKIRAAN_MB:
-        titik = "." * max(2, 44 - len(nama))
-        print(f"  {nama} {titik} ±{_gb(mb)}")
-    print(f"  {'data & sesi ~/.bagasai'} "
-          f"{'.' * max(2, 44 - len('data & sesi ~/.bagasai'))} "
-          "bertambah sesuai pemakaian")
-    print(f"  {'TOTAL (dengan cadangan unduhan)'} "
-          f"{'.' * max(2, 44 - len('TOTAL (dengan cadangan unduhan)'))} "
-          f"±{_gb(total_mb())}")
+    # Kebutuhan aktual tetap divalidasi oleh cek_sistem(), tetapi estimasinya
+    # tidak ditampilkan kepada pengguna.
     return not gagal
 
 
@@ -302,9 +288,6 @@ def main() -> int:
     if not dukung:
         print("\nSistem ini BELUM didukung bagas-ai — pemasangan dihentikan.")
         return 2
-    if False:
-        print("\nDibatalkan — ketentuan belum disetujui.")
-        return 1
     if not tanya_lanjut():
         print("\nDibatalkan — tidak ada yang dipasang.")
         return 1

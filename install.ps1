@@ -57,11 +57,17 @@ function Invoke-Captured([string]$Exe, [string[]]$Arguments) {
 # meminta input (mis. sistem.py): pakai Invoke-Quiet malah menelan outputnya
 # ke variabel, dan `switch` pada variabel-array itu terbaca salah.
 function Invoke-Live([string]$Exe, [string[]]$Arguments) {
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    # Jalankan langsung agar prompt tanpa newline tampil sebelum input dibaca.
-    try { & $Exe @Arguments 2>$null } finally { $ErrorActionPreference = $prev }
-    return $LASTEXITCODE
+    # Start-Process mewarisi console secara langsung. Ini penting karena hasil
+    # fungsi ditampung ke `$SistemRc`; pemanggilan `&` biasa membuat stdout
+    # Python ikut tertangkap dan prompt baru terlihat sesudah proses selesai.
+    try {
+        $p = Start-Process -FilePath $Exe -ArgumentList $Arguments `
+            -NoNewWindow -Wait -PassThru
+        return $p.ExitCode
+    } catch {
+        Err "Gagal menjalankan pemeriksaan sistem: $($_.Exception.Message)"
+        return 2
+    }
 }
 
 $RepoUrl = if ($env:BAGASAI_REPO) { $env:BAGASAI_REPO } else { "https://github.com/ahmadadptr001/bagas-ai" }
@@ -130,12 +136,10 @@ if ((Test-Path "pyproject.toml") -and (Select-String -Path "pyproject.toml" -Pat
 }
 
 # --- 2b. Cek kecocokan sistem (sebelum apa pun dipasang) ---
-# sistem.py: OS/arsitektur/RAM/disk/Python/internet + Ketentuan & Kebijakan
-# + perkiraan ruang disk, lalu konfirmasi lanjut/batal. Sengaja SEBELUM pip
-# install: pengguna perlu tahu "mesin ini didukung/tidak" dan berapa GB yang
-# akan terpakai sebelum menit-menit unduhan dimulai. Prompt Y/n-nya
-# interaktif; lewat Invoke-Live agar outputnya tampil di konsol DAN stderr
-# Python tak mematikan installer (lihat catatan di helper itu).
+# sistem.py: OS/arsitektur/RAM/disk/Python/internet + Ketentuan & Kebijakan,
+# lalu konfirmasi lanjut/batal. Sengaja dijalankan sebelum pip install agar
+# pengguna bisa membatalkan sebelum proses unduhan dimulai. Prompt Y/n-nya
+# interaktif; Invoke-Live menjaga output dan prompt tetap tampil di console.
 Step "Cek kecocokan sistem"
 $SistemRc = Invoke-Live $Py @((Join-Path $Src "src\agent\sistem.py"))
 switch ($SistemRc) {
