@@ -186,7 +186,10 @@ Screen {
 
 #input-row {
     width: 100%;
-    height: 3;
+    /* auto: tinggi mengikuti #chat-input yang tumbuh saat teks membungkus
+       (maks 5 baris, diatur _sesuaikan_tinggi di chat_box.py). Border
+       round menambah 2 baris sendiri. */
+    height: auto;
     background: $t-gema_bg;
     border: round $t-tepi;
     padding: 0 1;
@@ -206,6 +209,10 @@ Screen {
 
 #chat-input {
     width: 1fr;
+    /* Tinggi diubah dinamis oleh ChatBox._sesuaikan_tinggi: 1 saat kosong,
+       tumbuh mengikuti baris terbungkus, berhenti di 5 lalu menggulir.
+       height: auto TIDAK bisa dipakai — TextArea tidak menyediakan
+       tinggi-otomatis-mengikuti-isi. */
     height: 1;
     padding: 0;
     border: none;

@@ -3,11 +3,15 @@
 Satu-satunya tempat mengetik. Bentuk & posisinya sama persis saat idle
 maupun saat AI bekerja. Mendukung:
 
+- Input MULTI-BARIS: teks yang melebihi lebar kotak turun sendiri ke
+  baris berikutnya (soft wrap), kotak tumbuh sampai maksimal 5 baris,
+  dan MENGgulir bila teksnya lebih panjang lagi. Enter tetap mengirim
+  (bukan baris baru) — baris-baris tadi cuma pembungkusan visual.
 - Autocomplete slash command: dropdown DI ATAS kotak input (seperti
   Claude Code), navigasi panah, terima dengan Tab/Enter, tutup dengan Esc.
 - Paste: deteksi berkas gambar/video, tempelan panjang jadi penanda,
   tempelan multi-baris TIDAK terpotong satu baris.
-- Navigasi kursor (panah, Home/End, Ctrl+W/U/K dari Input bawaan).
+- Navigasi kursor (panah, Home/End, Ctrl+W/U/K).
 
 CATATAN BUG YANG SUDAH DIPERBAIKI (jangan diulang):
 
@@ -18,11 +22,15 @@ CATATAN BUG YANG SUDAH DIPERBAIKI (jangan diulang):
    dikendalikan langsung lewat ``.display`` (tanpa reactive, tanpa watcher).
 2. ``Input._on_paste`` menyisipkan HANYA baris pertama lalu ``event.stop()``,
    sehingga ``ChatBox.on_paste`` mati total. Sekarang ``ChatInput._on_paste``
-   meneruskan tempelan utuh ke ChatBox.
+   meneruskan tempelan utuh ke ChatBox (berlaku juga untuk TextArea).
 3. Tombol panah/Tab/Esc dulu tak pernah sampai ke dropdown (Input yang
    fokus). Sekarang ``ChatInput.on_key`` menangani lebih dulu lalu
-   ``prevent_default()`` + ``stop()`` agar perilaku bawaan Input dan binding
+   ``prevent_default()`` + ``stop()`` agar perilaku bawaan dan binding
    global (fokus-berikutnya) tidak ikut jalan.
+4. ``TextArea`` TIDAK punya ``height: auto`` yang mengikuti isi
+   (``get_content_height``-nya warisan ScrollView). Tinggi kotak diatur
+   manual di ``_sesuaikan_tinggi`` dari ``wrapped_document.height`` —
+   cara lain (CSS auto/max-height) membuat kotak tetap 1 baris.
 """
 from __future__ import annotations
 
@@ -32,7 +40,7 @@ from textual import events
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from rich.text import Text
 
@@ -79,10 +87,25 @@ _SLASH_COMMANDS: list[tuple[str, str, bool]] = [
 
 _CMD_LEBAR = max(len(c) for c, _, _ in _SLASH_COMMANDS)
 _MAKS_BARIS = 9
+# Tinggi maksimal kotak input (baris layar) sebelum mulai menggulir.
+_MAKS_TINGGI_INPUT = 5
 
 
-class ChatInput(Input):
-    """Input yang menyerahkan tombol navigasi & paste ke ChatBox induknya."""
+class ChatInput(TextArea):
+    """TextArea yang menyerahkan tombol navigasi & paste ke ChatBox induknya.
+
+    TextArea dipilih (bukan Input) karena Input tak bisa membungkus teks:
+    tempelan panjang hilang ke samping. ``soft_wrap=True`` membungkus teks
+    di batas kolom; ``tab_behavior="focus"`` supaya Tab tidak disisipkan
+    sebagai indentasi (ChatBox memakainya untuk autocomplete).
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("soft_wrap", True)
+        kwargs.setdefault("show_line_numbers", False)
+        kwargs.setdefault("compact", True)
+        kwargs.setdefault("tab_behavior", "focus")
+        super().__init__("", **kwargs)
 
     def _chatbox(self) -> "ChatBox | None":
         node = self.parent
@@ -91,12 +114,11 @@ class ChatInput(Input):
         return node  # type: ignore[return-value]
 
     def on_key(self, event: events.Key) -> None:
-        """Tangani tombol SEBELUM perilaku bawaan Input & binding global.
+        """Tangani tombol SEBELUM perilaku bawaan TextArea & binding global.
 
         ``prevent_default()`` menghentikan pencarian handler di MRO (jadi
-        ``Input._on_key`` tak ikut jalan) dan ``stop()`` menghentikan
-        gelembung ke Screen/App (jadi binding "tab -> fokus berikutnya"
-        tak merebut tombol).
+        ``TextArea._on_key`` tak ikut jalan) dan ``stop()`` menghentikan
+        gelembung ke Screen/App (jadi binding global tak merebut tombol).
         """
         box = self._chatbox()
         if box is None:
@@ -104,12 +126,20 @@ class ChatInput(Input):
         if box.proses_tombol(event.key):
             event.prevent_default()
             event.stop()
+            return
+        # Enter SELALU mengirim, bukan menyisipkan baris baru: kotak ini
+        # satu paragraf rata-kanan; baris-baris di layar hanyalah
+        # pembungkusan visual oleh soft wrap.
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            box.kirim()
 
     def _on_paste(self, event: events.Paste) -> None:
         """Teruskan tempelan UTUH ke ChatBox.
 
-        Input bawaan hanya mengambil ``splitlines()[0]`` — tempelan
-        multi-baris hilang dan deteksi berkas gambar tak pernah jalan.
+        Widget bawaan menyisipkan mentah apa adanya — deteksi berkas
+        gambar dan penanda tempelan panjang jalan di ChatBox, bukan di sini.
         """
         event.stop()
         event.prevent_default()
@@ -200,6 +230,42 @@ class ChatBox(Widget):
         self._hint.display = False
         self._prompt.update(Text("❯", style=f"bold {tema.p('aksen')}"))
         self._input.focus()
+        self._sesuaikan_tinggi()
+
+    def on_resize(self) -> None:
+        # Lebar berubah -> pembungkusan berubah -> tinggi bisa berubah.
+        # Tunggu refresh dulu supaya scrollable_content_region terukur
+        # dengan ukuran baru, baru hitung ulang.
+        self.call_after_refresh(self._sesuaikan_tinggi)
+
+    # --- Tinggi dinamis --------------------------------------------------
+
+    def _sesuaikan_tinggi(self) -> None:
+        """Tumbuhkan/kecilkan kotak mengikuti isi, maks _MAKS_TINGGI_INPUT.
+
+        TextArea tidak punya tinggi-otomatis-mengikuti-isi (lihat catatan
+        #4 di docstring modul), jadi dihitung manual dari jumlah baris
+        TERBUNGKUS. Bila teks melebihi 5 baris layar, kotak berhenti
+        tumbuh dan TextArea menggulir sendiri (cursor tetap dibuat
+        terlihat). Dibatasi juga dari bawah: minimal 1 baris.
+        """
+        try:
+            # TextArea.edit() memang membungkus ulang wrapped_document;
+            # baca saja hasilnya. (Rewrap eksplisit hanya perlu saat
+            # resize — ditangani on_resize di bawah.)
+            tinggi = self._input.wrapped_document.height
+        except Exception:  # noqa: BLE001 — belum ter-mount
+            return
+        tinggi = max(1, min(tinggi, _MAKS_TINGGI_INPUT))
+        if self._input.region.height != tinggi:
+            self._input.styles.height = tinggi
+        # Setelah tinggi berubah, pastikan kursor masih kelihatan (bila
+        # teks sudah menggulir, editan di ujung bawah tak men-scroll
+        # sendiri).
+        try:
+            self._input.scroll_cursor_visible()
+        except Exception:  # noqa: BLE001 — belum ter-mount
+            pass
 
     # --- Fokus ---------------------------------------------------------
 
@@ -249,14 +315,14 @@ class ChatBox(Widget):
                 # agar yang ditempel tetap terlihat (isi bisa dikembangkan
                 # manual nanti).
                 marker = f"[tempelan {len(lines)} baris]"
-            self._input.insert_text_at_cursor(marker)
+            self.insert_text_at_cursor(marker)
             self.post_message(self.Pasted(marker))
             return
 
         # Tempelan pendek: sisipkan apa adanya (baris jadi spasi).
         cleaned = " ".join(x for x in (b.strip() for b in lines) if x)
         if cleaned:
-            self._input.insert_text_at_cursor(cleaned)
+            self.insert_text_at_cursor(cleaned)
             self.post_message(self.Pasted(cleaned))
 
     def on_paste(self, event: events.Paste) -> None:
@@ -297,7 +363,7 @@ class ChatBox(Widget):
             if key == "enter":
                 # Enter pada kandidat: lengkapi dulu. Kalau yang diketik
                 # SUDAH sama dengan kandidat, biarkan Enter mengirim.
-                typed = self._input.value.strip().lower()
+                typed = self._input.text.strip().lower()
                 exact = [m for m in self._matches if m[0] == typed]
                 if exact and not exact[0][2]:
                     self._close()
@@ -308,13 +374,15 @@ class ChatBox(Widget):
 
         # Dropdown tertutup: Tab membuka tawaran untuk teks "/...".
         if key == "tab":
-            if self._input.value.startswith("/"):
-                self._refresh_matches(self._input.value, paksa=True)
+            if self._input.text.startswith("/"):
+                self._refresh_matches(self._input.text, paksa=True)
                 return True
             return False
-        # Panah-atas/-bawah = antrean & riwayat (lihat Recall). Input satu
-        # baris tak memakai panah vertikal untuk apa pun, jadi aman
-        # dirampas. (Dropdown TERBUKA sudah menyimpan panah di atas untuk
+        # Panah-atas/-bawah = antrean & riwayat (lihat Recall). Teks yang
+        # membungkus ke beberapa baris layar tetap SATU baris logika, dan
+        # kursor berpindah antar baris layar lewat kiri/kanan — jadi
+        # aman merampas panah vertikal untuk riwayat.
+        # (Dropdown TERBUKA sudah menyimpan panah di atas untuk
         # navigasi tawaran.)
         if key == "up":
             self.post_message(self.Recall())
@@ -323,31 +391,31 @@ class ChatBox(Widget):
             self.post_message(self.Recall(maju=True))
             return True
         if key == "escape":
-            if self._input.value:
+            if self._input.text:
                 self._set_value("")
                 return True
             return False
         return False
 
-    # --- Peristiwa Input ----------------------------------------------
+    # --- Peristiwa TextArea ---------------------------------------------
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Enter di field input — kirim teks."""
-        event.stop()
+    def kirim(self) -> None:
+        """Enter di kotak input — kirim teks (dipanggil ChatInput)."""
         if self._open:
             self._accept()
             return
-        text = self._input.value.strip()
+        text = self._input.text.strip()
         if not text:
             return
         self._set_value("")
         self._close()
         self.post_message(self.Submitted(text))
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        """Teks berubah — segarkan tawaran autocomplete."""
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        """Teks berubah — segarkan tawaran autocomplete & tinggi kotak."""
         event.stop()
-        self._refresh_matches(event.value)
+        self._refresh_matches(self._input.text)
+        self._sesuaikan_tinggi()
 
     def on_option_list_option_selected(
             self, event: OptionList.OptionSelected) -> None:
@@ -363,8 +431,9 @@ class ChatBox(Widget):
         if not text.startswith("/"):
             self._close()
             return
-        # Sudah ada spasi -> pengguna mengetik argumen, bukan nama perintah.
-        if " " in text or text != text.rstrip():
+        # Sudah ada spasi/baris-baru -> pengguna mengetik argumen, bukan
+        # nama perintah.
+        if " " in text or "\n" in text or text != text.rstrip():
             self._close()
             return
 
@@ -457,11 +526,12 @@ class ChatBox(Widget):
     def _set_value(self, text: str) -> None:
         """Ganti isi input dan taruh kursor di ujung.
 
-        ``Input.value`` TIDAK memindahkan kursor sendiri; tanpa ini kursor
-        tertinggal di posisi lama dan huruf berikutnya masuk di tengah.
+        Setter ``TextArea.text`` TIDAK memindahkan kursor sendiri (kursor
+        malah lompat ke awal); tanpa ini huruf berikutnya masuk di tengah.
         """
-        self._input.value = text
-        self._input.cursor_position = len(text)
+        self._input.text = text
+        baris = text.split("\n")
+        self._input.move_cursor((len(baris) - 1, len(baris[-1])))
 
     # --- API publik ----------------------------------------------------
 
@@ -490,7 +560,7 @@ class ChatBox(Widget):
 
     @property
     def current_text(self) -> str:
-        return self._input.value
+        return self._input.text
 
     @current_text.setter
     def current_text(self, value: str) -> None:
@@ -498,28 +568,44 @@ class ChatBox(Widget):
 
     @property
     def cursor_position(self) -> int:
-        return self._input.cursor_position
+        """Posisi kursor sebagai offset karakter (kompatibilitas app).
+
+        TextArea hanya punya lokasi (baris, kolom); offset dihitung manual.
+        """
+        baris, kolom = self._input.selection.end
+        isi = self._input.text.split("\n")
+        if baris >= len(isi):
+            return len(self._input.text)
+        kolom = min(kolom, len(isi[baris]))
+        return sum(len(b) + 1 for b in isi[:baris]) + kolom
 
     @property
     def autocomplete_open(self) -> bool:
         return self._open
 
     def insert_text_at_cursor(self, text: str) -> None:
-        self._input.insert_text_at_cursor(text)
+        self._input.insert(text)
 
     def delete_word_before_cursor(self) -> None:
-        """Hapus kata sebelum kursor (Ctrl+W)."""
-        text = self._input.value
-        pos = self._input.cursor_position
-        if pos <= 0:
+        """Hapus kata sebelum kursor (Ctrl+W).
+
+        TextArea tak punya API ini; rentang dihapusnya dihitung manual
+        dari lokasi kursor lalu diterapkan lewat replace().
+        """
+        baris, kolom = self._input.selection.end
+        isi = self._input.text.split("\n")
+        if baris >= len(isi):
             return
-        i = pos - 1
-        while i > 0 and text[i - 1].isspace():
+        line = isi[baris]
+        kolom = min(kolom, len(line))
+        if kolom <= 0:
+            return
+        i = kolom - 1
+        while i > 0 and line[i - 1].isspace():
             i -= 1
-        while i > 0 and not text[i - 1].isspace():
+        while i > 0 and not line[i - 1].isspace():
             i -= 1
-        self._input.value = text[:i] + text[pos:]
-        self._input.cursor_position = i
+        self._input.replace("", (baris, i), (baris, kolom))
 
     def apply_completion(self, completion: str) -> None:
         self._set_value(completion + " ")
