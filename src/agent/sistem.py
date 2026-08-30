@@ -252,15 +252,43 @@ def tampilkan() -> bool:
     return not gagal
 
 
-def tanya_lanjut() -> bool:
-    """Konfirmasi lanjut/batal. Terminal tak interaktif = lanjut tanpa bertanya
-    (dipakai skrip otomatis; hasil ceknya tetap tercetak di atas)."""
-    if not sys.stdin.isatty():
-        return True
+def _jawab_terminal(prompt: str) -> str | None:
+    """Baca jawaban dari terminal asli meski stdin installer berupa pipe."""
+    stream = sys.stdin
+    opened = None
+    if not stream.isatty():
+        # install.ps1 sering dijalankan lewat ``irm | iex`` sehingga stdin
+        # berisi skrip, bukan input pengguna. Buka console/tty langsung agar
+        # pertanyaan tidak terlewati dan Enter tidak otomatis memilih lanjut.
+        try:
+            device = "CONIN$" if os.name == "nt" else "/dev/tty"
+            opened = open(device, "r", encoding="utf-8", errors="replace")
+            stream = opened
+        except (OSError, IOError):
+            # Lingkungan benar-benar non-interaktif (CI/redirect murni):
+            # pertahankan perilaku non-blocking lama.
+            return None
     try:
-        jawab = input("\nLanjutkan pemasangan? [Y/n]: ").strip().lower()
+        print(prompt, end="", flush=True)
+        return stream.readline().strip().lower()
     except (EOFError, KeyboardInterrupt):
-        return False
+        return None
+    finally:
+        if opened is not None:
+            opened.close()
+
+
+def tanya_ketentuan() -> bool:
+    """Minta persetujuan eksplisit terhadap ketentuan sebelum pemasangan."""
+    jawab = _jawab_terminal("\nSaya menyetujui Ketentuan dan Kebijakan di atas? [y/N]: ")
+    return True if jawab is None else jawab in ("y", "ya", "yes", "j")
+
+
+def tanya_lanjut() -> bool:
+    """Konfirmasi lanjut/batal dari terminal asli, bukan stdin pipeline."""
+    jawab = _jawab_terminal("\nLanjutkan pemasangan? [Y/n]: ")
+    if jawab is None:
+        return True
     return jawab not in ("n", "no", "t", "tidak", "batal")
 
 
@@ -275,6 +303,9 @@ def main() -> int:
     if not dukung:
         print("\nSistem ini BELUM didukung bagas-ai — pemasangan dihentikan.")
         return 2
+    if not tanya_ketentuan():
+        print("\nDibatalkan — ketentuan belum disetujui.")
+        return 1
     if not tanya_lanjut():
         print("\nDibatalkan — tidak ada yang dipasang.")
         return 1
