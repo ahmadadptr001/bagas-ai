@@ -127,6 +127,18 @@ Screen {
     background: $t-gema_bg;
 }
 
+#sidebar-toggle {
+    display: none;
+    width: auto;
+    min-width: 18;
+    margin: 0 1;
+    height: 1;
+    border: none;
+    background: $t-gema_bg;
+    color: $t-aksen;
+}
+#sidebar-close { display: none; width: 100%; height: 1; border: none; background: $t-gema_bg; color: $t-aksen; }
+
 /* Panel-panel bawah diberi margin-top: teks jawaban/prompt di atasnya
    tidak menempel rapat ke box thinking / loading / antrean. */
 #plan, #image-preview, #thinking-block, #streaming-preview {
@@ -349,6 +361,9 @@ ConfirmScreen Static.-active {
 /* ── Responsif (kelas dipasang otomatis oleh breakpoints) ───────────── */
 
 Screen.-sempit #logo { display: none; }
+Screen.-sempit #sidebar-toggle { display: block; }
+Screen.-normal #sidebar-toggle { display: block; }
+Screen.-sempit #sidebar-close, Screen.-normal #sidebar-close { display: block; }
 Screen.-sempit #plan { max-height: 5; }
 Screen.-sempit #thinking-block { max-height: 4; }
 Screen.-sempit #streaming-preview { max-height: 4; }

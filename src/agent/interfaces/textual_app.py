@@ -22,12 +22,13 @@ from textual.binding import Binding
 from textual import events
 from textual.containers import Vertical
 from textual.reactive import reactive
+from textual.widgets import Button
 
 from .textual_widgets import (
     StatusBar, ChatBox, MessageList, PlanPanel, PlanSidebar, InfoSidebar,
     SystemPanel, ImagePreview, TurnProgressBar, LogoWidget,
     StreamingPreview, ThinkingBlock, SelectScreen, MultiSelectScreen,
-    ConfirmScreen, TextPromptScreen, ThemeScreen, QueueStrip,
+    ConfirmScreen, TextPromptScreen, ThemeScreen, QueueStrip, BtwScreen,
 )
 from ..ui.textual_theme import generate_css, variabel as variabel_tema
 from ..ui import tema
@@ -163,6 +164,7 @@ class BagasAIApp(App):
         # flag inilah yang membuat _perbarui_layout_plan tetap menahan langkah
         # selesai sampai giliran baru (plan_tool.reset via core.run).
         self._plan_disembunyikan: bool = False
+        self._sidebar_mobile_open = False
         # Info GPU terakhir dari thread nvidia-smi (lihat _poll_gpu).
         self._gpu_info: dict = {"nama": "…", "metrik": ""}
         # SATU referensi bound-method untuk handler pilihan. Akses ulang
@@ -247,6 +249,7 @@ class BagasAIApp(App):
             yield StreamingPreview(id="streaming-preview")
             yield TurnProgressBar(id="progress")
             yield ChatBox(id="chatbox")
+            yield Button("☰ Buka sidebar", id="sidebar-toggle", variant="default")
             yield StatusBar(agent=self.agent, id="statusbar")
 
     def on_mount(self):
@@ -524,15 +527,16 @@ class BagasAIApp(App):
             # tidak dimunculkan lagi sampai giliran baru menulis rencana
             # baru (flag dilepas di _poll_plan saat steps berubah).
             steps = []
+        tampil_sidebar = lebar or self._sidebar_mobile_open
         if not steps:
             plan.clear()
-            sidebar.clear(tampil=lebar)
+            sidebar.clear(tampil=tampil_sidebar)
             # Sidebar dan seksi Planning TETAP tampil di layar lebar.
             # Tanpa langkah aktif, PlanSidebar menggambar empty-state.
-            wadah.display = lebar
+            wadah.display = tampil_sidebar
             self._sinkron_footer_sidebar(lebar_layar)
             return
-        if lebar:
+        if lebar or self._sidebar_mobile_open:
             sidebar.update_plan(steps)
             wadah.display = True
             plan.clear()  # sembunyikan versi footer — jangan dobel
@@ -545,6 +549,21 @@ class BagasAIApp(App):
             except Exception:  # noqa: BLE001
                 pass
         self._sinkron_footer_sidebar(lebar_layar)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id not in ("sidebar-toggle", "sidebar-close"):
+            return
+        self._sidebar_mobile_open = (not self._sidebar_mobile_open
+                                     if event.button.id == "sidebar-toggle"
+                                     else False)
+        sidebar = self.query_one("#sidebar", InfoSidebar)
+        sidebar.display = self._sidebar_mobile_open
+        try:
+            self.query_one("#sidebar-toggle", Button).label = (
+                "× Tutup sidebar" if self._sidebar_mobile_open else "☰ Buka sidebar")
+        except Exception:
+            pass
+        self._sinkron_footer_sidebar()
 
     # ─── ask_user / ask_choice (dari thread pekerja) ──────────────────
 
@@ -723,7 +742,9 @@ class BagasAIApp(App):
 
         # Handle slash commands
         if text.startswith("/"):
-            msg_list.append_user_message(text)
+            # /btw memiliki layar dan riwayat sendiri; jangan mencemari chat utama.
+            if text.split(maxsplit=1)[0].lower() != "/btw":
+                msg_list.append_user_message(text)
             self._handle_command(text)
             return
 
@@ -1006,17 +1027,9 @@ class BagasAIApp(App):
 
     def _cmd_btw(self, text: str) -> None:
         """Obrolan sampingan; tidak masuk antrean atau memory tugas."""
-        msg_list = self.query_one("#messages", MessageList)
         parts = text.split(maxsplit=1)
-        if len(parts) != 2 or not parts[1].strip():
-            msg_list.append_notice("Pemakaian: /btw <obrolan santai>", style=tema.p("redup"))
-            return
-        pertanyaan = parts[1].strip()
-        msg_list.append_notice("/btw sedang menjawab di jalur samping…", style=tema.p("redup"))
-        def worker() -> None:
-            hasil = self.agent.btw(pertanyaan)
-            self._safe_call(msg_list.append_ai_message, hasil)
-        threading.Thread(target=worker, daemon=True).start()
+        initial = parts[1].strip() if len(parts) == 2 else ""
+        self.push_screen(BtwScreen(self.agent.btw, initial=initial))
 
     def _cmd_image(self, text: str) -> None:
         """Baca satu gambar di worker Python lokal, tanpa request provider."""

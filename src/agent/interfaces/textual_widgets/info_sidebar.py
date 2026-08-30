@@ -22,7 +22,7 @@ from __future__ import annotations
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Static, Button
 from rich.text import Text
 
 from ... import config
@@ -155,6 +155,7 @@ class InfoSidebar(Widget):
 
     def compose(self):
         yield _ResizeHandle(id="sidebar-resize")
+        yield Button("× Tutup sidebar", id="sidebar-close", variant="default")
         yield PlanSidebar(id="plan-side")
         yield SystemPanel(id="system-panel")
         yield _Klik("toggle", id="path-footer")

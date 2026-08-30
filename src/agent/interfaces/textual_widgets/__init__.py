@@ -22,7 +22,7 @@ from .streaming_preview import StreamingPreview
 from .thinking_block import ThinkingBlock
 from .queue_strip import QueueStrip
 from .modal_screens import (SelectScreen, MultiSelectScreen, ConfirmScreen,
-                            TextPromptScreen, ThemeScreen)
+                            TextPromptScreen, ThemeScreen, BtwScreen)
 
 __all__ = [
     "StatusBar",
@@ -44,4 +44,5 @@ __all__ = [
     "ConfirmScreen",
     "TextPromptScreen",
     "ThemeScreen",
+    "BtwScreen",
 ]

@@ -5,9 +5,12 @@ yang muncul sebagai overlay di atas UI utama.
 """
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
+
 from textual.screen import ModalScreen
 from textual.binding import Binding
-from textual.widgets import Static, OptionList, Input
+from textual.widgets import Static, OptionList, Input, RichLog
 from textual.widgets.option_list import Option
 from textual.widget import Widget
 from textual.containers import Vertical, Horizontal
@@ -561,4 +564,63 @@ class TextPromptScreen(ModalScreen[str]):
 
     def action_cancel(self):
         """Cancel input."""
+        self.dismiss(None)
+
+
+class BtwScreen(ModalScreen[None]):
+    """Jalur obrolan sampingan yang sepenuhnya terpisah dari terminal chat."""
+
+    DEFAULT_CSS = """
+    BtwScreen { align: center middle; background: $background 80%; }
+    BtwScreen #btw-container { width: 84%; height: 82%; max-width: 100; background: $surface; border: tall $accent; padding: 1 2; }
+    BtwScreen #btw-title { text-align: center; text-style: bold; padding-bottom: 1; }
+    BtwScreen #btw-log { height: 1fr; border: round $border; padding: 0 1; }
+    BtwScreen #btw-input { width: 1fr; margin-top: 1; }
+    BtwScreen #btw-hint { width: auto; padding: 1 0 0 1; color: $text-muted; }
+    """
+    BINDINGS = [Binding("escape", "cancel", show=False, priority=True)]
+
+    def __init__(self, answer: Callable[[str], str], initial: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._answer = answer
+        self._initial = initial
+
+    def compose(self):
+        with Vertical(id="btw-container"):
+            yield Static("/btw · obrolan sampingan", id="btw-title")
+            yield RichLog(id="btw-log", markup=False, wrap=True, auto_scroll=True)
+            with Horizontal():
+                yield Input(value=self._initial, placeholder="Ngobrol santai…", id="btw-input")
+                yield Static("esc tutup", id="btw-hint")
+
+    def on_mount(self):
+        self.query_one("#btw-input", Input).focus()
+        if self._initial:
+            self._kirim(self._initial)
+
+    def on_input_submitted(self, event: Input.Submitted):
+        self._kirim(event.value)
+
+    def _kirim(self, value: str):
+        pertanyaan = value.strip()
+        if not pertanyaan:
+            return
+        log = self.query_one("#btw-log", RichLog)
+        log.write(Text(f"kamu: {pertanyaan}"))
+        inp = self.query_one("#btw-input", Input)
+        inp.value = ""
+
+        def worker():
+            try:
+                jawaban = self._answer(pertanyaan)
+            except Exception as exc:  # noqa: BLE001
+                jawaban = f"Gagal: {exc}"
+            try:
+                self.app.call_from_thread(log.write, Text(f"bagas: {jawaban}"))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def action_cancel(self):
         self.dismiss(None)
