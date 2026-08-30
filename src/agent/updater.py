@@ -954,6 +954,23 @@ def _reinstall(repo: Path) -> dict:
     }
 
 
+def _sinkron_dependensi_runtime(repo: Path) -> str:
+    """Pastikan dependensi Python dan browser Playwright ikut diperbarui."""
+    flags = ["--user"] if _is_user_install() and not _is_editable(repo) else []
+    r = _run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
+              *flags, str(repo)], repo, timeout=900)
+    if r.returncode != 0:
+        return "GAGAL: dependensi Python tidak tersinkron saat update."
+    try:
+        pw = _run([sys.executable, "-m", "playwright", "install", "chromium"],
+                  repo, timeout=900)
+        if pw.returncode != 0:
+            return "GAGAL: browser Playwright Chromium tidak tersinkron."
+    except Exception:  # noqa: BLE001
+        return "GAGAL: browser Playwright Chromium tidak tersinkron."
+    return "Dependensi Python dan browser Playwright terverifikasi."
+
+
 # --- Cek otomatis saat startup (non-blocking, hasil di-cache) ---------------
 
 def _cache_file() -> Path:
@@ -1123,6 +1140,9 @@ def apply(force: bool = True) -> dict:
         note = ((note + "  ") if note else "") + (
             "pemasangan selesai tapi isi paket masih belum sama dengan repo: "
             + "; ".join(reinst.get("beda") or [])[:200])
+    runtime = _sinkron_dependensi_runtime(repo)
+    if runtime:
+        note = ((note + "  ") if note else "") + runtime
     # Aset yang tak ikut di dalam paket Python DIAMBIL DI SINI — sekali per
     # pembaruan, bukan saat pertama kali dibutuhkan. Kalau menunggu dibutuhkan,
     # penanda "tugas selesai" pertama sesudah update berbunyi terlambat (atau
@@ -1140,8 +1160,11 @@ def apply(force: bool = True) -> dict:
     vision = _pasang_vision_gemma()
     if vision:
         note = ((note + "  ") if note else "") + vision
+    status = "updated"
+    if runtime.startswith("GAGAL:") or vision.startswith("GAGAL:"):
+        status = "runtime_error"
     return {
-        "status": "updated",
+        "status": status,
         # Browser yang akan benar-benar dipakai sesudah pembaruan ini. Ikut
         # dilaporkan karena bawaannya bisa BERUBAH lewat pembaruan (mis. ke
         # Brave) — dan pengguna yang belum memasangnya berhak tahu bahwa yang
@@ -1162,6 +1185,7 @@ def apply(force: bool = True) -> dict:
         "note": note,
         "ocr": tesseract,
         "vision": vision,
+        "runtime": runtime,
         "pip_detail": reinst["detail"],
         "repo": str(repo),
         "version": repo_version(repo),
