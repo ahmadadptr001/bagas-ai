@@ -2178,8 +2178,21 @@ class BagasAIApp(App):
             attachments: list[str] = []
             try:
                 attachments = self._capture_live_attachment()
+                pertanyaan = text
+                if attachments:
+                    # /live WAJIB melewati vision lokal sebelum model utama:
+                    # jangan bergantung pada model API/web untuk memutuskan
+                    # apakah tool perlu dipanggil. Hasil Gemma ikut menjadi
+                    # konteks eksplisit pada giliran yang sama.
+                    from ..tools.vision_local import describe_image
+                    vision = describe_image(Path(attachments[0]))
+                    if vision:
+                        self.agent_on_notice("Gemma 3n E2B vision lokal aktif untuk screenshot live.")
+                        pertanyaan += "\n\n[SISTEM] Analisis vision lokal Gemma 3n E2B dari screenshot live:\n" + vision
+                    else:
+                        self.agent_on_notice("⚠ Gemma 3n E2B/Ollama belum merespons; screenshot tetap dikirim sebagai lampiran.")
                 result = self.agent.run(
-                    text,
+                    pertanyaan,
                     on_tool=self.agent_on_tool,
                     on_message=self.agent_on_message,
                     on_tool_result=self.agent_on_result,
