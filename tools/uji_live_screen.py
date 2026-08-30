@@ -131,11 +131,22 @@ async def cek_alur_ui() -> None:
             await tunggu(pilot, lambda: app._live_screen,
                          pesan="live harus aktif sesudah probe Gemma")
             assert app._live_screen is True
-            assert app.query_one("#statusbar", StatusBar).live_screen is True
+            statusbar = app.query_one("#statusbar", StatusBar)
+            assert statusbar.live_screen is True
+            assert statusbar.live_vision_state == "ready"
+            assert "Gemma ✓" in statusbar.render().plain
             probe.assert_called_once_with(force_probe=True)
 
             # Pertanyaan biasa memicu tepat satu capture just-in-time dan
             # dianalisis Gemma lokal; gambar mentah tidak dikirim ke model utama.
+            status_fase: list[str] = []
+            agent_on_status_asli = app.agent_on_status
+
+            def rekam_status(msg: str) -> None:
+                status_fase.append(msg)
+                agent_on_status_asli(msg)
+
+            app.agent_on_status = rekam_status
             chatbox = app.query_one("#chatbox")
             chatbox.set_text("apa yang tampil di layar?")
             await pilot.press("enter")
@@ -149,6 +160,9 @@ async def cek_alur_ui() -> None:
             assert "deskripsi Gemma uji" in panggilan[0][0]
             assert panggilan[0][1] == []
             describe.assert_called_once_with(Path(fake_png), strict=True)
+            assert any("mengambil screenshot" in s for s in status_fase)
+            assert any("Gemma 3 4B sedang menganalisis" in s
+                       for s in status_fase)
 
             # Slash command tidak memicu capture baru.
             app._handle_command("/live status")
@@ -171,6 +185,7 @@ async def cek_alur_ui() -> None:
                              pesan="probe gagal harus selesai")
             assert app._live_screen is False
             assert capture.call_count == 1
+            assert statusbar.live_vision_state == "error"
     print("  /live + probe Gemma wajib + konteks lokal + /stream: OK")
 
 

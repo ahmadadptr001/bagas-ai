@@ -1101,6 +1101,15 @@ class BagasAIApp(App):
             except Exception:  # noqa: BLE001 — cleanup tak boleh matikan UI
                 pass
 
+    def _set_live_vision_state(self, state: str) -> None:
+        """Perlihatkan proses/hasil probe Gemma secara permanen di footer."""
+        try:
+            self.query_one("#statusbar", StatusBar).update_live_screen(
+                self._live_screen, state,
+            )
+        except Exception:  # noqa: BLE001 — statusbar opsional/sedang tutup
+            pass
+
     def _cmd_live(self, text: str) -> None:
         """Kelola /live (alias /video): on, off, status, atau toggle."""
         msg_list = self.query_one("#messages", MessageList)
@@ -1110,9 +1119,17 @@ class BagasAIApp(App):
         mati = {"off", "mati", "stop", "berhenti"}
 
         if arg in {"status", "cek"}:
-            keadaan = "AKTIF" if self._live_screen else "MATI"
+            if self._live_screen:
+                detail = (
+                    "AKTIF dan TERVERIFIKASI — Ollama + gemma3:4b sudah "
+                    "menjawab probe gambar"
+                )
+            elif self._live_starting:
+                detail = "SEDANG DIVERIFIKASI — menunggu jawaban probe gambar"
+            else:
+                detail = "MATI"
             msg_list.append_notice(
-                f"Mode layar {keadaan}. Saat aktif, satu screenshot terbaru "
+                f"Mode layar {detail}. Saat aktif, satu screenshot terbaru "
                 "dilampirkan pada setiap pertanyaan biasa.",
                 style=(f"bold {tema.p('aksen')}" if self._live_screen
                        else tema.p("redup")),
@@ -1158,6 +1175,7 @@ class BagasAIApp(App):
         self._live_starting = True
         self._live_start_token += 1
         token = self._live_start_token
+        self._set_live_vision_state("checking")
         msg_list.append_notice(
             "Menyalakan Ollama dan menguji Gemma 3 4B dengan gambar nyata…",
             style=tema.p("redup"),
@@ -1185,18 +1203,19 @@ class BagasAIApp(App):
         msg_list = self.query_one("#messages", MessageList)
         if not siap:
             self._set_live_screen(False)
+            self._set_live_vision_state("error")
             msg_list.append_notice(
-                f"✗ Mode layar tetap MATI: {alasan}",
+                f"✗ VERIFIKASI GAGAL — mode layar tetap MATI. {alasan}",
                 style=f"bold {tema.p('exit_footer')}",
             )
             return
         from ..tools.screen import clear_live_capture
         clear_live_capture()
         self._set_live_screen(True)
+        bukti = alasan.strip().rstrip(".")
         msg_list.append_notice(
-            "✓ Mode layar AKTIF — Ollama hidup dan Gemma 3 4B sudah "
-            "menjawab probe gambar. Setiap screenshot wajib dianalisis Gemma "
-            "sebelum pertanyaan diteruskan.",
+            f"✓ VERIFIKASI BERHASIL — {bukti}. Mode layar AKTIF; setiap "
+            "screenshot wajib dianalisis Gemma sebelum pertanyaan diteruskan.",
             style=f"bold {tema.p('aksen')}",
         )
 
@@ -2227,6 +2246,9 @@ class BagasAIApp(App):
                     from ..tools.vision_local import (
                         VisionLocalError, describe_image,
                     )
+                    self.agent_on_status(
+                        "Gemma 3 4B sedang menganalisis screenshot via Ollama…"
+                    )
                     try:
                         vision = describe_image(Path(attachments[0]), strict=True)
                     except VisionLocalError as exc:
@@ -2236,7 +2258,8 @@ class BagasAIApp(App):
                             f"menganalisis screenshot: {exc}"
                         ) from exc
                     self.agent_on_notice(
-                        "Gemma 3 4B vision lokal digunakan untuk screenshot live."
+                        "✓ Screenshot selesai dianalisis Ollama / Gemma 3 4B; "
+                        "konteks vision diteruskan ke model utama."
                     )
                     pertanyaan += (
                         "\n\n[SISTEM] Analisis vision lokal Gemma 3 4B dari "

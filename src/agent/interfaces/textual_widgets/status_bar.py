@@ -76,6 +76,7 @@ class StatusBar(Widget):
     model_label: reactive[str] = reactive("")
     is_web: reactive[bool] = reactive(False)
     live_screen: reactive[bool] = reactive(False)
+    live_vision_state: reactive[str] = reactive("")
     voice_state: reactive[str] = reactive("")
 
     def __init__(self, agent: "Agent | None" = None, **kwargs):
@@ -126,10 +127,19 @@ class StatusBar(Widget):
         sep = "  │  "
         branch, changed = _git_cache["v"]
 
+        if self.live_vision_state == "checking":
+            live_label = f"{sep}◌ Gemma…"
+        elif self.live_vision_state == "ready" and self.live_screen:
+            live_label = f"{sep}◉ Gemma ✓"
+        elif self.live_vision_state == "error":
+            live_label = f"{sep}◌ Gemma ✗"
+        else:
+            live_label = f"{sep}📹 layar" if self.live_screen else ""
+
         segmen: dict[str, str] = {
             "merek": " ⬢ bagas-ai",
             "model": f"{sep}{'🌐' if is_web else '🤖'} {label}",
-            "live": f"{sep}📹 layar" if self.live_screen else "",
+            "live": live_label,
             "voice": (f"{sep}● merekam" if self.voice_state == "merekam"
                       else f"{sep}🎙 dengar" if self.voice_state else ""),
             "git": f"{sep}🌿 {branch}" if branch else "",
@@ -204,9 +214,19 @@ class StatusBar(Widget):
         self.model_label = label
         self.is_web = is_web
 
-    def update_live_screen(self, aktif: bool) -> None:
-        """Tampilkan indikator privasi selama screenshot otomatis aktif."""
+    def update_live_screen(
+        self, aktif: bool, vision_state: str | None = None,
+    ) -> None:
+        """Tampilkan status verifikasi vision, bukan sekadar ikon capture."""
         self.live_screen = bool(aktif)
+        if vision_state is None:
+            self.live_vision_state = "ready" if aktif else ""
+        else:
+            self.live_vision_state = (
+                vision_state
+                if vision_state in {"", "checking", "ready", "error"}
+                else ""
+            )
 
     def update_voice_state(self, keadaan: str = "") -> None:
         """Tampilkan indikator privasi mikrofon: dengar atau merekam."""
