@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -194,3 +196,49 @@ def delete(sess: Session) -> bool:
 
 def user_msg_count(sess: Session) -> int:
     return len([m for m in sess.messages if m.get("role") == "user"])
+
+
+def export_history(sess: Session, destination: str | Path | None = None,
+                   fmt: str = "md", overwrite: bool = False) -> Path:
+    """Ekspor riwayat sesi secara atomik tanpa menimpa file secara default."""
+    path = Path(destination) if destination else (
+        config.PROJECT_ROOT / f"bagasai-export-{sess.id}.{fmt.lower()}")
+    if path.suffix.lower() in (".json", ".md", ".markdown"):
+        fmt = "json" if path.suffix.lower() == ".json" else "md"
+    else:
+        path = path.with_suffix("." + ("json" if fmt.lower() == "json" else "md"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"file ekspor sudah ada: {path} (gunakan path lain)")
+    if fmt.lower() == "json":
+        content = json.dumps(sess.messages, ensure_ascii=False, indent=2)
+    else:
+        rows = [f"# bagas-ai — sesi {sess.id}", ""]
+        for msg in sess.messages:
+            role = msg.get("role", "")
+            if role == "system":
+                continue
+            if role == "diff":
+                rows += [f"### Diff `{msg.get('path', '')}`", "```diff", msg.get("diff", ""), "```", ""]
+                continue
+            content = msg.get("content", "")
+            if not content:
+                continue
+            label = {"user": "Pengguna", "assistant": "bagas-ai", "tool": "Tool"}.get(role, role.title())
+            rows += [f"### {label}", str(content), ""]
+        content = "\n".join(rows)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"file ekspor sudah ada: {path} (gunakan path lain)")
+        os.replace(temporary, path)
+    finally:
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return path

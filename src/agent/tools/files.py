@@ -728,8 +728,8 @@ def move_file(source: str, dest: str) -> str:
     if a.is_file():
         # pre-image untuk undo_changes: sumber dikembalikan, tujuan dihapus.
         # Pemindahan FOLDER tidak dicadangkan (undo tak mencakupnya).
-        _snapshot(a)
-        _snapshot(b)
+        _snapshot(a, kind="dir")
+        _snapshot(b, kind="dir")
     b.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(a), str(b))
     return f"Dipindahkan: {_display(a)} -> {_display(b)}"
@@ -746,7 +746,7 @@ def copy_file(source: str, dest: str) -> str:
         return f"[error] tidak ditemukan: {_display(a)}"
     if b.exists():
         return f"[error] tujuan sudah ada: {_display(b)}"
-    _snapshot(b)   # tujuan belum ada -> undo_changes menghapus salinannya
+    _snapshot(b, kind="dir" if a.is_dir() else "file")
     b.parent.mkdir(parents=True, exist_ok=True)
     if a.is_dir():
         shutil.copytree(str(a), str(b))

@@ -326,8 +326,10 @@ def _web_tool_protocol() -> str:
         "5. Perintah singkat memakai run_command; server/watch/proses lama "
         "memakai run_command_bg lalu bg_output.\n"
         "6. Setelah mengubah kode, periksa perubahan dan jalankan validasi "
-        "terarah. Untuk perubahan tampilan gunakan web_preview/take_screenshot "
-        "bila tersedia.\n"
+        "terarah. WAJIB jalankan program secara langsung setelah fitur selesai; "
+        "untuk UI lakukan interaksi pengguna nyata (klik/input/navigasi) dan "
+        "laporkan hasil aktual. Test syntax saja tidak cukup bila runtime tersedia. "
+        "Untuk perubahan tampilan gunakan web_preview/take_screenshot bila tersedia.\n"
         "7. Bila keputusan penting ambigu, panggil ask_user dengan 2-6 opsi. "
         "Jangan bertanya lewat pesan biasa di tengah pekerjaan.\n"
         "8. Jika tool yang dibutuhkan tidak ada di daftar inti, panggil "
@@ -2540,6 +2542,23 @@ class Agent:
                 on_retry=on_retry, attachments=attachments,
                 ambil_sisipan=ambil_sisipan, on_tim=on_tim, on_padat=on_padat,
             )
+
+    def btw(self, user_input: str, on_token: Callable[[str], None] | None = None) -> str:
+        """Jawab obrolan sampingan tanpa menyentuh memory, tool, atau checkpoint tugas."""
+        if self.model_spec.is_web:
+            return ("/btw saat ini hanya tersedia untuk model API; "
+                    "tugas utama tetap aman dan tidak diubah.")
+        prompt = [{"role": "system", "content": "Kamu adalah teman ngobrol santai. Jawab singkat, jangan menjalankan tool dan jangan mengubah berkas."},
+                  {"role": "user", "content": str(user_input)}]
+        try:
+            answer, _calls, _usage = llm.stream_completion(
+                prompt, tools=None, model=self.model_spec.api_model,
+                provider=self.model_spec.provider,
+                api_style=getattr(self.model_spec, "api_style", "chat"),
+                max_tokens=600, on_content=on_token)
+            return answer or "(tidak ada jawaban)"
+        except Exception as exc:  # noqa: BLE001
+            return f"[btw] gagal menjawab: {exc}"
 
     # --- jalur API NVIDIA (function-calling asli) --------------------------
     def _run_api(

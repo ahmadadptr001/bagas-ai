@@ -78,6 +78,8 @@ _SLASH_COMMANDS: list[tuple[str, str, bool]] = [
     ("/mic", "bacakan kabar dan jawaban AI", True),
     ("/voice", "mikrofon sebagai input perintah", True),
     ("/image", "baca gambar lokal via Python", True),
+    ("/export", "ekspor riwayat chat", True),
+    ("/btw", "ngobrol santai tanpa mengganggu tugas", True),
     ("/new", "mulai sesi baru", False),
     ("/reset", "reset percakapan sesi ini", False),
     ("/clear", "bersihkan layar", False),

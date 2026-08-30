@@ -274,6 +274,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("voice", "mikrofon: sebut \"bagas ai …\" lalu diam sejenak "
               "(on/off/tes/jangkau/dekat|normal|jauh)"),
     ("image", "baca gambar lokal via Python tanpa upload"),
+    ("export", "ekspor riwayat chat ke Markdown/JSON"),
+    ("btw", "ngobrol santai tanpa mengganggu tugas"),
     ("compact", "simpan riwayat percakapan ke berkas memory"),
     ("send-compact", "kirim berkas memory terakhir ke percakapan sekarang"),
     ("add-dir", "tambah folder konteks"),
@@ -5551,6 +5553,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
             f"[{c}]/mode[/]     mode kerja situs       [{c}]/scripts[/]  script memory\n"
             f"[{c}]/live[/]     konteks layar          [{c}]/image[/]    baca gambar lokal\n"
+            f"[{c}]/export[/]   ekspor riwayat chat      [{c}]/btw[/]      ngobrol sampingan\n"
             f"[{c}]/mic[/]      suara keluaran         [{c}]/voice[/]    input mikrofon\n"
             f"[{c}]/update[/]   cek pembaruan          [#f0603c]/exit[/]     keluar",
             title=tema.terjemah("[bold #fcc048]❔ Bantuan[/]"), title_align="left",
@@ -6563,6 +6566,20 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                                           (0, _LPAD, 1, _LPAD)))
             elif cmd == "compact":
                 do_compact()
+            elif cmd == "export" or cmd.startswith("export "):
+                tujuan = text.split(maxsplit=1)[1].strip().strip('"').strip("'") if len(text.split(maxsplit=1)) == 2 else None
+                try:
+                    fmt = tujuan.lower() if tujuan and tujuan.lower() in ("md", "markdown", "json") else "md"
+                    path = session_mod.export_history(agent.session, None if fmt != "md" else tujuan, fmt=fmt)
+                    console.print(f"  [green]✓ riwayat diekspor ke {path}[/green]\n")
+                except Exception as exc:
+                    console.print(f"  [red]✗ gagal ekspor: {exc}[/red]\n")
+            elif cmd == "btw" or cmd.startswith("btw "):
+                pertanyaan = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) == 2 else ""
+                if not pertanyaan:
+                    console.print("  [dim]Pakai: /btw <obrolan santai>[/dim]\n")
+                else:
+                    console.print(Padding(_md(agent.btw(pertanyaan)), (0, 3, 1, 3)))
             elif cmd == "send-compact" or cmd.startswith("send-compact "):
                 do_send_compact(text[13:].strip())
             elif (cmd in ("live", "video") or cmd.startswith("live ")
@@ -6631,6 +6648,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             # [foto] + gambar pending -> penanda lampiran [GAMBAR] (lihat
             # _kembangkan_foto); core yang memisahkannya jadi lampiran.
             _msg = _kembangkan_foto(_tempelan.simpanan().kembangkan(text))
+            from ..mentions import expand_mentions
+            _msg, _mentioned = expand_mentions(_msg)
             process(_msg)
         except KeyboardInterrupt:
             # Jaring pengaman terakhir: Ctrl+C tak boleh menjatuhkan REPL.

@@ -29,7 +29,7 @@ from pathlib import Path
 from .. import config
 from .base import tool
 
-_MAX_FILE = 5 * 1024 * 1024   # per file; lebih besar dari ini dicatat "dilewati"
+_MAX_FILE = 100 * 1024 * 1024  # file/folder backup limit
 _MAX_TURNS = 20               # riwayat checkpoint per proyek
 
 _lock = threading.Lock()
@@ -72,7 +72,7 @@ def _prune(base: Path, keep: int) -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def snapshot(target: Path | str) -> None:
+def snapshot(target: Path | str, kind: str | None = None) -> None:
     """Simpan pre-image `target` (file, bukan folder) SEKALI per giliran.
 
     Dipanggil tool mutasi SEBELUM menyentuh file. Aman dipanggil untuk file
@@ -93,14 +93,21 @@ def snapshot(target: Path | str) -> None:
                 tdir = base / f"turn-{int(time.time() * 1000):013d}"
                 tdir.mkdir(parents=True, exist_ok=True)
                 _state["dir"] = tdir
-            entry: dict = {"path": key, "existed": t.is_file(), "backup": None}
+            entry: dict = {"path": key, "existed": t.is_file() or t.is_dir(),
+                           "backup": None,
+                           "kind": kind or ("dir" if t.is_dir() else "file")}
             if entry["existed"]:
-                if t.stat().st_size > _MAX_FILE:
+                ukuran = (sum(x.stat().st_size for x in t.rglob("*") if x.is_file())
+                          if t.is_dir() else t.stat().st_size)
+                if ukuran > _MAX_FILE:
                     entry["skipped"] = f"file > {_MAX_FILE // (1024 * 1024)} MB"
                 else:
                     _state["seq"] += 1
                     nama = f"f{_state['seq']:04d}"
-                    shutil.copy2(t, tdir / nama)
+                    if t.is_dir():
+                        shutil.copytree(t, tdir / nama)
+                    else:
+                        shutil.copy2(t, tdir / nama)
                     entry["backup"] = nama
             _state["manifest"].append(entry)
             _tulis_manifest(tdir)
@@ -157,11 +164,20 @@ def undo_changes() -> str:
         p = Path(e["path"])
         try:
             if e.get("backup"):
-                _pulihkan_atomik(tdir / e["backup"], p)
+                if e.get("kind") == "dir":
+                    if p.exists():
+                        shutil.rmtree(p)
+                    shutil.copytree(tdir / e["backup"], p)
+                else:
+                    _pulihkan_atomik(tdir / e["backup"], p)
                 dipulihkan.append(str(p))
             elif e.get("skipped"):
                 masalah.append(f"{p} — tak dicadangkan ({e['skipped']}), "
                                "tak bisa dipulihkan")
+            elif e.get("kind") == "dir" and not e.get("existed"):
+                if p.is_dir():
+                    shutil.rmtree(p)
+                    dihapus.append(str(p))
             elif not e.get("existed"):
                 if p.is_file():
                     p.unlink()

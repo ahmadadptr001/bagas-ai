@@ -727,6 +727,14 @@ class BagasAIApp(App):
             self._handle_command(text)
             return
 
+        # Mention @file menyisipkan isi berkas ke prompt, tanpa mengubah gema
+        # riwayat yang dilihat pengguna.
+        from ..mentions import expand_mentions
+        text, mentioned = expand_mentions(text)
+        if mentioned:
+            msg_list.append_notice("Konteks disisipkan: " + ", ".join(Path(p).name for p in mentioned),
+                                   style=tema.p("redup"))
+
         # Gambar hasil paste/drop disimpan sebagai path lokal oleh
         # on_chatbox_pasted. Penanda [foto] hanya bentuk ringkas di kotak input;
         # core memerlukan [GAMBAR] <path> agar benar-benar menjadi attachment.
@@ -890,6 +898,10 @@ class BagasAIApp(App):
         # ── Help ───────────────────────────────────────────────────────
         elif cmd == "help":
             msg_list.append_notice(self._help_text())
+        elif cmd == "export" or cmd.startswith("export "):
+            self._cmd_export(text)
+        elif cmd == "btw" or cmd.startswith("btw "):
+            self._cmd_btw(text)
 
         # ── Model & Effort ─────────────────────────────────────────────
         elif cmd == "model" or cmd.startswith("model "):
@@ -975,6 +987,36 @@ class BagasAIApp(App):
             )
 
     # ─── Local Image Reader ───────────────────────────────────────────
+
+    def _cmd_export(self, text: str) -> None:
+        """Simpan transkrip sesi ke Markdown/JSON."""
+        msg_list = self.query_one("#messages", MessageList)
+        parts = text.split(maxsplit=1)
+        destination = parts[1].strip().strip('"').strip("'") if len(parts) == 2 else ""
+        try:
+            if self.agent.session is None:
+                raise RuntimeError("sesi belum tersedia")
+            fmt = destination.lower() if destination.lower() in ("md", "markdown", "json") else "md"
+            if fmt != "md":
+                destination = ""
+            path = session_mod.export_history(self.agent.session, destination or None, fmt=fmt)
+            msg_list.append_notice(f"✓ Riwayat diekspor ke {path}", style=tema.p("aksen"))
+        except Exception as exc:
+            msg_list.append_notice(f"Gagal ekspor: {exc}", style=f"bold {tema.p('exit_footer')}")
+
+    def _cmd_btw(self, text: str) -> None:
+        """Obrolan sampingan; tidak masuk antrean atau memory tugas."""
+        msg_list = self.query_one("#messages", MessageList)
+        parts = text.split(maxsplit=1)
+        if len(parts) != 2 or not parts[1].strip():
+            msg_list.append_notice("Pemakaian: /btw <obrolan santai>", style=tema.p("redup"))
+            return
+        pertanyaan = parts[1].strip()
+        msg_list.append_notice("/btw sedang menjawab di jalur samping…", style=tema.p("redup"))
+        def worker() -> None:
+            hasil = self.agent.btw(pertanyaan)
+            self._safe_call(msg_list.append_ai_message, hasil)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _cmd_image(self, text: str) -> None:
         """Baca satu gambar di worker Python lokal, tanpa request provider."""
@@ -2041,6 +2083,8 @@ class BagasAIApp(App):
 ║ /mic [on|off]   Bacakan kabar dan jawaban       ║
 ║ /voice [on|off] Mikrofon jadi input              ║
 ║ /image <path>   Baca gambar lokal via Python     ║
+║ /export [path]   Ekspor riwayat chat              ║
+║ /btw <pesan>     Ngobrol tanpa ganggu tugas       ║
 ║ /compact        Compact context                 ║
 ║ /send-compact   Kirim memory ke percakapan      ║
 ║ /new            Sesi baru                       ║
