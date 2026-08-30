@@ -142,6 +142,29 @@ def uji_dikte_tanpa_wake_word() -> None:
     print("  dikte tanpa wake word + VAD miss + auto-stop: OK")
 
 
+def uji_listener_kontinu_tanpa_wake_word() -> None:
+    """Satu ucapan dikenali langsung sebagai prompt dalam mode sesi voice."""
+    kenal = MagicMock()
+    kenal.kenali.return_value = ("buka berkas utama", "whisper")
+    terkirim: list[str] = []
+    level: list[tuple[float, bool]] = []
+    with patch.object(dengar, "pengenal", return_value=kenal):
+        p = dengar.Pendengar(
+            terkirim.append, langsung=True,
+            on_level=lambda nilai, aktif: level.append((nilai, aktif)))
+    p._satu_ucapan(b"audio")
+    assert terkirim == ["buka berkas utama"]
+    assert not p.perakit.merekam
+    p.ambang = 100
+    p._lapor_level(200, True, paksa=True)
+    assert level[-1] == (1.0, True)
+    p.berhenti()
+    assert level[-1] == (0.0, False)
+    p._satu_ucapan(b"audio sesudah esc")
+    assert terkirim == ["buka berkas utama"]
+    print("  listener kontinu langsung + level orb: OK")
+
+
 def uji_kontrak_instalasi() -> None:
     root = Path(__file__).resolve().parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
@@ -163,5 +186,6 @@ if __name__ == "__main__":
     uji_model_tidak_dimuat_ganda()
     uji_halusinasi_sunyi_dibuang()
     uji_dikte_tanpa_wake_word()
+    uji_listener_kontinu_tanpa_wake_word()
     uji_kontrak_instalasi()
     print("OK - seluruh pipeline audio lokal lulus")

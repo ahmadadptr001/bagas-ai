@@ -1,40 +1,23 @@
-"""/voice — bagas-ai mendengarkan mikrofon dan menunggu namanya disebut.
+"""Pipeline mikrofon lokal untuk sesi /voice dan kompatibilitas wake word.
 
 CARA PAKAI (dari sisi pengguna):
 
-    /voice on          mikrofon menyala, bagas-ai mendengarkan
-    /voice tekan       dikte satu prompt langsung, tanpa menyebut nama
-    "bagas ai ..."     namanya disebut -> ucapan berikutnya dianggap perintah
-    (diam 2 detik)     perintah DITUTUP & dikirim ke kotak terminal
-    "... batalkan"     buang rekaman yang sedang berjalan
+    /voice on          membuka layar orb dan mikrofon kontinu
+    (langsung bicara)  tidak perlu menyebut "bagas ai"
+    (diam sejenak)     satu ucapan DITUTUP & dikirim ke chat utama
     /voice off         mikrofon mati (ini keadaan bawaannya)
 
-TAK ADA kata penutup. Berhenti bicara dua detik sudah cukup; kalau kalimatnya
-diteruskan sebelum dua detik habis, hitungannya diulang dari nol. Pembatalnya
-tetap berupa kata ("batalkan"/"batal"/"batalin") — membatalkan harus bisa
-dilakukan SEKARANG, bukan dengan menunggu diam.
+TAK ADA kata pemicu maupun kata penutup di sesi langsung. Berhenti bicara
+sebentar sudah cukup; kalau kalimat diteruskan sebelum jeda habis, hitungannya
+diulang dari nol. Teks pengguna dan jawaban AI tetap masuk ke terminal utama;
+layar khusus hanya menampilkan animasi yang bereaksi terhadap audio.
 
-Satu perintah boleh sepanjang 30 detik sejak namanya disebut (MAKS_REKAM).
-Lewat itu ia dibatalkan, bukan dikirim setengah jadi.
+``Pendengar(langsung=False)`` masih mempertahankan Perakit berbasis wake word
+untuk klien lama. UI Textual dan CLI memakai ``langsung=True``.
 
-KENAPA NAMANYA HARUS DISEBUT
----------------------------
-Mikrofon yang hidup terus mendengar SEMUA yang terucap di ruangan — obrolan
-dengan orang lain, telepon, suara video. Tanpa kata pemicu, semua itu jadi
-perintah. Namanya sendiri yang jadi pemicu: ia khas, jadi hampir mustahil
-terucap kebetulan.
-
-Ujung kalimatnya lain ceritanya. Dulu ditutup kata aba-aba ("lakukan"), dan
-itu dibuang: mengucapkan aba-aba di ujung kalimat tak alami, yang lupa
-kehilangan seluruh perintahnya, dan kata apa pun yang dipilih pasti muncul
-juga DI DALAM perintah. Sekarang yang menutupnya BERHENTINYA suara — hal yang
-memang sudah dilakukan orang tanpa perlu diajari.
-
-APA YANG DIKIRIM
-----------------
-Hanya yang terucap SESUDAH namanya. "bagas ai tolong buka main.py" (lalu
-diam) menjadi perintah "tolong buka main.py" — kata pemicu & penutupnya dibuang,
-sebab keduanya ditujukan ke programnya, bukan ke AI.
+Karena sesi langsung mendengar semua ucapan di ruangan, pengguna keluar dengan
+Esc atau tombol ⌵ ketika percakapan voice selesai. Audio keluaran BagasAI
+dibuang dari jalur mikrofon agar jawaban AI tidak memicu dirinya sendiri.
 
 PENGENALAN SUARANYA TIDAK SEMPURNA, DAN ITU DIPERHITUNGKAN
 ----------------------------------------------------------
@@ -909,7 +892,9 @@ class Pendengar:
                  on_kabar: Callable[..., None] | None = None,
                  on_dengar: Callable[[str, bool], None] | None = None,
                  maks_rekam: float = MAKS_REKAM,
-                 jangkauan: str | None = None) -> None:
+                 jangkauan: str | None = None,
+                 langsung: bool = False,
+                 on_level: Callable[[float, bool], None] | None = None) -> None:
         self.on_perintah = on_perintah
         # on_kabar(pesan, batal=False). Penanda `batal` ada karena TAMPILANNYA
         # memperlakukan pembatalan berbeda dari kabar lain: cuma pembatalan
@@ -921,6 +906,15 @@ class Pendengar:
         self.on_kabar = on_kabar or (lambda _m, **_k: None)
         # on_dengar(teks, sedang_merekam) -> ditampilkan sebagai "yang terdengar"
         self.on_dengar = on_dengar or (lambda _t, _m: None)
+        # Mode langsung dipakai layar /voice baru: setiap ucapan yang sudah
+        # ditutup oleh jeda sunyi langsung menjadi prompt, tanpa wake word.
+        # Jalur lama tetap tersedia untuk antarmuka/klien yang memang ingin
+        # memakai Perakit dan kata pemicu.
+        self.langsung = bool(langsung)
+        self.on_level = on_level or (lambda _level, _mendengar: None)
+        self._sedang_ucapan = False
+        self._level_terakhir = 0.0
+        self._status_level_terakhir = False
         self.perakit = Perakit(maks_rekam)
         # Seberapa jauh boleh mendengar. Disimpan NAMANYA juga, bukan cuma
         # angkanya: bar status & `/voice` menyebutnya, dan "jauh" jauh lebih
@@ -976,7 +970,7 @@ class Pendengar:
 
         Dibaca bar status terminal: selama ini menyala, apa pun yang terucap
         ikut jadi perintah — keadaan yang harus terbaca sekali lihat."""
-        return self.perakit.merekam
+        return self._sedang_ucapan if self.langsung else self.perakit.merekam
 
     def mulai(self) -> str:
         """Nyalakan mikrofon. Return "" bila berhasil, atau alasan gagalnya."""
@@ -1010,6 +1004,8 @@ class Pendengar:
             t.join(timeout=2.0)
         self._threads = []
         self.perakit.batalkan()
+        self._sedang_ucapan = False
+        self._lapor_level(0.0, False, paksa=True)
 
     # --- thread 1: mikrofon -> potongan ucapan ---
     def _rekam(self) -> None:
@@ -1054,6 +1050,7 @@ class Pendengar:
                   self.jangkauan, derau, ramai, ambang, ambang_lanjut)
 
         potongan: list[Any] = list(suara_saat_kalibrasi)
+        self._sedang_ucapan = bool(potongan)
         # Sedikit rekaman SEBELUM ambang terlampaui ikut disimpan: suku kata
         # pertama selalu lebih pelan dari sisanya, dan tanpa ini "bagas" kerap
         # sampai sebagai "gas". Panjangnya mengikuti jangkauan — dari jauh
@@ -1083,7 +1080,7 @@ class Pendengar:
             # Ketukan penanda "sedang merekam". Dibunyikan HANYA di sela
             # ucapan (potongan kosong): kalau disisipkan di tengah kalimat, ia
             # ikut terekam dan merusak pengenalannya.
-            if self.perakit.merekam and not potongan:
+            if not self.langsung and self.perakit.merekam and not potongan:
                 if time.time() - tik >= _JEDA_TIK:
                     tik = time.time()
                     self._abaikan_sampai = tik + _NADA_TIK[0][1] / 1000 + 0.25
@@ -1100,6 +1097,8 @@ class Pendengar:
                 awalan = []
                 energi_beruntun = 0
                 self._sunyi_sejak = time.time()
+                self._sedang_ucapan = False
+                self._lapor_level(0.0, False, paksa=True)
                 depan.reset()
                 continue
             # HISTERESIS. Bar TINGGI untuk memulai ucapan, bar RENDAH untuk
@@ -1126,6 +1125,7 @@ class Pendengar:
             # satu dentuman keyboard tidak cukup untuk membuka rekaman.
             keras = (vad_suara or energi_beruntun >= 2
                      if depan.vad_tersedia else energi_suara)
+            self._lapor_level(tingkat, keras)
             lama_blok = len(data_bersih) / LAJU
             if not potongan and not vad_suara and not self.perakit.merekam:
                 # Tanpa VAD, jangan belajar dari bunyi yang sudah melewati
@@ -1148,7 +1148,8 @@ class Pendengar:
                 self._sunyi_sejak = 0.0
             elif not self._sunyi_sejak:
                 self._sunyi_sejak = time.time()
-            self._periksa_selesai()
+            if not self.langsung:
+                self._periksa_selesai()
             if not potongan:
                 awalan.append(data_bersih.copy())
                 if len(awalan) > self.profil.awalan:
@@ -1159,6 +1160,7 @@ class Pendengar:
                     potongan = list(awalan)
                     awalan = []
                     sunyi, mulai = 0.0, time.time()
+                    self._sedang_ucapan = True
                 continue
             potongan.append(data_bersih.copy())
             sunyi = 0.0 if keras else sunyi + lama_blok
@@ -1168,24 +1170,45 @@ class Pendengar:
                     blob = np.concatenate(potongan).tobytes()
                     self._menunggu += 1
                     self._antre.put(blob)
-                    # Riwayat untuk pengenalan satu-utuhan (lihat _periksa_selesai).
-                    self._riwayat.append((mulai, mulai + panjang, blob))
-                    # Pangkas yang lebih tua dari sebatas perintah terpanjang:
-                    # riwayat cuma perlu menampung SATU perintah, bukan seluruh
-                    # obrolan ruangan.
-                    batas = time.time() - (MAKS_REKAM + 5.0)
-                    if self._riwayat and self._riwayat[0][0] < batas:
-                        self._riwayat = [r for r in self._riwayat
-                                         if r[0] >= batas]
+                    if not self.langsung:
+                        # Riwayat untuk pengenalan satu-utuhan (lihat
+                        # _periksa_selesai). Mode langsung sudah mengirim satu
+                        # ucapan ini apa adanya dan tidak membutuhkan riwayat.
+                        self._riwayat.append((mulai, mulai + panjang, blob))
+                        batas = time.time() - (MAKS_REKAM + 5.0)
+                        if self._riwayat and self._riwayat[0][0] < batas:
+                            self._riwayat = [r for r in self._riwayat
+                                             if r[0] >= batas]
                 potongan = []
+                self._sedang_ucapan = False
+                self._lapor_level(0.0, False, paksa=True)
                 sunyi = 0.0
                 energi_beruntun = 0
             # Perintah yang menggantung tanpa kata penutup dibatalkan di sini —
             # bukan di thread pengenal, yang bisa saja sedang menjalankan inferensi.
-            if self.perakit.kedaluwarsa():
+            if not self.langsung and self.perakit.kedaluwarsa():
                 self.on_kabar(
                     f"perintah suara dibatalkan — {MAKS_REKAM:.0f} detik "
                     "habis sebelum perintah selesai", batal=True)
+
+    def _lapor_level(self, tingkat: float, mendengar: bool,
+                     *, paksa: bool = False) -> None:
+        """Kirim level 0..1 untuk visualisasi tanpa membebani thread UI."""
+        sekarang = time.monotonic()
+        berubah = bool(mendengar) != self._status_level_terakhir
+        if not paksa and not berubah and sekarang - self._level_terakhir < 0.06:
+            return
+        # Ambang adalah titik mulai bicara. Dua kali ambang sudah dianggap
+        # gerak maksimum agar suara biasa tetap terlihat hidup, bukan hanya
+        # teriakan yang mampu menggerakkan orb.
+        dasar = max(float(self.ambang or self.profil.lantai), 1.0)
+        level = max(0.0, min(1.0, float(tingkat) / (dasar * 2.0)))
+        self._level_terakhir = sekarang
+        self._status_level_terakhir = bool(mendengar)
+        try:
+            self.on_level(level, bool(mendengar))
+        except Exception:  # noqa: BLE001 - visual tak boleh mematikan mikrofon
+            log.debug("penerima level suara melempar", exc_info=True)
 
     @staticmethod
     def _bagasai_bicara() -> bool:
@@ -1291,6 +1314,11 @@ class Pendengar:
     def _satu_ucapan(self, data: bytes) -> None:
         """Kenali SATU potongan ucapan lalu umpankan ke perakit."""
         teks, info = self._pengenal.kenali(data)
+        # Esc dapat ditekan saat Whisper masih mengolah potongan terakhir.
+        # Hasil yang baru selesai sesudah listener dihentikan tidak boleh
+        # menyelinap menjadi prompt dari sesi voice yang sudah ditutup.
+        if self._stop.is_set():
+            return
         if not teks:
             if info.startswith("galat"):
                 self.on_kabar(f"pengenalan suara gagal: {info[6:]}")
@@ -1301,6 +1329,11 @@ class Pendengar:
                 # untuk penelusuran.
                 self.on_dengar("(tertangkap, tapi tak terdengar jelas)",
                                self.perakit.merekam)
+            return
+
+        if self.langsung:
+            self.on_dengar(teks, False)
+            self._kirim_perintah(teks)
             return
 
         self.on_dengar(teks, self.perakit.merekam)
@@ -1333,6 +1366,8 @@ class Pendengar:
         _jenis, audio, cadangan = item
         perintah = cadangan
         teks, info = self._pengenal.kenali(audio)
+        if self._stop.is_set():
+            return
         if teks:
             self.on_dengar(teks, False)
             kata = _kata(teks)
@@ -1348,6 +1383,8 @@ class Pendengar:
     def _gagal(self, pesan: str) -> None:
         self.galat = pesan
         self._stop.set()
+        self._sedang_ucapan = False
+        self._lapor_level(0.0, False, paksa=True)
         self.on_kabar(pesan)
 
 

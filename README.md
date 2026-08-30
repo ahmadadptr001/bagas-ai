@@ -136,11 +136,12 @@ sebelum setiap pertanyaan biasa dikirim; `/live off` menghentikannya dan
 menghapus screenshot sementara. `/video` mempunyai perilaku yang sama.
 
 `/mic on` membacakan kabar proses dan jawaban akhir; gunakan `/mic tes` untuk
-memeriksa suara. Tekan ikon mikrofon di kotak chat atau `F4` untuk dikte satu
-perintah langsung tanpa wake word; rekaman berhenti otomatis setelah diam dan
-diproses lokal. `/voice on` tetap tersedia sebagai mode hands-free: sebut
-“bagas ai”, ucapkan perintah, lalu diam dua detik. Mikrofon selalu mulai dalam
-keadaan mati pada sesi baru dan statusnya terlihat permanen di footer.
+memeriksa suara. Tekan ikon mikrofon, `F4`, atau jalankan `/voice` untuk
+membuka layar voice dengan orb besar yang bergerak saat mendengar maupun saat
+AI berbicara. Bicara langsung tanpa menyebut “bagas ai”; jeda sunyi menutup
+satu ucapan dan mengirimnya. `Esc` atau tombol `⌵` menutup layar sekaligus
+mikrofon. Transkrip pengguna dan jawaban AI tetap dicatat di chat utama—layar
+voice hanya menampilkan animasi. Mikrofon selalu mati pada sesi baru.
 Audio Windows diambil lewat WASAPI pada sample rate asli perangkat, kemudian
 WebRTC lokal menjalankan peredam bising, automatic gain control, dan deteksi
 suara sebelum Whisper. Model Whisper `small` (±460 MB) wajib diunduh dan diuji

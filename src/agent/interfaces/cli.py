@@ -271,8 +271,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("theme", "tema warna antarmuka"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
-    ("voice", "mikrofon: dikte langsung atau mode hands-free "
-              "(tekan/on/off/tes/jangkau/dekat|normal|jauh)"),
+    ("voice", "percakapan mikrofon langsung tanpa kata pemicu "
+              "(off/tes/jangkau/dekat|normal|jauh)"),
     ("image", "baca gambar lokal via Python tanpa upload"),
     ("export", "ekspor riwayat chat ke Markdown/JSON"),
     ("btw", "ngobrol santai tanpa mengganggu tugas"),
@@ -4942,12 +4942,12 @@ def main(resume: bool = False, resume_id: str = "") -> None:
     # dengar.Pendengar.on_dengar untuk penelusuran.
 
     def show_voice(arg: str = "") -> None:
-        """/voice — mikrofon: sebut "bagas ai …" lalu diam sejenak.
+        """/voice — mikrofon kontinu tanpa kata pemicu.
 
         Sengaja MATI secara bawaan, dan tak disimpan ke preferensi: mikrofon
         yang menyala sendiri di sesi berikutnya adalah kejutan yang tak seorang
         pun minta."""
-        pilihan = arg.strip().lower()
+        pilihan = arg.strip().lower() or "on"
         pendengar = voice_state.get("pendengar")
 
         if pilihan in ("off", "mati"):
@@ -4961,8 +4961,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             if pendengar is not None and pendengar.aktif:
                 console.print("  [dim]mikrofon sudah menyala.[/dim]\n")
                 return
-            p = _dengar.Pendengar(_voice_masuk, _voice_kabar,
-                                  jangkauan=voice_state.get("jangkauan"))
+            p = _dengar.Pendengar(
+                _voice_masuk, _voice_kabar,
+                jangkauan=voice_state.get("jangkauan"), langsung=True)
             alasan = p.mulai()
             if alasan:
                 console.print(f"  [yellow]⚠ mikrofon tak bisa dinyalakan:[/]\n"
@@ -4990,19 +4991,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             threading.Thread(target=_lapor_ambang, daemon=True).start()
             console.print(
                 f"  [#9fc93c]● mikrofon AKTIF[/] [dim]— {_esc(nama)}[/]\n"
-                "  [dim]sebut[/] [{tema.p('aksen')}]\"bagas ai\"[/] [dim]lalu ucapkan "
-                "perintahmu; berhenti bicara[/] "
-                f"[{tema.p('aksen')}]{_dengar.JEDA_SELESAI:.0f} detik[/] [dim]sudah "
-                "menutupnya — tak ada kata penutup. Contoh:[/]\n"
-                "  [dim]  \"bagas ai tolong buka main.py\"  → (diam) → "
-                "terkirim[/]\n"
-                "  [dim]begitu namaku terdengar aku MENJAWAB "
-                f"(\"{_dengar.sapaan()}\"), dan bar "
-                "status di bawah berubah jadi[/] [{tema.p('aksen')}]● merekam[/][dim]. "
-                "Meneruskan kalimat sebelum jeda itu habis mengulang "
-                "hitungannya. Ucapkan[/] [{tema.p('aksen')}]\"batalkan\"[/] [dim]untuk "
-                "membuang rekaman yang sedang berjalan. Satu perintah maksimal "
-                f"{_dengar.MAKS_REKAM:.0f} detik.[/dim]\n")
+                "  [dim]bicara langsung tanpa menyebut nama; setelah kamu "
+                "diam sejenak, satu ucapan dikirim sebagai prompt.[/dim]\n")
             return
 
         if pilihan in ("tekan", "dikte", "ptt"):
@@ -5189,11 +5179,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                else "  [dim](dekat / normal / jauh)[/]"))
         if not ok:
             console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]")
-        console.print("  [dim]cara pakai:[/] sebut [#fcc048]\"bagas ai\"[/] "
-                      "lalu perintahnya, lalu [{tema.p('aksen')}]diam 2 detik[/] "
-                      "[dim]· buang dengan[/] [{tema.p('aksen')}]\"batalkan\"[/]")
-        console.print("  [dim]yang dikirim hanya yang terucap SESUDAH "
-                      "namaku.[/dim]")
+        console.print("  [dim]cara pakai:[/] bicara langsung, lalu diam "
+                      "sejenak untuk mengirim satu ucapan.")
         console.print("  [dim]/voice tekan · on · off · tes ·[/] [#fcc048]jangkau[/]"
                       "[dim] (ukur dari tempat dudukmu) ·[/] "
                       "[{tema.p('aksen')}]dekat|normal|jauh[/]\n")

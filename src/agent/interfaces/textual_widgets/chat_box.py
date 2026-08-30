@@ -76,7 +76,7 @@ _SLASH_COMMANDS: list[tuple[str, str, bool]] = [
     ("/video", "alias mode screenshot /live", False),
     ("/stream", "hidup/matikan tampilan mengalir", False),
     ("/mic", "bacakan kabar dan jawaban AI", True),
-    ("/voice", "dikte langsung / mode hands-free", True),
+    ("/voice", "percakapan suara dengan layar orb", False),
     ("/image", "baca gambar lokal via Python", True),
     ("/export", "ekspor riwayat chat", True),
     ("/btw", "ngobrol santai tanpa mengganggu tugas", True),
@@ -236,7 +236,7 @@ class ChatBox(Widget):
         self._autocomplete.display = False
         self._hint.display = False
         self._prompt.update(Text("❯", style=f"bold {tema.p('aksen')}"))
-        self._voice_button.tooltip = "Dikte langsung (F4); tekan lagi untuk selesai"
+        self._voice_button.tooltip = "Buka mode voice (F4)"
         self._input.focus()
         self._sesuaikan_tinggi()
 
@@ -586,14 +586,14 @@ class ChatBox(Widget):
             pass
 
     def set_voice_recording(self, recording: bool, phase: str = "") -> None:
-        """Ubah ikon tombol dikte tanpa mengganggu fokus kotak teks."""
+        """Ubah ikon tombol voice tanpa mengganggu fokus kotak teks."""
         try:
             self._voice_button.label = "■" if recording else "🎙"
             self._voice_button.set_class(recording, "-merekam")
             self._voice_button.tooltip = (
-                "Tekan untuk mengakhiri rekaman"
+                "Tutup mode voice"
                 if recording else
-                "Dikte langsung (F4); tekan lagi untuk selesai"
+                "Buka mode voice (F4)"
             )
             if phase:
                 self._voice_button.tooltip = phase
