@@ -138,7 +138,7 @@ def _cmd_update() -> None:
             console.print(Panel(body, border_style="yellow", box=box.ROUNDED,
                                 padding=(0, 2)))
         else:
-            console.print("  [bold green]✓[/bold green] Ollama, Gemma 3n E2B, "
+            console.print("  [bold green]✓[/bold green] Ollama, Gemma 3 4B vision, "
                           "dependensi Python, dan Chromium siap.\n")
         return
 

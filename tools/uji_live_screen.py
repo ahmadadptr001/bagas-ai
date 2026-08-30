@@ -120,16 +120,22 @@ async def cek_alur_ui() -> None:
                 return_value=(True, "")),
           patch("agent.tools.screen.clear_live_capture"),
           patch("agent.tools.screen.capture_live_screen",
-                return_value=Path(fake_png)) as capture):
+                return_value=Path(fake_png)) as capture,
+          patch("agent.tools.vision_local.ensure_vision_ready",
+                return_value=(True, "probe vision berhasil")) as probe,
+          patch("agent.tools.vision_local.describe_image",
+                return_value="deskripsi Gemma uji") as describe):
         async with app.run_test(size=(100, 40)) as pilot:
-            # Alias /video mengaktifkan state dan indikator privasi.
+            # Alias /video baru aktif sesudah probe gambar Gemma berhasil.
             app._handle_command("/video on")
-            await pilot.pause(0.05)
+            await tunggu(pilot, lambda: app._live_screen,
+                         pesan="live harus aktif sesudah probe Gemma")
             assert app._live_screen is True
             assert app.query_one("#statusbar", StatusBar).live_screen is True
+            probe.assert_called_once_with(force_probe=True)
 
             # Pertanyaan biasa memicu tepat satu capture just-in-time dan
-            # meneruskannya sebagai attachment resmi.
+            # dianalisis Gemma lokal; gambar mentah tidak dikirim ke model utama.
             chatbox = app.query_one("#chatbox")
             chatbox.set_text("apa yang tampil di layar?")
             await pilot.press("enter")
@@ -138,8 +144,11 @@ async def cek_alur_ui() -> None:
             await tunggu(pilot, lambda: not app.is_turn_active,
                          pesan="giliran harus selesai")
             assert capture.call_count == 1
-            assert panggilan == [
-                ("apa yang tampil di layar?", [fake_png])]
+            assert len(panggilan) == 1
+            assert "apa yang tampil di layar?" in panggilan[0][0]
+            assert "deskripsi Gemma uji" in panggilan[0][0]
+            assert panggilan[0][1] == []
+            describe.assert_called_once_with(Path(fake_png), strict=True)
 
             # Slash command tidak memicu capture baru.
             app._handle_command("/live status")
@@ -154,14 +163,15 @@ async def cek_alur_ui() -> None:
             assert app._live_screen is False
             assert app.query_one("#statusbar", StatusBar).live_screen is False
 
-            # Model teks ditolak SEBELUM mode aktif/capture terjadi.
-            ag.model_spec = models.ModelSpec(
-                id="uji/text", label="Model Teks", multimodal=False)
-            ag.supports_vision.return_value = False
-            app._handle_command("/live on")
+            # Probe Gemma gagal -> mode tak boleh mengaku aktif.
+            with patch("agent.tools.vision_local.ensure_vision_ready",
+                       return_value=(False, "Gemma tak merespons")):
+                app._handle_command("/live on")
+                await tunggu(pilot, lambda: not app._live_starting,
+                             pesan="probe gagal harus selesai")
             assert app._live_screen is False
             assert capture.call_count == 1
-    print("  /live + /video + attachment + /stream + penolakan vision: OK")
+    print("  /live + probe Gemma wajib + konteks lokal + /stream: OK")
 
 
 async def main() -> None:

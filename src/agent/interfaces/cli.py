@@ -3198,19 +3198,38 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 pass
 
     def _live_attachments() -> list[str]:
-        """Screenshot tepat sebelum kirim; kegagalannya tidak membatalkan chat."""
+        """Screenshot tepat sebelum kirim untuk analisis vision wajib."""
         if not live_screen["on"]:
             return []
-        # Analisis gambar berjalan 100% lokal (tool read_image_local),
-        # jadi tak ada gerbang model vision lagi di sini.
         try:
             from ..tools.screen import capture_live_screen
             return [str(capture_live_screen())]
-        except Exception as exc:  # noqa: BLE001 — pertanyaan tetap jalan
-            console.print(
-                f"  [#f7d488]⚠ screenshot live gagal:[/] {_esc(str(exc))}\n"
-                "  [dim]pertanyaan tetap dikirim tanpa referensi layar.[/dim]\n")
-            return []
+        except Exception as exc:  # noqa: BLE001
+            _set_live_screen(False)
+            raise RuntimeError(
+                f"Live dihentikan karena screenshot gagal: {exc}"
+            ) from exc
+
+    def _live_pertanyaan(teks: str, attachments: list[str]) -> str:
+        """Masukkan hasil Gemma; jangan lanjut diam-diam bila vision gagal."""
+        if not attachments:
+            return teks
+        from ..tools.vision_local import VisionLocalError, describe_image
+        try:
+            vision = describe_image(Path(attachments[0]), strict=True)
+        except VisionLocalError as exc:
+            _set_live_screen(False)
+            raise RuntimeError(
+                "Live dihentikan karena Ollama/Gemma gagal menganalisis "
+                f"screenshot: {exc}"
+            ) from exc
+        console.print(
+            "  [#9fc93c]✓ Gemma 3 4B digunakan untuk screenshot live.[/]"
+        )
+        return (
+            teks + "\n\n[SISTEM] Analisis vision lokal Gemma 3 4B dari "
+            "screenshot live:\n" + vision
+        )
 
     def _step_label(name: str, args: dict) -> str:
         a = args if isinstance(args, dict) else {}
@@ -3858,8 +3877,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             attachments: list[str] = []
             try:
                 attachments = _live_attachments()
+                pertanyaan = _live_pertanyaan(text, attachments)
                 result["answer"] = agent.run(
-                    text, on_tool=_on_tool, on_message=_on_msg,
+                    pertanyaan, on_tool=_on_tool, on_message=_on_msg,
                     on_retry=_on_retry, cancel_event=cancel_event,
                     on_tool_result=_on_result, on_notice=_on_notice,
                     on_status=_on_status, ambil_sisipan=_ambil_sisipan,
@@ -3871,7 +3891,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                     # sini — dan justru selama pikiran itulah model yang
                     # lambat memulai tampak seperti model yang mati.
                     on_reasoning=_on_pikir,
-                    attachments=attachments,
+                    # Gemma lokal sudah mengubah screenshot menjadi konteks;
+                    # jangan kirim gambar mentah atau analisis ulang ke model.
+                    attachments=[],
                     # on_token SENGAJA tak diteruskan: pratinjau kalimat yang
                     # sedang ditulis sudah dihapus dari layar, jadi tak ada lagi
                     # yang memakainya. Efek sampingnya justru menguntungkan —
@@ -4340,14 +4362,17 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             attachments: list[str] = []
             try:
                 attachments = _live_attachments()
+                pertanyaan = _live_pertanyaan(text, attachments)
                 result["answer"] = agent.run(
-                    text, on_tool=on_tool, on_message=say,
+                    pertanyaan, on_tool=on_tool, on_message=say,
                     on_retry=on_retry, cancel_event=cancel_event,
                     on_tool_result=finish_step,
                     on_status=lambda m: status_obj.note_phase(_fase_status(m)),
                     on_padat=_jeda_padat(status_obj),
                     on_reasoning=_on_pikir_klasik,
-                    attachments=attachments,
+                    # Gemma lokal sudah mengubah screenshot menjadi konteks;
+                    # jangan kirim gambar mentah atau analisis ulang ke model.
+                    attachments=[],
                 )
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
@@ -6624,12 +6649,31 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                                 f"  [#f0603c]✗ mode layar tidak dapat "
                                 f"diaktifkan: {_esc(alasan)}[/]\n")
                         else:
-                            clear_live_capture()
-                            _set_live_screen(True)
-                            console.print(
-                                "  [#9fc93c]✓ mode layar AKTIF[/] [dim]— "
-                                "screenshot terbaru dikirim bersama tiap "
-                                "pertanyaan (model teks membacanya lewat read_image_local, 100% lokal); /live off untuk berhenti.[/dim]\n")
+                            from ..tools.vision_local import ensure_vision_ready
+                            with console.status(
+                                "[#fcc048]Menyalakan Ollama dan menguji "
+                                "Gemma 3 4B dengan gambar nyata…[/]",
+                                spinner="dots",
+                            ):
+                                siap, alasan_vision = ensure_vision_ready(
+                                    force_probe=True
+                                )
+                            if not siap:
+                                _set_live_screen(False)
+                                console.print(
+                                    "  [#f0603c]✗ mode layar tetap MATI:[/] "
+                                    f"{_esc(alasan_vision)}\n"
+                                )
+                            else:
+                                clear_live_capture()
+                                _set_live_screen(True)
+                                console.print(
+                                    "  [#9fc93c]✓ mode layar AKTIF[/] [dim]— "
+                                    "Ollama hidup dan Gemma 3 4B sudah menjawab "
+                                    "probe gambar. Setiap screenshot wajib "
+                                    "dianalisis Gemma; /live off untuk "
+                                    "berhenti.[/dim]\n"
+                                )
             elif cmd == "stream":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:

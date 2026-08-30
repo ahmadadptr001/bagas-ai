@@ -193,9 +193,18 @@ def _analisis_cv(target: Path) -> list[str]:
         hasil.append(f"  kontur besar terdeteksi: {len(besar)}")
         try:
             cascade = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            detector = cv2.CascadeClassifier(cascade)
-            wajah = detector.detectMultiScale(abu, 1.1, 5, minSize=(30, 30))
-            hasil.append(f"  wajah terdeteksi (Haar lokal): {len(wajah)}")
+            # Beberapa wheel OpenCV tidak membawa data Haar. Memanggil
+            # CascadeClassifier pada path kosong mencetak galat native ke
+            # terminal walau exception Python ditangkap.
+            if Path(cascade).is_file():
+                detector = cv2.CascadeClassifier(cascade)
+                if not detector.empty():
+                    wajah = detector.detectMultiScale(
+                        abu, 1.1, 5, minSize=(30, 30)
+                    )
+                    hasil.append(
+                        f"  wajah terdeteksi (Haar lokal): {len(wajah)}"
+                    )
         except Exception:  # noqa: BLE001
             pass
         return hasil
@@ -396,9 +405,9 @@ def read_image_local(path: str, ocr: bool = True,
         from .vision_local import describe_image
         vision = describe_image(target)
         if vision:
-            baris.extend(["Analisis vision lokal (Gemma 3n E2B):", vision])
+            baris.extend(["Analisis vision lokal (Gemma 3 4B):", vision])
         else:
-            baris.append("Vision lokal: tidak aktif (Ollama/model Gemma 3n E2B belum tersedia)")
+            baris.append("Vision lokal: tidak aktif (Ollama/model Gemma 3 4B belum siap)")
     except Exception:
         baris.append("Vision lokal: backend tidak tersedia; metadata/OCR tetap digunakan")
     baris.append(

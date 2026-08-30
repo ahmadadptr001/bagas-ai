@@ -424,7 +424,7 @@ def run(console: Console | None = None) -> bool:
     _write_env(config.ENV_FILE, env)
     try:
         from .updater import _pasang_vision_gemma
-        console.print("  [dim]Memastikan Ollama + Gemma 3n E2B (wajib)...[/dim]")
+        console.print("  [dim]Memastikan Ollama + Gemma 3 4B vision (wajib)...[/dim]")
         hasil_vision = _pasang_vision_gemma()
         console.print("  " + hasil_vision)
         if hasil_vision.startswith("GAGAL:"):

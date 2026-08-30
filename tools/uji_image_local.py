@@ -61,7 +61,7 @@ async def cek_textual(path: Path) -> None:
         chatbox.handle_paste(str(path))
         await pilot.pause(0.2)
         assert app._pending_gambar.get("path") == str(path.resolve())
-        assert app.query_one("#chat-input").value == "[foto]"
+        assert app.query_one("#chat-input").text == "[foto]"
 
         await pilot.press("enter")
         for _ in range(80):

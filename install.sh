@@ -211,8 +211,8 @@ else
   esac
 fi
 
-# --- 3e. Ollama + Gemma 3n E2B (WAJIB untuk vision lokal) ---
-step "Memeriksa Ollama (wajib untuk vision lokal Gemma 3n E2B)"
+# --- 3e. Ollama + Gemma 3 4B (WAJIB untuk vision lokal) ---
+step "Memeriksa Ollama (wajib untuk vision lokal Gemma 3 4B)"
 if ! command -v ollama >/dev/null 2>&1; then
   case "$(uname -s)" in
     Darwin)
@@ -223,10 +223,10 @@ if ! command -v ollama >/dev/null 2>&1; then
 fi
 command -v ollama >/dev/null 2>&1 || die "Ollama wajib tetapi gagal dipasang. Pasang dari https://ollama.com/download lalu jalankan installer lagi."
 ok "Ollama tersedia ($(command -v ollama))"
-note "mengunduh model vision Gemma 3n E2B (bisa beberapa GB)..."
-ollama pull gemma3n:e2b >/dev/null || die "Gagal mengunduh gemma3n:e2b. Instalasi dibatalkan."
-ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -qx 'gemma3n:e2b' || die "gemma3n:e2b tidak terverifikasi setelah pull. Instalasi dibatalkan."
-ok "Gemma 3n E2B siap untuk read_image_local dan /live"
+note "mengunduh model vision Gemma 3 4B (sekitar 3.3 GB)..."
+ollama pull gemma3:4b >/dev/null || die "Gagal mengunduh gemma3:4b. Instalasi dibatalkan."
+"$PY" -c 'from agent.tools.vision_local import ensure_vision_ready; ok, why = ensure_vision_ready(force_probe=True); print(why); raise SystemExit(0 if ok else 1)' >/dev/null || die "Gemma 3 4B terpasang tetapi gagal merespons gambar. Instalasi dibatalkan."
+ok "Ollama + Gemma 3 4B aktif dan teruji untuk read_image_local serta /live"
 
 # --- 4. Pastikan direktori bin/Scripts ada di PATH ---
 step "Memeriksa PATH"

@@ -865,7 +865,9 @@ def _pasang_tesseract() -> str:
 
 
 def _pasang_vision_gemma() -> str:
-    """Tarik Gemma 3n E2B bila Ollama memang tersedia di mesin pengguna."""
+    """Tarik Gemma multimodal dan buktikan ia benar-benar menjawab gambar."""
+    from .tools.vision_local import MODEL_DEFAULT, ensure_vision_ready
+
     ollama = shutil.which("ollama")
     if not ollama:
         try:
@@ -886,21 +888,21 @@ def _pasang_vision_gemma() -> str:
                                 encoding="utf-8", errors="replace", timeout=20)
         model_lines = {(line.split()[0] if line.split() else "").lower()
                        for line in (listed.stdout or "").splitlines()[1:]}
-        if "gemma3n:e2b" in model_lines:
-            return "Model vision lokal Gemma 3n E2B sudah tersedia."
-        pull_rc = _run_progress([ollama, "pull", "gemma3n:e2b"], Path.cwd(),
-                                timeout=1800, label="mengunduh Gemma 3n E2B")
-        if pull_rc == 0:
-            verify = subprocess.run([ollama, "list"], capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", timeout=20)
-            verified = any((line.split() or [""])[0].lower() == "gemma3n:e2b"
-                           for line in (verify.stdout or "").splitlines()[1:])
-            if verified:
-                return "Model vision lokal Gemma 3n E2B terpasang."
-            return "GAGAL: ollama pull selesai tetapi gemma3n:e2b tidak terverifikasi."
-        return "Gagal menarik Gemma 3n E2B; coba ulang: ollama pull gemma3n:e2b"
+        if MODEL_DEFAULT not in model_lines:
+            pull_rc = _run_progress(
+                [ollama, "pull", MODEL_DEFAULT], Path.cwd(), timeout=1800,
+                label=f"mengunduh Gemma vision {MODEL_DEFAULT}",
+            )
+            if pull_rc != 0:
+                return (f"GAGAL: gagal menarik {MODEL_DEFAULT}; coba ulang: "
+                        f"ollama pull {MODEL_DEFAULT}")
+        siap, alasan = ensure_vision_ready(force_probe=True)
+        if siap:
+            return f"Model vision lokal {MODEL_DEFAULT} aktif dan teruji dengan gambar."
+        return f"GAGAL: {alasan}"
     except (OSError, subprocess.SubprocessError):
-        return "GAGAL: Vision lokal belum terpasang; jalankan ollama pull gemma3n:e2b"
+        return (f"GAGAL: vision lokal belum siap; jalankan "
+                f"ollama pull {MODEL_DEFAULT}")
 
 
 def _reinstall(repo: Path) -> dict:

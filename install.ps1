@@ -267,8 +267,8 @@ if (-not $Tess) {
     Note "pasang nanti: winget install --id UB-Mannheim.TesseractOCR -e"
 }
 
-# --- 3e. Ollama + Gemma 3n E2B (WAJIB untuk vision lokal) ---
-Step "Memeriksa Ollama (wajib untuk vision lokal Gemma 3n E2B)"
+# --- 3e. Ollama + Gemma 3 4B (WAJIB untuk vision lokal) ---
+Step "Memeriksa Ollama (wajib untuk vision lokal Gemma 3 4B)"
 $Ollama = Get-Command ollama -ErrorAction SilentlyContinue
 if (-not $Ollama) {
     $Winget = Get-Command winget -ErrorAction SilentlyContinue
@@ -284,11 +284,13 @@ if (-not $Ollama) {
     exit 1
 }
 Ok "Ollama tersedia ($($Ollama.Source))"
-Note "mengunduh model vision Gemma 3n E2B (bisa beberapa GB)..."
-$rc = Invoke-Quiet ollama @("pull", "gemma3n:e2b")
-if ($rc -ne 0) { Err "Gagal mengunduh gemma3n:e2b (exit $rc). Instalasi dibatalkan."; exit 1 }
-if (-not ((& ollama list 2>$null) -match '(?m)^gemma3n:e2b\s')) { Err "gemma3n:e2b tidak terverifikasi setelah pull. Instalasi dibatalkan."; exit 1 }
-Ok "Gemma 3n E2B siap untuk read_image_local dan /live"
+Note "mengunduh model vision Gemma 3 4B (sekitar 3.3 GB)..."
+$rc = Invoke-Quiet ollama @("pull", "gemma3:4b")
+if ($rc -ne 0) { Err "Gagal mengunduh gemma3:4b (exit $rc). Instalasi dibatalkan."; exit 1 }
+$VisionProbe = "from agent.tools.vision_local import ensure_vision_ready; ok, why = ensure_vision_ready(force_probe=True); print(why); raise SystemExit(0 if ok else 1)"
+$rc = Invoke-Quiet $Py @("-c", $VisionProbe)
+if ($rc -ne 0) { Err "Gemma 3 4B terpasang tetapi gagal merespons gambar. Instalasi dibatalkan."; exit 1 }
+Ok "Ollama + Gemma 3 4B aktif dan teruji untuk read_image_local serta /live"
 
 # --- 4. Pastikan folder Scripts ada di PATH (User) ---
 # Cari lokasi .exe yang BENAR-BENAR terpasang (penting untuk Python Store yang
