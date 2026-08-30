@@ -37,9 +37,9 @@ from ...ui import tema
 # Siluet heksagon (tanda merek bagas-ai) dengan lubang antar-kelopak —
 # versi kecil dari logo resmi; ditampilkan 4 baris teks via half-block.
 _LOGO = (
-    " # # ",
-    "#####",
-    "  # ",
+    " # ",
+    "###",
+    "# # ",
 )
 
 # Durasi tiap tahap animasi (dalam tick; 1 tick ≈ 0.15 dtk dari app).

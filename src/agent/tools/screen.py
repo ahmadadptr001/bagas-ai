@@ -8,6 +8,7 @@ file mana yang harus dilampirkan — jadi tool lain yang menghasilkan gambar
 """
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -79,7 +80,12 @@ def capture_screen(path: str = LIVE_SCREEN_PATH) -> Path:
         img.thumbnail((_MAX_EDGE, _MAX_EDGE))
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        img.save(target, "PNG", optimize=True)
+        # Jangan menyimpan PNG dengan ekstensi JPEG: lampiran kemudian
+        # dideteksi dari ekstensi dan provider akan menerima MIME yang salah.
+        if target.suffix.lower() in (".jpg", ".jpeg"):
+            img.convert("RGB").save(target, "JPEG", quality=95, optimize=True)
+        else:
+            img.save(target, "PNG", optimize=True)
     except OSError as exc:
         raise ScreenCaptureError(
             f"tak bisa menyimpan {_display(target)}: {exc}") from exc
@@ -103,6 +109,82 @@ def clear_live_capture() -> None:
                     target.unlink(missing_ok=True)
     except (OSError, ValueError):
         pass
+
+
+def _proses_dari_pid(pid: int) -> str:
+    """Nama executable dari PID lewat Win32 murni (tanpa dependensi)."""
+    import ctypes
+    from ctypes import wintypes
+
+    # PROCESS_QUERY_LIMITED_INFORMATION: cukup untuk nama image, tak butuh
+    # hak akses yang lebih tinggi (dengan itu proses elevasi pun terbaca).
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return ""
+    try:
+        ukuran = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(ukuran.value)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                handle, 0, buf, ctypes.byref(ukuran)):
+            return buf.value.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+        return ""
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+@tool
+def active_window() -> str:
+    """Cek window/aplikasi mana yang SEDANG DIAKTIFKAN pengguna (foreground).
+
+    Jawabannya diambil LANGSUNG dari OS — judul window plus nama prosesnya —
+    jadi model teks pun tahu pasti aplikasi mana yang sedang terbuka, tanpa
+    perlu bisa melihat screenshot. Ini cara termutakhir menjawab "user sedang
+    di window mana?"; pakai take_screenshot/read_image_local hanya bila isi
+    TAMPILANNYA yang perlu diperiksa.
+    """
+    import ctypes
+
+    if sys.platform == "win32":
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return ("[error] tak ada window foreground (layar mungkin "
+                    "terkunci / sesi headless).")
+        panjang = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(max(1, panjang) + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, panjang + 1)
+        judul = buf.value.strip()
+        pid = ctypes.c_ulong()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        proses = _proses_dari_pid(pid.value) if pid.value else ""
+        if not judul and not proses:
+            return "[error] judul window foreground tak terbaca."
+        return (f"Window aktif: {judul or '(tanpa judul)'}\n"
+                f"Proses: {proses or 'tak diketahui'} (pid {pid.value or '?'})")
+    if sys.platform == "darwin":
+        import subprocess
+        try:
+            proses = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to get name of '
+                 "first process whose frontmost is true"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"[error] tak bisa menanyakannya ke macOS: {exc}"
+        return (f"Window aktif: aplikasi {proses or 'tak diketahui'} "
+                "(judul window tidak diekspos AppleScript)")
+    # Linux/X11: dua langkah xprop (root -> window aktif -> atributnya).
+    import subprocess
+    try:
+        root = subprocess.run(["xprop", "-root", "_NET_ACTIVE_WINDOW"],
+                              capture_output=True, text=True, timeout=10)
+        wid = root.stdout.split("#")[-1].strip().split()[0]
+        info = subprocess.run(
+            ["xprop", "-id", wid, "WM_CLASS", "_NET_WM_NAME"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError, IndexError) as exc:
+        return f"[error] tak bisa membacanya dari window manager: {exc}"
+    return f"Window aktif (id {wid}):\n{info.stdout.strip()}"
 
 
 @tool

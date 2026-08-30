@@ -240,21 +240,18 @@ def _prompt_secret(console: Console, message: str) -> str:
         return getpass.getpass(message + " ").strip()
 
 
-# Teks disclaimer yang WAJIB disetujui sebelum wizard menanyakan/menyimpan
-# apa pun. Jujur soal kuasa agent: ia menjalankan perintah & menulis berkas.
+# Teks Ketentuan yang WAJIB disetujui sebelum wizard menanyakan/menyimpan
+# apa pun. Sumber tunggalnya sistem.KETENTUAN (dipakai juga oleh installer
+# pra-pasang, yang belum punya rich); markup [bold] baru ditambahkan di sini.
+# Jujur soal kuasa agent: ia menjalankan perintah & menulis berkas.
+from .sistem import KETENTUAN as _KETENTUAN_TEKS
 _DISKLAIMER = (
-    "[bold]bagas-ai adalah agent AI[/bold] yang atas permintaanmu dapat:\n"
-    "  • menjalankan perintah & kode di komputer ini,\n"
-    "  • membaca/menulis berkas di folder kerja,\n"
-    "  • mengakses internet (web & API model).\n"
-    "\n"
-    "Percakapan dan konteks dikirim ke layanan model pilihanmu (situs web-AI\n"
-    "atau API NVIDIA/OpenRouter/OpenCode Zen). API key yang ditempel di wizard\n"
-    "ini disimpan LOKAL di ~/.bagasai/.env dan hanya dikirim ke penyedianya\n"
-    "saat autentikasi.\n"
-    "\n"
-    "[bold]Seluruh risiko pemakaian menjadi tanggungan pengguna.[/bold] Periksa\n"
-    "setiap perintah/berkas yang kamu setujui — bagas-ai bisa keliru."
+    _KETENTUAN_TEKS
+    .replace("bagas-ai adalah agent AI",
+             "[bold]bagas-ai adalah agent AI[/bold]", 1)
+    .replace("Seluruh risiko pemakaian menjadi tanggungan pengguna.",
+             "[bold]Seluruh risiko pemakaian menjadi tanggungan "
+             "pengguna.[/bold]", 1)
 )
 
 # Kredensial yang ditangani wizard: nama env -> validator + prompt + info.

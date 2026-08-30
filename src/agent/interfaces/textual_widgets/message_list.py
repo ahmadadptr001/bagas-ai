@@ -122,7 +122,12 @@ class _BlokTulis:
         for i, b in enumerate(tampil):
             t.append("  │ ", style=tema.p("tepi_redup"))
             if self._sintaks and i < len(self._sintaks):
-                t.append_text(self._sintaks[i].copy())
+                # Use the normal UI foreground as the base, then let lexer
+                # token spans override it. Otherwise non-token text becomes
+                # the terminal default (usually white).
+                body = self._sintaks[i].copy()
+                body.style = tema.p("teks")
+                t.append_text(body)
             else:
                 t.append(b, style=tema.p("teks"))
             t.append("\n")
@@ -819,7 +824,10 @@ class MessageList(RichLog, can_focus=False):
             from rich.syntax import Syntax
             from pygments.lexers import guess_lexer_for_filename
 
-            lexer = guess_lexer_for_filename(path, code)
+            # Lexer detection only needs the filename suffix. A full Windows
+            # path can fail on some Pygments versions.
+            nama = path.replace("\\", "/").rsplit("/", 1)[-1]
+            lexer = guess_lexer_for_filename(nama, code)
             if not lexer or lexer.name in ("Text only", "text"):
                 return None
             syn = Syntax(code, lexer.name, theme="gruvbox-dark",
@@ -829,13 +837,22 @@ class MessageList(RichLog, can_focus=False):
                 clean = Text(line_text.plain, no_wrap=True)
                 for span in line_text.spans:
                     st = span.style
-                    if not getattr(st, "color", None):
+                    # Rich exposes span styles as Style or (on older
+                    # versions) serialised strings.
+                    if not isinstance(st, RichStyle):
+                        try:
+                            st = RichStyle.parse(st)
+                        except Exception:  # noqa: BLE001
+                            continue
+                    if not st.color:
                         continue
-                    try:
-                        warna = f"color {st.color.get_truecolor().hex}"
-                    except Exception:  # noqa: BLE001
-                        warna = f"color {st.color}"
-                    clean.stylize(warna, span.start, span.end)
+                    # Do not copy the syntax theme background into the panel.
+                    clean.stylize(
+                        RichStyle(color=st.color, bold=st.bold,
+                                  italic=st.italic, underline=st.underline,
+                                  dim=st.dim),
+                        span.start, span.end,
+                    )
                 hasil.append(clean)
             return hasil
         except Exception:  # noqa: BLE001 — pygments opsional

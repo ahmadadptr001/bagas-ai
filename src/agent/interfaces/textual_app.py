@@ -279,6 +279,31 @@ class BagasAIApp(App):
             target=self._poll_gpu, daemon=True)
         self._thread_gpu.start()
 
+        # Peta proyek & fakta OS/hardware: _main() sudah prime() cache disk
+        # ke memo (instan), jadi Agent() tak pernah memindai folder saat
+        # startup. Kesegarannya diperiksa & dibangun DI THREAD LATAR —
+        # kembaran cli._bg_build_map — lalu system prompt disegarkan
+        # otomatis begitu peta terbaru siap.
+        def _bangun_peta():
+            try:
+                from .. import projectindex, osinfo
+                osinfo.sync_to_memory()
+                hw_status = osinfo.sync_hardware_to_memory()
+                primed = projectindex.as_prompt_block()
+                # config.PROJECT_ROOT dipakai sebagai default di dalam
+                # (module ini tak mengimpor config).
+                fresh = projectindex.refresh()
+                if fresh != primed or hw_status == "added":
+                    self._safe_call(self.agent.refresh_system_prompt)
+            except Exception:  # noqa: BLE001 — peta opsional
+                pass
+
+        try:
+            self.run_worker(_bangun_peta, thread=True, group="peta",
+                            exclusive=True, exit_on_error=False)
+        except Exception:  # noqa: BLE001 — jangan gagalkan startup
+            pass
+
         # _poll_plan early-return saat steps == cache (keduanya kosong di
         # awal), jadi tata layout SEKARANG: begitu terminal cukup lebar,
         # sidebar sistem tampil sejak detik pertama tanpa menunggu rencana
@@ -1042,15 +1067,10 @@ class BagasAIApp(App):
                                    style=tema.p("redup"))
             return
 
-        if not self.agent.supports_vision():
-            spec = self.agent.model_spec
-            msg_list.append_notice(
-                f"✗ Mode layar tidak dapat diaktifkan: {spec.label} tidak "
-                "mendukung vision/lampiran gambar. Pilih model vision lewat "
-                "/model.",
-                style=f"bold {tema.p('exit_footer')}",
-            )
-            return
+        # TAK ADA lagi gerbang model vision: analisis gambar berjalan
+        # 100% lokal lewat tool read_image_local, jadi model teks pun bisa
+        # "melihat" layar (OCR, warna, struktur). Model vision tetap
+        # menerima screenshot sebagai lampiran gambar biasa.
         try:
             from ..tools.screen import (
                 clear_live_capture, screen_capture_available,
@@ -1069,17 +1089,16 @@ class BagasAIApp(App):
         self._set_live_screen(True)
         msg_list.append_notice(
             "✓ Mode layar AKTIF — satu screenshot terbaru akan diambil dan "
-            "dikirim sebagai referensi pada setiap pertanyaan biasa. Gunakan "
-            "/live off untuk berhenti.",
+            "dikirim sebagai referensi pada setiap pertanyaan biasa. Model "
+            "apa pun boleh: model vision menerimanya sebagai lampiran "
+            "gambar, model teks membacanya lewat tool read_image_local "
+            "(analisis 100% lokal). Gunakan /live off untuk berhenti.",
             style=f"bold {tema.p('aksen')}",
         )
 
     def _capture_live_attachment(self) -> list[str]:
         """Ambil screenshot just-in-time di worker; gagal tidak membatalkan chat."""
         if not self._live_screen:
-            return []
-        if not self.agent.supports_vision():
-            self._safe_call(self._live_model_tidak_mendukung)
             return []
         self.agent_on_status("mengambil screenshot layar…")
         try:
@@ -1090,17 +1109,6 @@ class BagasAIApp(App):
                 f"⚠ Screenshot live gagal ({exc}); pertanyaan tetap dikirim "
                 "tanpa referensi layar.")
             return []
-
-    def _live_model_tidak_mendukung(self) -> None:
-        """Matikan /live bila model berubah saat mode sedang aktif."""
-        if not self._live_screen:
-            return
-        label = self.agent.model_spec.label
-        self._set_live_screen(False)
-        self.query_one("#messages", MessageList).append_notice(
-            f"○ Mode layar dimatikan: {label} tidak mendukung vision.",
-            style=f"bold {tema.p('exit_footer')}",
-        )
 
     # ─── Audio: /mic dan /voice ───────────────────────────────────────
 
@@ -1480,8 +1488,6 @@ class BagasAIApp(App):
                 spec.label, spec.is_web)
         except Exception:  # noqa: BLE001 — statusbar opsional
             pass
-        if self._live_screen and not self.agent.supports_vision():
-            self._live_model_tidak_mendukung()
         if self.agent.model_spec.is_web:
             self._pasang_model_web(varian)
 

@@ -349,6 +349,17 @@ KONTEKS_MAKS_BAGIAN: int = int(os.getenv("BAGASAI_KONTEKS_MAKS_BAGIAN", "8"))
 # sedang bicara. Ukur dulu dari tempatmu duduk: `/voice jangkau`.
 VOICE_JANGKAUAN: str = os.getenv("VOICE_JANGKAUAN", "jauh").strip().lower()
 
+# --- /voice: model Whisper untuk pengenalan suara --------------------------
+# Ukuran model faster-whisper yang dipakai mengenali suara. Bawaannya "small":
+# cukup tepat untuk bahasa Indonesia, ±460 MB (sekali unduh, tersimpan di
+# cache HuggingFace), dan masih nyaman di CPU. Pilihan lain:
+#   tiny    ±75 MB, tercepat, akurasi turun — cukup untuk komputer lambat
+#   base    ±140 MB, tengah-tengah
+#   medium  ±1,5 GB, paling tepat, hanya nyaman bila ada GPU/ RAM besar
+# Saat model belum termuat (belum terpasang / masih mengunduh), pengenalan
+# otomatis jatuh ke layanan Google lawas — /voice tetap hidup apa pun keadaan.
+VOICE_STT_MODEL: str = os.getenv("VOICE_STT_MODEL", "small").strip().lower()
+
 # Bunyi penanda "tugas selesai" pilihan sendiri (path ke berkas WAV). Kosong =
 # pakai bawaan di ~/.bagasai/suara/ (lihat tanda.py). Cara lain tanpa menyentuh
 # .env: taruh berkasnya di ~/.bagasai/suara/selesai-punyaku.wav.

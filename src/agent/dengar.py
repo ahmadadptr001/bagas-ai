@@ -89,7 +89,7 @@ log = logging.getLogger(__name__)
 # atas permintaan pengguna — dan memang itu pilihan yang lebih sehat: aba-aba
 # dua huruf gampang salah dengar DAN gampang terpicu tanpa sengaja, sementara
 # "bagas ai" khas dan hampir mustahil muncul kebetulan.
-_NAMA_KEDUA = {"ai", "hai", "ay", "a", "i", "eye", "ei"}
+_NAMA_KEDUA = {"ai", "hai", "ay", "ayi", "a", "i", "eye", "ei"}
 _NAMA_RAPAT = {"bagasai", "bagas-ai", "bagasi", "pagasai", "bagasay",
                "bagasih", "bagaskara", "bagasi"}
 _NAMA_PERTAMA = {"bagas", "pagas", "bagus", "begas", "bagaz"}
@@ -521,6 +521,128 @@ def nama_mikrofon() -> str:
         return ""
 
 
+# --- mesin pengenal: Whisper lokal (utama), Google lawas (cadangan) --------
+# Dua mesin, bukan satu. Whisper lokal jauh lebih akurat untuk suara beraksen,
+# berjarak, dan berderau — model transformer modern yang dilatih jutaan jam
+# audio sehari-hari, jenis yang sama dengan pengenal suara ChatGPT di browser.
+# Ia gratis dan TANPA kredensial, selaras dengan bagas-ai yang memang tak
+# memakai API key. Google lawas (endpoint web gratis warisan SpeechRecognition)
+# tetap dipertahankan sebagai cadangan: ia sudah terpasang, tanpa unduhan
+# model, dan membuat /voice tetap hidup saat Whisper belum siap —
+# perintah-perintah pendek dekat mikrofon masih cukup terbaca olehnya.
+def _nama_model_whisper() -> str:
+    try:
+        from . import config
+        nama = (getattr(config, "VOICE_STT_MODEL", "") or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        nama = ""
+    return nama or "small"
+
+
+class _Pengenal:
+    """Satu mesin pengenal bersama: Whisper bila siap, Google bila belum.
+
+    Singleton tingkat modul (lihat pengenal()) — Pendengar diciptakan ULANG
+    tiap `/voice on`, dan model Whisper yang termuat di dalamnya akan ikut
+    terbuang bila menempel pada instance. Yuk 500 MB diunduh sekali per
+    proses, dipakai lintas nyala-mati mikrofon."""
+
+    def __init__(self) -> None:
+        # Diisi thread pemuat; dibaca thread pengenal. Penempatan atribut
+        # tunggal atomik menurut CPython, cukup aman tanpa kunci.
+        self._whisper: Any = None
+        self._sr: Any = None
+        self._kabar: Callable[..., None] = lambda _m, **_k: None
+
+    def siapkan(self, kabar: Callable[..., None] | None = None) -> None:
+        """Muat Whisper di LATAR — unduhan pertama bisa beberapa menit.
+
+        Sementara menunggu, kenali() memakai Google; tak ada yang blokir."""
+        if kabar is not None:
+            self._kabar = kabar
+        if self._whisper is not None:
+            return
+        try:
+            import faster_whisper  # noqa: F401
+        except Exception:  # noqa: BLE001
+            # Diam-diam saja: /voice TETAP berfungsi lewat Google. Kabar
+            # sekali supaya tahu kenapa akurasinya rendah dan cara memperbaiki.
+            self._kabar("pengenal suara memakai Google (akurasi rendah) - "
+                        "pip install faster-whisper untuk Whisper lokal yang "
+                        "jauh lebih tepat", batal=False)
+            return
+
+        nama = _nama_model_whisper()
+
+        def _muat() -> None:
+            try:
+                from faster_whisper import WhisperModel
+                self._whisper = WhisperModel(
+                    nama, device="cpu", compute_type="int8")
+                self._kabar(f"pengenal suara Whisper siap (model {nama}, "
+                            "luring)", batal=False)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("pemuatan Whisper gagal", exc_info=True)
+                self._kabar(f"pengenal Whisper gagal dimuat "
+                            f"({str(exc)[:120]}) - lanjut memakai Google",
+                            batal=False)
+
+        threading.Thread(target=_muat, daemon=True,
+                         name="bagasai-whisper").start()
+
+    # Return kenali(): (teks, info). info menjelaskan MESIN yang dipakai atau
+    # sebab kosongnya: "whisper" | "google" | "takjelas" | "galat: <sebab>".
+    # Pemanggil menampilkan keduanya berbeda — kegagalan jaringan adalah kabar,
+    # ucapan yang tak terpahami bukan.
+    def kenali(self, data: bytes) -> tuple[str, str]:
+        """Ubah audio mentah (int16 mono 16 kHz) jadi teks."""
+        if self._whisper is not None:
+            try:
+                return self._whisperkenali(data), "whisper"
+            except Exception:  # noqa: BLE001 - jatuh ke Google, jangan mati
+                log.debug("Whisper gagal, jatuh ke Google", exc_info=True)
+        return self._google(data)
+
+    def _whisperkenali(self, data: bytes) -> str:
+        import numpy as np
+        audio = np.frombuffer(data, dtype=np.int16).astype("float32") / 32768.0
+        segmen, _info = self._whisper.transcribe(
+            audio, language="id", beam_size=5, vad_filter=True,
+            # initial_prompt membiasakan register-nya ke bahasa Indonesia
+            # sehari-hari ("gw", "gitu", kode-switching) — persis gaya yang
+            # tak dipahami endpoint Google lawas.
+            initial_prompt="Bahasa Indonesia sehari-hari, gaya bicara santai.",
+        )
+        return " ".join(s.text.strip() for s in segmen).strip()
+
+    def _google(self, data: bytes) -> tuple[str, str]:
+        try:
+            import speech_recognition as sr
+        except Exception as exc:  # noqa: BLE001
+            return "", f"galat: pengenal tak bisa dimuat: {exc}"
+        if self._sr is None:
+            self._sr = sr.Recognizer()
+        try:
+            teks = self._sr.recognize_google(
+                sr.AudioData(data, LAJU, 2), language="id-ID")
+            return (teks or "").strip(), "google"
+        except sr.UnknownValueError:
+            return "", "takjelas"
+        except Exception as exc:  # noqa: BLE001 - jaringan/layanan
+            return "", f"galat: {exc}"
+
+
+_PENGENAL: _Pengenal | None = None
+
+
+def pengenal() -> _Pengenal:
+    """Mesin pengenal bersama seluruh proses (dimuat malas sekali)."""
+    global _PENGENAL
+    if _PENGENAL is None:
+        _PENGENAL = _Pengenal()
+    return _PENGENAL
+
+
 # --- bunyi tanda -----------------------------------------------------------
 # Nada NAIK saat mikrofon menyala, nada TURUN saat mati. Bukan hiasan: begitu
 # fiturnya dipakai, mata pengguna ada di kodenya, bukan di baris status — dan
@@ -629,6 +751,16 @@ class Pendengar:
         # Ambang untuk MENERUSKAN ucapan yang sudah berjalan (histeresis).
         # Selalu lebih rendah dari `ambang`; lihat Jangkauan.
         self.ambang_lanjut = 0.0
+        # Mesin pengenal BERSAMA (Whisper/Google) — singleton modul, bukan milik
+        # instance ini: Pendengar diciptakan ulang tiap `/voice on`, dan model
+        # Whisper yang ikut terbuang tiap kali itu terjadi berarti unduhan 500 MB
+        # yang tak pernah habis dipakai.
+        self._pengenal = pengenal()
+        # Riwayat potongan ucapan (mulai, akhir, audio) ±35 detik terakhir.
+        # Bahan pengenalan SATU UTUHAN: perintah yang tercacah jeda di tengah
+        # kalimat dienali ulang menyeluruh saat ditutup — potongan-potongannya
+        # tak saling kenal, utuhannya saling kenal.
+        self._riwayat: list[tuple[float, float, bytes]] = []
         self._stop = threading.Event()
         # Sampai kapan blok audio DIBUANG (selagi ketukan penanda berbunyi).
         # Tanpa ini, bunyi bagas-ai sendiri ikut terekam lalu dikirim ke
@@ -666,6 +798,9 @@ class Pendengar:
         ok, alasan = siap()
         if not ok:
             return alasan
+        # Muat Whisper di latar SEKALI per proses. Sementara menunggu (unduhan
+        # model pertama bisa beberapa menit), pengenalan memakai Google.
+        self._pengenal.siapkan(self.on_kabar)
         self._stop.clear()
         self.galat = ""
         self._threads = [
@@ -784,8 +919,18 @@ class Pendengar:
             panjang = time.time() - mulai
             if sunyi >= _DIAM_SELESAI or panjang >= _MAKS_UCAPAN:
                 if panjang - sunyi >= _MIN_UCAPAN:
+                    blob = np.concatenate(potongan).tobytes()
                     self._menunggu += 1
-                    self._antre.put(np.concatenate(potongan).tobytes())
+                    self._antre.put(blob)
+                    # Riwayat untuk pengenalan satu-utuhan (lihat _periksa_selesai).
+                    self._riwayat.append((mulai, mulai + panjang, blob))
+                    # Pangkas yang lebih tua dari sebatas perintah terpanjang:
+                    # riwayat cuma perlu menampung SATU perintah, bukan seluruh
+                    # obrolan ruangan.
+                    batas = time.time() - (MAKS_REKAM + 5.0)
+                    if self._riwayat and self._riwayat[0][0] < batas:
+                        self._riwayat = [r for r in self._riwayat
+                                         if r[0] >= batas]
                 potongan = []
                 sunyi = 0.0
             # Perintah yang menggantung tanpa kata penutup dibatalkan di sini —
@@ -843,6 +988,9 @@ class Pendengar:
             return
         if not self.perakit.sementara:
             return
+        # Waktu namanya disebut harus ditangkap SEBELUM selesai() me-reset
+        # perakit — dipakai memilih potongan mana yang jadi perintah utuh.
+        sebut = self.perakit.disebut_pada
         perintah = self.perakit.selesai()
         self._sunyi_sejak = 0.0
         # DIJAWAB DULU, baru dikirim. Di detik ini pengguna baru saja berhenti
@@ -851,6 +999,35 @@ class Pendengar:
         # Pengirimannya tak menunggu suaranya selesai — AI boleh mulai bekerja
         # selagi kalimat ini dibacakan.
         self._ucapkan(DITERIMA, nada_cadangan=True)
+        # PENGECUALIAN DUA TAHAP. Teks per-potongan di atas cuma cadangan: yang
+        # benar-benar dikirim adalah pengenalan ulang SATU UTUH perintah (semua
+        # potongannya dijadikan satu). Ini penutup masalah terbesar pengenal
+        # lawas: potongan yang terpisah jeda dienali TANPA saling kenal, dan
+        # potongan pendek persis yang paling sering salah baca — cara kerja
+        # ChatGPT di browser persis kebalikannya, satu utuhan sekali baca.
+        audio = self._audio_perintah(sebut)
+        if audio:
+            self._menunggu += 1
+            self._antre.put(("utuh", audio, perintah))
+        else:
+            self._kirim_perintah(perintah)
+
+    def _audio_perintah(self, sebut: float) -> bytes:
+        """Audio utuh satu perintah: potongan-potongan sejak namanya disebut.
+
+        Jendela seleksinya dimulai 5 detik SEBELUM nama terdeteksi: nama berada
+        di AWAL potongannya, dan `disebut_pada` baru dicatat sesudah potongan
+        itu selesai dienali (plus jeda jaringan) — jadi awal potongan bisa jauh
+        lebih awal dari stempel itu. Nama ikut terbawa di teks utuh, lalu
+        dibuang lagi oleh cari_pemicu — sama seperti jalur per-potongan."""
+        if not self._riwayat or not sebut:
+            return b""
+        ambil = [b for _m, akhir, b in self._riwayat if akhir >= sebut - 5.0]
+        return b"".join(ambil)
+
+    def _kirim_perintah(self, perintah: str) -> None:
+        if not perintah:
+            return
         try:
             self.on_perintah(perintah)
         except Exception:  # noqa: BLE001 - UI tak boleh menjatuhkan mikrofon
@@ -858,19 +1035,22 @@ class Pendengar:
 
     # --- thread 2: potongan ucapan -> teks -> perintah ---
     def _kenali(self) -> None:
-        """Thread pengenal: ambil potongan ucapan dari antrean, ubah jadi teks."""
-        try:
-            import speech_recognition as sr
-        except Exception as exc:  # noqa: BLE001
-            self._gagal(f"pengenal suara tak bisa dimuat: {exc}")
-            return
-        rec = sr.Recognizer()
+        """Thread pengenal: ambil dari antrean, ubah jadi teks.
+
+        Antreannya berisi dua hal: potongan ucapan biasa (bytes) untuk
+        menampilkan "yang terdengar" & mendeteksi nama SECARA LANGSUNG, dan
+        perintah utuh (tuple) hasil pengenalan satu-utuhan yang TIDAK lagi
+        melalui perakit — perakit sudah selesai, kalimatnya tinggal dikirim.
+        """
         while not self._stop.is_set():
             data = self._antre.get()
             if data is None:
                 return
             try:
-                self._satu_ucapan(rec, sr, data)
+                if isinstance(data, tuple):
+                    self._satu_utuhan(data)
+                else:
+                    self._satu_ucapan(data)
             except Exception:  # noqa: BLE001 - satu potongan gagal, jangan mati
                 log.debug("pengenalan satu ucapan gagal", exc_info=True)
             finally:
@@ -880,23 +1060,19 @@ class Pendengar:
                 # terakhir hilang.
                 self._menunggu = max(0, self._menunggu - 1)
 
-    def _satu_ucapan(self, rec: Any, sr: Any, data: bytes) -> None:
+    def _satu_ucapan(self, data: bytes) -> None:
         """Kenali SATU potongan ucapan lalu umpankan ke perakit."""
-        try:
-            teks = rec.recognize_google(sr.AudioData(data, LAJU, 2),
-                                        language="id-ID")
-        except sr.UnknownValueError:
-            # Diteruskan lewat on_dengar, TIDAK dicetak sendiri: terminal
-            # sengaja tak menampilkan transkrip apa pun di atas kotak chat
-            # (permintaan pengguna — itu barisan debug). Jalurnya tetap ada
-            # untuk penelusuran.
-            self.on_dengar("(tertangkap, tapi tak terdengar jelas)",
-                           self.perakit.merekam)
-            return
-        except Exception as exc:  # noqa: BLE001 - jaringan/layanan
-            self.on_kabar(f"pengenalan suara gagal: {exc}")
-            return
-        if not teks.strip():
+        teks, info = self._pengenal.kenali(data)
+        if not teks:
+            if info.startswith("galat"):
+                self.on_kabar(f"pengenalan suara gagal: {info[6:]}")
+            else:
+                # Diteruskan lewat on_dengar, TIDAK dicetak sendiri: terminal
+                # sengaja tak menampilkan transkrip apa pun di atas kotak chat
+                # (permintaan pengguna — itu barisan debug). Jalurnya tetap ada
+                # untuk penelusuran.
+                self.on_dengar("(tertangkap, tapi tak terdengar jelas)",
+                               self.perakit.merekam)
             return
 
         self.on_dengar(teks, self.perakit.merekam)
@@ -925,6 +1101,29 @@ class Pendengar:
         # _periksa_selesai). Yang mengirimnya thread perekam, yang memang tahu
         # persis kapan pembicara berhenti.
 
+    def _satu_utuhan(self, item: tuple) -> None:
+        """Kenali SATU PERINTAH UTUH dan kirim — pengganti teks per-potongan.
+
+        Dipanggil dari antrean sesudah perintah ditutup (lihat
+        _periksa_selesai). Teksnya diuji cari_pemicu SEKALI LAGI: audio utuh
+        memuat nama di awalnya, dan yang dikirim memang hanya yang SESUDAH
+        nama — jalur yang sama dengan per-potongan, jadi tak ada dua logika
+        pemangkasan yang bisa saling bertentangan."""
+        _jenis, audio, cadangan = item
+        perintah = cadangan
+        teks, info = self._pengenal.kenali(audio)
+        if teks:
+            self.on_dengar(teks, False)
+            kata = _kata(teks)
+            i = cari_pemicu(kata)
+            if i >= 0 and kata[i:]:
+                perintah = " ".join(kata[i:])
+        elif info.startswith("galat"):
+            # Pengenalan utuhan gagal (jaringan/layanan) — cadangan per-potongan
+            # sudah ada di tangan, jadi ini bukan bencana; cukup dicatat.
+            log.debug("pengenalan utuhan gagal: %s", info)
+        self._kirim_perintah(perintah)
+
     def _gagal(self, pesan: str) -> None:
         self.galat = pesan
         self._stop.set()
@@ -940,7 +1139,6 @@ def dengar_sekali(detik: float = 5.0) -> tuple[str, float]:
     paham. Angka itu memisahkan keduanya."""
     import numpy as np
     import sounddevice as sd
-    import speech_recognition as sr
 
     blok: list[Any] = []
     puncak = 0.0
@@ -953,12 +1151,9 @@ def dengar_sekali(detik: float = 5.0) -> tuple[str, float]:
             puncak = max(puncak, _rms(data))
     if not blok:
         return "", 0.0
-    data = np.concatenate(blok).tobytes()
-    try:
-        teks = sr.Recognizer().recognize_google(
-            sr.AudioData(data, LAJU, 2), language="id-ID")
-    except Exception:  # noqa: BLE001
-        teks = ""
+    # Mesin yang sama dengan yang dipakai mendengarkan sungguhan — /voice tes
+    # yang memakai mesin lain mengukur mesin yang salah.
+    teks, _info = pengenal().kenali(np.concatenate(blok).tobytes())
     return teks, puncak
 
 
@@ -978,7 +1173,6 @@ def ukur(detik: float = 6.0, kalibrasi: float = 1.2,
     memindahkan letak salahnya."""
     import numpy as np
     import sounddevice as sd
-    import speech_recognition as sr
 
     jang = profil(jangkauan)
     sunyi: list[float] = []
@@ -1021,9 +1215,8 @@ def ukur(detik: float = 6.0, kalibrasi: float = 1.2,
             break
     if blok:
         try:
-            hasil["teks"] = sr.Recognizer().recognize_google(
-                sr.AudioData(np.concatenate(blok).tobytes(), LAJU, 2),
-                language="id-ID")
+            hasil["teks"], _info = pengenal().kenali(
+                np.concatenate(blok).tobytes())
         except Exception:  # noqa: BLE001
             pass
     return hasil

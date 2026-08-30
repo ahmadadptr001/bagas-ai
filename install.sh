@@ -7,9 +7,10 @@
 #   curl -fsSL <URL>/install.sh | bash    # dari mana saja (mengunduh repo)
 #
 # Langkah: cek Python 3.10+ → dapatkan sumber (folder ini / git / ZIP) →
-# pasang sebagai perintah global → unduh Chromium untuk Playwright → cek
-# Brave → rapikan PATH → cek/pasang opencode CLI (opsional) → wizard login
-# (opsional; tanpa API key).
+# cek kecocokan sistem (sistem.py) → pasang sebagai perintah global →
+# unduh Chromium untuk Playwright → cek Brave → cek Tesseract OCR (OCR
+# lokal /image) → rapikan PATH → cek/pasang opencode CLI (opsional) →
+# wizard login (opsional; tanpa API key).
 #
 # Variabel lingkungan (opsional):
 #   BAGASAI_REPO        URL repo alternatif
@@ -98,6 +99,22 @@ PYEOF
   ok "Kode sumber: $SRC"
 fi
 
+# --- 2b. Cek kecocokan sistem (sebelum apa pun dipasang) ---
+# sistem.py: OS/arsitektur/RAM/disk/Python/internet + Ketentuan & Kebijakan
+# + perkiraan ruang disk, lalu konfirmasi lanjut/batal. Sengaja SEBELUM pip
+# install: pengguna perlu tahu "mesin ini didukung/tidak" dan berapa GB yang
+# akan terpakai sebelum menit-menit unduhan dimulai. Keluar 1 = dibatalkan
+# pengguna (bukan galat); 2 = sistem tak didukung. set -e akan menelan
+# exit code-nya, jadi tangkap dulu.
+step "Cek kecocokan sistem"
+SISTEM_RC=0
+"$PY" "${SRC}/src/agent/sistem.py" || SISTEM_RC=$?
+case "$SISTEM_RC" in
+  0) ;;
+  1) warn "Dibatalkan — tidak ada yang dipasang."; exit 0 ;;
+  *) die "Sistem ini belum didukung — pemasangan dihentikan." ;;
+esac
+
 # --- 3. Pasang sebagai perintah global ---
 step "Memasang bagas-ai (pip install)"
 # Pastikan pip ada dulu (sebagian Python minimal/venv tak memuatnya).
@@ -179,6 +196,21 @@ else
   case "$(uname -s)" in
     Darwin) note "pasang: brew install --cask brave-browser" ;;
     *)      note "pasang: https://brave.com/linux/" ;;
+  esac
+fi
+
+# --- 3d. Tesseract OCR (untuk OCR lokal /image & read_image_local) ---
+# Opsional: tanpanya /image tetap jalan, hanya bagian "OCR lokal" kosong.
+# Tidak dipasang diam-diam: butuh sudo (apt) atau Homebrew yang belum tentu
+# ada — cukup periksa & tunjukkan perintahnya.
+step "Memeriksa Tesseract OCR (untuk OCR lokal /image)"
+if command -v tesseract >/dev/null 2>&1; then
+  ok "Tesseract sudah ada ($(command -v tesseract))"
+else
+  warn "Tesseract belum terpasang - OCR lokal (/image) akan nonaktif."
+  case "$(uname -s)" in
+    Darwin) note "pasang: brew install tesseract" ;;
+    *)      note "pasang: sudo apt install tesseract-ocr  (atau manajer paket distro-mu)" ;;
   esac
 fi
 

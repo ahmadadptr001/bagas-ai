@@ -64,8 +64,8 @@ LAIN: dict[str, tuple[str, ...]] = {
     "memori": ("remember", "list_memory", "forget"),
     "proses": ("bg_send", "bg_stop", "bg_list"),
     "git": ("git_log", "git_commit", "git_stash", "git_blame", "git_show"),
-    "pro": ("run_tests", "test_function", "take_screenshot", "find_todos",
-            "code_metrics", "diagnose", "bookmark", "changelog"),
+    "pro": ("run_tests", "test_function", "take_screenshot", "active_window",
+            "find_todos", "code_metrics", "diagnose", "bookmark", "changelog"),
 }
 
 # Petunjuk khusus per kategori — dulu tinggal di pesan pembuka dan dibaca setiap

@@ -30,8 +30,10 @@ Satu core agent, tiga antarmuka:
 
 ## 🚀 Pasang — satu perintah
 
-Installer akan memeriksa Python, memasang perintah global `bagas-ai`, mengatur
-PATH, lalu menuntun proses **login**.
+Installer akan memeriksa Python, memeriksa kecocokan sistem (OS, RAM, ruang
+disk ±3,7 GB, internet) dan menampilkan Ketentuan & Kebijakan sebelum
+memasang apa pun, lalu memasang perintah global `bagas-ai`, mengatur PATH,
+dan menuntun proses **login**.
 
 **Linux / macOS / Git-Bash**
 ```bash
@@ -137,11 +139,16 @@ menghapus screenshot sementara. `/video` mempunyai perilaku yang sama.
 memeriksa suara. `/voice on` menyalakan mikrofon sebagai input perintah: sebut
 “bagas ai”, ucapkan perintah, lalu diam dua detik. Mikrofon selalu mulai dalam
 keadaan mati pada sesi baru dan statusnya terlihat permanen di footer.
+Pengenal suaranya Whisper lokal (luring, tanpa API key) — jauh lebih tepat
+untuk suara berjarak/berderau; modelnya (small ±460 MB) terunduh otomatis
+saat `/voice on` pertama, dan sementara menunggu ia memakai layanan Google.
+Ukuran modelnya diatur lewat `VOICE_STT_MODEL`.
 
 `/image "path gambar.png"` membuka gambar langsung melalui Python/Pillow di
 laptop dan menampilkan format, dimensi, frame, transparansi, warna dominan,
-kecerahan, sketsa luminans, QR (jika OpenCV tersedia), serta OCR (jika
-Tesseract lokal tersedia). Tidak ada byte gambar yang dikirim ke provider.
+kecerahan, sketsa luminans, QR (jika OpenCV tersedia), serta OCR (Tesseract;
+di Windows dipasang otomatis oleh installer & `bagas-ai update` lewat winget).
+Tidak ada byte gambar yang dikirim ke provider.
 Tool agent dengan perilaku yang sama bernama `read_image_local`. Karena ini
 bukan model vision lokal, pengenalan objek atau makna adegan yang mendalam tetap
 memerlukan model vision dan lampiran gambar.
@@ -238,6 +245,7 @@ Disimpan di `~/.bagasai/.env`.
 | `CHAT_MODEL` | Model chat default. Ganti kapan pun lewat `/model`. |
 | `CONNECTOR_BROWSER_CHANNEL` | Browser yang dipakai connector: `brave` (default), `chrome`, `chrome-beta`, `msedge`. Kalau yang diminta belum terpasang, browser asli lain dipakai otomatis. Tiap browser punya profil login sendiri, jadi berganti berarti login ulang. |
 | `VOICE_JANGKAUAN` | Seberapa jauh mikrofon `/voice` boleh mendengar: `jauh` (default — bisa dari kasur / ruangan sebelah), `normal`, `dekat`. Ukur dari tempat dudukmu sendiri lewat `/voice jangkau`. |
+| `VOICE_STT_MODEL` | Model Whisper untuk `/voice`: `tiny` (±75 MB, tercepat), `base`, `small` (default, ±460 MB), `medium` (±1,5 GB). |
 | `VISION_MODEL` | Model untuk analisis gambar. |
 | `TELEGRAM_BOT_TOKEN` | Token bot untuk mode `telegram`. |
 | `RETRY_MAX_SECONDS` | Berapa lama bertahan mencoba ulang saat kena rate-limit (default 300). |

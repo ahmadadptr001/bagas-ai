@@ -739,6 +739,7 @@ _MIME_GAMBAR = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 _MIME_VIDIO = {"video/mp4", "video/mpeg", "video/webm",
                "video/quicktime", "video/mov"}
 _MEDIA_LAMPIR = "[LAMPIR-MEDIA]"
+_API_ROLES = frozenset(("system", "user", "assistant", "tool"))
 
 
 def _mime_gambar(path: str) -> str | None:
@@ -867,9 +868,23 @@ def _pesan_dengan_media(messages: list[dict[str, Any]],
     on_notice alih-alih membiarkan media hilang tanpa kabar."""
     cache = cache if cache is not None else {}
     lewat = lewat if lewat is not None else []
-    total = sum(len(v) for v in cache.values() if v)
+    # Batas media dihitung dalam byte berkas asli, bukan panjang data-URL
+    # base64 (yang ~33% lebih besar). Cache menyimpan URL untuk dipakai ulang,
+    # jadi pulihkan ukuran payload dari bagian base64 saat cache sudah terisi.
+    def _ukuran_cache(url: str) -> int:
+        try:
+            payload = url.split(",", 1)[1]
+            return (len(payload.rstrip("=")) * 3) // 4
+        except (IndexError, TypeError, ValueError):
+            return 0
+
+    total = sum(_ukuran_cache(v) for v in cache.values() if v)
     out: list[dict[str, Any]] = []
     for m in messages:
+        if not isinstance(m, dict) or m.get("role") not in _API_ROLES:
+            # `diff` dan record UI lain boleh hidup di Memory, tetapi tidak
+            # boleh dikirim ke endpoint sebagai messages[].role.
+            continue
         c = m.get("content")
         if m.get("role") != "user" or not isinstance(c, str) \
                 or _MEDIA_LAMPIR not in c:
@@ -906,7 +921,7 @@ def _pesan_dengan_media(messages: list[dict[str, Any]],
                 jenis = "image_url" if mime in _MIME_GAMBAR else "video_url"
                 url = f"data:{mime};base64,{b64}"
                 cache[p] = url
-                total += len(url)
+                total += besar
             if not url:
                 continue
             jenis = "image_url" if url.startswith("data:image/") else "video_url"
@@ -2597,23 +2612,51 @@ class Agent:
                 # dibuang diam-diam: jalurnya dialihkan ke tool baca-berkas
                 # dan pengguna diberi tahu. Membuangnya tanpa kabar membuat
                 # pengguna menunggu jawaban tentang berkas yang model ini tak
-                # pernah lihat.
-                daftar = "\n".join(f"- {a}" for a in attachments)
+                # pernah lihat. Saran tool HARUS spesifik: "baca berkas /
+                # daftar isi folder" untuk gambar hanya mengundang model
+                # menjalankan `dir` lalu menyerah — padahal screenshot /live
+                # justru skenario paling umum untuk model teks.
+                gambar = [a for a in attachments if _mime_gambar(a)]
+                lain = [a for a in attachments if a not in gambar]
+                bagian = []
+                if gambar:
+                    bagian.append(
+                        "Gambar di bawah TIDAK terkirim sebagai gambar (model "
+                        "ini tak menerima lampiran gambar lewat API), tetapi "
+                        "kamu tetap bisa membacanya. Panggil tool "
+                        "read_image_local dengan path-nya — analisis 100% "
+                        "lokal: OCR teks yang tampak di layar (judul window, "
+                        "menu, pesan error), warna dominan, struktur visual. "
+                        "Bila yang ditanyakan adalah window/aplikasi yang "
+                        "sedang aktif, tool active_window menjawabnya "
+                        "langsung dari OS tanpa membaca gambar:\n"
+                        + "\n".join(f"- {p}" for p in gambar))
+                if lain:
+                    bagian.append(
+                        "Berkas di bawah tidak terkirim sebagai lampiran. "
+                        "Buka sendiri dengan tool (mis. baca berkas / daftar "
+                        "isi folder) bila perlu:\n"
+                        + "\n".join(f"- {a}" for a in lain))
                 self.memory.add({
                     "role": "user",
-                    "content": (
-                        "[SISTEM] Pengguna melampirkan berkas di bawah. Model "
-                        "ini tak menerima gambar lewat API, jadi berkasnya "
-                        "TIDAK terkirim sebagai gambar. Buka sendiri dengan "
-                        "tool (mis. baca berkas / daftar isi folder) bila "
-                        "perlu:\n" + daftar
-                    ),
+                    "content": ("[SISTEM] Pengguna melampirkan berkas.\n"
+                                + "\n".join(bagian)),
                 })
                 if on_notice:
                     on_notice(
                         f"{len(attachments)} lampiran tak dikirim sebagai "
                         f"gambar ({spec.label} model teks) — pathnya "
                         "diteruskan supaya bisa dibaca lewat tool")
+
+        # Model teks + lampiran gambar (screenshot /live paling sering):
+        # read_image_local & active_window berada di luar API_INTI, jadi tanpa
+        # ini model disuruh "baca gambarnya" padahal schema tool-nya tak pernah
+        # dikirim — ia tak bisa memanggil tool yang tidak ada daftarnya.
+        tool_tambahan = (
+            ["read_image_local", "active_window"]
+            if attachments and not spec.multimodal
+            and any(_mime_gambar(a) for a in attachments)
+            else None)
 
         try:
             return self._api_loop(
@@ -2622,6 +2665,7 @@ class Agent:
                 on_tool=on_tool, on_message=on_message,
                 on_tool_result=on_tool_result, on_notice=on_notice,
                 on_retry=on_retry, ambil_sisipan=ambil_sisipan,
+                tool_tambahan=tool_tambahan,
             )
         except BaseException:
             # BaseException, bukan Exception: KeyboardInterrupt & llm.Cancelled
@@ -2646,6 +2690,7 @@ class Agent:
         on_notice: Callable[[str], None] | None,
         on_retry: Callable[[int, float, Exception], None] | None,
         ambil_sisipan: Callable[[], list[str]] | None,
+        tool_tambahan: list[str] | None = None,
     ) -> str:
         """Putaran tool: minta jawaban — eksekusi tool — kirim
         hasilnya, sampai model menjawab tanpa memanggil tool lagi.
@@ -2671,6 +2716,12 @@ class Agent:
         tool_dinamis = self.tool_names is None
         nama_tool_aktif = set(
             _katalog.API_INTI if tool_dinamis else (self.tool_names or ()))
+        if tool_tambahan and tool_dinamis:
+            # Hanya untuk giliran ini: kebutuhan dari lampiran (mis. model
+            # teks menerima screenshot /live -> read_image_local +
+            # active_window). Subset eksplisit dari pemanggil tak diganggu.
+            nama_tool_aktif.update(
+                n for n in tool_tambahan if n in tools.REGISTRY)
         guard = 0
         safety = max(self.max_iterations, 60)
         # Pemulih konteks penuh: berapa kali riwayat dipangkas giliran ini.
@@ -3662,6 +3713,32 @@ class Agent:
                             new_chat=False, open_chat_id=self._web_chat_id)
             # Pesan 2 (atau satu-satunya, bila konteks sudah pernah dikirim):
             # permintaan pengguna.
+            # Lampiran dipecah dua: yang BISA diunggah situs dikirim sebagai
+            # berkas percakapan; yang TIDAK (connector tanpa dukungan lampiran,
+            # atau jatah berkas situs habis) TIDAK dibuang diam-diam — pathnya
+            # diteruskan di teks supaya model tetap bisa membacanya lewat tool
+            # read_image_local (analisis 100% lokal: OCR, warna, struktur).
+            # Kembaran cabang model-teks di _run_api: tanpa ini pengguna
+            # menunggu jawaban tentang layar yang model tak pernah lihat.
+            lampiran_web = [p for p in (attachments or [])
+                            if conn.supports_attachments()
+                            and not self._lampiran_mati]
+            lampiran_lokal = [p for p in (attachments or [])
+                              if p not in lampiran_web]
+            if lampiran_lokal:
+                first_msg += (
+                    "\n\n[SISTEM] Pengguna melampirkan gambar di bawah, "
+                    "tetapi situs ini tak menerima unggahan gambar, jadi "
+                    "berkasnya TIDAK dilampirkan. Baca sendiri lewat tool "
+                    "read_image_local (analisis 100% lokal: OCR, warna "
+                    "dominan, struktur visual) bila perlu melihat isinya; "
+                    "untuk window/aplikasi yang sedang aktif ada tool "
+                    "active_window yang menjawab langsung dari OS:"
+                    "\n" + "\n".join(f"- {p}" for p in lampiran_lokal))
+                if on_notice:
+                    on_notice(f"{len(lampiran_lokal)} lampiran diteruskan "
+                              "sebagai path — dibaca lokal lewat "
+                              "read_image_local")
             reply = _send(
                 first_msg,
                 new_chat=False,
@@ -3672,9 +3749,7 @@ class Agent:
                 # terpisah lewat API; sekarang situs AI web sendiri yang
                 # membacanya — hasilnya juga lebih baik karena gambar masuk ke
                 # percakapan yang sama, bukan panggilan sekali-pakai tanpa konteks.
-                attachments=[p for p in (attachments or [])
-                             if conn.supports_attachments()
-                             and not self._lampiran_mati],
+                attachments=lampiran_web,
             )
             if first_of_session:
                 # Catat kaitan sesi<->chat + rapikan chat lama buatan bagas-ai

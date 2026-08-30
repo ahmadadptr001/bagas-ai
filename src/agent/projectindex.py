@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -72,17 +73,24 @@ def _paths(root: Path) -> tuple[Path, Path]:
 
 
 def _iter_files(root: Path):
-    """Semua file kode/penting di proyek (melewati folder yang diabaikan)."""
-    for p in sorted(root.rglob("*")):
-        parts = set(p.parts)
-        if parts & _IGNORE or any(x.startswith(".") and x not in (".env.example",)
-                                  for x in p.relative_to(root).parts[:-1]):
-            continue
-        if not p.is_file():
-            continue
-        name = p.name.lower()
-        if p.suffix.lower() in _CODE_EXT or name in _NOTABLE:
-            yield p
+    """Semua file kode/penting di proyek (melewati folder yang diabaikan).
+
+    Folder _IGNORE & folder tersembunyi DIPANGKAS dari JALUR PENELUSURAN
+    (os.walk topdown), bukan sekadar disaring dari hasil: `sorted(rglob)`
+    dulu tetap menuruni node_modules/venv/build yang berisi puluhan ribu
+    file padahal tak satu pun terindeks — pemindaian startup di folder
+    proyek besar jadi berkali-kali lipat lebih lambat dari perlu.
+    """
+    hasil: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in _IGNORE and not d.startswith(".")
+        )
+        for nama in sorted(filenames):
+            if nama.lower() in _NOTABLE or Path(nama).suffix.lower() in _CODE_EXT:
+                hasil.append(Path(dirpath) / nama)
+    yield from sorted(hasil)
 
 
 def _signature(root: Path) -> dict:

@@ -764,6 +764,60 @@ def _kabar_browser() -> str:
         return ""
 
 
+def _pasang_tesseract() -> str:
+    """Pastikan Tesseract OCR terpasang; kembalikan kabar ("" bila tak ada kabar).
+
+    read_image_local (/image) memakai executable Tesseract untuk OCR lokal.
+    Beda dengan browser (lihat _kabar_browser — sengaja TIDAK dipasang di tengah
+    update), Tesseract dipasang otomatis di sini: paketnya kecil, pemasangannya
+    cakupan-pengguna tanpa menyentuh sistem, dan tanpanya satu fitur lengkap
+    mati diam-diam ("OCR lokal: tidak tersedia") tanpa satu pun pesan kepada
+    pengguna. Setelah terpasang pun PATH sesi lama belum melihatnya, makanya
+    pencariannya juga lewat lokasi bawaan (lihat _cari_tesseract)."""
+    try:
+        from .tools.image_local import _cari_tesseract
+        if _cari_tesseract():
+            return ""
+    except Exception:  # noqa: BLE001 - kabar tambahan, jangan gagalkan update
+        return ""
+    if os.name != "nt":
+        return ("Tesseract OCR belum terpasang - OCR lokal (/image) nonaktif. "
+                "Pasang: sudo apt install tesseract-ocr (Debian/Ubuntu) atau "
+                "brew install tesseract (macOS).")
+    winget = shutil.which("winget")
+    if not winget:
+        return ("Tesseract OCR belum terpasang dan winget tidak ada - OCR lokal "
+                "(/image) nonaktif. Pasang manual: "
+                "winget install --id UB-Mannheim.TesseractOCR -e")
+    args = [winget, "install", "--id", "UB-Mannheim.TesseractOCR", "-e",
+            "--silent", "--disable-interactivity",
+            "--accept-package-agreements", "--accept-source-agreements"]
+    # Satu percobaan saja: paket ini CUMA mendukung cakupan mesin (diuji:
+    # --scope user pulang "No applicable installer found"), dan kode keluar
+    # winget tak bisa dipercaya sebagai ukuran sukses (saat paket sudah ada
+    # pun ia non-zero). Penentu sebenarnya adalah _cari_tesseract() di bawah.
+    try:
+        r = subprocess.run(
+            args, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=900,
+        )
+        keluaran = ((r.stdout or "") + (r.stderr or "")).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        keluaran = f"{type(exc).__name__}: {exc}"
+    try:
+        if _cari_tesseract():
+            return ("Tesseract OCR terpasang otomatis - OCR lokal (/image) "
+                    "siap dipakai.")
+    except Exception:  # noqa: BLE001
+        return ""
+    # Bawa penyebabnya: kegagalan senyap pernah membuat 'Gagal memasang'
+    # mustahil ditelusuri (bandingkan _schedule_post_exit_install).
+    return ("Gagal memasang Tesseract OCR otomatis - OCR lokal (/image) "
+            "nonaktif. Pasang manual: "
+            "winget install --id UB-Mannheim.TesseractOCR -e"
+            + (f"  (winget: {keluaran[-200:]})" if keluaran else ""))
+
+
 def _reinstall(repo: Path) -> dict:
     """Pasang ulang dari `repo`, mempertahankan cara pasang asli (--user, editable)."""
     editable = _is_editable(repo)
@@ -1039,6 +1093,11 @@ def apply(force: bool = True) -> dict:
         _tanda.unduh(paksa=True)
     except Exception:  # noqa: BLE001 - aset opsional, jangan gagalkan update
         log.debug("unduh aset penanda gagal", exc_info=True)
+    # Dependensi eksternal yang dijanjikan fitur (/image) diambil di sini juga,
+    # bukan menunggu fiturnya dipakai — sama seperti aset penanda di atas.
+    tesseract = _pasang_tesseract()
+    if tesseract:
+        note = ((note + "  ") if note else "") + tesseract
     return {
         "status": "updated",
         # Browser yang akan benar-benar dipakai sesudah pembaruan ini. Ikut
@@ -1059,6 +1118,7 @@ def apply(force: bool = True) -> dict:
         # bagas-ai ditutup, jadi ini bukan kegagalan yang menuntut tindakan.
         "scheduled": bool(reinst.get("scheduled")),
         "note": note,
+        "ocr": tesseract,
         "pip_detail": reinst["detail"],
         "repo": str(repo),
         "version": repo_version(repo),

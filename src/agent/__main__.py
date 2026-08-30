@@ -437,6 +437,19 @@ def main() -> None:
             if ses is None:
                 ses = Session.create()
 
+            # Peta proyek: baca cache disk APA ADANYA (instan, mungkin basi)
+            # sebelum Agent() membangun system prompt — kembaran cli.py.
+            # Tanpa ini Agent() memindai SELURUH folder secara sinkron dan UI
+            # chat di folder besar/proyek baru terasa "stuck" setelah bar
+            # loading. Kesegaran peta diperiksa di thread latar oleh app
+            # (lihat BagasAIApp.on_mount), lalu system prompt disegarkan
+            # otomatis begitu peta terbaru siap.
+            try:
+                from . import projectindex
+                projectindex.prime(config.PROJECT_ROOT)
+            except Exception:  # noqa: BLE001 — peta opsional, jangan halangi chat
+                pass
+
             agent = Agent(session=ses)
             app = BagasAIApp(agent=agent, resume=resume,
                              resume_id=resume_id)

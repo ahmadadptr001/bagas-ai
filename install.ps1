@@ -6,9 +6,10 @@
 #   irm <URL>/install.ps1 | iex       # dari mana saja (mengunduh repo)
 #
 # Langkah: cek Python 3.10+ -> dapatkan sumber (folder ini / git / ZIP) ->
-# pip install -> unduh Chromium untuk Playwright -> cek Brave -> rapikan PATH
-# (registry) -> cek/pasang opencode CLI (opsional) -> wizard login (opsional;
-# tanpa API key).
+# cek kecocokan sistem (sistem.py) -> pip install -> unduh Chromium untuk
+# Playwright -> cek Brave -> pasang Tesseract OCR (OCR lokal /image) ->
+# rapikan PATH (registry) -> cek/pasang opencode CLI (opsional) -> wizard
+# login (opsional; tanpa API key).
 #
 # Variabel lingkungan (opsional):
 #   BAGASAI_REPO        URL repo alternatif
@@ -49,6 +50,17 @@ function Invoke-Captured([string]$Exe, [string[]]$Arguments) {
     $ErrorActionPreference = "Continue"
     try { $out = & $Exe @Arguments 2>$null } finally { $ErrorActionPreference = $prev }
     return $out
+}
+
+# Seperti Invoke-Quiet, tapi output stdoutnya DIBIARKAN tampil di konsol dan
+# hanya exit code yang dikembalikan. WAJIB untuk program yang mencetak lalu
+# meminta input (mis. sistem.py): pakai Invoke-Quiet malah menelan outputnya
+# ke variabel, dan `switch` pada variabel-array itu terbaca salah.
+function Invoke-Live([string]$Exe, [string[]]$Arguments) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $Exe @Arguments 2>$null | Out-Host } finally { $ErrorActionPreference = $prev }
+    return $LASTEXITCODE
 }
 
 $RepoUrl = if ($env:BAGASAI_REPO) { $env:BAGASAI_REPO } else { "https://github.com/ahmadadptr001/bagas-ai" }
@@ -114,6 +126,21 @@ if ((Test-Path "pyproject.toml") -and (Select-String -Path "pyproject.toml" -Pat
         $Src = $dir.FullName
     }
     Ok "Kode sumber: $Src"
+}
+
+# --- 2b. Cek kecocokan sistem (sebelum apa pun dipasang) ---
+# sistem.py: OS/arsitektur/RAM/disk/Python/internet + Ketentuan & Kebijakan
+# + perkiraan ruang disk, lalu konfirmasi lanjut/batal. Sengaja SEBELUM pip
+# install: pengguna perlu tahu "mesin ini didukung/tidak" dan berapa GB yang
+# akan terpakai sebelum menit-menit unduhan dimulai. Prompt Y/n-nya
+# interaktif; lewat Invoke-Live agar outputnya tampil di konsol DAN stderr
+# Python tak mematikan installer (lihat catatan di helper itu).
+Step "Cek kecocokan sistem"
+$SistemRc = Invoke-Live $Py @((Join-Path $Src "src\agent\sistem.py"))
+switch ($SistemRc) {
+    0 { }
+    1 { Warn "Dibatalkan - tidak ada yang dipasang."; exit 0 }
+    default { Err "Sistem ini belum didukung - pemasangan dihentikan."; exit 1 }
 }
 
 # --- 3. Pasang sebagai perintah global ---
@@ -192,6 +219,48 @@ if ($Brave) {
         Note "pasang Brave nanti: winget install --id Brave.Brave -e"
         Note "atau unduh di https://brave.com/download/"
     }
+}
+
+# --- 3d. Tesseract OCR (untuk OCR lokal /image & read_image_local) ---
+# Opsional tapi kecil dan cakupan-pengguna: tanpanya /image tetap jalan,
+# hanya bagian "OCR lokal" yang kosong. Dipasang otomatis bila winget ada.
+# Jangan memanggil winget tanpa Invoke-Quiet: stderr-nya mematikan installer
+# (lihat catatan di helper itu).
+Step "Memeriksa Tesseract OCR (untuk OCR lokal /image)"
+$Winget = Get-Command winget -ErrorAction SilentlyContinue
+$TessPaths = @(
+    (Join-Path $env:ProgramFiles 'Tesseract-OCR\tesseract.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Tesseract-OCR\tesseract.exe')
+)
+if ($env:LOCALAPPDATA) {
+    $TessPaths += (Join-Path $env:LOCALAPPDATA 'Programs\Tesseract-OCR\tesseract.exe')
+}
+$Tess = $null
+$TessCmd = Get-Command tesseract -ErrorAction SilentlyContinue
+if ($TessCmd) { $Tess = $TessCmd.Source }
+if (-not $Tess) {
+    $Tess = $TessPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+}
+if ($Tess) {
+    Ok "Tesseract sudah ada ($Tess)"
+} elseif ($Winget) {
+    Note "memasang Tesseract lewat winget..."
+    # Satu percobaan; retry --scope user TIDAK berguna (diam2 gagal: paket ini
+    # cuma mendukung cakupan mesin). Cek ulang path bawaan setelahnya.
+    Invoke-Quiet winget @("install", "--id", "UB-Mannheim.TesseractOCR",
+                          "-e", "--silent", "--accept-package-agreements",
+                          "--accept-source-agreements") | Out-Null
+    $TessCmd = Get-Command tesseract -ErrorAction SilentlyContinue
+    if ($TessCmd) { $Tess = $TessCmd.Source }
+    if (-not $Tess) {
+        $Tess = $TessPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    }
+    if ($Tess) { Ok "Tesseract terpasang ($Tess)" }
+}
+if (-not $Tess) {
+    # TIDAK menggagalkan pemasangan: /image tetap jalan, hanya teksnya kosong.
+    Warn "Tesseract belum terpasang - OCR lokal /image akan nonaktif."
+    Note "pasang nanti: winget install --id UB-Mannheim.TesseractOCR -e"
 }
 
 # --- 4. Pastikan folder Scripts ada di PATH (User) ---

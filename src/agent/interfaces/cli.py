@@ -2353,6 +2353,7 @@ _PHASE = {
     "zip_create": "mengarsip",
     "zip_extract": "membongkar",
     "take_screenshot": "memotret",
+    "active_window": "mengecek window aktif",
     "analyze_image": "menganalisis",
     "read_image_local": "membaca gambar lokal",
     "attach_file": "mengunggah",
@@ -3198,12 +3199,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         """Screenshot tepat sebelum kirim; kegagalannya tidak membatalkan chat."""
         if not live_screen["on"]:
             return []
-        if not agent.supports_vision():
-            _set_live_screen(False)
-            console.print(
-                f"  [#f0603c]○ mode layar dimatikan:[/] "
-                f"{_esc(agent.model_spec.label)} tidak mendukung vision.\n")
-            return []
+        # Analisis gambar berjalan 100% lokal (tool read_image_local),
+        # jadi tak ada gerbang model vision lagi di sini.
         try:
             from ..tools.screen import capture_live_screen
             return [str(capture_live_screen())]
@@ -6592,11 +6589,6 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                         console.print(
                             "  [dim]○ mode layar MATI — screenshot "
                             "dihentikan.[/dim]\n")
-                    elif not agent.supports_vision():
-                        console.print(
-                            f"  [#f0603c]✗ mode layar tidak dapat diaktifkan: "
-                            f"{_esc(agent.model_spec.label)} tidak mendukung "
-                            "vision/lampiran gambar.[/]\n")
                     else:
                         try:
                             from ..tools.screen import (
@@ -6615,7 +6607,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                             console.print(
                                 "  [#9fc93c]✓ mode layar AKTIF[/] [dim]— "
                                 "screenshot terbaru dikirim bersama tiap "
-                                "pertanyaan; /live off untuk berhenti.[/dim]\n")
+                                "pertanyaan (model teks membacanya lewat read_image_local, 100% lokal); /live off untuk berhenti.[/dim]\n")
             elif cmd == "stream":
                 tui_mode["on"] = not tui_mode["on"]
                 if tui_mode["on"]:

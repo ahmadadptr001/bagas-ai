@@ -15,7 +15,7 @@ import httpx
 import openai
 from PIL import Image
 
-from agent import llm, models
+from agent import core, llm, models
 from agent.core import Agent
 
 
@@ -141,12 +141,30 @@ def cek_error_fatal_tidak_diulang() -> None:
     print("  auth/model fatal tidak diulang dan tidak memangkas riwayat: OK")
 
 
+def cek_diff_ui_tidak_masuk_payload() -> None:
+    pesan = [
+        {"role": "system", "content": "sistem"},
+        {"role": "user", "content": "kerjakan"},
+        {"role": "diff", "path": "a.py", "diff": "+baru"},
+        {"role": "assistant", "content": "selesai"},
+        {"role": "user", "content": "lanjutkan dari antrean"},
+    ]
+    chat = core._pesan_dengan_media(pesan)
+    responses = llm._responses_input(pesan)
+    assert all(m.get("role") != "diff" for m in chat)
+    assert all(m.get("role") != "diff" for m in responses)
+    assert [m.get("role") for m in chat] == ["system", "user", "assistant", "user"]
+    assert [m.get("role") for m in responses] == ["system", "user", "assistant", "user"]
+    print("  record diff UI tidak terkirim sebagai messages[].role: OK")
+
+
 def main() -> None:
     cek_opencode_tanpa_variant()
     cek_kuota_gratis_gagal_cepat()
     cek_extra_dilepas_tanpa_pangkas()
     cek_media_benar_benar_dilepas()
     cek_error_fatal_tidak_diulang()
+    cek_diff_ui_tidak_masuk_payload()
     print("OK - error provider diklasifikasikan dan dipulihkan tanpa salah pangkas")
 
 

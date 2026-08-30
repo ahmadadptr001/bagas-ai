@@ -714,11 +714,17 @@ def stream_completion(
 # ("missing required field `name`" — TERUKUR), bentuk resminya {type, name,
 # description, parameters}.
 
+_API_ROLES = frozenset(("system", "user", "assistant", "tool"))
+
 def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Pesan gaya chat -> daftar item input Responses API."""
     items: list[dict[str, Any]] = []
     for msg in messages:
         role = msg.get("role")
+        if role not in _API_ROLES:
+            # Memory juga memuat record `diff` untuk tampilan/replay. Itu
+            # sengaja tidak punya padanan role di Responses API.
+            continue
         # Lampiran multimodal (image_url/video_url) tak didukung jalur ini:
         # di Zen hanya model /chat/completions yang menerima media. Di sini
         # medianya dilepas diam-diam — teksnya tetap dikirim.
