@@ -2543,12 +2543,15 @@ class Agent:
                 ambil_sisipan=ambil_sisipan, on_tim=on_tim, on_padat=on_padat,
             )
 
-    def btw(self, user_input: str, on_token: Callable[[str], None] | None = None) -> str:
+    def btw(self, user_input: str, on_token: Callable[[str], None] | None = None,
+            context: str = "") -> str:
         """Jawab obrolan sampingan tanpa menyentuh memory, tool, atau checkpoint tugas."""
         if self.model_spec.is_web:
             return ("/btw saat ini hanya tersedia untuk model API; "
                     "tugas utama tetap aman dan tidak diubah.")
-        prompt = [{"role": "system", "content": "Kamu adalah teman ngobrol santai. Jawab singkat, jangan menjalankan tool dan jangan mengubah berkas."},
+        konteks = ("\nKonteks percakapan terminal utama (gunakan hanya bila relevan):\n"
+                   + context[-8000:]) if context else ""
+        prompt = [{"role": "system", "content": "Kamu adalah teman ngobrol santai. Jawab singkat, jangan menjalankan tool dan jangan mengubah berkas." + konteks},
                   {"role": "user", "content": str(user_input)}]
         try:
             answer, _calls, _usage = llm.stream_completion(

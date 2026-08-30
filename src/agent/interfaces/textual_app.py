@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual import events
-from textual.containers import Vertical
+from textual.containers import Vertical, Horizontal
 from textual.reactive import reactive
 from textual.widgets import Button
 
@@ -248,8 +248,9 @@ class BagasAIApp(App):
             yield ThinkingBlock(id="thinking-block")
             yield StreamingPreview(id="streaming-preview")
             yield TurnProgressBar(id="progress")
-            yield ChatBox(id="chatbox")
-            yield Button("☰ Buka sidebar", id="sidebar-toggle", variant="default")
+            with Horizontal(id="chat-row"):
+                yield Button("≡", id="sidebar-toggle", variant="default")
+                yield ChatBox(id="chatbox")
             yield StatusBar(agent=self.agent, id="statusbar")
 
     def on_mount(self):
@@ -559,8 +560,7 @@ class BagasAIApp(App):
         sidebar = self.query_one("#sidebar", InfoSidebar)
         sidebar.display = self._sidebar_mobile_open
         try:
-            self.query_one("#sidebar-toggle", Button).label = (
-                "× Tutup sidebar" if self._sidebar_mobile_open else "☰ Buka sidebar")
+            self.query_one("#sidebar-toggle", Button).label = "×" if self._sidebar_mobile_open else "≡"
         except Exception:
             pass
         self._sinkron_footer_sidebar()
@@ -1029,7 +1029,18 @@ class BagasAIApp(App):
         """Obrolan sampingan; tidak masuk antrean atau memory tugas."""
         parts = text.split(maxsplit=1)
         initial = parts[1].strip() if len(parts) == 2 else ""
-        self.push_screen(BtwScreen(self.agent.btw, initial=initial))
+        sess = getattr(self.agent, "session", None)
+        context = ""
+        if sess is not None:
+            rows = []
+            for msg in getattr(sess, "messages", [])[-12:]:
+                role, content = msg.get("role", ""), str(msg.get("content", ""))
+                if content:
+                    rows.append(f"{role}: {content}")
+            context = "\n".join(rows)
+        def jawab(pertanyaan: str) -> str:
+            return self.agent.btw(pertanyaan, context=context)
+        self.push_screen(BtwScreen(jawab, initial=initial))
 
     def _cmd_image(self, text: str) -> None:
         """Baca satu gambar di worker Python lokal, tanpa request provider."""

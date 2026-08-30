@@ -415,6 +415,13 @@ def run(console: Console | None = None) -> bool:
 
     # --- Simpan ---
     _write_env(config.ENV_FILE, env)
+    if _tanya_ya_tidak("Pasang model vision lokal Gemma 3n E2B sekarang? (butuh ruang disk dan Ollama)"):
+        try:
+            from .updater import _pasang_vision_gemma
+            console.print("  [dim]Menyiapkan model vision lokalâ€¦[/dim]")
+            console.print("  " + _pasang_vision_gemma())
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [yellow]Vision dilewati: {exc}[/yellow]")
     console.print(f"  [green]✔ Konfigurasi disimpan:[/green] [dim]{config.ENV_FILE}[/dim]")
     console.print(
         "\n  [bold]Selesai![/bold] Ketik [bold cyan]bagas-ai[/bold cyan] untuk mulai chat"

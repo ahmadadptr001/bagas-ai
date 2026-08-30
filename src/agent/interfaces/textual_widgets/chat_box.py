@@ -216,6 +216,8 @@ class ChatBox(Widget):
         # Perintah yang sedang ditawarkan, searah indeks dengan OptionList.
         self._matches: list[tuple[str, str, bool]] = []
         self._open = False
+        self._mention_mode = False
+        self._mention_token = ""
 
     def compose(self):
         # Urutan penting: dropdown DI ATAS baris input.
@@ -430,6 +432,22 @@ class ChatBox(Widget):
 
     def _refresh_matches(self, text: str, paksa: bool = False) -> None:
         """Hitung & tampilkan tawaran perintah untuk ``text``."""
+        import re
+        mention = re.search(r"(?:^|\s)(@[^\s]*)$", text)
+        if mention:
+            from ...mentions import mention_candidates
+            token = mention.group(1)
+            candidates = mention_candidates(token)
+            self._mention_mode = True
+            self._mention_token = token
+            if candidates:
+                self._open_with([(f"@{name}", path, True)
+                                 for name, path in candidates])
+            else:
+                self._close()
+            return
+        self._mention_mode = False
+        self._mention_token = ""
         if not text.startswith("/"):
             self._close()
             return
@@ -483,6 +501,13 @@ class ChatBox(Widget):
 
         self._autocomplete.highlighted = 0
         self._autocomplete.display = True
+        if self._mention_mode:
+            self._autocomplete.styles.position = "absolute"
+            self._autocomplete.styles.left = max(0, min((self.size.width or 80) - 12,
+                                                         len(self._input.text) * 0.6))
+            self._autocomplete.styles.bottom = max(1, self._input.region.height + 1)
+        else:
+            self._autocomplete.styles.position = "relative"
         self._hint.update(Text(
             "↑↓ pilih · tab lengkapi · esc tutup",
             style=f"dim {tema.p('redup')}",
@@ -495,6 +520,8 @@ class ChatBox(Widget):
         if not self._open and not self._autocomplete.display:
             return
         self._open = False
+        self._mention_mode = False
+        self._mention_token = ""
         self._matches = []
         self._autocomplete.display = False
         self._hint.display = False
@@ -520,7 +547,14 @@ class ChatBox(Widget):
         idx = self._autocomplete.highlighted or 0
         idx = max(0, min(idx, len(self._matches) - 1))
         cmd, _ket, butuh_arg = self._matches[idx]
+        mention_mode = self._mention_mode
+        mention_token = self._mention_token
         self._close()
+        if mention_mode:
+            current = self._input.text
+            replacement = cmd + " "
+            self._set_value(current[:-len(mention_token)] + replacement)
+            return
         # Spasi HANYA untuk perintah yang menerima argumen — kalau tidak,
         # spasi tersisa membuat perintah tak dikenal saat dikirim.
         self._set_value(cmd + (" " if butuh_arg else ""))

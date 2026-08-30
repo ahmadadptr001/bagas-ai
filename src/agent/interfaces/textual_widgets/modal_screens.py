@@ -573,10 +573,12 @@ class BtwScreen(ModalScreen[None]):
     DEFAULT_CSS = """
     BtwScreen { align: center middle; background: $background 80%; }
     BtwScreen #btw-container { width: 84%; height: 82%; max-width: 100; background: $surface; border: tall $accent; padding: 1 2; }
-    BtwScreen #btw-title { text-align: center; text-style: bold; padding-bottom: 1; }
+    BtwScreen #btw-head { width: 100%; height: 1; }
+    BtwScreen #btw-title { width: 1fr; text-style: bold; }
+    BtwScreen #btw-hint { dock: right; width: auto; color: $text-muted; }
+    BtwScreen #btw-loading { dock: right; width: 4; color: $accent; text-align: right; display: none; }
     BtwScreen #btw-log { height: 1fr; border: round $border; padding: 0 1; }
     BtwScreen #btw-input { width: 1fr; margin-top: 1; }
-    BtwScreen #btw-hint { width: auto; padding: 1 0 0 1; color: $text-muted; }
     """
     BINDINGS = [Binding("escape", "cancel", show=False, priority=True)]
 
@@ -584,17 +586,22 @@ class BtwScreen(ModalScreen[None]):
         super().__init__(**kwargs)
         self._answer = answer
         self._initial = initial
+        self._busy = False
+        self._spinner = 0
 
     def compose(self):
         with Vertical(id="btw-container"):
-            yield Static("/btw · obrolan sampingan", id="btw-title")
+            with Horizontal(id="btw-head"):
+                yield Static("/btw · obrolan sampingan", id="btw-title")
+                yield Static("esc tutup", id="btw-hint")
+                yield Static("", id="btw-loading")
             yield RichLog(id="btw-log", markup=False, wrap=True, auto_scroll=True)
             with Horizontal():
                 yield Input(value=self._initial, placeholder="Ngobrol santai…", id="btw-input")
-                yield Static("esc tutup", id="btw-hint")
 
     def on_mount(self):
         self.query_one("#btw-input", Input).focus()
+        self.set_interval(0.18, self._tick)
         if self._initial:
             self._kirim(self._initial)
 
@@ -609,6 +616,8 @@ class BtwScreen(ModalScreen[None]):
         log.write(Text(f"kamu: {pertanyaan}"))
         inp = self.query_one("#btw-input", Input)
         inp.value = ""
+        self._busy = True
+        self.query_one("#btw-loading", Static).display = True
 
         def worker():
             try:
@@ -617,10 +626,20 @@ class BtwScreen(ModalScreen[None]):
                 jawaban = f"Gagal: {exc}"
             try:
                 self.app.call_from_thread(log.write, Text(f"bagas: {jawaban}"))
+                self.app.call_from_thread(self._selesai)
             except Exception:
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _tick(self):
+        if self._busy:
+            self._spinner = (self._spinner + 1) % 4
+            self.query_one("#btw-loading", Static).update("·" * (self._spinner + 1))
+
+    def _selesai(self):
+        self._busy = False
+        self.query_one("#btw-loading", Static).display = False
 
     def action_cancel(self):
         self.dismiss(None)

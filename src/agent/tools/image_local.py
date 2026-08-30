@@ -392,9 +392,18 @@ def read_image_local(path: str, ocr: bool = True,
             baris.extend(["Teks OCR:", teks_ocr])
     else:
         baris.append("OCR lokal: dilewati (ocr=false)")
+    try:
+        from .vision_local import describe_image
+        vision = describe_image(target)
+        if vision:
+            baris.extend(["Analisis vision lokal (Gemma 3n E2B):", vision])
+        else:
+            baris.append("Vision lokal: tidak aktif (Ollama/model Gemma 3n E2B belum tersedia)")
+    except Exception:
+        baris.append("Vision lokal: backend tidak tersedia; metadata/OCR tetap digunakan")
     baris.append(
-        "Batas kemampuan: pembacaan ini tidak mengenali objek atau makna adegan "
-        "seperti model vision; hasil di atas murni pemrosesan Python lokal."
+        "Batas: hasil vision adalah bantuan lokal dan sebaiknya diverifikasi untuk "
+        "teks kecil atau detail yang ambigu."
     )
     return "\n".join(baris)
 

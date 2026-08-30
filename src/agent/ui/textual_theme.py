@@ -130,13 +130,15 @@ Screen {
 #sidebar-toggle {
     display: none;
     width: auto;
-    min-width: 18;
-    margin: 0 1;
+    min-width: 3;
+    margin: 0;
     height: 1;
     border: none;
     background: $t-gema_bg;
     color: $t-aksen;
 }
+#chat-row { width: 100%; height: auto; }
+#chat-row #chatbox { width: 1fr; }
 #sidebar-close { display: none; width: 100%; height: 1; border: none; background: $t-gema_bg; color: $t-aksen; }
 
 /* Panel-panel bawah diberi margin-top: teks jawaban/prompt di atasnya

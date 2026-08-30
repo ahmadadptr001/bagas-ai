@@ -818,6 +818,27 @@ def _pasang_tesseract() -> str:
             + (f"  (winget: {keluaran[-200:]})" if keluaran else ""))
 
 
+def _pasang_vision_gemma() -> str:
+    """Tarik Gemma 3n E2B bila Ollama memang tersedia di mesin pengguna."""
+    if os.environ.get("BAGASAI_SKIP_VISION_MODEL") == "1":
+        return "Vision lokal dilewati (BAGASAI_SKIP_VISION_MODEL=1)."
+    ollama = shutil.which("ollama")
+    if not ollama:
+        return "Vision lokal siap setelah Ollama dipasang: ollama pull gemma3n:e2b"
+    try:
+        listed = subprocess.run([ollama, "list"], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=20)
+        if "gemma3n" in (listed.stdout or "").lower():
+            return "Model vision lokal Gemma 3n E2B sudah tersedia."
+        pulled = subprocess.run([ollama, "pull", "gemma3n:e2b"], capture_output=True,
+                                 text=True, encoding="utf-8", errors="replace", timeout=1800)
+        if pulled.returncode == 0:
+            return "Model vision lokal Gemma 3n E2B terpasang."
+        return "Gagal menarik Gemma 3n E2B; coba ulang: ollama pull gemma3n:e2b"
+    except (OSError, subprocess.SubprocessError):
+        return "Vision lokal belum terpasang; coba: ollama pull gemma3n:e2b"
+
+
 def _reinstall(repo: Path) -> dict:
     """Pasang ulang dari `repo`, mempertahankan cara pasang asli (--user, editable)."""
     editable = _is_editable(repo)
@@ -1098,6 +1119,9 @@ def apply(force: bool = True) -> dict:
     tesseract = _pasang_tesseract()
     if tesseract:
         note = ((note + "  ") if note else "") + tesseract
+    vision = _pasang_vision_gemma()
+    if vision:
+        note = ((note + "  ") if note else "") + vision
     return {
         "status": "updated",
         # Browser yang akan benar-benar dipakai sesudah pembaruan ini. Ikut
@@ -1119,6 +1143,7 @@ def apply(force: bool = True) -> dict:
         "scheduled": bool(reinst.get("scheduled")),
         "note": note,
         "ocr": tesseract,
+        "vision": vision,
         "pip_detail": reinst["detail"],
         "repo": str(repo),
         "version": repo_version(repo),

@@ -10,6 +10,32 @@ _MENTION = re.compile(r"(?<![\w@])@(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))")
 _MAX_CHARS = 20_000
 
 
+def mention_candidates(prefix: str = "", limit: int = 40) -> list[tuple[str, str]]:
+    """Cari file/folder yang aman untuk dropdown mention UI."""
+    q = (prefix or "").lstrip("@").lower()
+    out: list[tuple[str, str]] = []
+    seen: set[Path] = set()
+    for root in [Path.cwd(), *workspace.allowed_roots()]:
+        root = root.resolve()
+        if root in seen or not root.is_dir():
+            continue
+        seen.add(root)
+        try:
+            items = sorted(root.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError:
+            continue
+        for item in items:
+            if item.name.startswith((".", "__pycache__")):
+                continue
+            rel = str(item.relative_to(root)).replace("\\", "/")
+            if q and q not in rel.lower():
+                continue
+            out.append((rel + ("/" if item.is_dir() else ""), str(item)))
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def expand_mentions(text: str) -> tuple[str, list[str]]:
     """Sisipkan isi berkas yang dirujuk ``@path``; mention tak dikenal dibiarkan."""
     found: list[str] = []
