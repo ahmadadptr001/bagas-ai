@@ -170,6 +170,57 @@ def ensure_vision_ready(*, force_probe: bool = False) -> tuple[bool, str]:
     return True, f"Ollama + {_nama_model()} merespons gambar: {jawaban[:80]}"
 
 
+def ensure_vision_available() -> tuple[bool, str]:
+    """Pastikan backend fallback tersedia tanpa menjalankan inferensi gambar."""
+    hidup, alasan = _mulai_ollama()
+    if not hidup:
+        return False, alasan
+    if not _model_ada():
+        return False, f"model {_nama_model()} belum terpasang"
+    return True, f"Ollama + {_nama_model()} tersedia"
+
+
+def response_needs_vision(text: str) -> bool:
+    """Deteksi jawaban AI yang menyatakan tak mampu membaca gambar."""
+    jawaban = " ".join(str(text or "").casefold().split())
+    if not jawaban:
+        return True
+    penolakan = (
+        "tidak dapat menganalisis gambar",
+        "tidak bisa menganalisis gambar",
+        "tidak dapat melihat gambar",
+        "tidak bisa melihat gambar",
+        "tidak dapat membaca gambar",
+        "tidak bisa membaca gambar",
+        "tidak memiliki akses ke gambar",
+        "tidak dapat mengakses gambar",
+        "tidak ada gambar yang",
+        "cannot analyze the image",
+        "can't analyze the image",
+        "unable to analyze the image",
+        "cannot see the image",
+        "can't see the image",
+        "unable to view the image",
+        "cannot access the image",
+        "don't have access to the image",
+        "no image was provided",
+    )
+    if any(frasa in jawaban for frasa in penolakan):
+        return True
+    ada_gambar = any(k in jawaban for k in (
+        "gambar", "image", "screenshot", "visual",
+    ))
+    ada_tidak_mampu = any(k in jawaban for k in (
+        "tidak dapat", "tidak bisa", "tak dapat", "tak bisa",
+        "cannot", "can't", "unable", "don't have access",
+    ))
+    ada_aksi = any(k in jawaban for k in (
+        "lihat", "melihat", "baca", "membaca", "analisis", "menganalisis",
+        "see", "view", "read", "analy",
+    ))
+    return ada_gambar and ada_tidak_mampu and ada_aksi
+
+
 def describe_image(
     path: Path,
     prompt: str = (
@@ -201,5 +252,7 @@ __all__ = [
     "MODEL_DEFAULT",
     "VisionLocalError",
     "describe_image",
+    "ensure_vision_available",
     "ensure_vision_ready",
+    "response_needs_vision",
 ]

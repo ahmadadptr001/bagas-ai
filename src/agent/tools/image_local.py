@@ -279,7 +279,8 @@ def read_image_local(path: str, ocr: bool = True,
                      ocr_language: str = "eng",
                      max_ocr_chars: int = 4000,
                      zoom: int = 1, focus: str = "",
-                     scan_grid: bool = False) -> str:
+                     scan_grid: bool = False,
+                     vision: bool = True) -> str:
     """Baca gambar secara LOKAL lewat Python tanpa mengunggah file atau byte gambarnya ke provider.
 
     Menghasilkan format, dimensi, mode warna, frame, transparansi, statistik
@@ -296,6 +297,8 @@ def read_image_local(path: str, ocr: bool = True,
     focus: titik x,y dalam piksel atau persen, beberapa titik dipisah ';'.
         Contoh '80%,20%;400,300'. Kosong berarti tidak crop.
     scan_grid: bila true, inspeksi otomatis 9 titik (grid 3x3).
+    vision: bila true, tambahkan analisis model vision lokal. Gunakan false
+        untuk alur OCR-first yang tidak boleh menjalankan LLM lokal.
     """
     try:
         target = _safe_path(path)
@@ -401,15 +404,26 @@ def read_image_local(path: str, ocr: bool = True,
             baris.extend(["Teks OCR:", teks_ocr])
     else:
         baris.append("OCR lokal: dilewati (ocr=false)")
-    try:
-        from .vision_local import describe_image
-        vision = describe_image(target)
-        if vision:
-            baris.extend(["Analisis vision lokal (Gemma 3 4B):", vision])
-        else:
-            baris.append("Vision lokal: tidak aktif (Ollama/model Gemma 3 4B belum siap)")
-    except Exception:
-        baris.append("Vision lokal: backend tidak tersedia; metadata/OCR tetap digunakan")
+    if vision:
+        try:
+            from .vision_local import describe_image
+            hasil_vision = describe_image(target)
+            if hasil_vision:
+                baris.extend([
+                    "Analisis vision lokal (Gemma 3 4B):", hasil_vision,
+                ])
+            else:
+                baris.append(
+                    "Vision lokal: tidak aktif "
+                    "(Ollama/model Gemma 3 4B belum siap)"
+                )
+        except Exception:
+            baris.append(
+                "Vision lokal: backend tidak tersedia; "
+                "metadata/OCR tetap digunakan"
+            )
+    else:
+        baris.append("Vision lokal: dilewati (vision=false)")
     baris.append(
         "Batas: hasil vision adalah bantuan lokal dan sebaiknya diverifikasi untuk "
         "teks kecil atau detail yang ambigu."

@@ -100,6 +100,24 @@ def cek_varian_web_dengan_lampiran() -> None:
     print("  varian web + attachment: urutan _status aman: OK")
 
 
+def cek_deteksi_fallback() -> None:
+    from agent.tools.vision_local import response_needs_vision
+
+    assert response_needs_vision(
+        "Maaf, saya tidak dapat menganalisis gambar tersebut."
+    ) is True
+    assert response_needs_vision(
+        "I can't see the image from here."
+    ) is True
+    assert response_needs_vision(
+        "Saya tidak dapat melihat atau menganalisis visual tersebut."
+    ) is True
+    assert response_needs_vision(
+        "Teks yang terlihat adalah menu Pengaturan."
+    ) is False
+    print("  deteksi penolakan model untuk fallback vision: OK")
+
+
 async def cek_alur_ui() -> None:
     spec = models.ModelSpec(
         id="uji/vision", label="Model Vision", multimodal=True)
@@ -110,7 +128,9 @@ async def cek_alur_ui() -> None:
 
     def run(text, **kwargs):
         panggilan.append((text, kwargs.get("attachments") or []))
-        return "jawaban"
+        if len(panggilan) == 1:
+            return "jawaban berdasarkan OCR"
+        return "Maaf, saya tidak dapat menganalisis gambar."
 
     ag.run.side_effect = run
     fake_png = str(Path(_TMP) / "screenshots" / "live-current.png")
@@ -121,24 +141,27 @@ async def cek_alur_ui() -> None:
           patch("agent.tools.screen.clear_live_capture"),
           patch("agent.tools.screen.capture_live_screen",
                 return_value=Path(fake_png)) as capture,
-          patch("agent.tools.vision_local.ensure_vision_ready",
-                return_value=(True, "probe vision berhasil")) as probe,
+          patch("agent.tools.vision_local.ensure_vision_available",
+                return_value=(True, "alat tersedia")) as probe,
+          patch("agent.tools.image_local.read_image_local",
+                return_value="laporan OCR uji") as baca_ocr,
           patch("agent.tools.vision_local.describe_image",
                 return_value="deskripsi Gemma uji") as describe):
         async with app.run_test(size=(100, 40)) as pilot:
-            # Alias /video baru aktif sesudah probe gambar Gemma berhasil.
+            # Alias /video aktif sesudah backend fallback tersedia.
             app._handle_command("/video on")
             await tunggu(pilot, lambda: app._live_screen,
-                         pesan="live harus aktif sesudah probe Gemma")
+                         pesan="live harus aktif sesudah alat tersedia")
             assert app._live_screen is True
             statusbar = app.query_one("#statusbar", StatusBar)
             assert statusbar.live_screen is True
             assert statusbar.live_vision_state == "ready"
-            assert "Gemma ✓" in statusbar.render().plain
-            probe.assert_called_once_with(force_probe=True)
+            assert "alat ✓" in statusbar.render().plain
+            probe.assert_called_once_with()
 
             # Pertanyaan biasa memicu tepat satu capture just-in-time dan
-            # dianalisis Gemma lokal; gambar mentah tidak dikirim ke model utama.
+            # OCR dijalankan lebih dulu; vision belum boleh dipakai bila jawaban
+            # model utama sudah memadai.
             status_fase: list[str] = []
             agent_on_status_asli = app.agent_on_status
 
@@ -157,16 +180,39 @@ async def cek_alur_ui() -> None:
             assert capture.call_count == 1
             assert len(panggilan) == 1
             assert "apa yang tampil di layar?" in panggilan[0][0]
-            assert "deskripsi Gemma uji" in panggilan[0][0]
+            assert "laporan OCR uji" in panggilan[0][0]
             assert panggilan[0][1] == []
-            describe.assert_called_once_with(Path(fake_png), strict=True)
-            assert any("mengambil screenshot" in s for s in status_fase)
-            assert any("Gemma 3 4B sedang menganalisis" in s
-                       for s in status_fase)
+            baca_ocr.assert_called_once_with(
+                fake_png, ocr=True, vision=False,
+            )
+            describe.assert_not_called()
+            assert any("mengambil gambar" in s for s in status_fase)
+            assert any("membaca teks" in s for s in status_fase)
+            assert not any("sedang menganalisis" in s for s in status_fase)
+
+            # Bila model utama menyatakan tak mampu menganalisis, barulah
+            # vision lokal dipanggil untuk gambar kedua.
+            chatbox.set_text("jelaskan gambar ini")
+            await pilot.press("enter")
+            await tunggu(pilot, lambda: len(panggilan) == 2,
+                         pesan="giliran fallback harus mencapai model utama")
+            await tunggu(pilot, lambda: not app.is_turn_active,
+                         pesan="giliran fallback harus selesai")
+            assert capture.call_count == 2
+            assert baca_ocr.call_count == 2
+            describe.assert_called_once()
+            args, kwargs = describe.call_args
+            assert args[0] == Path(fake_png)
+            assert "jelaskan gambar ini" in kwargs["prompt"]
+            assert kwargs["strict"] is True
+            ag.replace_last_answer.assert_called_once_with(
+                "deskripsi Gemma uji"
+            )
+            assert any("sedang menganalisis" in s for s in status_fase)
 
             # Slash command tidak memicu capture baru.
             app._handle_command("/live status")
-            assert capture.call_count == 1
+            assert capture.call_count == 2
 
             # /stream mengambil alih fungsi /live lama.
             semula = app._tui_mode
@@ -177,22 +223,23 @@ async def cek_alur_ui() -> None:
             assert app._live_screen is False
             assert app.query_one("#statusbar", StatusBar).live_screen is False
 
-            # Probe Gemma gagal -> mode tak boleh mengaku aktif.
-            with patch("agent.tools.vision_local.ensure_vision_ready",
+            # Backend fallback gagal -> mode tak boleh mengaku aktif.
+            with patch("agent.tools.vision_local.ensure_vision_available",
                        return_value=(False, "Gemma tak merespons")):
                 app._handle_command("/live on")
                 await tunggu(pilot, lambda: not app._live_starting,
-                             pesan="probe gagal harus selesai")
+                             pesan="cek alat gagal harus selesai")
             assert app._live_screen is False
-            assert capture.call_count == 1
+            assert capture.call_count == 2
             assert statusbar.live_vision_state == "error"
-    print("  /live + probe Gemma wajib + konteks lokal + /stream: OK")
+    print("  /live OCR-first + fallback vision selektif + /stream: OK")
 
 
 async def main() -> None:
     cek_kapabilitas_model()
     cek_siklus_berkas()
     cek_varian_web_dengan_lampiran()
+    cek_deteksi_fallback()
     await cek_alur_ui()
     print("OK - mode live screen terverifikasi tanpa membaca layar nyata")
 

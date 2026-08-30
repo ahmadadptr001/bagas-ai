@@ -26,6 +26,7 @@ def buat_gambar() -> Path:
 
 def cek_tool(path: Path) -> None:
     from agent.tools import REGISTRY, execute
+    from agent.tools.image_local import read_image_local
 
     assert "read_image_local" in REGISTRY
     hasil = execute("read_image_local", {"path": str(path), "ocr": False})
@@ -39,6 +40,10 @@ def cek_tool(path: Path) -> None:
     assert "[LAMPIR-MEDIA]" not in hasil
     assert "data:image" not in hasil
     assert "base64" not in hasil.lower()
+    with patch("agent.tools.vision_local.describe_image") as vision:
+        hasil_ocr = read_image_local(str(path), ocr=False, vision=False)
+    vision.assert_not_called()
+    assert "Vision lokal: dilewati (vision=false)" in hasil_ocr
     print("  tool read_image_local: Python lokal, tanpa attachment: OK")
 
 

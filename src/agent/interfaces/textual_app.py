@@ -1102,7 +1102,7 @@ class BagasAIApp(App):
                 pass
 
     def _set_live_vision_state(self, state: str) -> None:
-        """Perlihatkan proses/hasil probe Gemma secara permanen di footer."""
+        """Perlihatkan kesiapan alat live secara permanen di footer."""
         try:
             self.query_one("#statusbar", StatusBar).update_live_screen(
                 self._live_screen, state,
@@ -1120,17 +1120,13 @@ class BagasAIApp(App):
 
         if arg in {"status", "cek"}:
             if self._live_screen:
-                detail = (
-                    "AKTIF dan TERVERIFIKASI — Ollama + gemma3:4b sudah "
-                    "menjawab probe gambar"
-                )
+                detail = "alat aktif"
             elif self._live_starting:
-                detail = "SEDANG DIVERIFIKASI — menunggu jawaban probe gambar"
+                detail = "sedang mengaktifkan alat"
             else:
-                detail = "MATI"
+                detail = "alat tidak aktif"
             msg_list.append_notice(
-                f"Mode layar {detail}. Saat aktif, satu screenshot terbaru "
-                "dilampirkan pada setiap pertanyaan biasa.",
+                f"Status live: {detail}.",
                 style=(f"bold {tema.p('aksen')}" if self._live_screen
                        else tema.p("redup")),
             )
@@ -1148,7 +1144,7 @@ class BagasAIApp(App):
             self._live_start_token += 1
             self._live_starting = False
             self._set_live_screen(False)
-            msg_list.append_notice("○ Mode layar MATI — screenshot dihentikan.",
+            msg_list.append_notice("○ alat dinonaktifkan.",
                                    style=tema.p("redup"))
             return
 
@@ -1161,14 +1157,14 @@ class BagasAIApp(App):
             tersedia, alasan = False, str(exc)
         if not tersedia:
             msg_list.append_notice(
-                f"✗ Mode layar tidak dapat diaktifkan: {alasan}",
+                f"✗ alat tidak dapat diaktifkan: {alasan}",
                 style=f"bold {tema.p('exit_footer')}",
             )
             return
 
         if self._live_starting:
             msg_list.append_notice(
-                "Ollama + Gemma sedang diuji dengan gambar…",
+                "sedang mengaktifkan alat…",
                 style=tema.p("redup"),
             )
             return
@@ -1177,14 +1173,14 @@ class BagasAIApp(App):
         token = self._live_start_token
         self._set_live_vision_state("checking")
         msg_list.append_notice(
-            "Menyalakan Ollama dan menguji Gemma 3 4B dengan gambar nyata…",
+            "mengaktifkan alat…",
             style=tema.p("redup"),
         )
 
         def worker() -> None:
             try:
-                from ..tools.vision_local import ensure_vision_ready
-                siap, alasan_vision = ensure_vision_ready(force_probe=True)
+                from ..tools.vision_local import ensure_vision_available
+                siap, alasan_vision = ensure_vision_available()
             except Exception as exc:  # noqa: BLE001
                 siap, alasan_vision = False, str(exc)
             self._safe_call(
@@ -1196,7 +1192,7 @@ class BagasAIApp(App):
         ).start()
 
     def _finish_live_start(self, token: int, siap: bool, alasan: str) -> None:
-        """Aktifkan /live hanya sesudah inferensi gambar Gemma berhasil."""
+        """Aktifkan /live sesudah backend fallback dipastikan tersedia."""
         if token != self._live_start_token:
             return
         self._live_starting = False
@@ -1205,17 +1201,15 @@ class BagasAIApp(App):
             self._set_live_screen(False)
             self._set_live_vision_state("error")
             msg_list.append_notice(
-                f"✗ VERIFIKASI GAGAL — mode layar tetap MATI. {alasan}",
+                f"✗ alat gagal diaktifkan: {alasan}",
                 style=f"bold {tema.p('exit_footer')}",
             )
             return
         from ..tools.screen import clear_live_capture
         clear_live_capture()
         self._set_live_screen(True)
-        bukti = alasan.strip().rstrip(".")
         msg_list.append_notice(
-            f"✓ VERIFIKASI BERHASIL — {bukti}. Mode layar AKTIF; setiap "
-            "screenshot wajib dianalisis Gemma sebelum pertanyaan diteruskan.",
+            "✓ alat aktif.",
             style=f"bold {tema.p('aksen')}",
         )
 
@@ -1223,14 +1217,14 @@ class BagasAIApp(App):
         """Ambil screenshot just-in-time; live tidak boleh fallback diam-diam."""
         if not self._live_screen:
             return []
-        self.agent_on_status("mengambil screenshot layar…")
+        self.agent_on_status("mengambil gambar…")
         try:
             from ..tools.screen import capture_live_screen
             return [str(capture_live_screen())]
         except Exception as exc:  # noqa: BLE001
             self._safe_call(self._set_live_screen, False)
             raise RuntimeError(
-                f"Live dihentikan karena screenshot gagal: {exc}"
+                f"alat dihentikan karena pengambilan gambar gagal: {exc}"
             ) from exc
 
     # ─── Audio: /mic dan /voice ───────────────────────────────────────
@@ -2239,31 +2233,19 @@ class BagasAIApp(App):
                 attachments = self._capture_live_attachment()
                 pertanyaan = text
                 if attachments:
-                    # /live WAJIB melewati vision lokal sebelum model utama:
-                    # jangan bergantung pada model API/web untuk memutuskan
-                    # apakah tool perlu dipanggil. Hasil Gemma ikut menjadi
-                    # konteks eksplisit pada giliran yang sama.
-                    from ..tools.vision_local import (
-                        VisionLocalError, describe_image,
-                    )
-                    self.agent_on_status(
-                        "Gemma 3 4B sedang menganalisis screenshot via Ollama…"
-                    )
-                    try:
-                        vision = describe_image(Path(attachments[0]), strict=True)
-                    except VisionLocalError as exc:
-                        self._safe_call(self._set_live_screen, False)
-                        raise RuntimeError(
-                            "Live dihentikan karena Ollama/Gemma gagal "
-                            f"menganalisis screenshot: {exc}"
-                        ) from exc
-                    self.agent_on_notice(
-                        "✓ Screenshot selesai dianalisis Ollama / Gemma 3 4B; "
-                        "konteks vision diteruskan ke model utama."
+                    # Jalur murah lebih dulu: OCR/CV lokal tanpa inferensi LLM.
+                    # Model vision lokal baru dipakai bila jawaban model utama
+                    # secara eksplisit menyatakan tidak mampu membaca gambar.
+                    from ..tools.image_local import read_image_local
+                    self.agent_on_status("membaca teks…")
+                    laporan_ocr = read_image_local(
+                        attachments[0], ocr=True, vision=False,
                     )
                     pertanyaan += (
-                        "\n\n[SISTEM] Analisis vision lokal Gemma 3 4B dari "
-                        "screenshot live:\n" + vision
+                        "\n\n[SISTEM] Data OCR dan pembacaan lokal dari layar "
+                        "tersedia di bawah. Jawab dari data ini. Jika datanya "
+                        "tidak cukup untuk menjawab, katakan persis 'tidak "
+                        "dapat menganalisis gambar'.\n" + laporan_ocr
                     )
                 result = self.agent.run(
                     pertanyaan,
@@ -2279,11 +2261,33 @@ class BagasAIApp(App):
                     ambil_sisipan=self._ambil_sisipan,
                     on_tim=self.agent_on_tim,
                     on_padat=self.agent_on_padat,
-                    # Screenshot /live sudah dianalisis Gemma secara lokal dan
-                    # hasilnya ada di pertanyaan. Jangan kirim gambarnya lagi
-                    # ke model utama atau memicu read_image_local kedua kali.
+                    # Model utama menerima hasil OCR sebagai teks; gambar mentah
+                    # tidak diunggah dan vision lokal belum dijalankan di sini.
                     attachments=[],
                 )
+                if attachments:
+                    from ..tools.vision_local import (
+                        VisionLocalError, describe_image,
+                        response_needs_vision,
+                    )
+                    if response_needs_vision(result):
+                        self.agent_on_status("sedang menganalisis…")
+                        try:
+                            result = describe_image(
+                                Path(attachments[0]),
+                                prompt=(
+                                    "Jawab pertanyaan pengguna tentang gambar "
+                                    f"ini secara faktual: {text[:1200]}"
+                                ),
+                                strict=True,
+                            )
+                        except VisionLocalError as exc:
+                            self._safe_call(self._set_live_screen, False)
+                            raise RuntimeError(
+                                f"analisis lanjutan gagal: {exc}"
+                            ) from exc
+                        self.agent.replace_last_answer(result)
+                        self.agent_on_notice("✓ analisis selesai.")
                 self._safe_call(self._turn_complete, result, turn_id)
             except BaseException as exc:
                 self._safe_call(self._turn_error, exc, turn_id)

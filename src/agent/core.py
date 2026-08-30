@@ -2447,6 +2447,20 @@ class Agent:
             except OSError:
                 pass
 
+    def replace_last_answer(self, answer: str) -> None:
+        """Selaraskan riwayat bila jawaban utama diganti fallback lokal."""
+        teks = str(answer or "").strip()
+        if not teks:
+            return
+        for pesan in reversed(self.memory.messages):
+            if (pesan.get("role") == "assistant"
+                    and not pesan.get("tool_calls")):
+                pesan["content"] = teks
+                self._persist()
+                return
+        self.memory.add_assistant_text(teks)
+        self._persist()
+
     # --- inti ---
     def run(
         self,

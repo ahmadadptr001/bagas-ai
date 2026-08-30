@@ -128,11 +128,11 @@ class StatusBar(Widget):
         branch, changed = _git_cache["v"]
 
         if self.live_vision_state == "checking":
-            live_label = f"{sep}◌ Gemma…"
+            live_label = f"{sep}◌ alat…"
         elif self.live_vision_state == "ready" and self.live_screen:
-            live_label = f"{sep}◉ Gemma ✓"
+            live_label = f"{sep}◉ alat ✓"
         elif self.live_vision_state == "error":
-            live_label = f"{sep}◌ Gemma ✗"
+            live_label = f"{sep}◌ alat ✗"
         else:
             live_label = f"{sep}📹 layar" if self.live_screen else ""
 
