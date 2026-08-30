@@ -101,6 +101,7 @@ class BagasAIApp(App):
         Binding("ctrl+d", "eof", show=False, priority=True),
         Binding("ctrl+l", "clear", show=False),
         Binding("ctrl+w", "delete_word", show=False),
+        Binding("f4", "voice_dictation", show=False, priority=True),
         # Tab TIDAK diikat di sini: ChatBox memakainya untuk melengkapi
         # autocomplete. Binding global akan merebut tombol dari input.
     ]
@@ -138,6 +139,9 @@ class BagasAIApp(App):
             "jangkauan": None,
             "task_active": False,
             "wanted": False,
+            "dictation_active": False,
+            "dictation_phase": "",
+            "dictation_stop": None,
         }
         self._pending_gambar: dict = {}
         self._image_task_active = False
@@ -333,6 +337,9 @@ class BagasAIApp(App):
             clear_live_capture()
         except Exception:  # noqa: BLE001 — pembersihan best-effort
             pass
+        dikte_stop = self._voice_state.get("dictation_stop")
+        if dikte_stop is not None:
+            dikte_stop.set()
         pendengar = self._voice_state.get("pendengar")
         if pendengar is not None:
             try:
@@ -553,6 +560,10 @@ class BagasAIApp(App):
         self._sinkron_footer_sidebar(lebar_layar)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "chat-voice-button":
+            event.stop()
+            self._toggle_dictation()
+            return
         if event.button.id not in ("statusbar-sidebar-toggle", "sidebar-close"):
             return
         self._sidebar_mobile_open = (not self._sidebar_mobile_open
@@ -764,7 +775,11 @@ class BagasAIApp(App):
         bar = self.query_one("#statusbar", StatusBar)
         pendengar = self._voice_state.get("pendengar")
         keadaan = ""
-        if pendengar is not None and getattr(pendengar, "aktif", False):
+        if self._voice_state.get("dictation_active"):
+            keadaan = ("menganalisis"
+                       if self._voice_state.get("dictation_phase") == "menganalisis"
+                       else "merekam")
+        elif pendengar is not None and getattr(pendengar, "aktif", False):
             keadaan = ("merekam" if getattr(pendengar, "merekam", False)
                        else "dengar")
         bar.update_voice_state(keadaan)
@@ -1363,6 +1378,101 @@ class BagasAIApp(App):
         except Exception:  # noqa: BLE001 — statusbar sedang dibongkar
             pass
 
+    def _toggle_dictation(self) -> None:
+        """Tombol/F4: mulai dikte langsung atau akhiri rekaman aktif."""
+        stop = self._voice_state.get("dictation_stop")
+        if self._voice_state.get("dictation_active") and stop is not None:
+            stop.set()
+            self._voice_state["dictation_phase"] = "mengakhiri"
+            self.query_one("#chatbox", ChatBox).set_voice_recording(
+                True, "Mengakhiri rekaman…")
+            self._audio_notice("🎙 Mengakhiri rekaman dan menyiapkan transkrip…")
+            self._refresh_voice_status()
+            return
+        if self._voice_state.get("task_active"):
+            self._audio_notice("Proses audio lain masih berjalan.", error=True)
+            return
+
+        stop = threading.Event()
+        sebelumnya = self._voice_state.get("pendengar")
+        lanjutkan_listener = bool(
+            sebelumnya is not None and getattr(sebelumnya, "aktif", False))
+        self._voice_state.update({
+            "task_active": True,
+            "dictation_active": True,
+            "dictation_phase": "menunggu",
+            "dictation_stop": stop,
+            "pendengar": None,
+            "wanted": False,
+        })
+        self.query_one("#chatbox", ChatBox).set_voice_recording(
+            True, "Bicara sekarang; tekan lagi/F4 untuk selesai")
+        self._audio_notice(
+            "🎙 Dikte aktif — langsung bicara tanpa menyebut ‘bagas ai’. "
+            "Tekan tombol/F4 lagi untuk selesai.")
+        self._refresh_voice_status()
+
+        def status(fase: str) -> None:
+            self._safe_call(self._dictation_phase, fase)
+
+        def worker() -> None:
+            try:
+                if sebelumnya is not None:
+                    sebelumnya.berhenti()
+                from .. import dengar
+                teks, info = dengar.dengar_dikte(
+                    berhenti=stop,
+                    on_status=status,
+                    jangkauan=self._voice_state.get("jangkauan"),
+                )
+                galat = ""
+            except Exception as exc:  # noqa: BLE001
+                teks, info, galat = "", {}, str(exc)
+            self._safe_call(self._finish_dictation, teks, info, galat,
+                            lanjutkan_listener)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="bagasai-direct-dictation").start()
+
+    def _dictation_phase(self, fase: str) -> None:
+        if not self._voice_state.get("dictation_active"):
+            return
+        self._voice_state["dictation_phase"] = fase
+        label = {
+            "menunggu": "Menunggu suara…",
+            "merekam": "Sedang merekam; tekan lagi/F4 untuk selesai",
+            "menganalisis": "Menganalisis suara secara lokal…",
+        }.get(fase, fase)
+        self.query_one("#chatbox", ChatBox).set_voice_recording(True, label)
+        if fase == "menganalisis":
+            self._audio_notice("🎙 Sedang menganalisis suara secara lokal…")
+        self._refresh_voice_status()
+
+    def _finish_dictation(self, teks: str, info: dict,
+                          galat: str, lanjutkan_listener: bool) -> None:
+        self._voice_state.update({
+            "task_active": False,
+            "dictation_active": False,
+            "dictation_phase": "",
+            "dictation_stop": None,
+        })
+        chatbox = self.query_one("#chatbox", ChatBox)
+        chatbox.set_voice_recording(False)
+        chatbox.focus()
+        self._refresh_voice_status()
+        if galat:
+            self._audio_notice(f"Dikte gagal: {galat}", error=True)
+        elif not teks:
+            self._audio_notice(
+                "Tidak ada ucapan yang dikenali. Tekan mikrofon lalu coba lagi.",
+                error=True)
+        else:
+            mesin = info.get("engine", "whisper")
+            self._audio_notice(f"✓ Dikte lokal selesai ({mesin}): {teks}")
+            self._voice_masuk_ui(teks)
+        if lanjutkan_listener:
+            self._begin_voice()
+
     def _begin_voice(self, sebelumnya=None) -> None:
         """Mulai/restart pendengar mikrofon di thread terpisah."""
         if self._voice_state.get("task_active"):
@@ -1458,6 +1568,9 @@ class BagasAIApp(App):
             else:
                 self._begin_voice()
             return
+        if arg in ("tekan", "dikte", "ptt"):
+            self._toggle_dictation()
+            return
         if arg in ("dekat", "normal", "jauh"):
             self._voice_state["jangkauan"] = arg
             self._audio_notice(f"Jangkauan mikrofon diubah ke {arg.upper()}.")
@@ -1521,7 +1634,7 @@ class BagasAIApp(App):
 
         if arg not in ("status", "cek"):
             self._audio_notice(
-                "Pemakaian: /voice [on|off|tes|jangkau|dekat|normal|jauh]",
+                "Pemakaian: /voice [tekan|on|off|tes|jangkau|dekat|normal|jauh]",
                 error=True,
             )
             return
@@ -1529,7 +1642,8 @@ class BagasAIApp(App):
         galat = getattr(pendengar, "galat", "") if pendengar else ""
         self._audio_notice(
             f"🎙 Mikrofon {'AKTIF' if aktif else 'MATI'} · jangkauan "
-            f"{jangkauan}. Sebut “bagas ai” sebelum perintah."
+            f"{jangkauan}. Tekan ikon mikrofon/F4 untuk dikte langsung, atau "
+            "sebut “bagas ai” pada mode hands-free."
             + (f" Galat terakhir: {galat}" if galat else ""),
             error=bool(galat),
         )
@@ -2207,7 +2321,7 @@ class BagasAIApp(App):
 ║ /video          Alias /live                     ║
 ║ /stream         Toggle tampilan mengalir        ║
 ║ /mic [on|off]   Bacakan kabar dan jawaban       ║
-║ /voice [on|off] Mikrofon jadi input              ║
+║ /voice tekan/on  Dikte / mikrofon hands-free     ║
 ║ /image <path>   Baca gambar lokal via Python     ║
 ║ /export [path]   Ekspor riwayat chat              ║
 ║ /btw <pesan>     Ngobrol tanpa ganggu tugas       ║
@@ -2878,6 +2992,10 @@ class BagasAIApp(App):
         """Handle Ctrl+W — delete previous word at cursor position."""
         chatbox = self.query_one("#chatbox", ChatBox)
         chatbox.delete_word_before_cursor()
+
+    def action_voice_dictation(self):
+        """F4 memulai/mengakhiri dikte langsung tanpa wake word."""
+        self._toggle_dictation()
 
     # ─── Resize ────────────────────────────────────────────────────────
 

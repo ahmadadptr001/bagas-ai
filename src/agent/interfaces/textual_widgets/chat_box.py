@@ -40,7 +40,7 @@ from textual import events
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import OptionList, Static, TextArea
+from textual.widgets import Button, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from rich.text import Text
 
@@ -76,7 +76,7 @@ _SLASH_COMMANDS: list[tuple[str, str, bool]] = [
     ("/video", "alias mode screenshot /live", False),
     ("/stream", "hidup/matikan tampilan mengalir", False),
     ("/mic", "bacakan kabar dan jawaban AI", True),
-    ("/voice", "mikrofon sebagai input perintah", True),
+    ("/voice", "dikte langsung / mode hands-free", True),
     ("/image", "baca gambar lokal via Python", True),
     ("/export", "ekspor riwayat chat", True),
     ("/btw", "ngobrol santai tanpa mengganggu tugas", True),
@@ -213,6 +213,8 @@ class ChatBox(Widget):
         self._autocomplete = OptionList(id="autocomplete-list")
         self._hint = Static("", id="autocomplete-hint")
         self._prompt = Static("❯", id="input-prompt")
+        self._voice_button = Button("🎙", id="chat-voice-button",
+                                    variant="default")
         # Perintah yang sedang ditawarkan, searah indeks dengan OptionList.
         self._matches: list[tuple[str, str, bool]] = []
         self._open = False
@@ -226,6 +228,7 @@ class ChatBox(Widget):
         with Horizontal(id="input-row"):
             yield self._prompt
             yield self._input
+            yield self._voice_button
 
     def on_mount(self):
         # RichLog/OptionList bisa merebut fokus dari input saat diklik.
@@ -233,6 +236,7 @@ class ChatBox(Widget):
         self._autocomplete.display = False
         self._hint.display = False
         self._prompt.update(Text("❯", style=f"bold {tema.p('aksen')}"))
+        self._voice_button.tooltip = "Dikte langsung (F4); tekan lagi untuk selesai"
         self._input.focus()
         self._sesuaikan_tinggi()
 
@@ -578,6 +582,21 @@ class ChatBox(Widget):
             self._prompt.update(Text(
                 "⋯" if busy else "❯",
                 style=f"bold {tema.p('aksen')}"))
+        except Exception:  # noqa: BLE001 — belum ter-mount
+            pass
+
+    def set_voice_recording(self, recording: bool, phase: str = "") -> None:
+        """Ubah ikon tombol dikte tanpa mengganggu fokus kotak teks."""
+        try:
+            self._voice_button.label = "■" if recording else "🎙"
+            self._voice_button.set_class(recording, "-merekam")
+            self._voice_button.tooltip = (
+                "Tekan untuk mengakhiri rekaman"
+                if recording else
+                "Dikte langsung (F4); tekan lagi untuk selesai"
+            )
+            if phase:
+                self._voice_button.tooltip = phase
         except Exception:  # noqa: BLE001 — belum ter-mount
             pass
 

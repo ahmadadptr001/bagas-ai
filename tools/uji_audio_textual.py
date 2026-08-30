@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -54,6 +55,15 @@ async def main() -> None:
     agent.model_spec = spec
     agent.run.return_value = "jawaban audio"
     pref = {"suara": True}
+    dikte_mulai = threading.Event()
+    stop_saat_tutup = None
+
+    def dikte_palsu(*, berhenti, on_status, **_kwargs):
+        on_status("merekam")
+        dikte_mulai.set()
+        berhenti.wait(timeout=2.0)
+        on_status("menganalisis")
+        return "ubah berkas utama", {"engine": "whisper", "puncak": 200}
 
     def load_pref():
         return dict(pref)
@@ -76,7 +86,8 @@ async def main() -> None:
           patch("agent.dengar.bunyi"),
           patch("agent.dengar.siap", return_value=(True, "")),
           patch("agent.dengar.dengar_sekali",
-                return_value=("tes mikrofon", 321.0))):
+                return_value=("tes mikrofon", 321.0)),
+          patch("agent.dengar.dengar_dikte", side_effect=dikte_palsu)):
         async with app.run_test(size=(100, 40)) as pilot:
             # /mic benar-benar mengubah preferensi dan tes memanggil TTS.
             app._handle_command("/mic off")
@@ -125,6 +136,34 @@ async def main() -> None:
             await tunggu(pilot,
                          lambda: not app._voice_state["task_active"],
                          pesan="tes /voice harus selesai")
+
+            # F4 memulai dikte TANPA wake word; tombol yang sama menghentikan.
+            agent.run.reset_mock()
+            await pilot.press("f4")
+            await tunggu(pilot, lambda: dikte_mulai.is_set(),
+                         pesan="F4 harus membuka dikte langsung")
+            assert app._voice_state["dictation_active"] is True
+            app._refresh_status()
+            assert app.query_one("#statusbar", StatusBar).voice_state == "merekam"
+            tombol = app.query_one("#chat-voice-button")
+            assert str(tombol.label) == "■"
+            await pilot.click("#chat-voice-button")
+            await tunggu(pilot, lambda: not app._voice_state["dictation_active"],
+                         pesan="klik kedua harus menyelesaikan dikte")
+            await tunggu(pilot, lambda: agent.run.called,
+                         pesan="transkrip dikte harus masuk Agent.run")
+            assert agent.run.call_args.args[0] == "ubah berkas utama"
+            assert str(tombol.label) == "🎙"
+
+            # Menutup aplikasi ketika mic masih aktif wajib memberi sinyal
+            # stop ke worker, bukan membiarkannya merekam di belakang layar.
+            dikte_mulai.clear()
+            await pilot.press("f4")
+            await tunggu(pilot, lambda: dikte_mulai.is_set(),
+                         pesan="dikte kedua harus mulai sebelum app ditutup")
+            stop_saat_tutup = app._voice_state["dictation_stop"]
+
+        assert stop_saat_tutup is not None and stop_saat_tutup.is_set()
 
     print("OK - /mic dan /voice tampil di menu dan berfungsi di Textual "
           "tanpa perangkat audio nyata")

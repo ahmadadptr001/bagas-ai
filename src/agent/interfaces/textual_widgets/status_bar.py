@@ -140,7 +140,8 @@ class StatusBar(Widget):
             "merek": " ⬢ bagas-ai",
             "model": f"{sep}{'🌐' if is_web else '🤖'} {label}",
             "live": live_label,
-            "voice": (f"{sep}● merekam" if self.voice_state == "merekam"
+            "voice": (f"{sep}◌ analisis" if self.voice_state == "menganalisis"
+                      else f"{sep}● merekam" if self.voice_state == "merekam"
                       else f"{sep}🎙 dengar" if self.voice_state else ""),
             "git": f"{sep}🌿 {branch}" if branch else "",
             "ubah": f"{sep}📝 {changed}" if changed else "",
@@ -230,7 +231,8 @@ class StatusBar(Widget):
 
     def update_voice_state(self, keadaan: str = "") -> None:
         """Tampilkan indikator privasi mikrofon: dengar atau merekam."""
-        self.voice_state = keadaan if keadaan in ("dengar", "merekam") else ""
+        self.voice_state = (keadaan if keadaan in
+                            ("dengar", "merekam", "menganalisis") else "")
 
     def refresh_theme(self) -> None:
         """Gambar ulang dengan warna tema baru."""

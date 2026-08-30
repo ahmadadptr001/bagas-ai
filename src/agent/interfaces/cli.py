@@ -271,8 +271,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("theme", "tema warna antarmuka"),
     ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
     ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
-    ("voice", "mikrofon: sebut \"bagas ai …\" lalu diam sejenak "
-              "(on/off/tes/jangkau/dekat|normal|jauh)"),
+    ("voice", "mikrofon: dikte langsung atau mode hands-free "
+              "(tekan/on/off/tes/jangkau/dekat|normal|jauh)"),
     ("image", "baca gambar lokal via Python tanpa upload"),
     ("export", "ekspor riwayat chat ke Markdown/JSON"),
     ("btw", "ngobrol santai tanpa mengganggu tugas"),
@@ -5005,6 +5005,42 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 f"{_dengar.MAKS_REKAM:.0f} detik.[/dim]\n")
             return
 
+        if pilihan in ("tekan", "dikte", "ptt"):
+            # Dikte satu prompt tanpa wake word. Listener hands-free memakai
+            # perangkat yang sama, jadi dihentikan sebentar lalu dipulihkan.
+            lanjutkan = bool(pendengar is not None and pendengar.aktif)
+            if pendengar is not None:
+                pendengar.berhenti()
+                voice_state["pendengar"] = None
+            try:
+                from .. import suara as _suara_dikte
+                _suara_dikte.diam()
+            except Exception:  # noqa: BLE001
+                pass
+            console.print(
+                "  [#9fc93c]🎙 dikte langsung[/] [dim]— bicara sekarang; "
+                "rekaman berhenti otomatis setelah kamu diam.[/dim]")
+            try:
+                teks, info = _dengar.dengar_dikte(
+                    jangkauan=voice_state.get("jangkauan"),
+                    on_status=lambda fase: console.print(
+                        "  [dim]sedang menganalisis suara secara lokal…[/dim]")
+                    if fase == "menganalisis" else None,
+                )
+                if teks:
+                    console.print(
+                        f"  [#9fc93c]✓ terdengar ({_esc(info.get('engine', 'whisper'))}):[/] "
+                        f"[{tema.p('teks')}]{_esc(teks)}[/]")
+                    _voice_masuk(teks)
+                else:
+                    console.print("  [yellow]tak ada ucapan yang dikenali.[/yellow]")
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [red]✖ dikte gagal:[/red] {_esc(str(exc))}")
+            finally:
+                if lanjutkan:
+                    show_voice("on")
+            return
+
         if pilihan in _dengar.JANGKAUAN:
             # Jaraknya beda tiap ruangan & tiap posisi duduk, jadi sakelarnya
             # harus bisa diputar SEKARANG — bukan lewat menyunting .env lalu
@@ -5158,7 +5194,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                       "[dim]· buang dengan[/] [{tema.p('aksen')}]\"batalkan\"[/]")
         console.print("  [dim]yang dikirim hanya yang terucap SESUDAH "
                       "namaku.[/dim]")
-        console.print("  [dim]/voice on · off · tes ·[/] [#fcc048]jangkau[/]"
+        console.print("  [dim]/voice tekan · on · off · tes ·[/] [#fcc048]jangkau[/]"
                       "[dim] (ukur dari tempat dudukmu) ·[/] "
                       "[{tema.p('aksen')}]dekat|normal|jauh[/]\n")
 

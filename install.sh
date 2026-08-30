@@ -145,7 +145,23 @@ if [ -z "$INSTALLER" ]; then
 fi
 ok "Terpasang via $INSTALLER"
 
-# --- 3b. Browser Chromium untuk Playwright ---
+# --- 3b. Tentukan interpreter runtime (pipx punya venv sendiri) ---
+PW_PY="$PY"
+if ! "$PY" -c 'import agent' >/dev/null 2>&1 && [ "$INSTALLER" = "pipx" ]; then
+  PIPX_HOME_DIR="$(pipx environment --value PIPX_HOME 2>/dev/null || printf '%s' "${HOME}/.local/pipx")"
+  for cand in "${PIPX_HOME_DIR}/venvs/bagasai/bin/python" \
+              "${PIPX_HOME_DIR}/venvs/bagasai/Scripts/python.exe"; do
+    if [ -x "$cand" ]; then PW_PY="$cand"; break; fi
+  done
+fi
+
+# --- 3c. Pengenal suara lokal ---
+step "Menyiapkan pengenal suara lokal Whisper"
+"$PW_PY" -m agent.dengar --prepare-model \
+  || die "Whisper lokal gagal dipasang atau dimuat."
+ok "Pengenal suara lokal aktif dan teruji"
+
+# --- 3d. Browser Chromium untuk Playwright ---
 # WAJIB: seluruh model bagas-ai berjalan lewat browser. Paket pip `playwright`
 # hanya membawa pustakanya; binari browsernya harus diunduh terpisah. Tanpa
 # langkah ini, model pertama yang dipilih akan gagal dengan pesan teknis.
@@ -153,14 +169,6 @@ ok "Terpasang via $INSTALLER"
 # Pakai interpreter yang SUDAH punya playwright: kalau dipasang via pipx,
 # paketnya hidup di venv pipx, bukan di Python sistem.
 step "Mengunduh browser Chromium (sekali saja, ~120 MB)"
-PW_PY="$PY"
-if ! "$PY" -c 'import playwright' >/dev/null 2>&1 && [ "$INSTALLER" = "pipx" ]; then
-  PIPX_HOME_DIR="$(pipx environment --value PIPX_HOME 2>/dev/null || printf '%s' "${HOME}/.local/pipx")"
-  for cand in "${PIPX_HOME_DIR}/venvs/bagasai/bin/python" \
-              "${PIPX_HOME_DIR}/venvs/bagasai/Scripts/python.exe"; do
-    if [ -x "$cand" ]; then PW_PY="$cand"; break; fi
-  done
-fi
 if "$PW_PY" -m playwright install chromium; then
   ok "Browser siap"
 else

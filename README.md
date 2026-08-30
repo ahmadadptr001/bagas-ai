@@ -136,13 +136,15 @@ sebelum setiap pertanyaan biasa dikirim; `/live off` menghentikannya dan
 menghapus screenshot sementara. `/video` mempunyai perilaku yang sama.
 
 `/mic on` membacakan kabar proses dan jawaban akhir; gunakan `/mic tes` untuk
-memeriksa suara. `/voice on` menyalakan mikrofon sebagai input perintah: sebut
+memeriksa suara. Tekan ikon mikrofon di kotak chat atau `F4` untuk dikte satu
+perintah langsung tanpa wake word; rekaman berhenti otomatis setelah diam dan
+diproses lokal. `/voice on` tetap tersedia sebagai mode hands-free: sebut
 “bagas ai”, ucapkan perintah, lalu diam dua detik. Mikrofon selalu mulai dalam
 keadaan mati pada sesi baru dan statusnya terlihat permanen di footer.
-Pengenal suaranya Whisper lokal (luring, tanpa API key) — jauh lebih tepat
-untuk suara berjarak/berderau; modelnya (small ±460 MB) terunduh otomatis
-saat `/voice on` pertama, dan sementara menunggu ia memakai layanan Google.
-Ukuran modelnya diatur lewat `VOICE_STT_MODEL`.
+Audio Windows diambil lewat WASAPI pada sample rate asli perangkat, kemudian
+WebRTC lokal menjalankan peredam bising, automatic gain control, dan deteksi
+suara sebelum Whisper. Model Whisper `small` (±460 MB) wajib diunduh dan diuji
+saat instalasi maupun pembaruan; ukurannya diatur lewat `VOICE_STT_MODEL`.
 
 `/image "path gambar.png"` membuka gambar langsung melalui Python/Pillow di
 laptop dan menampilkan format, dimensi, frame, transparansi, warna dominan,

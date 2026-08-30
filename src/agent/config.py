@@ -356,8 +356,8 @@ VOICE_JANGKAUAN: str = os.getenv("VOICE_JANGKAUAN", "jauh").strip().lower()
 #   tiny    ±75 MB, tercepat, akurasi turun — cukup untuk komputer lambat
 #   base    ±140 MB, tengah-tengah
 #   medium  ±1,5 GB, paling tepat, hanya nyaman bila ada GPU/ RAM besar
-# Saat model belum termuat (belum terpasang / masih mengunduh), pengenalan
-# otomatis jatuh ke layanan Google lawas — /voice tetap hidup apa pun keadaan.
+# Installer/updater wajib mengunduh dan menguji model ini. Jika model gagal
+# dimuat, /voice menampilkan galat dan tidak mengirim audio ke layanan luar.
 VOICE_STT_MODEL: str = os.getenv("VOICE_STT_MODEL", "small").strip().lower()
 
 # Bunyi penanda "tugas selesai" pilihan sendiri (path ke berkas WAV). Kosong =

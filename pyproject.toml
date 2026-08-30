@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.1.139"
+version = "1.1.140"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,7 +44,12 @@ dependencies = [
     # menolak menyala dan menyebutkan paket mana yang kurang, sedangkan
     # sisa bagas-ai jalan seperti biasa.
     "sounddevice>=0.4.6",
-    "SpeechRecognition>=3.10.0",
+    # Mesin STT utama luring. Installer/updater juga mengunduh dan benar-benar
+    # memuat model small agar /voice siap sebelum mikrofon dibuka.
+    "faster-whisper>=1.0.0",
+    # WebRTC Audio Processing kecil: noise suppression, automatic gain control,
+    # dan voice activity detection. Wheel Windows tersedia untuk Python 3.13.
+    "aec-audio-processing>=1.0.1",
     "ddgs>=6.0.0",
     "python-telegram-bot>=21.0",
     # Server MCP (`bagas-ai mcp`) — sasaran tepat untuk AI. HANYA dipakai

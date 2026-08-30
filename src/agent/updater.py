@@ -1057,7 +1057,16 @@ def _sinkron_dependensi_runtime(repo: Path) -> str:
             return "GAGAL: browser Playwright Chromium tidak tersinkron."
     except Exception:  # noqa: BLE001
         return "GAGAL: browser Playwright Chromium tidak tersinkron."
-    return "Dependensi Python dan browser Playwright terverifikasi."
+    try:
+        voice_rc = _run_progress(
+            [sys.executable, "-m", "agent.dengar", "--prepare-model"],
+            repo, timeout=1800, label="memastikan pengenal suara lokal")
+        if voice_rc != 0:
+            return "GAGAL: model Whisper lokal tidak siap atau gagal dimuat."
+    except Exception:  # noqa: BLE001
+        return "GAGAL: model Whisper lokal tidak siap atau gagal dimuat."
+    return ("Dependensi Python, browser Playwright, dan pengenal suara lokal "
+            "terverifikasi.")
 
 
 def ensure_runtime() -> dict[str, str]:

@@ -243,6 +243,32 @@ Screen {
     background-tint: $t-gema_bg;
 }
 
+#chat-voice-button {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    min-height: 1;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    background-tint: transparent;
+    color: $t-redup;
+}
+
+#chat-voice-button:hover, #chat-voice-button:focus {
+    border: none;
+    background: transparent;
+    background-tint: transparent;
+    color: $t-aksen;
+    text-style: bold;
+}
+
+#chat-voice-button.-merekam {
+    color: $t-exit_footer;
+    text-style: bold;
+}
+
 /* ── Dropdown autocomplete: DI ATAS kotak input ─────────────────────── */
 /* Teks opsi TIDAK diberi warna di Python (cukup bold/dim) supaya warna  */
 /* diatur sepenuhnya dari sini — termasuk saat baris tersorot, yang      */

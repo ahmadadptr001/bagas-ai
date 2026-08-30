@@ -170,7 +170,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 Ok "Terpasang"
 
-# --- 3b. Browser Chromium untuk Playwright ---
+# --- 3b. Pengenal suara lokal ---
+Step "Menyiapkan pengenal suara lokal Whisper"
+$VoiceRc = Invoke-Live $Py @("-m", "agent.dengar", "--prepare-model")
+if ($VoiceRc -ne 0) {
+    Err "Whisper lokal gagal dipasang atau dimuat. Instalasi dibatalkan."
+    exit 1
+}
+Ok "Pengenal suara lokal aktif dan teruji"
+
+# --- 3c. Browser Chromium untuk Playwright ---
 # WAJIB: seluruh model bagas-ai berjalan lewat browser. Paket pip `playwright`
 # hanya membawa pustakanya; binari browsernya harus diunduh terpisah. Tanpa
 # langkah ini, model pertama yang dipilih akan gagal dengan pesan teknis.

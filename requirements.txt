@@ -18,12 +18,10 @@ mcp>=1.0
 # browser ke kimi.com / chat.qwen.ai. Setelah install, jalankan sekali:
 #   playwright install chromium
 playwright>=1.40.0
-# Opsional: /voice — mikrofon (sounddevice merekam; SpeechRecognition adalah
-# mesin CADANGAN lewat layanan Google lawas, bahasa id-ID).
+# /voice — mikrofon dan pengenal lokal. Audio tidak dikirim ke layanan STT.
 sounddevice>=0.4.6
-SpeechRecognition>=3.10.0
-# /voice — mesin pengenal UTAMA: Whisper lokal (faster-whisper). Jauh lebih
-# tepat dari Google lawas untuk suara beraksen/berjarak/berderau, luring, dan
-# tanpa API key. Unduhan model pertama (small ±460 MB) terjadi otomatis saat
-# /voice on pertama; sementara menunggu, pengenalan memakai Google.
+# Mesin pengenal: Whisper lokal (faster-whisper), luring, tanpa API key.
+# Model small diunduh dan diverifikasi oleh installer/updater.
 faster-whisper>=1.0.0
+# Front-end WebRTC lokal untuk peredam bising, AGC, dan VAD sebelum Whisper.
+aec-audio-processing>=1.0.1
