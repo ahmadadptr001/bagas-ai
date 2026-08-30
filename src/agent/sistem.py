@@ -234,7 +234,7 @@ def tampilkan() -> bool:
             gagal = True
 
     print()
-    print("=== KETENTUAN DAN KEBIJAKAN ===")
+    print("=== DISCLAIMER — KETENTUAN DAN KEBIJAKAN ===")
     for baris in KETENTUAN.splitlines():
         print("  " + baris if baris else "")
 
@@ -278,18 +278,13 @@ def _jawab_terminal(prompt: str) -> str | None:
             opened.close()
 
 
-def tanya_ketentuan() -> bool:
-    """Minta persetujuan eksplisit terhadap ketentuan sebelum pemasangan."""
-    jawab = _jawab_terminal("\nSaya menyetujui Ketentuan dan Kebijakan di atas? [y/N]: ")
-    return True if jawab is None else jawab in ("y", "ya", "yes", "j")
-
-
 def tanya_lanjut() -> bool:
-    """Konfirmasi lanjut/batal dari terminal asli, bukan stdin pipeline."""
-    jawab = _jawab_terminal("\nLanjutkan pemasangan? [Y/n]: ")
+    """Persetujuan tunggal untuk disclaimer + ketentuan sebelum memasang."""
+    jawab = _jawab_terminal(
+        "\nSaya sudah membaca dan menyetujui Disclaimer, Ketentuan, serta Kebijakan di atas? [y/N]: ")
     if jawab is None:
         return True
-    return jawab not in ("n", "no", "t", "tidak", "batal")
+    return jawab in ("y", "ya", "yes", "j")
 
 
 def main() -> int:
@@ -303,7 +298,7 @@ def main() -> int:
     if not dukung:
         print("\nSistem ini BELUM didukung bagas-ai — pemasangan dihentikan.")
         return 2
-    if not tanya_ketentuan():
+    if False:
         print("\nDibatalkan — ketentuan belum disetujui.")
         return 1
     if not tanya_lanjut():
