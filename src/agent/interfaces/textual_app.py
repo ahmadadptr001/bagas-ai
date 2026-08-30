@@ -29,13 +29,14 @@ from .textual_widgets import (
     SystemPanel, ImagePreview, TurnProgressBar, LogoWidget,
     StreamingPreview, ThinkingBlock, SelectScreen, MultiSelectScreen,
     ConfirmScreen, TextPromptScreen, ThemeScreen, QueueStrip, BtwScreen,
+    BukaBerkas, FileEditorScreen,
 )
 from ..ui.textual_theme import generate_css, variabel as variabel_tema
 from ..ui import tema
 from .. import interaction
 from .. import session as session_mod
 from ..session import Session
-from .. import workspace, longmem, models, prefs
+from .. import config, workspace, longmem, models, prefs
 
 try:
     from pyfiglet import Figlet
@@ -564,6 +565,56 @@ class BagasAIApp(App):
         except Exception:
             pass
         self._sinkron_footer_sidebar()
+
+    # ─── Editor file dari sidebar ─────────────────────────────────────
+
+    def on_project_tree_buka_berkas(self, event: BukaBerkas) -> None:
+        """Klik/Enter file pada ProjectTree membuka editor teks aman."""
+        event.stop()
+        # Satu aktivasi Tree dapat menghasilkan highlight lalu select sangat
+        # berdekatan. Jangan menumpuk dua modal editor untuk file yang sama.
+        if isinstance(self.screen, FileEditorScreen):
+            return
+        try:
+            from ..editor import load_text_file
+            document = load_text_file(event.path)
+        except Exception as exc:  # noqa: BLE001 — tampilkan alasan ke pengguna
+            self.query_one("#messages", MessageList).append_notice(
+                f"File tidak dapat dibuka: {exc}",
+                style=f"bold {tema.p('exit_footer')}",
+            )
+            return
+
+        def save(old: str, new: str) -> tuple[bool, str]:
+            return self._save_sidebar_document(document, old, new)
+
+        self.push_screen(FileEditorScreen(document.path, document.text, save))
+
+    def _save_sidebar_document(self, document, old: str,
+                               new: str) -> tuple[bool, str]:
+        """Simpan hasil editor dan rekam diff ke riwayat UI/sesi."""
+        if self.is_turn_active:
+            return False, "Tunggu tugas AI selesai sebelum menyimpan file."
+        try:
+            from ..editor import EditorFileError, save_text_file
+            detail = save_text_file(document, new)
+        except EditorFileError as exc:
+            return False, str(exc)
+        except Exception as exc:  # noqa: BLE001 — kegagalan I/O harus terlihat
+            return False, f"Gagal menyimpan: {exc}"
+
+        try:
+            label = str(document.path.relative_to(config.PROJECT_ROOT.resolve()))
+        except ValueError:
+            label = str(document.path)
+        messages = self.query_one("#messages", MessageList)
+        messages.append_diff(label, old, new, is_new=False)
+        self._catat_diff_memory(label, old, new, False)
+        messages.append_notice(
+            f"✓ {label} disimpan · dapat dikembalikan dengan undo_changes",
+            style=f"bold {tema.p('aksen')}",
+        )
+        return True, detail
 
     # ─── ask_user / ask_choice (dari thread pekerja) ──────────────────
 

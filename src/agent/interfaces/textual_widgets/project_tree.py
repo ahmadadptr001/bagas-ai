@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from textual.message import Message
 from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 
@@ -39,6 +40,14 @@ def _abai(path: Path) -> bool:
     if nama.startswith(".") and nama != ".bagas":
         return True
     return nama in _ABAIKAN_DIR
+
+
+class BukaBerkas(Message, namespace="project_tree"):
+    """Permintaan membuka file leaf di editor utama."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self.path = path
 
 
 class ProjectTree(Tree):
@@ -150,3 +159,13 @@ class ProjectTree(Tree):
         if folder is not None:
             self._isi_anak(node, folder)
             self._node_sudah_dimuat.add(id(node))
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        """Klik/Enter pada berkas membukanya; folder tetap untuk navigasi."""
+        path = self._node_path(event.node)
+        if path is not None and path.is_file():
+            self.post_message(BukaBerkas(path))
+            event.stop()
+
+
+__all__ = ["BukaBerkas", "ProjectTree"]

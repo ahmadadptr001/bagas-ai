@@ -14,7 +14,8 @@ from .plan_panel import PlanPanel
 from .plan_sidebar import PlanSidebar
 from .system_panel import SystemPanel
 from .info_sidebar import InfoSidebar
-from .project_tree import ProjectTree
+from .project_tree import BukaBerkas, ProjectTree
+from .file_editor import FileEditorScreen
 from .image_preview import ImagePreview
 from .progress_bar import TurnProgressBar
 from .logo import LogoWidget
@@ -33,6 +34,8 @@ __all__ = [
     "SystemPanel",
     "InfoSidebar",
     "ProjectTree",
+    "BukaBerkas",
+    "FileEditorScreen",
     "ImagePreview",
     "TurnProgressBar",
     "LogoWidget",

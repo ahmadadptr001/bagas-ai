@@ -12,6 +12,8 @@ Yang dicek:
    klik folder di dalamnya me-expand dan memuat isi folder itu (lazy), tanpa
    menduplikasi anak saat dibuka-tutup.
 4. Lebar pilihan tersimpan ke prefs.json dan dipakai lagi saat mount.
+5. Klik file membuka editor, Ctrl+S menampilkan diff lalu menyimpan dengan
+   checkpoint yang dapat dipulihkan lewat undo_changes.
 """
 import asyncio
 import os
@@ -32,9 +34,12 @@ os.environ["BAGASAI_HOME"] = os.path.join(_TMP, "home")
 sys.path.insert(0, r"C:/Users/user/Documents/PROJECTS/ai-agent/src")
 
 from textual.app import App
+from textual.widgets import RichLog, TextArea
 
 from agent.interfaces.textual_app import BagasAIApp
-from agent.interfaces.textual_widgets import InfoSidebar, ProjectTree
+from agent.interfaces.textual_widgets import (
+    FileEditorScreen, InfoSidebar, ProjectTree,
+)
 
 
 def buat_struktur():
@@ -215,6 +220,59 @@ async def main():
             anak_ag = [str(n.label) for n in node_agent.children]
             cek("expand agent memuat widgets",
                 any("widgets" in l for l in anak_ag), f"anak={anak_ag}")
+
+        # ── 5. klik file -> edit -> tinjau diff -> simpan + undo ──────
+        node_file = next(n for n in tree.root.children
+                         if "berkas.py" in str(n.label))
+        tree.select_node(node_file)
+        tree.action_select_cursor()
+        def editor_siap():
+            try:
+                return (isinstance(app.screen, FileEditorScreen)
+                        and app.screen.query_one("#file-editor-area", TextArea))
+            except Exception:
+                return False
+        await tunggu(pilot, editor_siap,
+                     pesan="klik file harus membuka editor")
+        editor = app.screen
+        area = editor.query_one("#file-editor-area", TextArea)
+        cek("editor membaca isi file", area.text == "x = 1\n",
+            f"isi={area.text!r}")
+        area.text = "x = 2\n"
+        await pilot.pause()
+        cek("editor menandai perubahan", editor.dirty is True)
+
+        # Ctrl+S pertama wajib hanya membuka diff, belum menyentuh disk.
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        diff = editor.query_one("#file-editor-diff", RichLog)
+        cek("Ctrl+S pertama membuka pratinjau diff",
+            editor._preview is True and diff.display is True)
+        cek("file belum ditulis sebelum konfirmasi",
+            (Path(_TMP) / "berkas.py").read_text(encoding="utf-8") == "x = 1\n")
+
+        # Ctrl+S kedua mengonfirmasi penulisan.
+        await pilot.press("ctrl+s")
+        await tunggu(
+            pilot,
+            lambda: (Path(_TMP) / "berkas.py").read_text(encoding="utf-8")
+            == "x = 2\n",
+            pesan="konfirmasi editor harus menyimpan file",
+        )
+        cek("file tersimpan dari editor",
+            (Path(_TMP) / "berkas.py").read_text(encoding="utf-8") == "x = 2\n")
+        cek("editor kembali bersih setelah simpan", editor.dirty is False)
+        await pilot.pause(0.2)
+        await pilot.press("escape")
+        await tunggu(pilot,
+                     lambda: not list(editor.query("#file-editor-area")),
+                     pesan="editor tersimpan harus dapat ditutup")
+
+        from agent.tools.checkpoint import undo_changes
+        hasil_undo = undo_changes()
+        cek("backup editor dapat dipulihkan oleh undo_changes",
+            (Path(_TMP) / "berkas.py").read_text(encoding="utf-8") == "x = 1\n",
+            hasil_undo)
 
         # Tutup tree lagi: klik path kedua kali (retry — sama seperti buka).
         for _ in range(8):

@@ -245,7 +245,7 @@ class InfoSidebar(Widget):
             t.append(path[:potong] + "\n   ", style=tema.p("redup"))
             path = path[potong:].lstrip("/")
         t.append(path, style=tema.p("teks"))
-        t.append("\n  klik path: tree · tarik tepi kiri: lebar",
+        t.append("\n  klik path: tree · klik file: edit",
                  style=f"dim {tema.p('redup')}")
         self.terakhir_path = t.plain
         self._path.update(t)
