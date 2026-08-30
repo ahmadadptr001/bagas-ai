@@ -214,6 +214,23 @@ else
   esac
 fi
 
+# --- 3e. Ollama + Gemma 3n E2B (WAJIB untuk vision lokal) ---
+step "Memeriksa Ollama (wajib untuk vision lokal Gemma 3n E2B)"
+if ! command -v ollama >/dev/null 2>&1; then
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then brew install --cask ollama >/dev/null 2>&1 || true; fi ;;
+    Linux)
+      curl -fsSL https://ollama.com/install.sh | sh >/dev/null 2>&1 || true ;;
+  esac
+fi
+command -v ollama >/dev/null 2>&1 || die "Ollama wajib tetapi gagal dipasang. Pasang dari https://ollama.com/download lalu jalankan installer lagi."
+ok "Ollama tersedia ($(command -v ollama))"
+note "mengunduh model vision Gemma 3n E2B (bisa beberapa GB)..."
+ollama pull gemma3n:e2b >/dev/null || die "Gagal mengunduh gemma3n:e2b. Instalasi dibatalkan."
+ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -qx 'gemma3n:e2b' || die "gemma3n:e2b tidak terverifikasi setelah pull. Instalasi dibatalkan."
+ok "Gemma 3n E2B siap untuk read_image_local dan /live"
+
 # --- 4. Pastikan direktori bin/Scripts ada di PATH ---
 step "Memeriksa PATH"
 # Cari lokasi executable yang BENAR-BENAR terpasang (lebih andal daripada

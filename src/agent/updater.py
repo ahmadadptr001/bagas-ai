@@ -820,23 +820,41 @@ def _pasang_tesseract() -> str:
 
 def _pasang_vision_gemma() -> str:
     """Tarik Gemma 3n E2B bila Ollama memang tersedia di mesin pengguna."""
-    if os.environ.get("BAGASAI_SKIP_VISION_MODEL") == "1":
-        return "Vision lokal dilewati (BAGASAI_SKIP_VISION_MODEL=1)."
     ollama = shutil.which("ollama")
     if not ollama:
-        return "Vision lokal siap setelah Ollama dipasang: ollama pull gemma3n:e2b"
+        try:
+            if sys.platform == "win32" and shutil.which("winget"):
+                _run(["winget", "install", "--id", "Ollama.Ollama", "-e",
+                      "--silent", "--accept-package-agreements",
+                      "--accept-source-agreements"], Path.cwd(), timeout=900)
+            elif sys.platform.startswith("linux") and shutil.which("curl"):
+                _run(["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
+                     Path.cwd(), timeout=900)
+            ollama = shutil.which("ollama")
+        except (OSError, subprocess.SubprocessError):
+            ollama = None
+    if not ollama:
+        return "GAGAL: Ollama wajib untuk vision lokal tetapi tidak bisa dipasang."
     try:
         listed = subprocess.run([ollama, "list"], capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=20)
-        if "gemma3n" in (listed.stdout or "").lower():
+        model_lines = {(line.split()[0] if line.split() else "").lower()
+                       for line in (listed.stdout or "").splitlines()[1:]}
+        if "gemma3n:e2b" in model_lines:
             return "Model vision lokal Gemma 3n E2B sudah tersedia."
         pulled = subprocess.run([ollama, "pull", "gemma3n:e2b"], capture_output=True,
                                  text=True, encoding="utf-8", errors="replace", timeout=1800)
         if pulled.returncode == 0:
-            return "Model vision lokal Gemma 3n E2B terpasang."
+            verify = subprocess.run([ollama, "list"], capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", timeout=20)
+            verified = any((line.split() or [""])[0].lower() == "gemma3n:e2b"
+                           for line in (verify.stdout or "").splitlines()[1:])
+            if verified:
+                return "Model vision lokal Gemma 3n E2B terpasang."
+            return "GAGAL: ollama pull selesai tetapi gemma3n:e2b tidak terverifikasi."
         return "Gagal menarik Gemma 3n E2B; coba ulang: ollama pull gemma3n:e2b"
     except (OSError, subprocess.SubprocessError):
-        return "Vision lokal belum terpasang; coba: ollama pull gemma3n:e2b"
+        return "GAGAL: Vision lokal belum terpasang; jalankan ollama pull gemma3n:e2b"
 
 
 def _reinstall(repo: Path) -> dict:
