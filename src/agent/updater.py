@@ -18,6 +18,7 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 import json
+import queue
 import os
 import re
 import shutil
@@ -37,6 +38,51 @@ def _run(args: list[str], cwd: Path, timeout: int = 120) -> subprocess.Completed
     return subprocess.run(
         args, cwd=str(cwd), capture_output=True, text=True, timeout=timeout
     )
+
+
+def _run_progress(args: list[str], cwd: Path, timeout: int,
+                  label: str) -> int:
+    """Jalankan proses panjang tanpa menyembunyikan progresnya di terminal."""
+    print(f"  … {label}", flush=True)
+    try:
+        proc = subprocess.Popen(args, cwd=str(cwd), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace",
+                                bufsize=1)
+        assert proc.stdout is not None
+        lines: queue.Queue[str | None] = queue.Queue()
+        def _reader() -> None:
+            for line in proc.stdout:
+                lines.put(line)
+            lines.put(None)
+        threading.Thread(target=_reader, daemon=True).start()
+        deadline = time.monotonic() + timeout
+        done = False
+        while time.monotonic() < deadline:
+            try:
+                line = lines.get(timeout=1.0)
+                if line is None:
+                    done = True
+                    break
+                line = line.strip()
+                if line:
+                    print(f"    {line[:180]}", flush=True)
+            except queue.Empty:
+                if proc.poll() is not None:
+                    done = True
+                    break
+        if not done and proc.poll() is None:
+            proc.kill()
+            return 124
+        return proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return 124
+    except (OSError, subprocess.SubprocessError):
+        return 1
 
 
 def _git_available() -> bool:
@@ -842,9 +888,9 @@ def _pasang_vision_gemma() -> str:
                        for line in (listed.stdout or "").splitlines()[1:]}
         if "gemma3n:e2b" in model_lines:
             return "Model vision lokal Gemma 3n E2B sudah tersedia."
-        pulled = subprocess.run([ollama, "pull", "gemma3n:e2b"], capture_output=True,
-                                 text=True, encoding="utf-8", errors="replace", timeout=1800)
-        if pulled.returncode == 0:
+        pull_rc = _run_progress([ollama, "pull", "gemma3n:e2b"], Path.cwd(),
+                                timeout=1800, label="mengunduh Gemma 3n E2B")
+        if pull_rc == 0:
             verify = subprocess.run([ollama, "list"], capture_output=True, text=True,
                                     encoding="utf-8", errors="replace", timeout=20)
             verified = any((line.split() or [""])[0].lower() == "gemma3n:e2b"
@@ -956,19 +1002,30 @@ def _reinstall(repo: Path) -> dict:
 
 def _sinkron_dependensi_runtime(repo: Path) -> str:
     """Pastikan dependensi Python dan browser Playwright ikut diperbarui."""
+    print("  … menyelaraskan dependensi Python", flush=True)
     flags = ["--user"] if _is_user_install() and not _is_editable(repo) else []
     r = _run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
               *flags, str(repo)], repo, timeout=900)
     if r.returncode != 0:
         return "GAGAL: dependensi Python tidak tersinkron saat update."
     try:
-        pw = _run([sys.executable, "-m", "playwright", "install", "chromium"],
-                  repo, timeout=900)
-        if pw.returncode != 0:
+        pw_rc = _run_progress([sys.executable, "-m", "playwright", "install", "chromium"],
+                              repo, timeout=900, label="memastikan Chromium Playwright")
+        if pw_rc != 0:
             return "GAGAL: browser Playwright Chromium tidak tersinkron."
     except Exception:  # noqa: BLE001
         return "GAGAL: browser Playwright Chromium tidak tersinkron."
     return "Dependensi Python dan browser Playwright terverifikasi."
+
+
+def ensure_runtime() -> dict[str, str]:
+    """Pastikan runtime wajib walau kode BagasAI sudah versi terbaru."""
+    repo = find_repo() or config.ROOT_DIR
+    runtime = _sinkron_dependensi_runtime(repo)
+    vision = _pasang_vision_gemma()
+    return {"runtime": runtime, "vision": vision,
+            "status": ("ok" if not runtime.startswith("GAGAL:")
+                       and not vision.startswith("GAGAL:") else "runtime_error")}
 
 
 # --- Cek otomatis saat startup (non-blocking, hasil di-cache) ---------------

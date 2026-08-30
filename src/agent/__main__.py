@@ -110,6 +110,14 @@ def _cmd_update() -> None:
     if st == "up_to_date":
         print(f"✓ bagas-ai sudah versi terbaru. ({res.get('local','')})")
         _ringkas_versi()
+        print("Memastikan dependensi runtime (Ollama, Gemma, Python, Chromium)...")
+        runtime = updater.ensure_runtime()
+        if runtime.get("status") != "ok":
+            print("runtime belum siap:")
+            print("  " + runtime.get("runtime", ""))
+            print("  " + runtime.get("vision", ""))
+        else:
+            print("Ollama, Gemma 3n E2B, dependensi Python, dan Chromium siap.")
         return
 
     if st == "stale_install":
