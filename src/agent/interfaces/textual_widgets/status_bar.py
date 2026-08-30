@@ -85,7 +85,7 @@ class StatusBar(Widget):
     def compose(self):
         # Ikon menu ditempatkan tepat di area merek footer; hanya terlihat
         # pada breakpoint mobile dan event-nya ditangani BagasAIApp.
-        yield Button("☰", id="statusbar-sidebar-toggle", variant="default")
+        yield Button("▯", id="statusbar-sidebar-toggle", variant="default")
 
     # Tanpa compose() — StatusBar memakai render() langsung.
 

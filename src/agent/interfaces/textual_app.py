@@ -558,7 +558,7 @@ class BagasAIApp(App):
         sidebar = self.query_one("#sidebar", InfoSidebar)
         sidebar.display = self._sidebar_mobile_open
         try:
-            self.query_one("#statusbar-sidebar-toggle", Button).label = "×" if self._sidebar_mobile_open else "☰"
+            self.query_one("#statusbar-sidebar-toggle", Button).label = "▮" if self._sidebar_mobile_open else "▯"
         except Exception:
             pass
         self._sinkron_footer_sidebar()

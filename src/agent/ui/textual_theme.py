@@ -135,11 +135,14 @@ Screen {
     margin: 0;
     height: 1;
     border: none;
-    background: $t-gema_bg;
+    background: transparent;
+    background-tint: transparent;
+    border: none;
+    padding: 0;
     color: $t-aksen;
 }
 #statusbar-sidebar-toggle { display: none; }
-#sidebar-close { display: none; width: 100%; height: 1; border: none; background: $t-gema_bg; color: $t-aksen; }
+#sidebar-close { display: none; width: 100%; height: 1; border: none; background: transparent; background-tint: transparent; color: $t-aksen; }
 
 /* Panel-panel bawah diberi margin-top: teks jawaban/prompt di atasnya
    tidak menempel rapat ke box thinking / loading / antrean. */
