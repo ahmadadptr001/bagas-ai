@@ -238,6 +238,10 @@ def tampilkan() -> bool:
     for baris in KETENTUAN.splitlines():
         print("  " + baris if baris else "")
 
+    # Estimasi ruang disk tidak ditampilkan di installer; kebutuhan aktual
+    # tetap divalidasi oleh cek_sistem().
+    return not gagal
+
     print()
     print("=== PERKIRAAN RUANG DISK YANG DIPAKAI ===")
     for nama, mb in PERKIRAAN_MB:

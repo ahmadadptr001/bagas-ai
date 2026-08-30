@@ -59,7 +59,8 @@ function Invoke-Captured([string]$Exe, [string[]]$Arguments) {
 function Invoke-Live([string]$Exe, [string[]]$Arguments) {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    try { & $Exe @Arguments 2>$null | Out-Host } finally { $ErrorActionPreference = $prev }
+    # Jalankan langsung agar prompt tanpa newline tampil sebelum input dibaca.
+    try { & $Exe @Arguments 2>$null } finally { $ErrorActionPreference = $prev }
     return $LASTEXITCODE
 }
 
