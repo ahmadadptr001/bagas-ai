@@ -88,9 +88,23 @@ def _cmd_login() -> None:
 def _cmd_update() -> None:
     """Cek & terapkan pembaruan bagas-ai dari GitHub (dari terminal)."""
     from . import updater
+    from rich import box
+    from rich.console import Console
+    from rich.markup import escape
+    from rich.panel import Panel
+    from rich.text import Text
 
-    print("🔄 Memeriksa pembaruan (GitHub + paket yang benar-benar terpasang)…")
-    res = updater.check()
+    console = Console()
+    console.print()
+    console.print(Panel(
+        "[dim]GitHub · paket terpasang · dependensi runtime[/dim]",
+        title="[bold magenta]bagas-ai update[/bold magenta]",
+        title_align="left", border_style="magenta", box=box.ROUNDED,
+        padding=(1, 2),
+    ))
+    with console.status("[cyan]Memeriksa versi dan sumber pembaruan…[/cyan]",
+                        spinner="dots"):
+        res = updater.check()
     st = res.get("status")
 
     def _ringkas_versi() -> None:
@@ -105,26 +119,41 @@ def _cmd_update() -> None:
             baris += f"   remote {v['remote']}"
         if v.get("commit_lokal"):
             baris += f"   commit {v['commit_lokal']}"
-        print(baris)
+        console.print(f"  [dim]{baris.strip()}[/dim]")
 
     if st == "up_to_date":
-        print(f"✓ bagas-ai sudah versi terbaru. ({res.get('local','')})")
+        console.print(Panel(
+            f"[bold green]✓ Sudah versi terbaru[/bold green]\n"
+            f"[dim]Versi lokal {escape(str(res.get('local', '')))}[/dim]",
+            border_style="green", box=box.ROUNDED, padding=(0, 2),
+        ))
         _ringkas_versi()
-        print("Memastikan dependensi runtime (Ollama, Gemma, Python, Chromium)...")
-        runtime = updater.ensure_runtime()
+        with console.status("[cyan]Memastikan Ollama, Gemma, Python, dan Chromium…[/cyan]",
+                            spinner="dots"):
+            runtime = updater.ensure_runtime()
         if runtime.get("status") != "ok":
-            print("runtime belum siap:")
-            print("  " + runtime.get("runtime", ""))
-            print("  " + runtime.get("vision", ""))
+            body = Text("Runtime belum sepenuhnya siap\n", style="bold yellow")
+            body.append(runtime.get("runtime", "") + "\n")
+            body.append(runtime.get("vision", ""))
+            console.print(Panel(body, border_style="yellow", box=box.ROUNDED,
+                                padding=(0, 2)))
         else:
-            print("Ollama, Gemma 3n E2B, dependensi Python, dan Chromium siap.")
+            console.print("  [bold green]✓[/bold green] Ollama, Gemma 3n E2B, "
+                          "dependensi Python, dan Chromium siap.\n")
         return
 
     if st == "stale_install":
         # Yang menentukan apa yang berjalan adalah salinan terpasang, bukan repo.
-        print("⚠ Repo sudah mutakhir, tapi paket yang TERPASANG tertinggal:")
+        rincian = []
         for b in (res.get("beda") or [])[:10]:
-            print("  • " + str(b))
+            rincian.append("• " + escape(str(b)))
+        console.print(Panel(
+            "[bold yellow]Repo sudah mutakhir, tetapi paket terpasang tertinggal[/bold yellow]"
+            + (("\n\n" + "\n".join(rincian)) if rincian else ""),
+            title="[bold yellow]⚠ Pemasangan tertinggal[/bold yellow]",
+            title_align="left", border_style="yellow", box=box.ROUNDED,
+            padding=(1, 2),
+        ))
         try:
             ans = input("Pasang ulang sekarang? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -132,8 +161,10 @@ def _cmd_update() -> None:
         if ans in ("n", "no", "t", "tidak"):
             print("Dilewati.")
             return
-        print("⏳ Memasang ulang…")
-        _lapor_update(updater.apply(), _ringkas_versi)
+        with console.status("[cyan]Memasang ulang dan memverifikasi paket…[/cyan]",
+                            spinner="dots"):
+            out = updater.apply()
+        _lapor_update(out, _ringkas_versi, console)
         return
     if st == "no_git":
         print("✖ git tidak ditemukan — pasang git dulu agar bisa memperbarui.")
@@ -148,8 +179,14 @@ def _cmd_update() -> None:
     if st == "setup_needed":
         # Instalasi tanpa repo git penopang (salinan pip / installer dari folder).
         # Bisa disiapkan otomatis dengan clone lalu reinstall.
-        print("ℹ Auto-update belum disiapkan untuk instalasi ini.")
-        print(f"  Sumber: {res.get('repo_url','')} (branch {res.get('branch','')})")
+        console.print(Panel(
+            "[bold cyan]Auto-update belum disiapkan untuk instalasi ini.[/bold cyan]\n\n"
+            f"[dim]Sumber[/dim]  {escape(str(res.get('repo_url', '')))}\n"
+            f"[dim]Branch[/dim]  {escape(str(res.get('branch', '')))}",
+            title="[bold cyan]ℹ Siapkan pembaruan[/bold cyan]",
+            title_align="left", border_style="cyan", box=box.ROUNDED,
+            padding=(1, 2),
+        ))
         try:
             ans = input("Siapkan & perbarui sekarang? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -157,13 +194,20 @@ def _cmd_update() -> None:
         if ans in ("n", "no", "t", "tidak"):
             print("Dilewati.")
             return
-        print("⏳ Menyiapkan repo & memasang pembaruan…")
+        proses = "Menyiapkan repo dan memasang pembaruan…"
     elif st == "update_available":
-        print(f"\n{res.get('behind','?')} pembaruan tersedia "
-              f"({res.get('local','')} → {res.get('remote','')}):")
+        isi = (f"[bold cyan]{escape(str(res.get('behind', '?')))} pembaruan tersedia[/bold cyan]\n"
+               f"[dim]{escape(str(res.get('local', '')))} → "
+               f"{escape(str(res.get('remote', '')))}[/dim]")
         if res.get("log"):
+            isi += "\n"
             for line in res["log"].splitlines():
-                print("  • " + line)
+                isi += "\n• " + escape(line)
+        console.print(Panel(
+            isi, title="[bold magenta]🔄 Pembaruan tersedia[/bold magenta]",
+            title_align="left", border_style="magenta", box=box.ROUNDED,
+            padding=(1, 2),
+        ))
         try:
             ans = input("\nTerapkan sekarang? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -171,43 +215,61 @@ def _cmd_update() -> None:
         if ans in ("n", "no", "t", "tidak"):
             print("Dilewati.")
             return
-        print("⏳ Menarik & memasang pembaruan…")
+        proses = "Menarik, memasang, dan memverifikasi pembaruan…"
     else:
         print(f"✖ status tak terduga: {st}")
         return
 
-    _lapor_update(updater.apply(), _ringkas_versi)
+    with console.status(f"[cyan]{proses}[/cyan]", spinner="dots"):
+        out = updater.apply()
+    _lapor_update(out, _ringkas_versi, console)
 
 
-def _lapor_update(out: dict, ringkas_versi=None) -> None:
+def _lapor_update(out: dict, ringkas_versi=None, console=None) -> None:
     """Laporkan hasil apply() apa adanya — dan hanya sebut 'berhasil' bila
     isinya BENAR-BENAR terverifikasi sama dengan repo, bukan karena pip pulang
     dengan kode 0 (yang pernah terbukti berbohong)."""
+    if console is None:
+        from rich.console import Console
+        console = Console()
+    from rich import box
+    from rich.markup import escape
+    from rich.panel import Panel
+
     if out.get("status") != "updated":
-        print(f"✖ gagal ({out.get('status')}): {out.get('detail','')}")
+        console.print(Panel(
+            f"[bold red]✖ Pembaruan gagal[/bold red]\n"
+            f"[dim]{escape(str(out.get('status', '')))}[/dim]  "
+            f"{escape(str(out.get('detail', '')))}",
+            border_style="red", box=box.ROUNDED, padding=(0, 2),
+        ))
         return
 
     if out.get("verified"):
-        print(f"✓ bagas-ai diperbarui & diverifikasi (v{out.get('version','')}).")
+        pesan = (f"[bold green]✓ Pembaruan selesai dan terverifikasi[/bold green]\n"
+                 f"[dim]Versi {escape(str(out.get('version', '')))}[/dim]\n")
         if out.get("how") == "langsung":
-            print("  Kode terbaru SUDAH aktif — tak ada yang perlu ditutup "
-                  "atau ditunggu. Jalankan ulang perintahnya saja.")
+            pesan += "Kode terbaru sudah aktif. Jalankan ulang perintahnya saja."
         else:
-            print("  Jalankan ulang perintah bagas-ai.")
+            pesan += "Jalankan ulang perintah bagas-ai agar perubahan aktif."
         if out.get("note"):
-            print("  ℹ " + out["note"])
+            pesan += "\n[cyan]ℹ[/cyan] " + escape(str(out["note"]))
+        console.print(Panel(pesan, border_style="green", box=box.ROUNDED,
+                            padding=(1, 2)))
         if ringkas_versi:
             ringkas_versi()
         return
 
-    print("⚠ Pembaruan belum tuntas.")
+    pesan = "[bold yellow]⚠ Pembaruan belum tuntas[/bold yellow]"
     if out.get("note"):
-        print("  " + out["note"])
+        pesan += "\n" + escape(str(out["note"]))
     for b in (out.get("diff") or [])[:6]:
-        print("  • " + str(b))
+        pesan += "\n  • " + escape(str(b))
     detail = (out.get("pip_detail") or "").strip()
     if detail:
-        print(f"  catatan pip: {detail}")
+        pesan += f"\n[dim]catatan pip: {escape(detail)}[/dim]"
+    console.print(Panel(pesan, border_style="yellow", box=box.ROUNDED,
+                        padding=(1, 2)))
 
 
 def _cmd_uninstall(flags: set[str]) -> None:

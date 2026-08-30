@@ -5622,8 +5622,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             if not go:
                 console.print("  [dim](dilewati)[/dim]\n")
                 return
-            console.print("  [dim]⏳ memasang ulang…[/dim]")
-            _terapkan_update()
+            _terapkan_update("Memasang ulang dan memverifikasi paket…")
             return
         if st == "no_git":
             console.print("  [red]✖ git tidak ditemukan[/red] — pasang git dulu agar bisa memperbarui.\n")
@@ -5657,7 +5656,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             if not go:
                 console.print("  [dim](dilewati)[/dim]\n")
                 return
-            console.print("  [dim]⏳ menyiapkan repo & memasang pembaruan…[/dim]")
+            proses = "Menyiapkan repo dan memasang pembaruan…"
         elif st == "update_available":
             n = res.get("behind", "?")
             log = res.get("log", "")
@@ -5680,16 +5679,22 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             if not go:
                 console.print("  [dim](dilewati)[/dim]\n")
                 return
-            console.print("  [dim]⏳ menarik & memasang pembaruan…[/dim]")
+            proses = "Menarik, memasang, dan memverifikasi pembaruan…"
         else:
             console.print(f"  [red]✖ status tak terduga:[/red] {st}\n")
             return
 
-        _terapkan_update()
+        _terapkan_update(proses)
 
-    def _terapkan_update() -> None:
+    def _terapkan_update(label: str = "Memasang dan memverifikasi pembaruan…") -> None:
         try:
-            out = updater.apply()
+            # Spinner tetap bergerak selama git/pip/Ollama bekerja agar proses
+            # panjang tidak terlihat macet pada satu baris statis.
+            with console.status(
+                f"[{tema.p('aksen_terang')}]{_esc(label)}[/]",
+                spinner="dots",
+            ):
+                out = updater.apply()
         except Exception as e:  # noqa: BLE001
             console.print(f"  [red]✖ gagal memperbarui:[/red] {e}\n")
             return

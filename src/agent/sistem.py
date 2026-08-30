@@ -1,4 +1,4 @@
-"""Cek kecocokan sistem, Ketentuan dan Kebijakan, dan perkiraan ruang disk.
+"""Cek kecocokan sistem serta persetujuan Ketentuan dan Kebijakan.
 
 Dijalankan installer SEBELUM memasang apa pun:
 
@@ -9,15 +9,13 @@ pustaka bawaan — rich/dotenv/… belum tentu ada saat itu. Ia juga bisa
 diimpor (mis. oleh setup_wizard) setelah terpasang; teks Ketentuannya satu
 sumber untuk keduanya.
 
-Tiga bagian, urutannya sengaja begitu:
+Dua bagian, urutannya sengaja begitu:
   1. CEK SISTEM — OS, arsitektur, RAM, ruang disk, Python, internet. Yang
      perlu diketahui pengguna SEBELUM menit-menit unduhan dimulai adalah
      "mesin ini didukung atau tidak", bukan pesan galat pip di menit kelimanya.
   2. KETENTUAN DAN KEBIJAKAN — jujur soal kuasa agent sebelum apa pun
      dipasang. (Nama lamanya "disclaimer".)
-  3. PERKIRAAN RUANG DISK — total yang akan dipakai bagas-ai, lalu pengguna
-     memilih lanjut atau batal. Unduhan ratusan MB sampai GB bukan keputusan
-     yang boleh diambilkan pengguna.
+  Setelah keduanya tampil, pengguna memilih lanjut atau batal.
 
 Kode keluar: 0 = lanjut, 1 = dibatalkan pengguna, 2 = sistem tak didukung.
 """
@@ -29,6 +27,7 @@ import shutil
 import socket
 import struct
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -51,10 +50,6 @@ PERKIRAAN_MB: list[tuple[str, int]] = [
     ("model Whisper /voice (unduh nanti)", 500),
 ]
 _TOLERANSI = 1.15  # pip cache sementara, berkas sementara unduhan, dsb.
-
-
-def _gb(mb: float) -> str:
-    return f"{mb / 1024:.1f} GB" if mb >= 1024 else f"{mb:.0f} MB"
 
 
 def total_mb() -> int:
@@ -213,11 +208,89 @@ def cek_sistem() -> list[tuple[str | None, str]]:
 
 
 # --- tampilan ----------------------------------------------------------------
-_OK, _WARN, _GALAT = "[ok]", "[!]", "[x]"
+_RESET = "\033[0m"
+_TEBAL = "\033[1m"
+_REDUP = "\033[2m"
+_HIJAU = "\033[32m"
+_KUNING = "\033[33m"
+_MERAH = "\033[31m"
+_MAGENTA = "\033[35m"
+_CYAN = "\033[36m"
+_PAKAI_WARNA = False
+
+
+def _aktifkan_warna() -> None:
+    """Aktifkan ANSI bila terminal mendukungnya, termasuk console Windows."""
+    global _PAKAI_WARNA
+    if os.environ.get("NO_COLOR") is not None or not sys.stdout.isatty():
+        return
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_uint()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return
+            if not kernel32.SetConsoleMode(handle, mode.value | 0x0004):
+                return
+        except Exception:  # noqa: BLE001
+            return
+    _PAKAI_WARNA = True
+
+
+def _gaya(teks: str, *kode: str) -> str:
+    if not _PAKAI_WARNA:
+        return teks
+    return "".join(kode) + teks + _RESET
+
+
+def _lebar_tampilan() -> int:
+    """Lebar panel yang tetap nyaman di terminal sempit maupun lebar."""
+    return max(42, min(shutil.get_terminal_size((76, 24)).columns - 2, 78))
+
+
+def _kepala_panel(judul: str, subjudul: str) -> None:
+    lebar = _lebar_tampilan()
+    label = f" {judul} "
+    sisa = max(1, lebar - len(label) - 3)
+    print(_gaya("╭─" + label + "─" * sisa + "╮", _MAGENTA, _TEBAL))
+    isi = f"  {subjudul}"[:lebar - 2]
+    print(_gaya("│" + isi.ljust(lebar - 2) + "│", _REDUP))
+    print(_gaya("╰" + "─" * (lebar - 2) + "╯", _MAGENTA))
+
+
+def _judul_bagian(judul: str) -> None:
+    print()
+    print(_gaya(f"  {judul.upper()}", _CYAN, _TEBAL))
+    print(_gaya("  " + "─" * min(36, _lebar_tampilan() - 4), _REDUP))
+
+
+def _baris_disclaimer() -> list[str]:
+    """Bungkus disclaimer mengikuti lebar terminal tanpa memecah kata."""
+    lebar = max(24, _lebar_tampilan() - 4)
+    hasil: list[str] = []
+    for baris in KETENTUAN.splitlines():
+        if not baris:
+            hasil.append("")
+            continue
+        inden = len(baris) - len(baris.lstrip())
+        awal = " " * inden
+        lanjutan = awal + ("  " if baris.lstrip().startswith("-") else "")
+        hasil.extend(textwrap.wrap(
+            baris.strip(), width=lebar, initial_indent=awal,
+            subsequent_indent=lanjutan, break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""])
+    return hasil
 
 
 def _tanda(status: str | None) -> str:
-    return _OK if status is True else _GALAT if status is False else _WARN
+    if status is True:
+        return _gaya("✓", _HIJAU, _TEBAL)
+    if status is False:
+        return _gaya("×", _MERAH, _TEBAL)
+    return _gaya("!", _KUNING, _TEBAL)
 
 
 def tampilkan() -> bool:
@@ -225,17 +298,17 @@ def tampilkan() -> bool:
 
     Return False bila ada kegagalan MUTLAK (sistem tak didukung)."""
     print()
-    print("=== CEK KECOCOKAN SISTEM ===")
+    _kepala_panel("bagas-ai setup", "Pemeriksaan awal sebelum pemasangan")
+    _judul_bagian("Kecocokan sistem")
     gagal = False
     for status, ket in cek_sistem():
-        print(f"  {_tanda(status)} {ket}")
+        print(f"  {_tanda(status)}  {ket}")
         if status is False:
             gagal = True
 
-    print()
-    print("=== DISCLAIMER — KETENTUAN DAN KEBIJAKAN ===")
-    for baris in KETENTUAN.splitlines():
-        print("  " + baris if baris else "")
+    _judul_bagian("Disclaimer · Ketentuan dan Kebijakan")
+    for baris in _baris_disclaimer():
+        print(_gaya("│ ", _MAGENTA) + baris if baris else _gaya("│", _MAGENTA))
 
     # Kebutuhan aktual tetap divalidasi oleh cek_sistem(), tetapi estimasinya
     # tidak ditampilkan kepada pengguna.
@@ -270,8 +343,10 @@ def _jawab_terminal(prompt: str) -> str | None:
 
 def tanya_lanjut() -> bool:
     """Persetujuan tunggal untuk disclaimer + ketentuan sebelum memasang."""
+    print()
+    print(_gaya("  PERSETUJUAN DIPERLUKAN", _KUNING, _TEBAL))
     jawab = _jawab_terminal(
-        "\nSaya sudah membaca dan menyetujui Disclaimer, Ketentuan, serta Kebijakan di atas? [y/N]: ")
+        "  Setujui Disclaimer, Ketentuan, dan Kebijakan lalu lanjutkan? [y/N]: ")
     if jawab is None:
         return True
     return jawab in ("y", "ya", "yes", "j")
@@ -284,6 +359,7 @@ def main() -> int:
             _stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             pass
+    _aktifkan_warna()
     dukung = tampilkan()
     if not dukung:
         print("\nSistem ini BELUM didukung bagas-ai — pemasangan dihentikan.")
