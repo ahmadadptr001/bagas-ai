@@ -100,12 +100,10 @@ PYEOF
 fi
 
 # --- 2b. Cek kecocokan sistem (sebelum apa pun dipasang) ---
-# sistem.py: OS/arsitektur/RAM/disk/Python/internet + Ketentuan & Kebijakan
-# + perkiraan ruang disk, lalu konfirmasi lanjut/batal. Sengaja SEBELUM pip
-# install: pengguna perlu tahu "mesin ini didukung/tidak" dan berapa GB yang
-# akan terpakai sebelum menit-menit unduhan dimulai. Keluar 1 = dibatalkan
-# pengguna (bukan galat); 2 = sistem tak didukung. set -e akan menelan
-# exit code-nya, jadi tangkap dulu.
+# sistem.py: OS/arsitektur/RAM/disk/Python/internet + Ketentuan & Kebijakan,
+# lalu konfirmasi lanjut/batal sebelum pip install. Keluar 1 = dibatalkan
+# pengguna (bukan galat); 2 = sistem tak didukung. set -e akan menelan exit
+# code-nya, jadi tangkap dulu.
 step "Cek kecocokan sistem"
 SISTEM_RC=0
 "$PY" "${SRC}/src/agent/sistem.py" || SISTEM_RC=$?
@@ -114,7 +112,6 @@ case "$SISTEM_RC" in
   1) warn "Dibatalkan — tidak ada yang dipasang."; exit 0 ;;
   *) die "Sistem ini belum didukung — pemasangan dihentikan." ;;
 esac
-
 # --- 3. Pasang sebagai perintah global ---
 step "Memasang bagas-ai (pip install)"
 # Pastikan pip ada dulu (sebagian Python minimal/venv tak memuatnya).
@@ -364,21 +361,21 @@ else
   printf '\n'; step "Setup — bot Telegram (opsional)"
   if command -v bagas-ai >/dev/null 2>&1; then
     if [ -t 0 ]; then
-      bagas-ai login || true
+      BAGASAI_DISCLAIMER_ACCEPTED=1 bagas-ai login || true
     elif [ -r /dev/tty ]; then
       # curl|bash: skrip dibaca dari stdin, jadi wizard TIDAK boleh membaca
       # stdin (langsung EOF) — arahkan ke terminal asli.
       note "stdin bukan terminal — wizard membaca dari /dev/tty"
-      bagas-ai login < /dev/tty || true
+      BAGASAI_DISCLAIMER_ACCEPTED=1 bagas-ai login < /dev/tty || true
     else
       warn "Tidak ada terminal interaktif — wizard dilewati."
       note "Jalankan 'bagas-ai login' nanti untuk menghubungkan bot Telegram."
     fi
   else
     if [ -t 0 ]; then
-      "$PY" -m agent login || true
+      BAGASAI_DISCLAIMER_ACCEPTED=1 "$PY" -m agent login || true
     elif [ -r /dev/tty ]; then
-      "$PY" -m agent login < /dev/tty || true
+      BAGASAI_DISCLAIMER_ACCEPTED=1 "$PY" -m agent login < /dev/tty || true
     else
       warn "Tidak ada terminal interaktif — wizard dilewati."
       note "Jalankan 'bagas-ai login' nanti untuk menghubungkan bot Telegram."

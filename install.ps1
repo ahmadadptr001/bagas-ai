@@ -147,7 +147,6 @@ switch ($SistemRc) {
     1 { Warn "Dibatalkan - tidak ada yang dipasang."; exit 0 }
     default { Err "Sistem ini belum didukung - pemasangan dihentikan."; exit 1 }
 }
-
 # --- 3. Pasang sebagai perintah global ---
 Step "Memasang bagas-ai (pip install)"
 # Pastikan pip ada dulu (sebagian Python Store/venv memicu 'No module named pip').
@@ -442,7 +441,17 @@ if ($env:BAGASAI_SKIP_LOGIN -eq "1") {
 } else {
     Step "Setup - bot Telegram (opsional)"
     $bagas = Get-Command bagas-ai -ErrorAction SilentlyContinue
-    if ($bagas) { & bagas-ai login } else { & $Py -m agent login }
+    $PrevDisclaimerAccepted = $env:BAGASAI_DISCLAIMER_ACCEPTED
+    $env:BAGASAI_DISCLAIMER_ACCEPTED = "1"
+    try {
+        if ($bagas) { & bagas-ai login } else { & $Py -m agent login }
+    } finally {
+        if ($null -eq $PrevDisclaimerAccepted) {
+            Remove-Item Env:BAGASAI_DISCLAIMER_ACCEPTED -ErrorAction SilentlyContinue
+        } else {
+            $env:BAGASAI_DISCLAIMER_ACCEPTED = $PrevDisclaimerAccepted
+        }
+    }
 }
 
 Write-Host ""

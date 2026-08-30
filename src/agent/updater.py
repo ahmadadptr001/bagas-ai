@@ -1000,14 +1000,54 @@ def _reinstall(repo: Path) -> dict:
     }
 
 
+def _dependensi_python_hilang() -> list[str]:
+    """Requirement bagasai yang hilang/tidak cocok, tanpa menilai paket lain.
+
+    ``pip check`` tidak dipakai karena environment pengguna bisa punya paket
+    lain yang saling konflik (mis. facenet vs numpy) tetapi tidak ada kaitannya
+    dengan runtime bagas-ai.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, requires, version
+        from packaging.requirements import Requirement
+    except ImportError:
+        return ["packaging>=23.0"]
+
+    try:
+        daftar = requires("bagasai") or []
+    except PackageNotFoundError:
+        # Checkout development bisa belum punya metadata distribusi. Pemasangan
+        # utama akan menanganinya; jangan reinstall executable dari updater.
+        return []
+
+    kurang: list[str] = []
+    for mentah in daftar:
+        try:
+            req = Requirement(mentah)
+            if req.marker and not req.marker.evaluate({"extra": ""}):
+                continue
+            terpasang = version(req.name)
+            if req.specifier and terpasang not in req.specifier:
+                kurang.append(mentah)
+        except PackageNotFoundError:
+            kurang.append(mentah)
+        except Exception:  # noqa: BLE001 - satu metadata aneh tak boleh crash
+            log.debug("gagal memeriksa requirement %r", mentah, exc_info=True)
+    return kurang
+
+
 def _sinkron_dependensi_runtime(repo: Path) -> str:
-    """Pastikan dependensi Python dan browser Playwright ikut diperbarui."""
-    print("  … menyelaraskan dependensi Python", flush=True)
-    flags = ["--user"] if _is_user_install() and not _is_editable(repo) else []
-    r = _run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
-              *flags, str(repo)], repo, timeout=900)
-    if r.returncode != 0:
-        return "GAGAL: dependensi Python tidak tersinkron saat update."
+    """Pastikan dependensi Python dan browser tanpa reinstall paket aktif."""
+    print("  … memverifikasi dependensi Python", flush=True)
+    kurang = _dependensi_python_hilang()
+    if kurang:
+        flags = ["--user"] if _is_user_install() and not _is_editable(repo) else []
+        r = _run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
+                  *flags, *kurang], repo, timeout=900)
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout or "").strip()[-240:]
+            return ("GAGAL: dependensi Python bagas-ai tidak tersinkron."
+                    + (f" ({detail})" if detail else ""))
     try:
         pw_rc = _run_progress([sys.executable, "-m", "playwright", "install", "chromium"],
                               repo, timeout=900, label="memastikan Chromium Playwright")

@@ -15,6 +15,7 @@ login`, config membacanya sendiri — lihat config._baca_key_opencode.)
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import requests
@@ -361,16 +362,22 @@ def run(console: Console | None = None) -> bool:
         "lewat[/dim] [bold cyan]/model[/bold cyan][dim].[/dim]\n"
     )
 
-    # --- Disclaimer: WAJIB disetujui sebelum apa pun ditanya/disimpan ------
-    console.print(Panel(
-        _DISKLAIMER, title="disclaimer", border_style="yellow", padding=(0, 2),
-    ))
-    if not _tanya_ya_tidak("Saya sudah membaca & MENYETUJUI ketentuan di atas", bawaan=True):
-        console.print(
-            "  [yellow]Dibatalkan — tak ada yang diubah.[/yellow]\n"
-            "  [dim]Jalankan lagi 'bagas-ai login' bila berubah pikiran.[/dim]"
-        )
-        return False
+    # Installer sudah meminta persetujuan sebelum memasang apa pun dan menaruh
+    # penanda hanya untuk proses wizard anak ini. ``bagas-ai login`` yang
+    # dijalankan sendiri tetap wajib menampilkan serta meminta persetujuan.
+    sudah_setuju = os.environ.get("BAGASAI_DISCLAIMER_ACCEPTED") == "1"
+    if not sudah_setuju:
+        console.print(Panel(
+            _DISKLAIMER, title="disclaimer", border_style="yellow", padding=(0, 2),
+        ))
+        if not _tanya_ya_tidak(
+            "Saya sudah membaca & MENYETUJUI ketentuan di atas", bawaan=True
+        ):
+            console.print(
+                "  [yellow]Dibatalkan — tak ada yang diubah.[/yellow]\n"
+                "  [dim]Jalankan lagi 'bagas-ai login' bila berubah pikiran.[/dim]"
+            )
+            return False
 
     # --- Deteksi kredensial -------------------------------------------------
     # Yang SUDAH ada DILEWATI (tidak ditanya ulang); yang belum ada
