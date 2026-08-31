@@ -351,11 +351,22 @@ _DIAM_SELESAI = 1.3     # sunyi selama ini -> satu ucapan dianggap selesai.
                         # tersendiri — potongan sependek itu paling sering
                         # gagal dikenali, jadi namanya hilang tanpa jejak
                         # dan sisa kalimatnya dikira obrolan ruangan.
+_DIAM_SELESAI_LANGSUNG = 2.2
+                        # Mode /voice tidak punya kata penutup dan hasilnya
+                        # langsung masuk sebagai prompt. Jeda 1,3 detik terlalu
+                        # mudah memecah kalimat biasa menjadi 1--3 kata, lalu
+                        # tiap pecahan terkirim sebagai prompt tersendiri.
+                        # Tunggu sedikit lebih lama supaya jeda mengambil napas
+                        # tetap menjadi bagian dari SATU ucapan.
 _MIN_UCAPAN = 0.35      # lebih pendek dari ini: dentuman meja, bukan ucapan
 _MAKS_UCAPAN = 15.0     # satu POTONGAN kirim ke pengenal (bukan batas
                         # perintah — lihat MAKS_REKAM). Dipotong berkala
                         # supaya yang terdengar muncul di layar sambil
                         # pengguna masih bicara, bukan menunggu 30 detik.
+_MAKS_UCAPAN_LANGSUNG = 30.0
+                        # Di mode langsung, satu potongan adalah satu prompt.
+                        # Batas lama 15 detik membelah instruksi panjang dan
+                        # membuat bagian akhirnya terlihat terulang.
 _KALIBRASI = 0.7        # lama mengukur derau ruangan sebelum mulai
 
 
@@ -536,20 +547,44 @@ _HALUSINASI_SUNYI = (
     "jangan lupa like comment dan subscribe",
 )
 
+# Versi pendek ini juga lazim keluar dari Whisper saat mikrofon hanya menangkap
+# derau, tetapi BISA benar-benar diucapkan pengguna. Karena itu ia tidak boleh
+# diblokir berdasarkan teks saja; lihat argumen ``peluang_sunyi`` di bawah.
+_HALUSINASI_SUNYI_PENDEK = ("terima kasih",)
+_AMBANG_SUNYI_STOK_PENDEK = 0.45
 
-def _halusinasi_sunyi(teks: str) -> bool:
+
+def _halusinasi_sunyi(teks: str,
+                      peluang_sunyi: float | None = None) -> bool:
     """Kenali frasa stok Whisper pada audio kosong/sangat pelan.
 
     Pencocokan sengaja sempit: hanya frasa stok utuh (termasuk bila diulang),
     bukan kalimat pengguna yang kebetulan mengandung beberapa katanya.
     """
     normal = " ".join(_kata(teks))
-    for frasa in _HALUSINASI_SUNYI:
+    def hanya_frasa_berulang(frasa: str) -> bool:
         sisa = normal
         while sisa == frasa or sisa.startswith(frasa + " "):
             sisa = sisa[len(frasa):].strip()
             if not sisa:
                 return True
+        return False
+
+    for frasa in _HALUSINASI_SUNYI:
+        if hanya_frasa_berulang(frasa):
+            return True
+
+    # no_speech_prob bukan vonis yang cukup andal untuk suara pengguna yang
+    # pelan/jauh. Karena itu probabilitas ini HANYA dipakai untuk frasa stok
+    # pendek, bukan untuk membuang sembarang kalimat. Pencocokan teksnya tetap
+    # UTUH agar instruksi seperti "tulis ucapan terima kasih" tidak ikut
+    # hilang. Ucapan nyata "terima kasih" juga tetap lolos ketika peluang
+    # sunyinya rendah.
+    if peluang_sunyi is not None:
+        if peluang_sunyi >= _AMBANG_SUNYI_STOK_PENDEK:
+            for frasa in _HALUSINASI_SUNYI_PENDEK:
+                if hanya_frasa_berulang(frasa):
+                    return True
     return False
 
 
@@ -620,23 +655,49 @@ class _Pengenal:
             log.debug("pengenalan Whisper lokal gagal", exc_info=True)
             return "", f"galat: Whisper lokal gagal: {str(exc)[:120]}"
 
-    def _whisperkenali(self, data: bytes) -> str:
-        import numpy as np
-        audio = np.frombuffer(data, dtype=np.int16).astype("float32") / 32768.0
+    def _transkripsikan(self, audio, *, vad_filter: bool) -> tuple[str, float]:
+        """Jalankan satu pass Whisper dan sertakan peluang audio kosong."""
         segmen, _info = self._whisper.transcribe(
-            audio, language="id", beam_size=5, vad_filter=False,
+            audio, language="id", beam_size=5, vad_filter=vad_filter,
             condition_on_previous_text=False,
-            # Audio di sini sudah dideteksi dan dipotong oleh WebRTC di depan.
-            # Menyalakan Silero VAD lagi membuat suara jauh yang pelan lolos
-            # dari pemotong pertama tetapi dibuang seluruhnya oleh pemotong
-            # kedua, sehingga Whisper terlihat "diam".
             # Jangan memakai initial_prompt: pada rekaman yang sangat pelan,
             # Whisper dapat mengulang prompt itu sebagai hasil seolah-olah
             # pengguna benar-benar mengucapkannya.
         )
-        teks = " ".join(s.text.strip() for s in segmen).strip()
-        if _halusinasi_sunyi(teks):
-            log.debug("hasil Whisper dibuang sebagai halusinasi sunyi: %r", teks)
+        daftar = list(segmen)
+        teks = " ".join(s.text.strip() for s in daftar).strip()
+        # Ambil nilai TERENDAH: hasil multi-segmen hanya dianggap sunyi bila
+        # semua segmennya sepakat. Satu segmen ucapan nyata cukup untuk menjaga
+        # seluruh kalimat agar tidak dibuang.
+        peluang_sunyi = min(
+            (float(getattr(s, "no_speech_prob", 0.0)) for s in daftar),
+            default=0.0,
+        )
+        return teks, peluang_sunyi
+
+    def _whisperkenali(self, data: bytes) -> str:
+        import numpy as np
+        audio = np.frombuffer(data, dtype=np.int16).astype("float32") / 32768.0
+
+        # Pass utama tidak memakai Silero VAD: audio sudah dipotong WebRTC dan
+        # VAD kedua dapat membuang suara nyata yang jauh/pelan.
+        teks, peluang_sunyi = self._transkripsikan(audio, vad_filter=False)
+        if _halusinasi_sunyi(teks, peluang_sunyi):
+            log.debug(
+                "hasil Whisper dicurigai sebagai halusinasi sunyi (%.3f): %r",
+                peluang_sunyi, teks,
+            )
+            # Silero VAD hanya dipakai sebagai pemeriksaan kedua ketika pass
+            # utama menghasilkan frasa stok. Jika ia menemukan kalimat lain,
+            # jangan biarkan filter pertama membuat AI tampak tidak menjawab.
+            ulang, peluang_ulang = self._transkripsikan(
+                audio, vad_filter=True)
+            if ulang and not _halusinasi_sunyi(ulang, peluang_ulang):
+                log.debug(
+                    "pass VAD memulihkan transkripsi (%.3f): %r",
+                    peluang_ulang, ulang,
+                )
+                return ulang
             return ""
         return teks
 
@@ -1050,6 +1111,7 @@ class Pendengar:
                   self.jangkauan, derau, ramai, ambang, ambang_lanjut)
 
         potongan: list[Any] = list(suara_saat_kalibrasi)
+        sampel_potongan = sum(len(x) for x in potongan)
         self._sedang_ucapan = bool(potongan)
         # Sedikit rekaman SEBELUM ambang terlampaui ikut disimpan: suku kata
         # pertama selalu lebih pelan dari sisanya, dan tanpa ini "bagas" kerap
@@ -1094,6 +1156,7 @@ class Pendengar:
                 # tak ikut jadi perintah, dan hitungan diam DIULANG supaya
                 # bacaannya tak dihitung sebagai "pengguna sudah berhenti".
                 potongan = []
+                sampel_potongan = 0
                 awalan = []
                 energi_beruntun = 0
                 self._sunyi_sejak = time.time()
@@ -1158,28 +1221,45 @@ class Pendengar:
                     # `awalan` sudah memuat blok sekarang; menambahkannya lagi
                     # menduplikasi ±64 ms dan mengaburkan konsonan awal.
                     potongan = list(awalan)
+                    sampel_potongan = sum(len(x) for x in potongan)
                     awalan = []
                     sunyi, mulai = 0.0, time.time()
                     self._sedang_ucapan = True
                 continue
             potongan.append(data_bersih.copy())
+            sampel_potongan += len(data_bersih)
             sunyi = 0.0 if keras else sunyi + lama_blok
-            panjang = time.time() - mulai
-            if sunyi >= _DIAM_SELESAI or panjang >= _MAKS_UCAPAN:
+            # Durasi harus berasal dari audio, bukan jam dinding. Driver dapat
+            # menyerahkan beberapa buffer sekaligus sesudah terlambat; memakai
+            # time.time() membuat audio valid tampak terlalu pendek dan dibuang
+            # oleh _MIN_UCAPAN, atau terlambat menyentuh batas maksimum.
+            panjang = sampel_potongan / LAJU
+            # Mode lama boleh mengirim potongan pendek karena semuanya masih
+            # dirakit ulang sebelum menjadi perintah. Mode langsung tidak:
+            # setiap hasil antrean segera menjadi prompt terminal. Karena itu
+            # endpoint dan batas panjangnya wajib lebih longgar agar kalimat
+            # dengan jeda alami tidak berubah menjadi beberapa prompt.
+            batas_sunyi = (_DIAM_SELESAI_LANGSUNG
+                            if self.langsung else _DIAM_SELESAI)
+            batas_panjang = (_MAKS_UCAPAN_LANGSUNG
+                              if self.langsung else _MAKS_UCAPAN)
+            if sunyi >= batas_sunyi or panjang >= batas_panjang:
                 if panjang - sunyi >= _MIN_UCAPAN:
                     blob = np.concatenate(potongan).tobytes()
                     self._menunggu += 1
                     self._antre.put(blob)
                     if not self.langsung:
                         # Riwayat untuk pengenalan satu-utuhan (lihat
-                        # _periksa_selesai). Mode langsung sudah mengirim satu
-                        # ucapan ini apa adanya dan tidak membutuhkan riwayat.
+                        # _periksa_selesai). Mode langsung menunggu endpoint
+                        # yang lebih panjang di atas, lalu mengirim satu ucapan
+                        # utuh apa adanya dan tidak membutuhkan riwayat.
                         self._riwayat.append((mulai, mulai + panjang, blob))
                         batas = time.time() - (MAKS_REKAM + 5.0)
                         if self._riwayat and self._riwayat[0][0] < batas:
                             self._riwayat = [r for r in self._riwayat
                                              if r[0] >= batas]
                 potongan = []
+                sampel_potongan = 0
                 self._sedang_ucapan = False
                 self._lapor_level(0.0, False, paksa=True)
                 sunyi = 0.0

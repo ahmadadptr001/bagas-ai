@@ -136,7 +136,7 @@ sebelum setiap pertanyaan biasa dikirim; `/live off` menghentikannya dan
 menghapus screenshot sementara. `/video` mempunyai perilaku yang sama.
 
 `/mic on` membacakan kabar proses dan jawaban akhir; gunakan `/mic tes` untuk
-memeriksa suara. Tekan ikon mikrofon, `F4`, atau jalankan `/voice` untuk
+memeriksa suara. Tekan `F4` atau jalankan `/voice` untuk
 membuka layar voice dengan orb besar yang bergerak saat mendengar maupun saat
 AI berbicara. Bicara langsung tanpa menyebut “bagas ai”; jeda sunyi menutup
 satu ucapan dan mengirimnya. `Esc` atau tombol `⌵` menutup layar sekaligus

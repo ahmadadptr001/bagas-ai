@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -20,19 +21,27 @@ from agent.interfaces.textual_widgets.chat_box import _SLASH_COMMANDS
 
 class PendengarPalsu:
     gagal = False
+    mulai_gate = None
+    instances = []
 
     def __init__(self, on_perintah, on_kabar, jangkauan=None,
-                 langsung=False, on_level=None, **_kwargs):
+                 langsung=False, on_level=None, on_dengar=None, **_kwargs):
         self.on_perintah = on_perintah
         self.on_kabar = on_kabar
         self.on_level = on_level or (lambda _level, _hearing: None)
+        self.on_dengar = on_dengar or (lambda _teks, _merekam: None)
         self.langsung = langsung
         self.jangkauan = jangkauan or "jauh"
         self.aktif = False
         self.merekam = False
         self.galat = ""
+        type(self).instances.append(self)
 
     def mulai(self):
+        gate = type(self).mulai_gate
+        type(self).mulai_gate = None
+        if gate is not None:
+            gate.wait(timeout=5)
         if type(self).gagal:
             return "mikrofon uji gagal"
         self.aktif = True
@@ -100,6 +109,10 @@ async def main() -> None:
                 return_value=("tes mikrofon", 321.0))):
         async with app.run_test(size=(100, 40)) as pilot:
             print("  app mounted", flush=True)
+            # Tombol mic di ujung kotak input sengaja dihapus; /voice dan F4
+            # tetap menjadi jalur masuk yang stabil.
+            assert len(app.query("#chat-voice-button")) == 0
+
             # /mic benar-benar mengubah preferensi dan tes memanggil TTS.
             app._handle_command("/mic off")
             assert pref["suara"] is False and diam.called
@@ -135,6 +148,16 @@ async def main() -> None:
             assert app._voice_visual_state()[0] == "berbicara"
             tts_busy["value"] = False
             print("  orb dan level aktif", flush=True)
+
+            # Jika energi suara tertangkap tetapi Whisper belum memahami,
+            # pengguna menerima kabar di chat utama dan tidak dibiarkan diam.
+            pesan = app.query_one("#messages")
+            jumlah_notice = len(pesan._items)
+            p.on_dengar("(tertangkap, tapi tak terdengar jelas)", False)
+            await tunggu(pilot, lambda: len(pesan._items) > jumlah_notice,
+                         pesan="ucapan tak jelas harus memberi umpan balik")
+            notice = pesan._items[-1]
+            assert "belum terbaca jelas" in getattr(notice, "plain", str(notice))
 
             # Callback mikrofon menjadi prompt biasa di chat utama dan jawaban
             # akhir tetap dibacakan meski preferensi /mic sedang mati.
@@ -192,6 +215,32 @@ async def main() -> None:
                 lambda: not app._voice_state["session_active"])
             assert not isinstance(app.screen, VoiceScreen)
             PendengarPalsu.gagal = False
+
+            # Esc saat startup lambat harus langsung membebaskan UI. F4 baru
+            # boleh memulai generasi lain; listener lama yang selesai belakangan
+            # tidak boleh mengambil alih sesi baru.
+            gate = threading.Event()
+            PendengarPalsu.mulai_gate = gate
+            await pilot.press("f4")
+            await tunggu_async(lambda: isinstance(app.screen, VoiceScreen))
+            await pilot.press("escape")
+            await tunggu_async(
+                lambda: not app._voice_state["task_active"],
+                pesan="Esc saat startup harus langsung melepas kunci audio")
+            await pilot.press("f4")
+            await tunggu_async(
+                lambda: app._voice_state["pendengar"] is not None,
+                pesan="voice harus bisa direstart sebelum worker lama selesai")
+            listener_baru = app._voice_state["pendengar"]
+            listener_lama = PendengarPalsu.instances[-2]
+            gate.set()
+            await tunggu_async(lambda: listener_lama.aktif is False)
+            assert app._voice_state["pendengar"] is listener_baru
+            assert listener_baru.aktif is True
+            await pilot.press("escape")
+            await tunggu_async(
+                lambda: not app._voice_state["session_active"])
+            print("  cancel startup dan restart aman", flush=True)
 
             # Menutup aplikasi ketika mic masih aktif wajib memberi sinyal
             # stop ke listener, bukan membiarkannya merekam di belakang layar.

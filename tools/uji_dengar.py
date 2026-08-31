@@ -80,17 +80,63 @@ def uji_model_tidak_dimuat_ganda() -> None:
 
 
 def uji_halusinasi_sunyi_dibuang() -> None:
-    class Segmen:
+    class SegmenStok:
         text = " Terima kasih kerana menonton. "
+        no_speech_prob = 0.20
 
     model = MagicMock()
-    model.transcribe.return_value = ([Segmen()], object())
+    model.transcribe.return_value = ([SegmenStok()], object())
     kenal = dengar._Pengenal()
     kenal._whisper = model
     assert kenal._whisperkenali(np.zeros(16000, dtype=np.int16).tobytes()) == ""
+    assert [c.kwargs["vad_filter"] for c in model.transcribe.call_args_list] == \
+        [False, True]
     assert dengar._halusinasi_sunyi(
         "Terima kasih telah menonton. Terima kasih telah menonton.")
+    assert dengar._halusinasi_sunyi("Terima kasih.", 0.75)
+    assert not dengar._halusinasi_sunyi("Terima kasih.", 0.20)
     assert not dengar._halusinasi_sunyi("tulis ucapan terima kasih untuk ibu")
+    assert not dengar._halusinasi_sunyi("buka berkas utama", 0.99)
+
+    class SegmenPendekSunyi:
+        text = " Terima kasih. "
+        no_speech_prob = 0.75
+
+    model.reset_mock()
+    model.transcribe.return_value = ([SegmenPendekSunyi()], object())
+    assert kenal._whisperkenali(np.zeros(16000, dtype=np.int16).tobytes()) == ""
+
+    # Filter VAD kedua boleh memulihkan ucapan nyata yang pada pass awal
+    # disalahkenali sebagai frasa stok.
+    class SegmenPulih:
+        text = " Buka berkas utama. "
+        no_speech_prob = 0.82
+
+    model.reset_mock()
+    model.transcribe.side_effect = [
+        ([SegmenPendekSunyi()], object()),
+        ([SegmenPulih()], object()),
+    ]
+    assert kenal._whisperkenali(np.zeros(16000, dtype=np.int16).tobytes()) == \
+        "Buka berkas utama."
+
+    # no_speech tinggi tidak boleh lagi membuang kalimat non-stok dari suara
+    # pengguna yang pelan atau jauh.
+    model.reset_mock()
+    model.transcribe.side_effect = None
+    model.transcribe.return_value = ([SegmenPulih()], object())
+    assert kenal._whisperkenali(np.zeros(16000, dtype=np.int16).tobytes()) == \
+        "Buka berkas utama."
+    assert model.transcribe.call_count == 1
+
+    class SegmenPendekNyata:
+        text = " Terima kasih. "
+        no_speech_prob = 0.20
+
+    model.reset_mock()
+    model.transcribe.return_value = ([SegmenPendekNyata()], object())
+    assert kenal._whisperkenali(np.zeros(16000, dtype=np.int16).tobytes()) == \
+        "Terima kasih."
     print("  halusinasi Whisper pada audio sunyi dibuang: OK")
 
 
@@ -165,6 +211,74 @@ def uji_listener_kontinu_tanpa_wake_word() -> None:
     print("  listener kontinu langsung + level orb: OK")
 
 
+def uji_jeda_alami_tetap_satu_prompt() -> None:
+    """Jeda napas > endpoint lama tak boleh membelah prompt langsung.
+
+    Ini menguji pemotong audio sungguhan, bukan hanya memanggil
+    ``_satu_ucapan`` dengan blob buatan. Kalimat sengaja tidak mengandung nama
+    BagasAI dan memiliki sunyi 1,6 detik di tengahnya: kode lama mengantrekan
+    dua potongan, sehingga terminal menerima kata-kata pendek berulang.
+    """
+    blok_ucapan = np.full((1024,), 2000, dtype=np.int16)
+    blok_sunyi = np.full((1024,), 20, dtype=np.int16)
+    jeda_napas = int(1.6 / dengar._DETIK_BLOK)
+    jeda_akhir = int((dengar._DIAM_SELESAI_LANGSUNG + 0.2)
+                     / dengar._DETIK_BLOK)
+    blok = ([blok_ucapan] * 8 + [blok_sunyi] * jeda_napas
+            + [blok_ucapan] * 8 + [blok_sunyi] * jeda_akhir
+            + [blok_sunyi] * 2)
+
+    class StreamPalsu:
+        def __init__(self, pendengar):
+            self.pendengar = pendengar
+            self.index = 0
+
+        def read(self, _n):
+            if self.index >= len(blok):
+                self.pendengar._stop.set()
+                return blok_sunyi.reshape(-1, 1), False
+            nilai = blok[self.index]
+            self.index += 1
+            return nilai.reshape(-1, 1), False
+
+    class FrontendPalsu:
+        vad_tersedia = True
+
+        def __init__(self, _rate):
+            pass
+
+        def proses(self, data):
+            x = np.asarray(data, dtype=np.int16).reshape(-1)
+            return x, x, bool(np.max(np.abs(x)) > 1000)
+
+        def reset(self):
+            pass
+
+    kenal = MagicMock()
+    kenal.kenali.return_value = (
+        "tolong buka berkas utama lalu jelaskan isinya", "whisper")
+    terkirim: list[str] = []
+    with (patch.object(dengar, "pengenal", return_value=kenal),
+          patch.object(dengar, "_AudioFrontEnd", FrontendPalsu),
+          patch.object(dengar, "_KALIBRASI", 0.0),
+          patch.object(dengar, "hitung_ambang",
+                       return_value=(20.0, 20.0, 100.0, 60.0))):
+        p = dengar.Pendengar(terkirim.append, langsung=True)
+        p._gelung(StreamPalsu(p), np)
+
+    assert p._antre.qsize() == 1, (
+        "jeda napas memecah satu kalimat menjadi beberapa audio")
+    blob = p._antre.get_nowait()
+    p._stop.clear()
+    p._satu_ucapan(blob)
+    assert kenal.kenali.call_count == 1
+    assert terkirim == [
+        "tolong buka berkas utama lalu jelaskan isinya"]
+    # Dua bagian ucapan beserta jeda di tengah memang berada dalam satu blob.
+    assert len(blob) / 2 / dengar.LAJU > 2.5
+    print("  jeda alami 1,6 dtk + tanpa wake word = satu prompt: OK")
+
+
 def uji_kontrak_instalasi() -> None:
     root = Path(__file__).resolve().parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
@@ -187,5 +301,6 @@ if __name__ == "__main__":
     uji_halusinasi_sunyi_dibuang()
     uji_dikte_tanpa_wake_word()
     uji_listener_kontinu_tanpa_wake_word()
+    uji_jeda_alami_tetap_satu_prompt()
     uji_kontrak_instalasi()
     print("OK - seluruh pipeline audio lokal lulus")
