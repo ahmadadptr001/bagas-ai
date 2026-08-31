@@ -196,11 +196,11 @@ def uji_listener_kontinu_tanpa_wake_word() -> None:
     level: list[tuple[float, bool]] = []
     with patch.object(dengar, "pengenal", return_value=kenal):
         p = dengar.Pendengar(
-            terkirim.append, langsung=True,
+            terkirim.append,
             on_level=lambda nilai, aktif: level.append((nilai, aktif)))
     p._satu_ucapan(b"audio")
     assert terkirim == ["buka berkas utama"]
-    assert not p.perakit.merekam
+    assert not p.merekam
     p.ambang = 100
     p._lapor_level(200, True, paksa=True)
     assert level[-1] == (1.0, True)
@@ -212,16 +212,16 @@ def uji_listener_kontinu_tanpa_wake_word() -> None:
 
 
 def uji_jeda_alami_tetap_satu_prompt() -> None:
-    """Jeda napas > endpoint lama tak boleh membelah prompt langsung.
+    """Jeda napas pendek tak boleh membelah prompt langsung.
 
     Ini menguji pemotong audio sungguhan, bukan hanya memanggil
-    ``_satu_ucapan`` dengan blob buatan. Kalimat sengaja tidak mengandung nama
-    BagasAI dan memiliki sunyi 1,6 detik di tengahnya: kode lama mengantrekan
-    dua potongan, sehingga terminal menerima kata-kata pendek berulang.
+    ``_satu_ucapan`` dengan blob buatan. Kalimat memiliki sunyi 0,8 detik di
+    tengahnya — di bawah endpoint (yang kini gesit demi balasan cepat),
+    sehingga tetap menjadi SATU prompt, bukan dua potongan kata pendek.
     """
     blok_ucapan = np.full((1024,), 2000, dtype=np.int16)
     blok_sunyi = np.full((1024,), 20, dtype=np.int16)
-    jeda_napas = int(1.6 / dengar._DETIK_BLOK)
+    jeda_napas = int(0.8 / dengar._DETIK_BLOK)
     jeda_akhir = int((dengar._DIAM_SELESAI_LANGSUNG + 0.2)
                      / dengar._DETIK_BLOK)
     blok = ([blok_ucapan] * 8 + [blok_sunyi] * jeda_napas
@@ -263,7 +263,7 @@ def uji_jeda_alami_tetap_satu_prompt() -> None:
           patch.object(dengar, "_KALIBRASI", 0.0),
           patch.object(dengar, "hitung_ambang",
                        return_value=(20.0, 20.0, 100.0, 60.0))):
-        p = dengar.Pendengar(terkirim.append, langsung=True)
+        p = dengar.Pendengar(terkirim.append)
         p._gelung(StreamPalsu(p), np)
 
     assert p._antre.qsize() == 1, (
@@ -276,7 +276,112 @@ def uji_jeda_alami_tetap_satu_prompt() -> None:
         "tolong buka berkas utama lalu jelaskan isinya"]
     # Dua bagian ucapan beserta jeda di tengah memang berada dalam satu blob.
     assert len(blob) / 2 / dengar.LAJU > 2.5
-    print("  jeda alami 1,6 dtk + tanpa wake word = satu prompt: OK")
+    print("  jeda napas 0,8 dtk + tanpa wake word = satu prompt: OK")
+
+
+def uji_penyela_memotong_tts() -> None:
+    """Menyela di tengah TTS: bacaan dipotong & ucapan penyela jadi prompt.
+
+    Dulu semua blok dibuang selama speaker bersuara — mikrofon tuli total dan
+    pengguna yang menanggapi di tengah bacaan lenyap. Kini kebocoran speaker
+    jadi baseline; lonjakan energi DI ATASNYA (plus VAD) memotong bacaan dan
+    memulai rekaman ucapan penyela, lengkap dengan pre-roll sebelum
+    lonjakannya."""
+    blok_bocor = np.full((1024,), 100, dtype=np.int16)   # gema pengeras suara
+    blok_ucap = np.full((1024,), 3000, dtype=np.int16)   # suara penyela
+    blok_sunyi = np.full((1024,), 20, dtype=np.int16)
+    jeda_akhir = int((dengar._DIAM_SELESAI_LANGSUNG + 0.2)
+                     / dengar._DETIK_BLOK)
+    # 8 blok kebocoran membangun baseline; 5 blok lonjakan beruntun memicu
+    # penyela; sisanya ucapan penyela + sunyi sampai endpoint.
+    blok = ([blok_bocor] * 8 + [blok_ucap] * 10
+            + [blok_sunyi] * jeda_akhir + [blok_sunyi] * 2)
+
+    class StreamPalsu:
+        def __init__(self, pendengar):
+            self.pendengar = pendengar
+            self.index = 0
+
+        def read(self, _n):
+            if self.index >= len(blok):
+                self.pendengar._stop.set()
+                return blok_sunyi.reshape(-1, 1), False
+            nilai = blok[self.index]
+            self.index += 1
+            return nilai.reshape(-1, 1), False
+
+    class FrontendPalsu:
+        vad_tersedia = True
+
+        def __init__(self, _rate):
+            pass
+
+        def proses(self, data):
+            x = np.asarray(data, dtype=np.int16).reshape(-1)
+            return x, x, bool(np.max(np.abs(x)) > 1000)
+
+        def reset(self):
+            pass
+
+    kenal = MagicMock()
+    kenal.kenali.return_value = ("hentikan, kubahas yang lain", "whisper")
+    terkirim: list[str] = []
+    tts = {"on": True}
+
+    # Mock dibuat terpisah: `with (...) as x` pada daftar berkurung mengikat
+    # TUPLE-nya, bukan mock yang terakhir.
+    diam = MagicMock(side_effect=lambda: tts.update(on=False))
+
+    with (patch.object(dengar, "pengenal", return_value=kenal),
+          patch.object(dengar, "_AudioFrontEnd", FrontendPalsu),
+          patch.object(dengar, "_KALIBRASI", 0.0),
+          patch.object(dengar, "hitung_ambang",
+                       return_value=(20.0, 20.0, 100.0, 60.0)),
+          patch("agent.suara.sibuk", side_effect=lambda: tts["on"]),
+          patch("agent.suara.diam", diam)):
+        p = dengar.Pendengar(terkirim.append)
+        p._gelung(StreamPalsu(p), np)
+
+    assert diam.called, "ucapan penyela harus memotong bacaan TTS"
+    assert p._antre.qsize() == 1, "ucapan penyela harus menjadi satu prompt"
+    blob = p._antre.get_nowait()
+    p._stop.clear()
+    p._satu_ucapan(blob)
+    assert terkirim == ["hentikan, kubahas yang lain"]
+    # Pre-roll ikut terekam: suku kata pertama penyela jatuh SEBELUM
+    # ambangnya terlampaui.
+    assert len(blob) / 2 / dengar.LAJU > 0.5
+    print("  menyela TTS: bacaan dipotong + ucapan penyela terekam: OK")
+
+
+def uji_potong_kalimat_tts() -> None:
+    """Jawaban akhir dipecah per kalimat; potongan lanjutan tak terbuang."""
+    from agent import suara
+
+    teks = ("Kalimat pembuka yang pendek. "
+            + "Kalimat berikutnya menjelaskan hasil pemeriksaan berkas. " * 8)
+    bag = suara.potong_kalimat(teks)
+    assert len(bag) >= 2, "jawaban panjang harus dipecah beberapa potongan"
+    assert len(bag[0]) <= 160, "potongan pembuka harus pendek agar cepat terdengar"
+    assert all(len(b) <= 320 for b in bag)
+    assert " ".join(bag) == suara.bersihkan(teks, suara._MAKS_TOTAL)
+
+    # Blok kode tak pantas didengar — tetap dibuang walau dipecah per kalimat.
+    assert suara.potong_kalimat("Lihat:\n```python\nx = 1\n```\nSelesai.") == \
+        ["Lihat: Selesai."]
+
+    # Antrean: kabar langkah baru membuang kabar langkah lama, TAPI potongan
+    # lanjutan jawaban akhir tetap hidup — jawaban tak berhenti setengah.
+    p = suara.Pengucap()
+    p._antre.put(("kabar langkah lama", False))
+    p._antre.put(("kalimat lanjutan jawaban", True))
+    p._buang_antre(simpan_sambung=True)
+    assert p._antre.qsize() == 1
+    assert p._antre.get_nowait() == ("kalimat lanjutan jawaban", True)
+    p._antre.put(("kalimat lanjutan", True))
+    p._buang_antre()
+    assert p._antre.qsize() == 0, "diam() tetap membuang semuanya"
+    print("  TTS per kalimat + antrean sambung: OK")
 
 
 def uji_kontrak_instalasi() -> None:
@@ -302,5 +407,7 @@ if __name__ == "__main__":
     uji_dikte_tanpa_wake_word()
     uji_listener_kontinu_tanpa_wake_word()
     uji_jeda_alami_tetap_satu_prompt()
+    uji_penyela_memotong_tts()
+    uji_potong_kalimat_tts()
     uji_kontrak_instalasi()
     print("OK - seluruh pipeline audio lokal lulus")

@@ -44,7 +44,9 @@ TIGA PEMBATAS
   2. Kabar BASI dibuang. Begitu giliran dibatalkan atau giliran baru dimulai,
      antreannya dikosongkan dan yang sedang diucapkan dihentikan — mendengar
      rencana langkah yang sudah lewat lebih membingungkan daripada diam.
-     Antreannya hanya menyimpan SATU kabar: yang terbaru.
+     Antrean langkah hanya menyimpan SATU kabar: yang terbaru. Pengecualiannya
+     potongan LANJUTAN jawaban akhir: satu jawaban dibacakan utuh walau kabar
+     langkah datang di sela-selanya.
   3. Yang diucapkan dipendekkan & dibersihkan: blok kode, penanda protokol, dan
      tautan tak ada gunanya didengar.
 
@@ -80,9 +82,17 @@ _MAKS_UCAP = 160
 # cuma membuat pesannya terdengar separuh. Tetap ada batasnya supaya jawaban
 # sepanjang halaman tak dibacakan bermenit-menit.
 _MAKS_UCAP_AKHIR = 900
-# Antrean sengaja menyimpan SATU kabar saja — yang terbaru. Dulu ada batas 3 di
-# sini, tapi sejak tiap kabar baru mengosongkan antrean, batas itu tak pernah
-# tercapai dan cuma menyesatkan pembaca berikutnya.
+# Batas potongan LANJUTAN jawaban akhir yang dibacakan per kalimat, dan batas
+# TOTALnya. Dua kali lipat _MAKS_UCAP_AKHIR itu sengaja: sejak jawaban bisa
+# DISELA kapan saja (barge-in di dengar.py), pengguna tak lagi terjebak
+# mendengarkan bacaan panjang tanpa jalan keluar — jadi batas lamanya boleh
+# dilonggarkan.
+_MAKS_UCAP_LANJUT = 320
+_MAKS_TOTAL = 2000
+# Antrean kabar LANGKAH hanya menyimpan yang TERBARU — tiap kabar baru
+# mengosongkan antrean (lihat _dahului). Pengecualian: potongan LANJUTAN satu
+# jawaban akhir (sambung) tidak saling mengalahkan, jadi satu jawaban panjang
+# tetap dibacakan utuh.
 _MAKS_ANTRE = 1
 # Kecepatan bicara SAPI (-10..10). TERUKUR untuk kalimat 67 huruf: rate 0 = 5,9
 # detik, rate 2 = 4,3 detik, rate 4 = 3,4 detik. Dipilih 2 — cukup cepat untuk
@@ -296,6 +306,47 @@ def bersihkan(teks: str, maks: int = _MAKS_UCAP) -> str:
     return potong.rsplit(" ", 1)[0].strip()
 
 
+def potong_kalimat(teks: str) -> list[str]:
+    """Pecah JAWABAN AKHIR jadi potongan kalimat yang layak dibacakan.
+
+    Potongan PERTAMA pendek (≤ _MAKS_UCAP) supaya bacaan bermula cepat;
+    sisanya boleh lebih panjang. Tanpa pemecahan ini, jawaban dibacakan sebagai
+    SATU bacaan: seluruhnya harus selesai disiapkan lebih dulu, dan selama
+    dibacakan mikrofon tak bisa dipakai — persis keluhan "suaranya mengabaikan
+    aku". Per kalimat, potongan pertama terdengar lebih cepat dan sisanya
+    menyusul sambil potongan sebelumnya masih berbunyi."""
+    t = bersihkan(teks, _MAKS_TOTAL)
+    if not t:
+        return []
+    kalimat = [k.strip() for k in re.split(r"(?<=[.!?…])\s+|\n+", t)]
+    kalimat = [k for k in kalimat if k]
+    if not kalimat:
+        return []
+    # Kalimat tunggal yang sendirinya kepanjangan tetap dibelah — di batas
+    # KATA, bukan di tengah suku kata, supaya yang terdengar masih wajar.
+    pecahan: list[str] = []
+    for k in kalimat:
+        while len(k) > _MAKS_UCAP_LANJUT:
+            i = k.rfind(" ", 0, _MAKS_UCAP_LANJUT)
+            if i <= 0:
+                i = _MAKS_UCAP_LANJUT
+            pecahan.append(k[:i].strip())
+            k = k[i:].strip()
+        if k:
+            pecahan.append(k)
+    out: list[str] = []
+    for p in pecahan:
+        i = len(out) - 1
+        if i >= 0:
+            # potongan ke-0 (pembuka) dijaga pendek; sisanya boleh panjang
+            batas = _MAKS_UCAP if i == 0 else _MAKS_UCAP_LANJUT
+            if len(out[i]) + 1 + len(p) <= batas:
+                out[i] = f"{out[i]} {p}"
+                continue
+        out.append(p)
+    return out
+
+
 def sapu_berkas_suara(umur: float = 3600.0) -> int:
     """Buang berkas suara sisa di folder sementara. Kembalikan jumlahnya.
 
@@ -408,7 +459,11 @@ class Pengucap:
 
     def __init__(self, rate: int = _RATE) -> None:
         self.rate = max(-10, min(10, int(rate)))
-        self._antre: queue.Queue[str] = queue.Queue()
+        # Tiap item: (teks, sambung). `sambung` menandai potongan LANJUTAN satu
+        # jawaban akhir — ia tak boleh terbuang saat kabar langkah baru datang,
+        # sebab jawaban yang dibacakan setengah lalu berhenti lebih membingungkan
+        # daripada kabar yang menyusul beberapa detik.
+        self._antre: queue.Queue[tuple[str, bool]] = queue.Queue()
         self._proc: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
         self._kunci = threading.Lock()
@@ -448,11 +503,14 @@ class Pengucap:
         self.galat: str = ""         # alasan kalau tak berbunyi
 
     # ---- pemakaian ----
-    def ucap(self, teks: str, penuh: bool = False) -> None:
+    def ucap(self, teks: str, penuh: bool = False,
+             sambung: bool = False) -> None:
         """Antrekan satu kabar. Tak pernah melempar, tak pernah menahan.
 
         `penuh=True` untuk JAWABAN AKHIR: dibacakan jauh lebih panjang, sebab
-        tak ada langkah berikutnya yang perlu dikejar."""
+        tak ada langkah berikutnya yang perlu dikejar. `sambung=True` untuk
+        potongan LANJUTAN jawaban itu: tidak mengalahkan apa pun dan tak
+        dibuang oleh kabar langkah baru — dipakai ucap_panjang()."""
         if self._mati:
             return
         bersih = bersihkan(teks, _MAKS_UCAP_AKHIR if penuh else _MAKS_UCAP)
@@ -465,17 +523,40 @@ class Pengucap:
         # lama makin tertinggal. Syarat "sudah sempat terdengar" itulah yang
         # menjaga agar aturan ini tak berbalik jadi kesunyian di laptop pelan
         # (lihat _MIN_DENGAR).
-        self._dahului()
-        self._antre.put(bersih)
+        if not sambung:
+            self._dahului()
+        self._antre.put((bersih, sambung))
         self._pastikan_jalan()
 
-    def _buang_antre(self) -> None:
-        """Kosongkan antrean. Antreannya memang cuma menyimpan yang TERBARU."""
+    def ucap_panjang(self, teks: str) -> None:
+        """Bacakan JAWABAN AKHIR per potongan kalimat.
+
+        Dulu jawaban akhir dibacakan sebagai SATU bacaan: seluruhnya harus
+        selesai disiapkan lebih dulu, dan selama dibacakan pengguna tak bisa
+        menyela. Dipecah per kalimat, potongan pertama terdengar lebih cepat,
+        sisanya menyusul, dan penyela (barge-in) cukup memotong di batas
+        kalimat yang sedang berbunyi."""
+        if self._mati:
+            return
+        bagian = potong_kalimat(teks)
+        if not bagian:
+            return
+        self.ucap(bagian[0], penuh=True)
+        for lanjut in bagian[1:]:
+            self.ucap(lanjut, penuh=True, sambung=True)
+
+    def _buang_antre(self, simpan_sambung: bool = False) -> None:
+        """Kosongkan antrean kabar. Potongan LANJUTAN boleh dipertahankan."""
+        sisa: list[tuple[str, bool]] = []
         while True:
             try:
-                self._antre.get_nowait()
+                item = self._antre.get_nowait()
             except queue.Empty:
-                return
+                break
+            if simpan_sambung and item[1]:
+                sisa.append(item)
+        for item in sisa:
+            self._antre.put(item)
 
     def _hentikan(self) -> None:
         """Matikan ucapan yang sedang berbunyi SEKARANG juga.
@@ -523,8 +604,12 @@ class Pengucap:
         lebih cepat dari itu. Memotong tanpa syarat berarti TAK SATU PUN kabar
         pernah selesai — pengeras suara diam total sesudah kabar pertama.
         Membiarkannya selesai memang membuat suara tertinggal sedikit, tapi
-        tertinggal sedikit masih jauh lebih berguna daripada senyap."""
-        self._buang_antre()
+        tertinggal sedikit masih jauh lebih berguna daripada senyap.
+
+        Yang dibuang hanya kabar LANGKAH: potongan lanjutan jawaban akhir
+        (sambung) tetap di antrean, sebab jawaban yang berhenti setengah
+        mengubah "kubacakan jawabannya" menjadi teka-teki."""
+        self._buang_antre(simpan_sambung=True)
         with self._kunci:
             mulai = self._mulai_bunyi
         if mulai is None:
@@ -587,7 +672,7 @@ class Pengucap:
         self.mesin = urutan[0]
         while not self._mati:
             try:
-                teks = self._antre.get(timeout=_JEDA_NGANGGUR)
+                item = self._antre.get(timeout=_JEDA_NGANGGUR)
             except queue.Empty:
                 # Lama menganggur -> lepaskan prosesnya. Menahan PowerShell
                 # hidup sepanjang sesi hanya untuk berjaga-jaga itu boros —
@@ -620,7 +705,7 @@ class Pengucap:
             with self._kunci:
                 gen = self._gen
             try:
-                self._ucapkan(teks, urutan, gen)
+                self._ucapkan(item[0], urutan, gen)
             except Exception:  # noqa: BLE001 - thread ini TAK BOLEH mati diam-diam
                 # Kalau thread pengucap berhenti karena galat tak terduga,
                 # fiturnya tampak "hilang tanpa sebab": layar terus jalan,
@@ -1013,6 +1098,14 @@ def ucap(teks: str, penuh: bool = False) -> None:
         pengucap().ucap(teks, penuh)
     except Exception:  # noqa: BLE001 - notifikasi tak boleh menjatuhkan giliran
         log.debug("gagal mengucap", exc_info=True)
+
+
+def ucap_panjang(teks: str) -> None:
+    """Bacakan JAWABAN AKHIR per potongan kalimat (tak menahan, tak melempar)."""
+    try:
+        pengucap().ucap_panjang(teks)
+    except Exception:  # noqa: BLE001 - notifikasi tak boleh menjatuhkan giliran
+        log.debug("gagal mengucap panjang", exc_info=True)
 
 
 def diam() -> None:

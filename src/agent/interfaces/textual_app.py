@@ -1555,7 +1555,6 @@ class BagasAIApp(App):
                     self._voice_masuk,
                     self._voice_kabar,
                     jangkauan=self._voice_state.get("jangkauan"),
-                    langsung=True,
                     on_level=self._voice_level,
                     on_dengar=self._voice_dengar,
                 )
@@ -1616,7 +1615,9 @@ class BagasAIApp(App):
             nama, jeda = "mikrofon bawaan", 2
         self._audio_notice(
             f"● Mode voice AKTIF — {nama}. Bicara langsung tanpa kata "
-            f"pemicu; jeda sekitar {jeda:.0f} detik akan mengirim ucapan.")
+            f"pemicu; jeda sekitar {jeda:.0f} detik akan mengirim ucapan. "
+            f"Kamu juga bisa menyela kapan saja saat aku membacakan "
+            f"jawaban.")
         self._refresh_voice_status()
 
     def _stop_voice(self, *, close_screen: bool = True) -> None:
@@ -2690,7 +2691,7 @@ class BagasAIApp(App):
                 try:
                     from .. import suara
                     suara.getar()
-                    suara.ucap(final_text, penuh=True)
+                    suara.ucap_panjang(final_text)
                 except Exception:  # noqa: BLE001 — TTS tak boleh rusak giliran
                     pass
         else:

@@ -25,12 +25,11 @@ class PendengarPalsu:
     instances = []
 
     def __init__(self, on_perintah, on_kabar, jangkauan=None,
-                 langsung=False, on_level=None, on_dengar=None, **_kwargs):
+                 on_level=None, on_dengar=None, **_kwargs):
         self.on_perintah = on_perintah
         self.on_kabar = on_kabar
         self.on_level = on_level or (lambda _level, _hearing: None)
         self.on_dengar = on_dengar or (lambda _teks, _merekam: None)
-        self.langsung = langsung
         self.jangkauan = jangkauan or "jauh"
         self.aktif = False
         self.merekam = False
@@ -96,6 +95,7 @@ async def main() -> None:
                 side_effect=save_pref),
           patch("agent.suara.mesin_tersedia", return_value=["edge"]),
           patch("agent.suara.ucap") as ucap,
+          patch("agent.suara.ucap_panjang") as ucap_panjang,
           patch("agent.suara.sibuk",
                 side_effect=lambda: tts_busy["value"]),
           patch("agent.suara.getar") as getar,
@@ -132,7 +132,6 @@ async def main() -> None:
                          pesan="listener /voice harus aktif")
             p = app._voice_state["pendengar"]
             print("  /voice listener aktif", flush=True)
-            assert p.langsung is True
             assert isinstance(app.screen, VoiceScreen)
             orb = app.screen.query_one("#voice-orb", VoiceOrb)
             assert orb.size.width >= 70 and orb.size.height >= 20, (
@@ -169,8 +168,10 @@ async def main() -> None:
                          pesan="giliran voice harus selesai")
             assert agent.run.call_args.args[0] == "tolong cek proyek"
             assert getar.called
-            assert any(c.kwargs.get("penuh") is True
-                       for c in ucap.call_args_list)
+            # Jawaban akhir dibacakan per potongan kalimat (ucap_panjang),
+            # bukan sebagai satu bacaan penuh.
+            assert any("jawaban audio" in c.args[0]
+                       for c in ucap_panjang.call_args_list)
             assert app._voice_state["session_active"] is True
             print("  prompt dan TTS selesai", flush=True)
 

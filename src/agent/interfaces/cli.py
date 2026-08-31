@@ -4275,11 +4275,12 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 # Tak dibacakan bila gilirannya DIBATALKAN: Ctrl+C berarti
                 # "berhenti", dan laptop yang tetap membacakan jawabannya
                 # sesudah itu terdengar seperti pembatalan yang diabaikan.
-                # penuh=True: jawaban akhir dibacakan UTUH. Batas pendek yang
-                # dipakai narasi ada supaya suara tak tertinggal saat langkah
-                # datang beruntun — di sini tak ada langkah berikutnya yang
-                # perlu dikejar, jadi memotongnya cuma membuat pesannya
-                # terdengar separuh.
+                # ucap_panjang: jawaban akhir dibacakan UTUH, per potongan
+                # kalimat. Batas pendek yang dipakai narasi ada supaya suara
+                # tak tertinggal saat langkah datang beruntun — di sini tak
+                # ada langkah berikutnya yang perlu dikejar, jadi memotongnya
+                # cuma membuat pesannya terdengar separuh. Per kalimat pula
+                # yang membuat bacaannya bisa DISELA mikrofon (barge-in).
                 bersuara = not interrupted and prefs.load().get("suara", True)
                 if bersuara:
                     # GETARAN dulu, baru dibacakan. Kabar antar-langkah dan
@@ -4289,7 +4290,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                     # dengung pendek ini yang membedakannya — satu ketukan yang
                     # artinya cuma satu hal: sudah sampai kesimpulan.
                     _suara.getar()
-                    _suara.ucap(ans, penuh=True)
+                    _suara.ucap_panjang(ans)
                     _kabar_suara()
                 # PENANDA TUGAS SELESAI — dering + jendela berkedip di taskbar.
                 # Diletakkan di sini, bukan di tiap langkah: yang ditandai
@@ -4346,8 +4347,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         def say(content: str, akhir: bool = False) -> None:
             """Tampilkan ucapan/narasi bagas-ai: 1 header per giliran, indentasi rapi.
 
-            `akhir=True` menandai JAWABAN AKHIR, yang dibacakan utuh — bukan
-            dipotong sependek narasi antar-langkah."""
+            `akhir=True` menandai JAWABAN AKHIR, yang dibacakan utuh per
+            potongan kalimat — bukan dipotong sependek narasi antar-langkah."""
             if not content or not content.strip():
                 return
             baru_bicara = not header["shown"]
@@ -4361,7 +4362,10 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             # menyuarakan sendiri juga — kalau tidak, suara cuma bekerja di
             # satu mode tampilan dan pengguna mode lain mengira fiturnya rusak.
             if prefs.load().get("suara", True):
-                _suara.ucap(content, penuh=akhir)
+                if akhir:
+                    _suara.ucap_panjang(content)
+                else:
+                    _suara.ucap(content)
                 _kabar_suara()
 
         def _on_pikir_klasik(piece: str) -> None:
@@ -4472,11 +4476,11 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             if (result["answer"] or "").strip() \
                     and prefs.load().get("suara", True):
                 _suara.getar()
-            # penuh=True: jawaban AKHIR dibacakan utuh. Tanpa ini mode klasik
-            # memakai batas narasi (160 huruf) sementara mode mengalir memakai
-            # 900 — TERUKUR pada jawaban 1260 huruf: 125 vs 881. Itulah "kok
-            # suaranya baca setengah-setengah" yang dulu cuma diperbaiki di
-            # satu mode tampilan.
+            # ucap_panjang: jawaban AKHIR dibacakan utuh per kalimat. Dulu mode
+            # klasik memakai batas narasi (160 huruf) sementara mode mengalir
+            # memakai 900 — TERUKUR pada jawaban 1260 huruf: 125 vs 881. Itulah
+            # "kok suaranya baca setengah-setengah" yang dulu cuma diperbaiki
+            # di satu mode tampilan.
             say(result["answer"], akhir=True)
             # PENANDA TUGAS SELESAI — dipasang di sini JUGA. Dilaporkan
             # pengguna: "selesai tapi sound-nya nggak bunyi". Sebabnya
@@ -4937,8 +4941,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
     # obrolan ruangan — itu keluaran debug, bukan bagian dari alat kerja.
     #
     # Yang tetap tampil dua hal saja: perintah yang JADI (gemanya sama persis
-    # dengan ketikan) dan kabar yang bisa ditindaklanjuti (mis. kata penutup
-    # terucap padahal namaku belum disebut). Jalurnya sendiri tetap ada di
+    # dengan ketikan) dan kabar yang bisa ditindaklanjuti (mis. ucapan tak
+    # jelas terdengar). Jalurnya sendiri tetap ada di
     # dengar.Pendengar.on_dengar untuk penelusuran.
 
     def show_voice(arg: str = "") -> None:
@@ -4963,7 +4967,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 return
             p = _dengar.Pendengar(
                 _voice_masuk, _voice_kabar,
-                jangkauan=voice_state.get("jangkauan"), langsung=True)
+                jangkauan=voice_state.get("jangkauan"))
             alasan = p.mulai()
             if alasan:
                 console.print(f"  [yellow]⚠ mikrofon tak bisa dinyalakan:[/]\n"
@@ -4992,7 +4996,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             console.print(
                 f"  [#9fc93c]● mikrofon AKTIF[/] [dim]— {_esc(nama)}[/]\n"
                 "  [dim]bicara langsung tanpa menyebut nama; setelah kamu "
-                "diam sejenak, satu ucapan dikirim sebagai prompt.[/dim]\n")
+                "diam sejenak, satu ucapan dikirim sebagai prompt. Kamu "
+                "juga bisa menyela kapan saja saat jawabanmu "
+                "dibacakan.[/dim]\n")
             return
 
         if pilihan in ("tekan", "dikte", "ptt"):
@@ -6437,8 +6443,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         _p = voice_state.get("pendengar")
         mik = ""
         if _p is not None and _p.aktif:
-            # DUA keadaan yang sangat berbeda: "mendengarkan" (menunggu namaku)
-            # dan "merekam" (apa pun yang terucap sekarang jadi perintah).
+            # DUA keadaan yang sangat berbeda: "mendengarkan" (menunggu
+            # ucapan) dan "merekam" (ucapan sedang berjalan).
             mik = (f"{sep}<sesi>● merekam</sesi>" if _p.merekam
                    else f"{sep}<sesi>🎙 dengar</sesi>")
         layar = (f"{sep}<sesi>📹 layar</sesi>"
