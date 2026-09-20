@@ -69,7 +69,11 @@ def _get_bool(name: str, default: bool) -> bool:
 #  4. API OpenCode Zen (opencode/...) — GRATIS tanpa key (anonim) ke
 #     opencode.ai/zen/v1; key hanya opsional (big-pickle, *-free — models.py)
 #
-# Default: web/glm (browser). Pilih lewat /model; pilihan terakhir otomatis tersimpan.
+# Default: nvidia/nemotron (API). SELURUH model (web) sedang DITUNDA
+# (models._DITUNDA), jadi bawaan yang menunjuk ke sana berarti tiap sesi baru
+# dimulai pada model yang pengguna sendiri tak boleh memilihnya — dan
+# spec_for_id diam-diam memetakannya ke model lain. Pilih lewat /model;
+# pilihan terakhir otomatis tersimpan.
 # Konfigurasi NVIDIA API (opsional; hanya untuk model nvidia/*):
 NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
@@ -142,9 +146,9 @@ if not OPENCODE_API_KEY:
 NVIDIA_DEFAULT_MODEL: str = os.getenv(
     "NVIDIA_DEFAULT_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip()
 
-CHAT_MODEL: str = os.getenv("CHAT_MODEL", "web/glm").strip()
+CHAT_MODEL: str = os.getenv("CHAT_MODEL", "nvidia/nemotron").strip()
 if not CHAT_MODEL.startswith(("web/", "nvidia/", "openrouter/", "opencode/")):
-    CHAT_MODEL = "web/glm"
+    CHAT_MODEL = "nvidia/nemotron"
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -391,11 +395,16 @@ def has_api_key(provider: str = "") -> bool:
     if provider == "openrouter":
         return bool(OPENROUTER_API_KEY)
     if provider == "opencode":
-        # Model opencode/* GRATIS dan jalan TANPA key (akses anonim per-IP —
-        # TERUKUR 2026-08-29). has_api_key dipakai pemanggilnya sebagai gerbang
-        # "bolehkah model provider ini dipakai", jadi jawabannya selalu True;
-        # OPENCODE_API_KEY murni opsional di sisi klien (llm.get_client).
-        return True
+        # Dulu SELALU True: akses anonim per-IP ke opencode.ai/zen/v1 masih
+        # terbuka (TERUKUR 2026-08-29), jadi key murni opsional dan gerbang ini
+        # tak pernah menolak. TERUKUR ULANG 2026-09-21: permintaan TANPA header
+        # Authorization — persis yang dikirim llm._headers_tanpa_auth — kini
+        # dibalas HTTP 403 "OpenCode's free tier can only be used from within
+        # OpenCode". Karena itu jawabannya SEKARANG jujur: tanpa key, provider
+        # ini tidak bisa dipakai. Akibatnya models._pastikan_aktif menolak
+        # model opencode/* SAAT DIPILIH dengan menyebut OPENCODE_API_KEY, bukan
+        # membiarkannya lolos lalu gagal 403 di tengah giliran pengguna.
+        return bool(OPENCODE_API_KEY)
     if provider == "nvidia":
         return bool(NVIDIA_API_KEY)
     return bool(NVIDIA_API_KEY) or bool(OPENROUTER_API_KEY) or bool(OPENCODE_API_KEY)

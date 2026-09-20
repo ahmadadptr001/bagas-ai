@@ -404,8 +404,16 @@ def get_client(provider: str = ""):
             # OpenCode Zen: gateway OpenAI-compatible. Tanpa header atribusi
             # ( itu kebutuhan khusus OpenRouter) — Zen tak memintanya.
             #
-            # TANPA require_api_key: model gratisnya jalan secara ANONIM
+            # TANPA require_api_key: dulu model gratisnya jalan secara ANONIM
             # (TERUKUR 2026-08-29: request tanpa Authorization dibalas 200).
+            # TERUKUR ULANG 2026-09-21: jalur itu SUDAH DITUTUP penyedianya —
+            # request tanpa Authorization kini dibalas HTTP 403 FreeTierError
+            # ("OpenCode's free tier can only be used from within OpenCode").
+            # Mekanisme dummy key + _headers_tanpa_auth di bawah TETAP benar
+            # dan tetap dipakai bila OPENCODE_API_KEY kosong; yang berubah cuma
+            # gerbangnya: config.has_api_key("opencode") sekarang menuntut key,
+            # jadi keadaan itu tak lagi bisa dicapai lewat /model.
+            #
             # SDK openai memang mewajibkan api_key non-kosong saat klien
             # dibuat, makanya dipakai dummy lalu header Authorization-nya
             # dibuang per-request lewat _headers_tanpa_auth() — dummy key tak

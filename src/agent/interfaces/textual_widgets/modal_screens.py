@@ -16,6 +16,7 @@ from textual.widget import Widget
 from textual.containers import Vertical, Horizontal
 from rich.text import Text
 
+from ...models import _TANDA_DITUNDA
 from ...ui import tema
 
 # Penanda baris PEMISAH kategori di SelectScreen.options: opsi berbentuk
@@ -121,6 +122,13 @@ class SelectScreen(ModalScreen[str]):
                 t.append(opt[1], style="bold")
                 t.append("  " + "─" * 34, style="dim")
                 return t
+            if tampil.startswith(_TANDA_DITUNDA):
+                # Model yang tak boleh dipilih: nama tetap terbaca, tapi redup
+                # + alasan singkatnya, supaya pengguna tahu ini SENGAJA mati
+                # dan bukan katalog yang rusak.
+                t = Text(tampil[len(_TANDA_DITUNDA):], style="dim")
+                t.append("  ⏸ ditunda sementara", style="dim italic")
+                return t
             if tampil.endswith(" (rekomendasi)"):
                 base = tampil[:-len(" (rekomendasi)")]
                 t = Text(base + " ")
@@ -132,17 +140,24 @@ class SelectScreen(ModalScreen[str]):
     def _adalah_separator(self, opt) -> bool:
         return isinstance(opt, tuple) and opt[0] == _SEP
 
+    def _nonaktif(self, opt) -> bool:
+        """True bila opsi ini TIDAK boleh dipilih: baris pemisah kategori,
+        atau model yang sedang ditunda (ditandai models._TANDA_DITUNDA)."""
+        return self._adalah_separator(opt) or (
+            isinstance(opt, tuple) and opt[0].startswith(_TANDA_DITUNDA))
+
     def compose(self):
         with Vertical(id="select-container"):
             yield Static(self.title_text, id="select-title")
             if self.options:
                 opt_list = OptionList(id="select-options")
                 for opt in self.options:
-                    # Pemisah kategori DISABLED: tak bisa disorot/dipilih —
-                    # panah melewatinya, jadi navigasi tetap mulus.
+                    # Pemisah kategori & model yang ditunda DISABLED: tak bisa
+                    # disorot/dipilih — panah melewatinya, jadi navigasi tetap
+                    # mulus dan pilihan mati tak bisa dikonfirmasi.
                     opt_list.add_option(Option(
                         self._tampilan(opt),
-                        disabled=self._adalah_separator(opt)))
+                        disabled=self._nonaktif(opt)))
                 yield opt_list
             else:
                 yield Static("(no options)", id="select-empty")
@@ -157,10 +172,10 @@ class SelectScreen(ModalScreen[str]):
         # Tanpa ini ``highlighted`` bisa None: Enter ditangkap binding
         # priority di Screen lalu ``action_confirm`` pulang tanpa bunyi —
         # modal tampak "macet" dan tidak bisa dikonfirmasi. Sorot opsi
-        # pertama yang BUKAN pemisah (baris kategori disabled).
+        # pertama yang BISA dipilih (bukan pemisah / model yang ditunda).
         if opt_list.highlighted is None:
             for i, opt in enumerate(self.options):
-                if not self._adalah_separator(opt):
+                if not self._nonaktif(opt):
                     opt_list.highlighted = i
                     break
             else:

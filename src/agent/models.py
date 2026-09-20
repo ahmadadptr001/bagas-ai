@@ -119,6 +119,10 @@ class ModelSpec:
     effort_catatan: str = ""
     # Tampil berlabel "(rekomendasi)" di menu /model — penanda pilihan
     # utama bagas-ai, bukan janji kualitas: model tanpa label tetap sah.
+    # Kriterianya SATU dan harus terukur: model ini TERBUKTI cepat mulai
+    # menjawab (waktu ujinya tercatat di note masing-masing). Model yang
+    # pintar tapi lambat tetap tak berlabel — label ini soal kesigapan,
+    # bukan mutu, supaya pemakainya tahu apa yang ia dapat.
     rekomendasi: bool = False
 
     @property
@@ -185,22 +189,72 @@ class ModelSpec:
         return {"chat_template_kwargs": ctk}
 
 
-# MODEL YANG SEDANG DITUNDA — atas permintaan pengguna. Yang boleh dipakai
-# sekarang: GLM dan Qwen. Entri lain SENGAJA TIDAK DIHAPUS:
-# connector-nya utuh, ujinya utuh, profil login-nya utuh. Yang berubah cuma
-# satu — ia tak bisa dipilih. Menghidupkannya kembali = keluarkan aliasnya
+# MODEL YANG SEDANG DITUNDA — atas permintaan pengguna (2026-09-21).
+# Dua sebab, dan keduanya harus disebut supaya tak ada yang menebak-nebak:
+#   (1) SELURUH jalur browser dimatikan: tiap model (web) butuh jendela Chrome,
+#       login, dan detik-detik menunggu situsnya — sementara jalur API menjawab
+#       tanpa browser sama sekali.
+#   (2) SELURUH jalur OpenCode Zen dimatikan juga, karena strukturnya akan
+#       diubah besar-besaran.
+# Yang boleh dipakai sekarang: model (API) nvidia/* dan openrouter/* — asalkan
+# kunci penyedianya sudah terisi.
+#
+# Entri yang ditunda SENGAJA TIDAK DIHAPUS: connector-nya utuh, ujinya utuh,
+# profil login-nya utuh, dan /web tetap bisa mengurus profilnya. Yang berubah
+# cuma satu — ia tak bisa dipilih. Menghidupkannya kembali = keluarkan aliasnya
 # dari himpunan ini, tanpa menyentuh kode lain.
 #
 # Sengaja daftar ALIAS yang ditunda, bukan daftar yang aktif: menambah model
 # baru kelak tak boleh diam-diam ikut terkunci hanya karena lupa didaftarkan.
-_DITUNDA = {"dola-web"}
-# _DITUNDA = {"gemini-web", "dola-web", "kimi-web"}
+_DITUNDA = {
+    # (1) Seluruh jalur browser — atas permintaan pengguna (2026-09-21). Tiap
+    #     model (web) butuh jendela Chrome, login, dan detik-detik menunggu
+    #     situsnya, sementara jalur API menjawab tanpa browser sama sekali.
+    "chatgpt-web", "kimi-web", "gemini-web", "qwen-web", "glm-web", "dola-web",
+    # (2) Seluruh jalur OpenCode Zen — atas permintaan pengguna (2026-09-21)
+    #     juga, karena struktur jalur ini akan diubah besar-besaran. Ditunda
+    #     LEBIH DULU dari perubahannya supaya versi yang sedang dipakai tak
+    #     diam-diam berpindah perilaku di tengah pekerjaan itu.
+    #
+    #     Kebetulan yang membantu: penyedianya SENDIRI menutup akses anonim
+    #     jalur ini di hari yang sama (TERUKUR 2026-09-21: HTTP 403
+    #     FreeTierError), jadi tanpa key pun entri-entri ini sudah tak bisa
+    #     menjawab — lihat config.has_api_key("opencode") yang kini menuntut
+    #     key, dan catatan di blok entri opencode di bawah.
+    "big-pickle", "hy3-free", "ling-3.0-flash-fin-free", "mimo-v2.5-free",
+    "muse-spark-1.2-contributor-free", "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+}
+
+# Penanda tampilan untuk model yang ditunda di menu SelectScreen (UI Textual).
+# Opsi yang tampilannya berawalan ini dirender REDUP dan tak bisa disorot —
+# panah melewatinya, persis seperti model yang ditunda di menu /model versi
+# CLI. Konstanta ini tinggal di SINI, bukan di modul UI-nya, karena "model ini
+# ditunda" adalah fakta katalog; modul UI cuma merendernya.
+_TANDA_DITUNDA = "\x00DITUNDA"
 
 # Alias pendek -> spesifikasi. Urutan menentukan nomor pada /model.
 MODELS: dict[str, ModelSpec] = {
     # --- jalur OpenCode Zen (opencode.ai/zen/v1) — PALING ATAS ---------------
-    # Semua entri di bawah GRATIS dan jalan TANPA API key (akses anonim
-    # per-IP, TERUKUR 2026-08-29 — key dari opencode.ai/auth hanya opsional).
+    # TERUKUR 2026-09-21: akses anonimnya SUDAH DITUTUP penyedianya. Permintaan
+    # TANPA header Authorization — persis yang dikirim llm._headers_tanpa_auth
+    # selama ini — kini dibalas HTTP 403 "OpenCode's free tier can only be used
+    # from within OpenCode". Dengan header key palsu malah 401 AuthError, jadi
+    # tak ada lagi jalan masuk tanpa kredensial. Catatan "GRATIS tanpa API key"
+    # di tiap entri karena itu DIHAPUS: membiarkannya berarti pengguna memilih
+    # model ini lalu tertipu dua kali — sekali saat dipilih, sekali saat gagal.
+    #
+    # Entrinya SENGAJA TIDAK DIHAPUS dan TIDAK masuk _DITUNDA: yang berubah
+    # kebijakan PENYEDIANYA, bukan katalog ini. Isi OPENCODE_API_KEY (atau
+    # jalankan `opencode auth login`) dan seluruh entri ini langsung hidup lagi
+    # tanpa satu pun suntingan di sini. config.has_api_key("opencode") yang
+    # menjaga gerbangnya, jadi penolakannya terjadi SAAT DIPILIH — dengan nama
+    # env yang harus diisi — bukan 403 di tengah giliran.
+    #
+    # Label rekomendasi DICABUT dari semua entri di sini mengikuti aturan
+    # katalog: label itu menandai model yang TERUKUR cepat MENJAWAB, dan model
+    # yang tak bisa menjawab sama sekali jelas tidak memenuhinya.
+    #
     # Kebijakan reasoning tiap model BELUM diukur — jadi /effort sengaja tidak
     # ditawarkan. Flag CLI OpenCode `--variant` TIDAK dikirim mentah sebagai
     # field API; dokumentasinya menjelaskan variant sebagai pemetaan opsi
@@ -212,10 +266,10 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="big-pickle",
         multimodal=False,
-        note=("Via OpenCode Zen — GRATIS tanpa API key; model pilihan tim "
-              "opencode untuk agent koding"),
+        note=("Via OpenCode Zen — model pilihan tim opencode untuk agent "
+              "koding; butuh OPENCODE_API_KEY (akses anonim ditutup "
+              "penyedianya 2026-09-21)"),
         max_tokens=16384,
-        rekomendasi=True,
     ),
     "hy3-free": ModelSpec(
         id="opencode/hy3-free",
@@ -223,9 +277,8 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="hy3-free",
         multimodal=False,
-        note="Via OpenCode Zen — GRATIS tanpa API key",
+        note="Via OpenCode Zen — butuh OPENCODE_API_KEY",
         max_tokens=16384,
-        rekomendasi=True,
     ),
     "ling-3.0-flash-fin-free": ModelSpec(
         id="opencode/ling-3.0-flash-fin-free",
@@ -233,9 +286,8 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="ling-3.0-flash-fin-free",
         multimodal=False,
-        note="Via OpenCode Zen — GRATIS tanpa API key",
+        note="Via OpenCode Zen — butuh OPENCODE_API_KEY",
         max_tokens=16384,
-        rekomendasi=True,
     ),
     "mimo-v2.5-free": ModelSpec(
         id="opencode/mimo-v2.5-free",
@@ -243,9 +295,8 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="mimo-v2.5-free",
         multimodal=False,
-        note="Via OpenCode Zen — GRATIS tanpa API key",
+        note="Via OpenCode Zen — butuh OPENCODE_API_KEY",
         max_tokens=16384,
-        rekomendasi=True,
     ),
     "muse-spark-1.2-contributor-free": ModelSpec(
         id="opencode/muse-spark-1.2-contributor-free",
@@ -254,9 +305,9 @@ MODELS: dict[str, ModelSpec] = {
         api_model="muse-spark-1.2-contributor-free",
         multimodal=False,
         api_style="responses",  # TERUKUR: /chat/completions membalas error 500
-        note="Via OpenCode Zen — GRATIS tanpa API key (hanya endpoint /responses)",
+        note=("Via OpenCode Zen — butuh OPENCODE_API_KEY (hanya endpoint "
+              "/responses)"),
         max_tokens=16384,
-        rekomendasi=True,
     ),
     "nemotron-3-ultra-free": ModelSpec(
         id="opencode/nemotron-3-ultra-free",
@@ -264,9 +315,8 @@ MODELS: dict[str, ModelSpec] = {
         provider="opencode",
         api_model="nemotron-3-ultra-free",
         multimodal=False,
-        note="Via OpenCode Zen — GRATIS tanpa API key",
+        note="Via OpenCode Zen — butuh OPENCODE_API_KEY",
         max_tokens=16384,
-        rekomendasi=True,
     ),
     "nemotron-3.5-lightning-free": ModelSpec(
         id="opencode/nemotron-3.5-lightning-free",
@@ -277,11 +327,16 @@ MODELS: dict[str, ModelSpec] = {
         # Saat pengukuran awal (2026-08-29) upstream Zen untuk model ini masih
         # membalas 404 "Provider returned error" di /chat/completions — pasang
         # masuk tapi beri catatan jujur; penyedianya sendiri yang bermasalah.
-        note=("Via OpenCode Zen — GRATIS tanpa API key (upstream-nya kadang "
+        note=("Via OpenCode Zen — butuh OPENCODE_API_KEY (upstream-nya kadang "
               "404; bila gagal, pilih varian lain)"),
         max_tokens=16384,
     ),
 
+    # --- jalur browser (SEDANG DITUNDA semua — lihat _DITUNDA) ---------------
+    # Entrinya tetap di sini supaya connectornya tetap terdaftar & /web tetap
+    # bisa mengurus profil login-nya. Yang perlu diingat saat membacanya:
+    # semuanya masih TERDAFTAR tapi TAK BISA DIPILIH sampai aliasnya keluar
+    # dari _DITUNDA.
     "chatgpt-web": ModelSpec(
         id="web/chatgpt",
         label="ChatGPT (web)",
@@ -334,7 +389,8 @@ MODELS: dict[str, ModelSpec] = {
         api_model="nvidia/nemotron-3-ultra-550b-a55b",
         multimodal=False,  # endpoint teks; lampiran gambar tak dikirim
         note=("Via API NVIDIA — 550B, mode berpikir bisa dimatikan; "
-              "cepat mulai menjawab, cocok untuk kerja tool bertubi-tubi"),
+              "TERUKUR 2,3 dtk sampai jawaban utuh, cocok untuk kerja tool "
+              "bertubi-tubi"),
         reasoning_key="enable_thinking",
         # HANYA dua tingkat, dan itu memang seluruh yang model ini punya:
         # enable_thinking terbukti bekerja dua arah, sedangkan reasoning_effort
@@ -345,14 +401,20 @@ MODELS: dict[str, ModelSpec] = {
         effort_default="mendalam",  # bawaan server memang NYALA
         kirim_reasoning_effort=False,
         max_tokens=16384,
+        rekomendasi=True,
     ),
     "muse": ModelSpec(
         id="nvidia/muse",
         label="Muse Glimmer 30B (API)",
         api_model="meta/muse-glimmer-30b",
         multimodal=False,
-        note=("Via API NVIDIA — 30B, paling ringan & paling gesit; "
-              "mode berpikirnya selalu nyala dan tak bisa diatur"),
+        # Dulu tertulis "paling ringan & paling GESIT" — klaim itu TERBANTAH
+        # saat diukur 2026-09-21: muse butuh 26,7 dtk sampai jawaban utuh,
+        # sementara Nemotron Ultra 2,3 dtk dan GPT-OSS-20B 0,6 dtk. Yang benar
+        # cuma "paling ringan" (30B); banyak model di bawah justru lebih gesit,
+        # jadi entri ini sengaja TIDAK berlabel rekomendasi.
+        note=("Via API NVIDIA — 30B, paling ringan; mode berpikirnya selalu "
+              "nyala dan tak bisa diatur (TERUKUR 26,7 dtk, tak gesit)"),
         # Kosong SEMUA, sesuai pengukuran: tanpa extra_body pun reasoning tetap
         # keluar, dan ketiga kunci saklar diterima tanpa mengubah apa pun.
         reasoning_key="",
@@ -360,6 +422,73 @@ MODELS: dict[str, ModelSpec] = {
         max_tokens=8192,  # contoh resminya 8192, bukan 16384
         effort_catatan=("model ini tak punya saklar mode berpikir — nalarnya "
                         "selalu aktif dan tak ada tingkatan yang bisa dipilih"),
+    ),
+
+    # --- ditambahkan 2026-09-21, setelah mengukur ulang NVIDIA --------------
+    # Daftar /v1/models MENIPU: ia menjawab HTTP 200 dengan 82 nama, tapi saat
+    # tiap nama benar-benar dipanggil dengan key ini, 60+ di antaranya membalas
+    # HTTP 404 "Function '<uuid>': Not found for account" — TERDAFTAR bukan
+    # berarti MELAYANI. Empat entri berikut adalah yang benar-benar menjawab
+    # DAN cepat mulai. Yang pintar tapi lambat sengaja tak dimasukkan; angka di
+    # note adalah hasil uji satu-kata, dan ujinya bisa diulang kapan saja:
+    #     python tools/uji_nvidia_models.py
+    "gpt-oss": ModelSpec(
+        id="nvidia/gpt-oss",
+        label="GPT-OSS 20B (API)",
+        api_model="openai/gpt-oss-20b",
+        multimodal=False,
+        note=("Via API NVIDIA — 20B, TERUKUR 0,6 dtk: paling gesit dari semua "
+              "model di katalog ini"),
+        # Kosong SEMUA: saklar mode berpikirnya belum diukur untuk entri ini.
+        # Menebak nama kuncinya berarti mengirim parameter yang mungkin
+        # diabaikan diam-diam — persis yang dihindari seluruh berkas ini.
+        reasoning_key="",
+        effort_levels=(),
+        effort_catatan=("saklar mode berpikir model ini belum diukur — "
+                        "tak ada tingkatan yang bisa ditawarkan"),
+        max_tokens=16384,
+        rekomendasi=True,
+    ),
+    "nemotron-super": ModelSpec(
+        id="nvidia/nemotron-super",
+        label="Nemotron 3 Super 120B (API)",
+        api_model="nvidia/nemotron-3-super-120b-a12b",
+        multimodal=False,
+        note=("Via API NVIDIA — 120B, TERUKUR 1,5 dtk; yang paling besar di "
+              "antara yang gesit"),
+        reasoning_key="",
+        effort_levels=(),
+        effort_catatan=("saklar mode berpikir model ini belum diukur — "
+                        "tak ada tingkatan yang bisa ditawarkan"),
+        max_tokens=16384,
+        rekomendasi=True,
+    ),
+    "nemotron-lightning": ModelSpec(
+        id="nvidia/nemotron-lightning",
+        label="Nemotron 3.5 Lightning 30B (API)",
+        api_model="nvidia/nemotron-3.5-lightning-30b-a3b",
+        multimodal=False,
+        note=("Via API NVIDIA — 30B, TERUKUR 3,8 dtk; nalarnya keluar sebagai "
+              "teks biasa, jadi jawabannya perlu dibaca sampai tuntas"),
+        reasoning_key="",
+        effort_levels=(),
+        effort_catatan=("saklar mode berpikir model ini belum diukur — "
+                        "tak ada tingkatan yang bisa ditawarkan"),
+        max_tokens=16384,
+        rekomendasi=True,
+    ),
+    "nemotron-nano": ModelSpec(
+        id="nvidia/nemotron-nano",
+        label="Nemotron 3 Nano Omni 30B (API)",
+        api_model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        multimodal=False,
+        note=("Via API NVIDIA — 30B dengan penalaran nyala, TERUKUR 4,2 dtk"),
+        reasoning_key="",
+        effort_levels=(),
+        effort_catatan=("saklar mode berpikir model ini belum diukur — "
+                        "tak ada tingkatan yang bisa ditawarkan"),
+        max_tokens=16384,
+        rekomendasi=True,
     ),
     # Dihapus 2026-08-25: deepseek-v4-flash (nvidia/deepseek) — paling lambat
     # memulai dari semuanya (TERUKUR 106-169 dtk sampai kata pertama, 4 dari 8
@@ -399,9 +528,27 @@ MODELS = {k: (v if k not in _DITUNDA else
           for k, v in MODELS.items()}
 
 _ORDER = list(MODELS.keys())
-_AKTIF = [k for k in _ORDER if MODELS[k].aktif]
-if not _AKTIF:      # jaring pengaman: tak boleh ada keadaan "tak ada model"
-    _AKTIF = _ORDER
+# "Siap" berarti BENAR-BENAR bisa dipilih sekarang, bukan sekadar tak ditunda:
+# model (API) yang kunci penyedianya kosong sama tak bisanya dipakai, dan
+# models._pastikan_aktif akan menolaknya juga. Menyaringnya di sini membuat
+# turunan _SIAP — DEFAULT_ID dan daftar "yang bisa dipakai sekarang" pada pesan
+# penolakan — tak pernah menjanjikan model yang pasti ditolak.
+_SIAP = [
+    k for k in _ORDER
+    if MODELS[k].aktif
+    and (not MODELS[k].is_api or config.has_api_key(MODELS[k].provider))
+]
+# _AKTIF = daftar yang dipakai untuk MENYARANKAN sebuah nama (mis. contoh pada
+# /model, atau nama yang tinggal disalin pengguna). Bedanya dengan _SIAP hanya
+# pada keadaan darurat: bila belum satu pun kunci terisi, _SIAP kosong dan
+# daftar ini jatuh ke katalog TAK-DITUNDA supaya pesannya masih bisa menyebut
+# nama yang benar-benar ada di katalog.
+#
+# Jatuh ke katalog TAK-DITUNDA, bukan ke _ORDER: _ORDER dimulai dari entri
+# opencode/* yang kini ditunda, dan karena DEFAULT_ID diambil dari unsur
+# pertama daftar ini, memakai _ORDER berarti keadaan "belum ada key"
+# mendaratkan bagas-ai di model yang pengguna sendiri tak boleh memilih.
+_AKTIF = _SIAP or [k for k in _ORDER if MODELS[k].aktif] or _ORDER
 
 # Model bawaan bila tak ada preferensi tersimpan / preferensinya tak dikenal.
 # Diambil dari yang AKTIF: bawaan yang ditunda berarti bagas-ai mendarat di
@@ -416,6 +563,27 @@ _ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web
 _TIDAK_DIDUKUNG = {"opencode/hy3-free"}
 
 
+def _sebut_yang_bisa_dipakai() -> str:
+    """Kalimat lanjutan yang menyebut model mana yang BENAR-BENAR bisa dipakai.
+
+    Satu kalimat untuk EMPAT tempat (tiga penolakan + satu 'model tak dikenal'),
+    dan itu memang alasannya: dulu tiap tempat menyusun daftarnya sendiri dari
+    _AKTIF, jadi begitu keadaan katalog berubah — seluruh model (web) ditunda,
+    lalu belum ada key sama sekali — keempatnya ikut berbohong bersama-sama,
+    masing-masing dengan caranya. Satu fungsi berarti satu kebenaran.
+
+    Dua bentuk, sesuai apa yang benar-benar ada:
+      * ada yang siap -> sebutkan namanya (pengguna tinggal menyalin);
+      * belum ada key -> sebut SEBABNYA, sebab tak ada satu nama pun yang jujur
+        bisa disebut "bisa dipakai sekarang"."""
+    if _SIAP:
+        return ("Yang bisa dipakai sekarang: "
+                + ", ".join(MODELS[k].label for k in _SIAP) + ".")
+    return ("Belum ada satu pun model yang bisa dipakai: NVIDIA_API_KEY & "
+            "OPENROUTER_API_KEY masih kosong (jalur (web) sedang ditunda). "
+            "Isi salah satunya lewat `bagas-ai login`.")
+
+
 def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
     """Tolak model yang belum boleh dipakai — dengan alasan, bukan sekadar 'gagal'.
 
@@ -425,35 +593,61 @@ def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
     Penolakannya di SINI, satu pintu untuk semua jalan masuk (/model, argumen
     baris perintah, tombol Telegram, preferensi tersimpan): kalau tiap
     antarmuka menyaring sendiri-sendiri, cepat atau lambat ada satu yang lupa."""
+    # DITUNDA diperiksa LEBIH DULU, dan urutannya penting. Menaruh pemeriksaan
+    # kunci di depan berarti model opencode/* — yang kini ditunda — dijawab
+    # "butuh OPENCODE_API_KEY": pengguna lalu pergi mencari kunci yang, setelah
+    # didapat, tetap tak membuka apa pun karena sebabnya bukan itu. Sebab yang
+    # lebih menentukan disebut lebih dulu.
+    if not spec.aktif:
+        raise ValueError(
+            f"Model {spec.label} sedang DITUNDA. "
+            + _sebut_yang_bisa_dipakai()
+            + " Entrinya tak dihapus, jadi ini bisa dibuka lagi kapan saja."
+        )
     if spec.is_api and not config.has_api_key(spec.provider):
         env_name = config.api_key_env(spec.provider)
         # Diperiksa DI SINI, bukan saat giliran berjalan: kalau tidak, pengguna
         # baru tahu key-nya kosong sesudah mengirim pesan panjang, dan pesan itu
         # sudah masuk riwayat sebagai giliran gagal.
+        #
+        # Saran penutupnya TIDAK LAGI menyuruh pindah ke model (web): seluruh
+        # model (web) sedang ditunda (_DITUNDA), jadi mengarahkan ke sana cuma
+        # membuat pengguna menabrak penolakan berikutnya.
         if spec.provider == "openrouter":
             raise ValueError(
                 f"Model {spec.label} lewat API OpenRouter dan butuh "
                 f"{env_name}, yang belum diisi. Isi di {config.ENV_FILE} "
-                f"(baris: {env_name}=sk-or-...), ambil key di "
-                "https://openrouter.ai/keys — atau pilih model (web) mana "
-                "pun, yang tak butuh key sama sekali."
+                f"(baris: {env_name}=sk-or-...); ambil key di "
+                "https://openrouter.ai/keys."
             )
-        # Catatan: model opencode/* TAK PERLU melewati pemeriksaan ini —
-        # model gratisnya jalan anonim tanpa key (config.has_api_key selalu
-        # True untuk "opencode"), jadi tak ada cabang penolakannya di sini.
+        if spec.provider == "opencode":
+            # Cabang ini baru TERJANGKAU sejak 2026-09-21: sebelumnya akses
+            # anonimnya masih terbuka sehingga has_api_key("opencode") selalu
+            # True dan tak ada yang pernah sampai ke sini. Penyedianya menutup
+            # akses itu (HTTP 403 FreeTierError), jadi key sungguhan kini
+            # satu-satunya jalan masuk — dan gerbangnya dipindah ke ATAS, ke
+            # momen memilih model, bukan dibiarkan meledak di tengah giliran.
+            raise ValueError(
+                f"Model {spec.label} lewat API OpenCode Zen dan butuh "
+                f"{env_name}, yang belum diisi. Akses tanpa key jalur ini "
+                "SUDAH DITUTUP penyedianya (TERUKUR 2026-09-21: HTTP 403 "
+                "FreeTierError), jadi model ini tak bisa dipakai tanpa key. "
+                f"Isi di {config.ENV_FILE} (baris: {env_name}=...); ambil key "
+                "di https://opencode.ai/auth, atau jalankan `opencode auth "
+                "login` — berkasnya dibaca otomatis oleh bagas-ai."
+            )
         raise ValueError(
             f"Model {spec.label} lewat API NVIDIA dan butuh {env_name}, "
             f"yang belum diisi. Isi di {config.ENV_FILE} "
-            f"(baris: {env_name}=nvapi-...), key gratis di "
-            "https://build.nvidia.com — atau pilih model (web) mana pun, "
-            "yang tak butuh key sama sekali."
+            f"(baris: {env_name}=nvapi-...); key gratis di "
+            "https://build.nvidia.com."
         )
     if spec.aktif:
         return spec
     raise ValueError(
-        f"Model {spec.label} sedang DITUNDA — untuk sementara bagas-ai hanya "
-        "memakai " + ", ".join(MODELS[k].label for k in _AKTIF) + ". "
-        "Connector-nya tak dihapus, jadi ini bisa dibuka lagi kapan saja."
+        f"Model {spec.label} sedang DITUNDA. "
+        + _sebut_yang_bisa_dipakai()
+        + " Connector-nya tak dihapus, jadi ini bisa dibuka lagi kapan saja."
     )
 
 
@@ -485,11 +679,23 @@ def cari(name: str) -> ModelSpec:
     # bebas memakai model mana pun dari katalog NVIDIA. Kini tak ada katalog:
     # menerima ID sembarangan hanya akan membuat giliran gagal saat dijalankan,
     # jadi lebih baik ditolak di sini dengan daftar yang jelas.
-    raise ValueError(
-        f"Model '{name}' tidak dikenal. Yang tersedia: "
-        + ", ".join(_ORDER)
-        + ". Ketik /model untuk memilih."
-    )
+    #
+    # Daftarnya diambil dari _SIAP, BUKAN _ORDER: menyebut ketiga belas entri
+    # yang ditunda berarti menawarkan tiga belas nama yang pasti ditolak
+    # langkah berikutnya — pengguna mengetiknya, lalu dapat penolakan yang
+    # seharusnya bisa ia hindari sejak awal. Yang ditunda tetap disebut, tapi
+    # sebagai keterangan, bukan sebagai pilihan.
+    #
+    # _SIAP yang kosong (belum ada satu pun key) diperlakukan sebagai cabang
+    # tersendiri: di keadaan itulah tak ada nama yang jujur bisa disebut
+    # "bisa dipakai sekarang", jadi yang disebut justru sebabnya.
+    pesan = (f"Model '{name}' tidak dikenal. " + _sebut_yang_bisa_dipakai()
+             + " Ketik /model untuk melihat katalog.")
+    _tunda = [MODELS[k].label for k in _ORDER if not MODELS[k].aktif]
+    if _tunda:
+        pesan += (" (Ada juga yang ditunda dan belum bisa dipakai: "
+                  + ", ".join(_tunda) + ".)")
+    raise ValueError(pesan)
 
 
 def resolve(name: str) -> ModelSpec:
@@ -499,10 +705,14 @@ def resolve(name: str) -> ModelSpec:
     dijawab "tidak dikenal", yang akan membuat pengguna mengira model itu
     hilang lalu mencari-cari nama yang sebenarnya masih ada."""
     spec = cari(name)
-    if spec.id in _TIDAK_DIDUKUNG:
+    # Pesan khusus hy3-free hanya berlaku SELAMA modelnya masih boleh dipilih.
+    # Sejak jalur opencode ditunda, model ini ditolak lewat _pastikan_aktif
+    # seperti saudara-saudaranya; menyebut big-pickle/muse-spark sebagai
+    # gantinya justru menunjuk dua model yang ikut ditunda.
+    if spec.id in _TIDAK_DIDUKUNG and spec.aktif:
         raise ValueError(
             "Model Hy3 Free sedang tidak didukung OpenCode (401 ModelError). "
-            "Pilih big-pickle atau muse-spark-1.2-contributor-free."
+            + _sebut_yang_bisa_dipakai()
         )
     return _pastikan_aktif(spec)
 
@@ -519,7 +729,11 @@ def spec_for_id(model_id: str) -> ModelSpec:
     tak boleh dipilih, dan tiap /model justru menolak mengembalikannya.
     """
     if model_id in _TIDAK_DIDUKUNG:
-        return MODELS["big-pickle"]
+        # Dulu di sini tertulis MODELS["big-pickle"] secara HARFIAH. Itu jadi
+        # jebakan begitu jalur opencode ditunda: pemetaannya mendarat di model
+        # yang tak boleh dipilih, dan tiap kali dijalankan peringatan yang sama
+        # muncul lagi. Bawaannya diambil dari _AKTIF, seperti cabang di bawah.
+        return MODELS[_AKTIF[0]]
     for spec in MODELS.values():
         if spec.id == model_id and spec.aktif:
             return spec
@@ -600,8 +814,13 @@ def pilihan_model_grup() -> list[tuple[str, list[tuple[str, str]]]]:
         else:
             items = [key]
         label_bebas = " (rekomendasi)" if spec.rekomendasi else ""
+        # Model yang ditunda TETAP ditampilkan — dengan penanda yang membuat
+        # SelectScreen merendernya redup & melewatinya. Menyembunyikannya akan
+        # membuat pengguna mengira connectornya sudah dihapus, padahal ia utuh
+        # dan cuma sedang tak boleh dipilih.
+        awalan = _TANDA_DITUNDA if spec.ditunda else ""
         grup.setdefault(kategori_model(spec), []).extend(
-            (it + label_bebas, it) for it in items)
+            (awalan + it + label_bebas, it) for it in items)
     return list(grup.items())
 
 
@@ -664,7 +883,15 @@ def catalog() -> list[tuple[int, str, ModelSpec]]:
 def catalog_aktif() -> list[tuple[int, str, ModelSpec]]:
     """Hanya model yang BOLEH dipilih. Dipakai jalur yang memilih SENDIRI
     (mis. tawaran pindah model saat kuota habis) — di situ entri yang ditunda
-    bukan cuma tak terpilih, tapi tak boleh ditawarkan sama sekali."""
+    bukan cuma tak terpilih, tapi tak boleh ditawarkan sama sekali.
+
+    Saringannya `spec.aktif` = "tak ditunda", BUKAN _SIAP = "kuncinya ada".
+    Bedanya penting dan disengaja: yang memanggil fungsi ini menawarkan pilihan
+    kepada pengguna, bukan menjanjikan giliran yang langsung jalan. Model yang
+    kuncinya belum diisi tetap SAH ditawarkan — memilihnya memunculkan
+    keterangan kunci mana yang kurang, dan itu justru cara pengguna tahu apa
+    yang perlu diisi. Menyaringnya di sini akan menyembunyikan fitur yang sudah
+    terpasang hanya karena env-nya belum lengkap."""
     return [(i, key, spec) for i, key, spec in catalog() if spec.aktif]
 
 
@@ -684,6 +911,11 @@ def list_text(current_id: str | None = None) -> str:
     for i, key in enumerate(_ORDER, start=1):
         spec = MODELS[key]
         tag = f"  [{spec.note}]" if spec.note else ""
+        # Penanda rekomendasi ditulis di SINI juga, bukan hanya di menu
+        # berkelompok versi Textual: /model adalah jalan yang paling sering
+        # dipakai, dan label yang cuma muncul di satu dari dua tampilan membuat
+        # "mana yang disarankan" bergantung pada antarmuka mana yang dibuka.
+        rek = "  (rekomendasi)" if spec.rekomendasi else ""
         mark = "  <- aktif" if current_id and spec.id == current_id else ""
         if spec.ditunda:
             mark = "  (ditunda — belum bisa dipilih)"
@@ -692,7 +924,7 @@ def list_text(current_id: str | None = None) -> str:
             # ini ada dan apa syaratnya. Menyembunyikannya membuat fitur yang
             # sudah terpasang terlihat tak pernah ada.
             mark = f"  (butuh {config.api_key_env(spec.provider)})"
-        lines.append(f"  {i:>2}. {key:12s} {spec.label}{tag}{mark}")
+        lines.append(f"  {i:>2}. {key:12s} {spec.label}{rek}{tag}{mark}")
     contoh = _AKTIF[0]
     lines.append(f"Pilih: /model <nama|nomor>   contoh: /model {contoh}")
     return "\n".join(lines)
