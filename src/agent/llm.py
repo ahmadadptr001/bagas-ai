@@ -102,16 +102,19 @@ _TRANSIENT_KEYWORDS = (
     "timeout", "timed out", "connection", "throttl", "429", "server error",
     "bad gateway", "gateway timeout", "worker", "quota", "busy",
     # "Provider returned error" sengaja tidak dianggap transient. Core mencoba
-    # payload aman (tanpa extra/media/schema tool), tetapi TIDAK memangkas
-    # riwayat kecuali errornya benar-benar menyebut konteks/ukuran.
+    # payload yang lebih ringan (tanpa extra/media/schema tool), tetapi TIDAK
+    # menyentuh riwayat — riwayat tak pernah dipangkas otomatis lagi.
 )
 # Kode status FATAL (percuma diulang): permintaan salah / auth / model tak ada.
 # Selain ini, 5xx dianggap sementara.
 _FATAL_STATUS = {400, 401, 403, 404, 405, 422}
 
-# Kata kunci pada pesan HTTP 400 yang berarti RIWAYAT MELEWATI JENDELA
-# KONTEKS model — bukan permintaan salah. Dibedakan supaya core bisa BERTINDAK
-# (pangkas riwayat lalu ulangi) alih-alih melaporkan kegagalan misterius.
+# Kata kunci pada pesan HTTP 400 yang berarti permintaannya MELEWATI JENDELA
+# KONTEKS model — bukan permintaan salah. Dibedakan supaya core bisa
+# MENJELASKANNYA (beserta jalan keluar /compact) alih-alih melaporkan
+# kegagalan misterius. Sejak 2026-09-22 kata kunci ini TIDAK memicu pemangkasan
+# riwayat: daftarnya sengaja lebar ("request too large" juga muncul saat
+# BODY-nya kebesaran), jadi ia terlalu lemah untuk dipakai membuang pekerjaan.
 _KATA_KONTEKS_PENUH = (
     "context length", "context window", "maximum context", "context_limit",
     "too many tokens", "token limit", "exceeds the maximum",
@@ -153,10 +156,11 @@ def _quota_error(exc: Exception) -> ProviderQuotaError:
 class KonteksPenuh(Exception):
     """Permintaan ditolak karena riwayat melebihi jendela konteks model.
 
-    FATAL untuk retry biasa (mengulang payload yang sama pasti ditolak lagi)
-    — tapi SEMBUH oleh core: riwayat dipangkas lalu giliran dilanjutkan.
-    Dibedakan dari BadRequestError mentah supaya pesan ke pengguna bukan
-    sekadar "400 Bad Request" tanpa jalan keluar."""
+    FATAL untuk retry biasa (mengulang payload yang sama pasti ditolak lagi).
+    Core menanganinya dengan MELAPORKAN apa adanya + jalan keluar milik
+    pengguna (`/compact` lalu `/new` + `/send-compact`) — bukan lagi dengan
+    memangkas riwayat diam-diam. Dibedakan dari BadRequestError mentah supaya
+    pesan ke pengguna bukan sekadar "400 Bad Request" tanpa jalan keluar."""
 
     def __init__(self, asli: str = "") -> None:
         super().__init__(asli or "riwayat melebihi jendela konteks model")
@@ -189,7 +193,7 @@ def _is_transient(exc: Exception) -> bool:
     """True bila error layak dicoba ulang (rate limit / throttle / gangguan)."""
     if isinstance(exc, (Cancelled, KonteksPenuh)):
         # KonteksPenuh: mengulang payload yang sama PASTI ditolak lagi —
-        # pemulihannya bukan retry, melainkan pangkas riwayat (di core).
+        # pemulihannya bukan retry, melainkan penjelasan + /compact (di core).
         return False
     if isinstance(exc, (EmptyResponseError, _StallTimeout)):
         return True

@@ -757,7 +757,7 @@ def _mime_vidio(path: str) -> str | None:
 
 
 def _potong_alasan(asli: str, maks: int = 90) -> str:
-    """Penyebab singkat 'konteks penuh' untuk satu baris notifikasi."""
+    """Penyebab singkat 'konteks penuh' untuk pesan ke pengguna."""
     teks = " ".join((asli or "").split())
     # Buang prefiks khas openrouter/openai yang cuma menambah kebisingan.
     for awalan in ("Error code: 400 - ", "Bad Request: ",
@@ -770,32 +770,10 @@ def _potong_alasan(asli: str, maks: int = 90) -> str:
 
 
 # Pesan 400/413 yang jelas-jelas BUKAN soal ukuran — naikkan apa adanya,
-# jangan dibuang waktu utk ladder pemangkasan yang pasti tak menolong.
+# jangan dibuang waktu utk tangga payload yang pasti tak menolong.
 _KATA_FATAL_400 = ("api key", "authentic", "unauthorized", "not found",
                    "permission", "invalid model", "does not exist",
                    "no endpoints found")
-
-
-def _layak_pulih(exc: Exception) -> bool:
-    """True hanya bila 400/413 benar-benar menunjukkan konteks terlalu besar.
-
-    Dulu SEMUA 400 dianggap konteks penuh. Akibatnya field tak dikenal, schema
-    tool yang ditolak, atau request invalid justru memangkas riwayat pengguna
-    dan berakhir dengan pesan menyesatkan "provider menolak permintaan".
-    Pemangkasan adalah tindakan destruktif, jadi sekarang wajib ada bukti.
-    """
-    o = llm._oa()
-    if not isinstance(exc, o.BadRequestError):
-        return False
-    status = getattr(exc, "status_code", None)
-    if status not in (400, 413):
-        return False
-    if status == 413:
-        return True
-    teks = (str(getattr(exc, "message", "") or "") + " "
-            + str(getattr(exc, "body", "") or "") + " " + str(exc)).lower()
-    return (not any(k in teks for k in _KATA_FATAL_400)
-            and llm._teks_menyebut_konteks_penuh(teks))
 
 
 def _permintaan_api_ditolak(exc: Exception) -> bool:
@@ -807,31 +785,6 @@ def _permintaan_api_ditolak(exc: Exception) -> bool:
     teks = (str(getattr(exc, "message", "") or "") + " "
             + str(getattr(exc, "body", "") or "") + " " + str(exc)).lower()
     return not any(k in teks for k in _KATA_FATAL_400)
-
-
-def _pastikan_tugas_aktif(memory: Memory, teks: str) -> bool:
-    """Pastikan permintaan pengguna yang SEDANG dikerjakan selamat dari
-    pemangkasan. Return True bila ia diselamatkan (disisipkan ulang).
-
-    potong_awal() menyimpan N entri terakhir — padahal dalam rantai tool
-    panjang, entri-entri itu adalah langkah-langkahnya, bukan permintaannya.
-    Tanpa jagaan ini model kehilangan OBJEKTIF di tengah kerja lalu menjawab
-    acak. Pencocokan memakai normalisasi spasi + 120 karakter pertama supaya
-    tetap kenal walau isi pesan panjang."""
-    awal = " ".join((teks or "").split())[:120]
-    if not awal:
-        return False
-    for m in memory.messages:
-        c = m.get("content")
-        if m.get("role") == "user" and isinstance(c, str) \
-                and awal in " ".join(c.split()):
-            return False                      # masih ada — tidak perlu apa-apa
-    memory.messages.insert(1, {
-        "role": "user",
-        "content": ("[SISTEM] Tugas yang SEDANG dikerjakan (riwayat awalnya "
-                    f"terpangkas agar muat konteks):\n{(teks or '')[:1500]}"),
-    })
-    return True
 
 
 # Batas ukuran media per request (terverifikasi: video 30 MB -> data-URL
@@ -1327,13 +1280,6 @@ class Agent:
         # berkas memory supaya model tak menyimpulkan bahwa percakapannya
         # memang dimulai dari situ.
         self._riwayat_terpotong = False
-        # Snapshot ingatan SEBELUM pemangkasan pemulih konteks: tanpa ini,
-        # /compact setelah pemulihan menghasilkan berkas ±3 KB kosongan —
-        # riwayat yang dipangkas hilang total dari bekal /send-compact.
-        self._snapshot_terakhir: list = []
-        # Pernah menjalankan tangga pemangkasan? Dipakai /compact untuk
-        # menjelaskan MENGAPA gilirannya sedikit.
-        self._pernah_pangkas = False
         # Sudah pernah memberi tahu bahwa percakapan ini melewati ambang?
         # Sekali per percakapan; kabar yang sama tiap giliran cuma berisik.
         self._kabar_panjang = False
@@ -1985,15 +1931,6 @@ class Agent:
                 "API intinya DISUNTIKKAN ke riwayat (ringkasan giliran + ekor "
                 "percakapan terakhir). Peta proyek & memorimu tak ikut "
                 "disuntik — keduanya memang otomatis ada di sesi mana pun.")
-            if getattr(self, "_pernah_pangkas", False):
-                catatan += ("\n\nCatatan: jumlah giliran kecil karena riwayat "
-                            "panjang perlu dipangkas otomatis agar muat konteks "
-                            "model.")
-                if self._snapshot_terakhir:
-                    catatan += (" Salinan lengkap SEBELUM pemangkasan: "
-                                + ", ".join(
-                                    p.name for p in self._snapshot_terakhir)
-                                + ".")
         return (
             f"Ingatan tersimpan di `{berkas[0].parent}`:\n"
             + "\n".join(f"  - {p.name}" for p in berkas) + "\n\n"
@@ -2132,27 +2069,6 @@ class Agent:
                    + "\n".join(f"  - {p.parent.name}/{p.name}" for p in berkas))
         return (f"Ingatan dipasang ke percakapan ({len(teks)} karakter "
                 f"disuntik: ringkasan + ekor terakhir):\n{rincian}")
-
-    def _pulih_konteks(self, pangkas_ke: int, tugas: str) -> int:
-        """Satu anak tangga pemulih konteks. Return jumlah entri tersisa.
-
-        SEBELUM pangkasan pertama, riwayat penuh DI-SNAPSHOT ke berkas memory
-        (jalur /compact) — pemangkasan itu destruktif, dan tanpa snapshot
-        pekerjaan yang diselamatkan dari provider justru hilang dari bekal
-        `/send-compact` (bug nyata: /compact pasca-pemulihan menghasilkan
-        berkas ±3 KB tanpa satu pun giliran)."""
-        # pangkas_ke sudah +1 saat dipanggil dari handler (anak tangga pertama
-        # = 1), jadi ambang snapshotnya <= 1 — bukan == 0.
-        if pangkas_ke <= 1 and not self._snapshot_terakhir:
-            try:
-                snap = self.simpan_memory()
-                if snap:
-                    self._snapshot_terakhir = list(snap)
-            except Exception:  # noqa: BLE001 - snapshot gagal tak boleh
-                pass           # menggagalkan penyelamatan giliran
-        sisa = self.memory.potong_awal(14 if pangkas_ke == 1 else 6)
-        _pastikan_tugas_aktif(self.memory, tugas)
-        return sisa
 
     def kirim_memory(self, path: Any = None, on_status: Any = None,
                      on_notice: Any = None) -> str:
@@ -2760,10 +2676,6 @@ class Agent:
                 n for n in tool_tambahan if n in tools.REGISTRY)
         guard = 0
         safety = max(self.max_iterations, 60)
-        # Pemulih konteks penuh: berapa kali riwayat dipangkas giliran ini.
-        # Dua tingkat (14 -> 6 entri) — sesudah itu memang tak ada lagi yang
-        # aman dibuang dan pengguna diarahkan ke /compact.
-        pangkas_ke = 0
         seen_tools: dict[str, str] = {}
         dup_hits = 0
         total_calls = 0
@@ -2781,19 +2693,11 @@ class Agent:
         media_sudah_dikabari = False
         # Pemulih request 400 GENERIK memakai pengurangan payload yang aman:
         # parameter provider -> media -> schema tool. Tidak satu pun langkah
-        # ini memangkas riwayat; pemangkasan hanya untuk konteks-penuh yang
-        # terbukti lewat status/pesan khusus.
+        # ini menyentuh riwayat — RIWAYAT TIDAK PERNAH DIPANGKAS OTOMATIS
+        # lagi (lihat handler KonteksPenuh di bawah).
         media_diblokir = False
         extra_diblokir = False
         tools_diblokir = False
-        # Permintaan pengguna giliran ini — pegang TEKS-nya sejak awal:
-        # bila KonteksPenuh memaksa pemangkasan dan ia tergesang keluar,
-        # _pastikan_tugas_aktif menyisipkannya kembali.
-        tugas_aktif = ""
-        for m in reversed(self.memory.messages):
-            if m.get("role") == "user" and isinstance(m.get("content"), str):
-                tugas_aktif = m["content"]
-                break
 
         while True:
             guard += 1
@@ -2937,8 +2841,7 @@ class Agent:
                 # Ini menyelamatkan provider yang menolak extra_body/schema
                 # tanpa mengubah error request menjadi kehilangan konteks.
                 generik = (_permintaan_api_ditolak(exc)
-                           and not isinstance(exc, llm.KonteksPenuh)
-                           and not _layak_pulih(exc))
+                           and not isinstance(exc, llm.KonteksPenuh))
                 if generik:
                     if extra and not extra_diblokir:
                         extra_diblokir = True
@@ -2965,42 +2868,49 @@ class Agent:
                         continue
                     raise
 
-                # URUTAN ADALAH NYAWA: KonteksPenuh wajib dikenali sebelum
-                # error umum, baru riwayat boleh dipangkas.
-                if isinstance(exc, llm.KonteksPenuh):
-                    penyebab = "konteks model penuh"
-                elif _layak_pulih(exc):
-                    penyebab = "payload/konteks model terlalu besar"
-                else:
+                # KONTEKS PENUH TIDAK LAGI MEMANGKAS RIWAYAT (2026-09-22).
+                # Dulu di titik ini ada tangga pemulih otomatis: 400/413 yang
+                # teksnya menyebut "too large"/"input length" diperlakukan
+                # sebagai bukti konteks penuh -> memory.potong_awal(14, lalu 6)
+                # -> permintaan diulang, dan pengguna cuma melihat kabar
+                # "riwayat dipangkas (sisa N entri)". Dibuang karena dua hal:
+                #  1. Buktinya lemah. "request/payload too large" sama-sama
+                #     muncul saat BODY-nya yang kebesaran (lampiran base64,
+                #     hasil tool raksasa) atau saat penyedia membungkus kegagalan
+                #     lain sebagai error ukuran — bukan karena riwayatnya
+                #     panjang. Riwayat pengguna lalu dibuang untuk sebab yang
+                #     tak ada hubungannya dengannya.
+                #  2. Model yang butuh waktu lama menjawab tampak "tak
+                #     merespons", dan hukumannya justru kehilangan konteks:
+                #     pekerjaan yang sedang berjalan lenyap di tengah giliran.
+                # Pemangkasan itu destruktif dan tak bisa dibatalkan, jadi ia
+                # bukan sesuatu yang pantas dipicu tebakan. Yang tersisa hanya
+                # pengurangan payload yang TIDAK menghapus apa pun — media
+                # base64 bisa dibangun ulang dari riwayatnya — lalu pengguna
+                # diberi tahu apa adanya beserta jalan keluarnya.
+                if not isinstance(exc, llm.KonteksPenuh):
                     raise          # bukan keluarga ini: biarkan naik seperti biasa
 
-                self._pernah_pangkas = True
-                # Anak tangga 0: media base64 sering penyebab utamanya —
-                # lepas dulu (TANPA menghitung pemangkasan riwayat).
                 if any(v for v in media_cache.values()) and not media_diblokir:
                     media_diblokir = True
                     if on_notice:
-                        on_notice(f"{penyebab} — dicoba ulang TANPA lampiran "
-                                  "gambar/video")
+                        on_notice("konteks model penuh — dicoba ulang TANPA "
+                                  "lampiran gambar/video (riwayat tetap utuh)")
                     continue
-                pangkas_ke += 1
-                sisa = self._pulih_konteks(pangkas_ke, tugas_aktif)
-                if sisa <= 2 or pangkas_ke > 2:
-                    final = (
-                        f"{penyebab.capitalize()} dan tetap gagal sesudah "
-                        "media & riwayat lama dilepas. Jalankan `/compact` "
-                        "untuk menyimpan kerja, lalu `/new` + `/send-compact` "
-                        "untuk melanjutkan di percakapan bersih.")
-                    self.memory.add_assistant_text(final)
-                    self._persist()
-                    return final
-                if on_notice:
-                    on_notice(
-                        f"{penyebab} ({_potong_alasan(
-                            getattr(exc, 'asli', '') or str(exc))}) — riwayat "
-                        f"dipangkas (sisa {sisa} entri), permintaanmu "
-                        "diulangi otomatis")
-                continue
+                final = (
+                    "Konteks model untuk percakapan ini sudah penuh, dan "
+                    "permintaannya tak bisa kuteruskan apa adanya.\n\n"
+                    "Riwayatnya SENGAJA tidak kupangkas otomatis: pemangkasan "
+                    "membuang pekerjaan yang sedang berjalan dan tak bisa "
+                    "dibatalkan. Kalau percakapan ini memang sudah sesak, "
+                    "jalankan `/compact` untuk menyimpan kelanjutannya, lalu "
+                    "`/new` + `/send-compact` untuk meneruskannya di "
+                    "percakapan bersih.\n\n"
+                    "Kata penyedianya: "
+                    + _potong_alasan(getattr(exc, "asli", "") or str(exc)))
+                self.memory.add_assistant_text(final)
+                self._persist()
+                return final
 
             # Media yang DILEWATI diumumkan SEKALI (putaran pertama yang
             # memintanya) — tanpa ini pengguna mengira fotonya terkirim.

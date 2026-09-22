@@ -86,7 +86,6 @@ def cek_extra_dilepas_tanpa_pangkas() -> None:
     assert hasil == "jawaban pulih"
     assert extra == [{"parameter_uji": "medium"}, None]
     assert any("parameter API standar" in n for n in notice)
-    assert agent._pernah_pangkas is False
     assert any(m.get("content") == "uji parameter" for m in agent.memory.messages)
     print("  HTTP 400 field asing -> retry tanpa extra, riwayat utuh: OK")
 
@@ -113,8 +112,48 @@ def cek_media_benar_benar_dilepas() -> None:
         hasil = agent.run("lihat", attachments=[str(gambar)])
     assert hasil == "jawaban tanpa media"
     assert bentuk == [True, False], bentuk
-    assert agent._pernah_pangkas is False
+    # Penanda [LAMPIR-MEDIA] memang tetap hidup di Memory (konversinya
+    # per-request) — yang dilepas hanya data-URL-nya di payload kedua.
+    assert any(isinstance(m.get("content"), str)
+               and m["content"].startswith("lihat")
+               for m in agent.memory.messages)
     print("  fallback media 400 benar-benar menghapus data-URL, bukan riwayat: OK")
+
+
+def cek_konteks_penuh_tidak_memangkas() -> None:
+    """Konteks penuh DIJELASKAN, bukan dibayar dengan riwayat (2026-09-22).
+
+    Dulu satu 400 yang teksnya menyebut "too large"/"input length" sudah cukup
+    untuk memicu memory.potong_awal(): riwayat pengguna dibuang, giliran
+    diulang, dan sebab sebenarnya tak pernah terlihat. Kata kunci itu terlalu
+    lemah sebagai bukti (payload kebesaran karena lampiran pun menyebutnya),
+    dan akibatnya harus ditanggung pekerjaan yang sedang berjalan. Sekarang
+    giliran berhenti dengan penjelasan + jalan keluar, riwayatnya utuh.
+    """
+    spec = models.ModelSpec(
+        id="uji/penuh", label="Provider Uji", provider="nvidia",
+        api_model="uji", multimodal=False,
+    )
+    agent = agen_uji(spec)
+    agent.memory.add_user("pekerjaan lama yang harus selamat")
+    percobaan = 0
+
+    def stream(_messages, **_kwargs):
+        nonlocal percobaan
+        percobaan += 1
+        raise llm.KonteksPenuh(
+            "Error code: 400 - This model's maximum context length is "
+            "16384 tokens, however you requested 20000 tokens")
+
+    with patch("agent.core.llm.stream_completion", side_effect=stream):
+        hasil = agent.run("lanjutkan tugas")
+    assert percobaan == 1, "konteks penuh tak perlu diulang"
+    assert "/compact" in hasil and "/new" in hasil
+    isi = [m.get("content") for m in agent.memory.messages
+           if isinstance(m.get("content"), str)]
+    assert "pekerjaan lama yang harus selamat" in isi, isi
+    assert "lanjutkan tugas" in isi, isi
+    print("  konteks penuh: dijelaskan & riwayat utuh, tanpa pemangkasan: OK")
 
 
 def cek_error_fatal_tidak_diulang() -> None:
@@ -137,8 +176,7 @@ def cek_error_fatal_tidak_diulang() -> None:
     except openai.BadRequestError:
         pass
     assert jumlah == 1
-    assert agent._pernah_pangkas is False
-    print("  auth/model fatal tidak diulang dan tidak memangkas riwayat: OK")
+    print("  auth/model fatal tidak diulang dan riwayat tak disentuh: OK")
 
 
 def cek_diff_ui_tidak_masuk_payload() -> None:
@@ -163,6 +201,7 @@ def main() -> None:
     cek_kuota_gratis_gagal_cepat()
     cek_extra_dilepas_tanpa_pangkas()
     cek_media_benar_benar_dilepas()
+    cek_konteks_penuh_tidak_memangkas()
     cek_error_fatal_tidak_diulang()
     cek_diff_ui_tidak_masuk_payload()
     print("OK - error provider diklasifikasikan dan dipulihkan tanpa salah pangkas")
