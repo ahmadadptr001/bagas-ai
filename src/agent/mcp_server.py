@@ -327,13 +327,9 @@ def _peta_sasaran() -> dict[str, Any]:
     return dict(_KEADAAN.sasaran)
 
 
-# --- main: pasang semuanya ke FastMCP -------------------------------------------
-def main() -> None:
-    """Jalankan server MCP (stdio). Import mcp dilakukan di sini supaya paket
-    bagas-ai tetap jalan tanpa SDK MCP terpasang."""
-    # API SDK MCP berubah besar di v2 (FastMCP -> MCPServer). Dicoba dua-duanya
-    # supaya kode ini jalan di mcp 1.x maupun 2.x — keduanya memakai dekorator
-    # .tool()/.resource() dengan bentuk yang sama.
+# --- bangun server MCP (dipakai oleh CLI `mcp run` DAN main()) ---------------
+def _buat_server():
+    """Bangun instance FastMCP — dipanggil saat import (untuk CLI) dan main()."""
     try:
         from mcp.server.fastmcp import FastMCP as _Server  # mcp 1.x
     except ImportError:
@@ -369,6 +365,16 @@ def main() -> None:
     mcp.resource("peta://proyek")(_peta_proyek)
     mcp.resource("peta://sasaran")(_peta_sasaran)
 
+    return mcp
+
+
+# Instance global agar `mcp run src/agent/mcp_server.py` menemukannya
+mcp = _buat_server()
+
+
+def main() -> None:
+    """Jalankan server MCP (stdio). Import mcp dilakukan di sini supaya paket
+    bagas-ai tetap jalan tanpa SDK MCP terpasang."""
     mcp.run(transport="stdio")
 
 
