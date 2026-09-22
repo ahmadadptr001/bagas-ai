@@ -146,7 +146,7 @@ Screen {
 
 /* Panel-panel bawah diberi margin-top: teks jawaban/prompt di atasnya
    tidak menempel rapat ke box thinking / loading / antrean. */
-#plan, #image-preview, #thinking-block, #streaming-preview {
+#plan, #image-preview, #thinking-block {
     width: 100%;
     height: auto;
     background: $t-gema_bg;
@@ -161,13 +161,10 @@ Screen {
 
 #image-preview { max-height: 12; }
 
+/* Tanpa max-height: di sini dulu ada batas 8/4/3 baris menurut layar, dan
+   batas itu memotong dari BAWAH — persis baris terbaru yang ingin dibaca
+   yang hilang. Tingginya sekarang dihitung ThinkingBlock._baris_maks(). */
 #thinking-block {
-    max-height: 8;
-    border-top: tall $t-tepi_redup;
-}
-
-#streaming-preview {
-    max-height: 8;
     border-top: tall $t-tepi_redup;
 }
 
@@ -373,16 +370,12 @@ Screen.-sempit #statusbar { padding-left: 3; }
 Screen.-normal #statusbar { padding-left: 3; }
 Screen.-sempit #sidebar-close, Screen.-normal #sidebar-close { display: block; }
 Screen.-sempit #plan { max-height: 5; }
-Screen.-sempit #thinking-block { max-height: 4; }
-Screen.-sempit #streaming-preview { max-height: 4; }
 Screen.-sempit #autocomplete-list { max-height: 5; }
 Screen.-sempit #autocomplete-hint { display: none; }
 
 Screen.-pendek #logo { display: none; }
 Screen.-pendek #footer { max-height: 60%; }
 Screen.-pendek #plan { max-height: 4; }
-Screen.-pendek #thinking-block { max-height: 3; }
-Screen.-pendek #streaming-preview { max-height: 3; }
 Screen.-pendek #autocomplete-list { max-height: 4; }
 Screen.-pendek #autocomplete-hint { display: none; }
 

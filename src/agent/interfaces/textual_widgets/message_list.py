@@ -22,6 +22,13 @@ CATATAN BUG YANG SUDAH DIPERBAIKI (jangan diulang):
 5. ``append_notice`` dulu hanya memberi spasi di baris PERTAMA
    (``f"  {text}"``), sehingga seluruh keluaran berkotak (mis. ``/help``)
    miring dan patah. Sekarang setiap baris diberi indentasi.
+6. Jawaban yang sedang mengalir dulu tampil di DUA tempat: panel
+   ``StreamingPreview`` terpisah DI BAWAH blok berpikir — tanpa label dan
+   diredupkan, jadi mudah disangka blok "berpikir" kedua — lalu muncul lagi
+   sebagai jawaban final saat giliran selesai. Panel itu dibuang; jawaban
+   kini tumbuh LANGSUNG di area percakapan sebagai markdown
+   (``flush_stream``), dan ``end_stream`` memastikan tak ada tulisan ganda
+   di akhir giliran.
 """
 from __future__ import annotations
 
@@ -29,6 +36,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from typing import TYPE_CHECKING
 
@@ -51,6 +59,10 @@ _MAKS_RIWAYAT = 1500
 _MAKS_BARIS_LOG = 12000
 # Jeda gambar-ulang setelah resize berhenti (detik).
 _JEDA_RESIZE = 0.2
+# Jeda minimum antar gambar-ulang jawaban yang sedang mengalir (detik).
+# Token datang puluhan per detik; merender markdown seluruh jawaban sesering
+# itu murni boros CPU tanpa bedanya bagi mata.
+_JEDA_ALIRAN = 0.12
 
 
 def _bersih_kendali(text: str) -> str:
@@ -162,11 +174,15 @@ class MessageList(RichLog, can_focus=False):
         self._lebar_terakhir = 0
         self._timer_resize = None
         self._menggambar_ulang = False
-        # Keadaan aliran token
+        # Keadaan aliran token (lihat "Aliran jawaban" di bawah).
+        # ``_stream_buf`` ditulis dari thread pekerja, sisanya hanya dari
+        # thread UI.
         self._stream_buf = ""
         self._stream_lock = threading.Lock()
-        self._stream_rendered = False
-        self._stream_preview_len = 0
+        self._aliran_awal: int | None = None   # baris pertama item hidup
+        self._aliran_teks = ""                 # isi yang SEDANG tampil
+        self._aliran_item: RenderableType | None = None  # renderable-nya
+        self._aliran_waktu = 0.0               # waktu gambar-ulang terakhir
         # Seleksi salin-otomatis (lihat "Salin otomatis" di bawah).
         # Seleksi adalah rentang karakter: jangkar & ujung berupa
         # (baris_konten, indeks_karakter). _salin_mode menentukan
@@ -198,7 +214,19 @@ class MessageList(RichLog, can_focus=False):
         """Satu-satunya jalan tulis ke log.
 
         ``simpan=False`` untuk isi sementara yang tak perlu digambar ulang.
+
+        Tulisan lain MENUTUP aliran jawaban: teks yang menyusul setelah
+        langkah tool/pemberitahuan adalah paragraf BARU, bukan lanjutan item
+        yang sedang tumbuh. Tanpa penutupan ini, flush berikutnya akan
+        menggambar ulang di baris item hidup — menimpa langkah tool yang
+        baru saja dicetak di bawahnya.
+
+        ``_tutup_aliran`` juga MENGOSONGKAN buffer token. Ini bagian yang
+        dulu terlewat: tanpa itu, teks yang sudah tampil dan tersegel ikut
+        terbawa buffer, lalu digambar lagi sebagai segmen baru — jawaban
+        tampil dua kali begitu ada langkah tool di tengahnya.
         """
+        self._tutup_aliran()
         if simpan:
             self._items.append(renderable)
         try:
@@ -253,13 +281,18 @@ class MessageList(RichLog, can_focus=False):
         # lama bisa menunjuk baris yang keliru, lebih baik lenyap.
         self._salin_jangkar = None
         self._salin_lo = self._salin_hi = None
-        if self._menggambar_ulang or not self._items:
+        if self._menggambar_ulang or not (self._items or self._aliran_item):
             return
         self._menggambar_ulang = True
         try:
             items = list(self._items)
+            item_aliran = self._aliran_item
+            teks_aliran = self._aliran_teks
             self.clear()
             self._blok_klik.clear()
+            self._aliran_awal = None
+            self._aliran_teks = ""
+            self._aliran_item = None
             lebar = self._lebar()
             for it in items:
                 try:
@@ -270,6 +303,21 @@ class MessageList(RichLog, can_focus=False):
                     pass
             self._items.clear()
             self._items.extend(items)
+            # Item hidup tidak ada di ``_items``, jadi ia harus ditulis
+            # sendiri di sini — kalau tidak, jawaban yang sedang mengalir
+            # LENYAP begitu jendela diubah lebarnya. Renderable-nya dipakai
+            # ulang: Rich merendernya pada lebar konsol baru, jadi isinya ikut
+            # menyesuaikan tanpa perlu mengurai markdown sekali lagi.
+            if item_aliran is not None:
+                posisi = len(self.lines)
+                try:
+                    self.write(item_aliran, width=lebar)
+                except Exception:  # noqa: BLE001
+                    pass
+                if len(self.lines) > posisi:
+                    self._aliran_awal = posisi
+                    self._aliran_teks = teks_aliran
+                    self._aliran_item = item_aliran
             self.scroll_end(animate=False)
         finally:
             self._menggambar_ulang = False
@@ -641,11 +689,21 @@ class MessageList(RichLog, can_focus=False):
 
     def append_ai_message(self, text: str) -> None:
         """Jawaban AI, dirender sebagai markdown."""
-        cleaned = _pagari_pohon(_bersih_kendali(text))
+        self._emit(self._markdown(text))
+
+    @staticmethod
+    def _markdown(teks: str) -> RenderableType:
+        """Markdown jawaban; jatuh ke teks polos bila markdown cacat.
+
+        Dipakai bersama oleh jalur aliran (digambar ulang berkali-kali) dan
+        jalur biasa, supaya keduanya menghasilkan tampilan yang SAMA —
+        jawaban yang mengalir tak berubah rupa saat giliran selesai.
+        """
+        bersih = _pagari_pohon(_bersih_kendali(teks))
         try:
-            self._emit(Markdown(cleaned))
+            return Markdown(bersih)
         except Exception:  # noqa: BLE001 — markdown cacat
-            self._emit(Text(cleaned))
+            return Text(bersih)
 
     def append_notice(self, text: str, style: str | None = None) -> None:
         """Pemberitahuan sistem (info, peringatan, keluaran /help, dll)."""
@@ -908,46 +966,155 @@ class MessageList(RichLog, can_focus=False):
 
     def clear_messages(self) -> None:
         """Kosongkan seluruh riwayat."""
-        with self._stream_lock:
-            self._stream_buf = ""
-            self._stream_rendered = False
-            self._stream_preview_len = 0
+        # simpan=False: riwayatnya memang sedang dibuang.
+        self._tutup_aliran(simpan=False)
         self._items.clear()
         try:
             self.clear()
         except Exception:  # noqa: BLE001
             pass
 
-    # --- Aliran token --------------------------------------------------
+    # --- Aliran jawaban -------------------------------------------------
+    #
+    # Jawaban yang sedang mengalir tumbuh LANGSUNG di area percakapan (dulu
+    # ada panel pratinjau terpisah di bawah blok berpikir; panel itu dibuang
+    # karena isinya tak berlabel dan mudah disangka blok "berpikir" kedua).
+    #
+    # RichLog menyimpan hasil render sebagai ``Strip`` dan tak pernah
+    # membungkus ulang, jadi item yang sedang tumbuh digambar ulang DI
+    # TEMPATNYA: barisnya dipotong dari ``self.lines`` lalu ditulis lagi
+    # dengan isi terbaru. Item hidup itu TIDAK pernah masuk ``self._items``
+    # (deque riwayat yang dipakai _gambar_ulang) — kalau masuk, ia tergambar
+    # dua kali setiap kali lebar jendela berubah. Penandanya ``_aliran_awal``:
+    # indeks baris pertama item hidup di dalam ``self.lines``.
 
     def begin_stream(self) -> None:
-        """Mulai sesi aliran untuk satu jawaban AI."""
-        with self._stream_lock:
-            self._stream_buf = ""
-            self._stream_rendered = False
-            self._stream_preview_len = 0
+        """Mulai sesi aliran untuk satu jawaban AI (thread UI)."""
+        # Jawaban sebelumnya (kalau ada) disegel ke riwayat dulu; buffer
+        # token ikut dikosongkan oleh _tutup_aliran.
+        self._tutup_aliran()
+        self._aliran_waktu = 0.0
 
     def append_token(self, piece: str) -> None:
-        """Kumpulkan satu token. Dipanggil dari thread pekerja."""
+        """Kumpulkan satu token. Dipanggil dari thread pekerja.
+
+        Sengaja hanya menumpuk teks: thread pekerja tak boleh menyentuh
+        widget. Penggambarannya diurus ``flush_stream`` di thread UI.
+        """
         with self._stream_lock:
             self._stream_buf += piece
 
-    def end_stream(self) -> str:
-        """Akhiri aliran, kembalikan seluruh teks untuk render markdown."""
+    def teks_aliran(self) -> str:
+        """Salinan isi buffer aliran (aman lintas thread)."""
         with self._stream_lock:
-            text = self._stream_buf
+            return self._stream_buf
+
+    def flush_stream(self, paksa: bool = False) -> None:
+        """Gambar ulang jawaban yang sedang tumbuh (thread UI).
+
+        Dipanggil untuk SETIAP token, jadi jeda ``_JEDA_ALIRAN`` diatur di
+        sini: merender markdown seluruh jawaban puluhan kali per detik itu
+        boros tanpa bedanya bagi mata. ``paksa=True`` melewati jeda — dipakai
+        saat giliran berakhir supaya kata terakhir pasti tampil.
+        """
+        if not self._size_known:
+            # Ukuran belum diketahui: tulisan akan ditunda RichLog dan
+            # penanda baris jadi tak bisa dipercaya. Tunggu tata letak.
+            return
+        # Spasi/baris kosong di UJUNG tidak digambar: baris kosong terakhir
+        # tak terlihat, tapi kalau ikut disimpan ia membuat teks yang tampil
+        # selalu "berbeda" dari teks final di end_stream hanya karena beda
+        # baris baru — dan itu memicu gambar ulang penuh yang terlihat
+        # seperti kedipan di akhir giliran.
+        teks = self.teks_aliran().rstrip()
+        if not teks or teks == self._aliran_teks:
+            return
+        sekarang = time.monotonic()
+        if (not paksa and self._aliran_awal is not None
+                and sekarang - self._aliran_waktu < _JEDA_ALIRAN):
+            return
+        self._aliran_waktu = sekarang
+        self._gambar_aliran(teks)
+
+    def _gambar_aliran(self, teks: str) -> None:
+        """Tulis — atau gambar ulang di tempatnya — item jawaban hidup."""
+        if not self._size_known:
+            return
+        try:
+            awal = self._aliran_awal
+            if awal is not None and 0 <= awal <= len(self.lines):
+                # Buang baris item lama. Cache render RichLog berkunci
+                # (baris, lebar, ...) — tanpa dibersihkan, baris LAMA bisa
+                # muncul kembali dari cache meski ``lines`` sudah dipotong.
+                del self.lines[awal:]
+                self._line_cache.clear()
+            posisi = len(self.lines)
+            item = self._markdown(teks)
+            self.write(item, width=self._lebar())
+            if len(self.lines) > posisi:
+                self._aliran_awal = posisi
+                self._aliran_teks = teks
+                self._aliran_item = item
+        except Exception:  # noqa: BLE001 — render tak boleh mematikan UI
+            self._tutup_aliran()
+
+    def _tutup_aliran(self, simpan: bool = True) -> None:
+        """Akhiri item hidup; aliran berikutnya mulai sebagai paragraf baru.
+
+        ``simpan`` memindahkan item yang sudah tampil ke ``_items`` (riwayat
+        yang dipakai gambar ulang). Tanpa itu, jawaban yang sudah tersegel
+        hanya hidup di ``self.lines`` — dan LENYAP begitu jendela diubah
+        lebarnya, karena ``_gambar_ulang`` membersihkan seluruh log lalu
+        menggambar ulang dari ``_items`` saja.
+
+        Buffer token ikut dikosongkan: teks yang sudah tampil tak boleh
+        dikirim ulang sebagai segmen berikutnya.
+        """
+        if simpan and self._aliran_item is not None:
+            self._items.append(self._aliran_item)
+        self._aliran_awal = None
+        self._aliran_teks = ""
+        self._aliran_item = None
+        with self._stream_lock:
             self._stream_buf = ""
-            self._stream_rendered = False
-            self._stream_preview_len = 0
-            return text
 
-    @property
-    def stream_length(self) -> int:
-        """Panjang buffer aliran (aman lintas thread)."""
-        with self._stream_lock:
-            return len(self._stream_buf)
+    def end_stream(self, teks_akhir: str | None = None) -> str:
+        """Akhiri aliran; kembalikan teks yang BENAR-BENAR tampil.
 
-    def get_stream_tail(self, n: int = 600) -> str:
-        """``n`` huruf terakhir dari buffer aliran (aman lintas thread)."""
+        ``teks_akhir`` adalah teks final dari agen — bisa BERBEDA dari
+        buffer (jalur non-streaming, atau jawaban yang diganti setelah
+        pembacaan ulang gambar). Bila isinya sama dengan yang sudah di
+        layar, layar TIDAK digambar ulang: dulu jawaban dicetak dua kali di
+        akhir giliran (sekali redup sebagai pratinjau, sekali terang sebagai
+        jawaban final) dan itu terlihat seperti kedipan.
+        """
         with self._stream_lock:
-            return self._stream_buf[-n:] if self._stream_buf else ""
+            buffer = self._stream_buf
+            self._stream_buf = ""
+        final = teks_akhir or buffer
+        hidup = self._aliran_awal is not None
+        # Jawaban berisi spasi/baris kosong saja = tidak ada jawaban; biar
+        # pemanggil yang memutuskan apa yang ditampilkan (mis. "(no response)").
+        bersih = final.rstrip()
+        if not bersih:
+            self._tutup_aliran()
+            return ""
+        if not hidup:
+            # Tak ada item hidup (jalur non-streaming): tulis sebagai pesan
+            # biasa agar ikut digambar ulang saat lebar berubah. Lewat
+            # ``append_ai_message`` — bukan ``_emit`` langsung — supaya ini
+            # benar-benar jalan masuk yang SAMA dengan jawaban lain: apa pun
+            # yang membungkus/memantau metode publik itu (mis. uji) tetap
+            # melihat jawaban akhir, dan tak ada dua jalur yang bisa berbeda
+            # perlakuan.
+            self.append_ai_message(bersih)
+            return final
+        if self._aliran_teks != bersih:
+            # Isi final berbeda: gambar ulang di posisi yang sama supaya
+            # tidak ada dua versi jawaban di layar. Dibandingkan dalam bentuk
+            # yang sudah dirapikan — sama seperti yang digambar flush_stream.
+            self._gambar_aliran(bersih)
+        # Item hidup kini selesai. Pindahkan kepemilikannya ke riwayat —
+        # tanpa menggambar ulang, jadi tampilannya tak berubah sedetik pun.
+        self._tutup_aliran()
+        return final

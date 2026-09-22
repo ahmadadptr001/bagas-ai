@@ -20,7 +20,6 @@ from .voice_screen import VoiceScreen, VoiceOrb
 from .image_preview import ImagePreview
 from .progress_bar import TurnProgressBar
 from .logo import LogoWidget
-from .streaming_preview import StreamingPreview
 from .thinking_block import ThinkingBlock
 from .queue_strip import QueueStrip
 from .modal_screens import (SelectScreen, MultiSelectScreen, ConfirmScreen,
@@ -42,7 +41,6 @@ __all__ = [
     "ImagePreview",
     "TurnProgressBar",
     "LogoWidget",
-    "StreamingPreview",
     "ThinkingBlock",
     "QueueStrip",
     "SelectScreen",

@@ -27,7 +27,7 @@ from textual.widgets import Button
 from .textual_widgets import (
     StatusBar, ChatBox, MessageList, PlanPanel, PlanSidebar, InfoSidebar,
     SystemPanel, ImagePreview, TurnProgressBar, LogoWidget,
-    StreamingPreview, ThinkingBlock, SelectScreen, MultiSelectScreen,
+    ThinkingBlock, SelectScreen, MultiSelectScreen,
     ConfirmScreen, TextPromptScreen, ThemeScreen, QueueStrip, BtwScreen,
     BukaBerkas, FileEditorScreen, VoiceScreen,
 )
@@ -261,7 +261,6 @@ class BagasAIApp(App):
             yield PlanPanel(id="plan")
             yield ImagePreview(id="image-preview")
             yield ThinkingBlock(id="thinking-block")
-            yield StreamingPreview(id="streaming-preview")
             yield TurnProgressBar(id="progress")
             yield ChatBox(id="chatbox")
             yield StatusBar(agent=self.agent, id="statusbar")
@@ -2664,7 +2663,6 @@ class BagasAIApp(App):
         self._stop_progress_timer()
         try:
             self.query_one("#progress", TurnProgressBar).hide()
-            self.query_one("#streaming-preview", StreamingPreview).hide()
             self.query_one("#thinking-block", ThinkingBlock).hide()
             self.query_one("#chatbox", ChatBox).set_busy(False)
         except Exception:  # noqa: BLE001 — widget sedang dibongkar
@@ -2679,13 +2677,13 @@ class BagasAIApp(App):
         self._bersihkan_turn_ui()
 
         msg_list = self.query_one("#messages", MessageList)
-        # End streaming — get accumulated text and render final markdown
-        stream_text = msg_list.end_stream()
-
-        # Use agent result if available, otherwise use streamed text
-        final_text = result or stream_text
+        # Tutup aliran: ``end_stream`` mengembalikan teks yang BENAR-BENAR
+        # tampil. Hasil agen dipakai bila ada (jalur non-streaming atau
+        # jawaban yang diganti), tapi kalau isinya sama dengan yang sudah
+        # mengalir di layar, tak ada gambar-ulang — dulu jawaban tercetak
+        # dua kali di sini.
+        final_text = msg_list.end_stream(result)
         if final_text:
-            msg_list.append_ai_message(final_text)
             if (self._voice_state.get("session_active")
                     or prefs.load().get("suara", True)):
                 try:
@@ -2789,29 +2787,22 @@ class BagasAIApp(App):
             self._safe_call(self._forward_token, piece)
 
     def _forward_token(self, piece: str):
-        """Forward token to message list for streaming display.
+        """Teruskan sepotong jawaban ke area percakapan (thread UI).
 
-        Called from main thread via call_from_thread.
-        Appends token then updates the streaming preview widget.
+        Dulu tiap token juga menulis panel pratinjau terpisah di bawah blok
+        berpikir, dan menggeser progress bar dengan ``min(0.9, n/500)``.
+        Panel itu dibuang — isinya tak berlabel, diredupkan, dan selalu
+        tampak seperti blok "berpikir" kedua; jawabannya kini tumbuh di
+        area percakapan lewat ``flush_stream``. Pecahan progress itu pun
+        keliru: logo hanya berputar selama ``fraction < 0.95``, jadi
+        mendorongnya ke 0.9 justru MEMBEKUKAN animasinya di tengah jawaban.
         """
         msg_list = self.query_one("#messages", MessageList)
         msg_list.append_token(piece)
-        # Read stream tail and length atomically (single lock acquisition)
-        with msg_list._stream_lock:
-            buf_len = len(msg_list._stream_buf)
-            text = msg_list._stream_buf[-600:] if buf_len > 0 else ""
-        # Update streaming preview with accumulated text
-        preview = self.query_one("#streaming-preview", StreamingPreview)
-        if buf_len > 0:
-            preview.update_preview(text)
-        # Update progress bar
+        msg_list.flush_stream()
         if self.is_turn_active:
             progress = self.query_one("#progress", TurnProgressBar)
-            if buf_len > 0:
-                progress.update_progress(
-                    min(0.9, buf_len / 500),
-                    f"menjawab... ({buf_len} chars)"
-                )
+            progress.update_progress(0.0, "menjawab...")
 
     def agent_on_reasoning(self, piece: str):
         """Reasoning token from API model — show in thinking block."""
@@ -3102,12 +3093,6 @@ class BagasAIApp(App):
     def action_clear(self):
         """Handle Ctrl+L — clear messages."""
         self.query_one("#messages", MessageList).clear_messages()
-
-    def action_toggle_thinking(self):
-        """Toggle thinking block (dipanggil via App khusus; Tab ditangani
-        ChatBox untuk autocomplete, jadi ini biasanya lewat klik)."""
-        thinking = self.query_one("#thinking-block", ThinkingBlock)
-        thinking.toggle()
 
     def action_delete_word(self):
         """Handle Ctrl+W — delete previous word at cursor position."""

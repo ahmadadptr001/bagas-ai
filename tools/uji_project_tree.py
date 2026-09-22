@@ -38,7 +38,7 @@ from textual.widgets import RichLog, TextArea
 
 from agent.interfaces.textual_app import BagasAIApp
 from agent.interfaces.textual_widgets import (
-    FileEditorScreen, InfoSidebar, ProjectTree,
+    FileEditorScreen, InfoSidebar, ProjectTree, ThinkingBlock,
 )
 
 
@@ -93,13 +93,17 @@ async def main():
         cek("box chat tidak menutupi sidebar",
             input_row.region.x + input_row.region.width == sb.region.x,
             f"chat={input_row.region}, sidebar={sb.region}")
-        streaming = app.query_one("#streaming-preview")
-        streaming.update_preview("uji pra-jawaban")
+        # Panel footer mana pun harus berhenti di tepi sidebar, bukan
+        # menabrak dividernya. Blok berpikir dipakai sebagai wakilnya —
+        # panel pratinjau jawaban sudah dihapus (jawaban kini mengalir
+        # langsung di area percakapan).
+        pikir = app.query_one("#thinking-block", ThinkingBlock)
+        pikir.update_thinking("uji pra-jawaban")
         await pilot.pause()
-        cek("box pra-jawaban tidak memutus divider",
-            streaming.region.x + streaming.region.width == sb.region.x,
-            f"pra={streaming.region}, sidebar={sb.region}")
-        streaming.hide()
+        cek("panel pra-jawaban tidak memutus divider",
+            pikir.region.x + pikir.region.width == sb.region.x,
+            f"pra={pikir.region}, sidebar={sb.region}")
+        pikir.hide()
         await pilot.resize_terminal(90, 30)
         await pilot.pause()
         cek("footer kembali penuh saat sidebar disembunyikan",

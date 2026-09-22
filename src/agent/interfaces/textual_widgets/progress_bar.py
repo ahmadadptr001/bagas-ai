@@ -113,8 +113,16 @@ class TurnProgressBar(Widget):
         self._gambar()
 
     def update_progress(self, fraction: float, label: str = ""):
-        """Perbarui label status (fraksi tak dipakai animasi logo)."""
-        self.fraction = min(1.0, max(0.0, fraction))
+        """Perbarui label status (fraksi tak dipakai animasi logo).
+
+        Pengulangan yang tak mengubah apa pun diabaikan: pemanggilnya
+        meneruskan SETIAP token jawaban, dan menyusun ulang logo puluhan
+        kali per detik demi label yang sama itu murni pemborosan.
+        """
+        fraksi = min(1.0, max(0.0, fraction))
+        if fraksi == self.fraction and (not label or label == self.label):
+            return
+        self.fraction = fraksi
         if label:
             self.label = label
         self._gambar()
