@@ -66,8 +66,8 @@ def _get_bool(name: str, default: bool) -> bool:
 #  1. Browser-based (web/...) — login sekali lewat Chrome, kredensial milik sendiri
 #  2. API NVIDIA (nvidia/...) — pakai NVIDIA_API_KEY ke integrate.api.nvidia.com/v1
 #  3. API OpenRouter (openrouter/...) — pakai OPENROUTER_API_KEY ke openrouter.ai/api/v1
-#  4. API OpenCode Zen (opencode/...) — GRATIS tanpa key (anonim) ke
-#     opencode.ai/zen/v1; key hanya opsional (big-pickle, *-free — models.py)
+#  4. CLI OpenCode (opencode/...) — GRATIS lewat `opencode run` (butuh binary
+#     `opencode` di PATH; OPENCODE_API_KEY tidak disyaratkan — models.py)
 #
 # Default: nvidia/nemotron (API). SELURUH model (web) sedang DITUNDA
 # (models._DITUNDA), jadi bawaan yang menunjuk ke sana berarti tiap sesi baru
@@ -81,12 +81,12 @@ NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidi
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL: str = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
-# Konfigurasi OpenCode Zen (untuk model opencode/*). Model bertanda "Free" di
-# https://opencode.ai/docs/zen jalan TANPA key sama sekali — akses anonim
-# per-IP (TERUKUR 2026-08-29: request tanpa Authorization dibalas 200). Key
-# dari https://opencode.ai/auth hanya OPSIONAL (mis. untuk kuota akun sendiri)
-# dan kalau `opencode auth login` pernah dijalankan, terbaca otomatis dari
-# auth.json CLI-nya (lihat _baca_key_opencode).
+# Konfigurasi OpenCode (untuk model opencode/*). Jalur UTAMA kini lewat CLI
+# `opencode run` (TERUKUR 2026-09-23) — tanpa API key sama sekali; yang
+# disyaratkan hanya binary `opencode` ada di PATH (lihat has_api_key). Key
+# di bawah masih dibaca untuk cadangan HTTP bila CLI dipakai lewat jalur lama
+# dan untuk `opencode auth login` yang menyimpan kredensial di auth.json
+# (lihat _baca_key_opencode).
 OPENCODE_API_KEY: str = os.getenv("OPENCODE_API_KEY", "").strip()
 OPENCODE_BASE_URL: str = os.getenv(
     "OPENCODE_BASE_URL", "https://opencode.ai/zen/v1").strip()
@@ -371,41 +371,56 @@ def api_key_env(provider: str = "") -> str:
     return _PROVIDER_KEY_ENV.get(provider, "NVIDIA_API_KEY")
 
 
-def has_api_key(provider: str = "") -> bool:
-    """True bila kunci PENYEDIA itu (atau salah satu, bila tak disebut) terisi.
+_opencode_cli_ada: bool | None = None  # cache hasil deteksi binary `opencode`
 
-    Kredensial ini TIDAK wajib: bagas-ai tetap jalan penuh dengan model browser
-    saja. Ia hanya syarat untuk model API — karena itu pemeriksaannya berupa
+
+def opencode_cli_tersedia() -> bool:
+    """True bila binary CLI `opencode` bisa ditemukan di PATH (di-cache)."""
+    global _opencode_cli_ada
+    if _opencode_cli_ada is None:
+        import shutil
+        _opencode_cli_ada = shutil.which("opencode") is not None
+    return _opencode_cli_ada
+
+
+def has_api_key(provider: str = "") -> bool:
+    """True bila penyedia itu SIAP dipakai (kunci terisi, atau CLI tersedia).
+
+    Kredensial ini TIDAK wajib: bagas-ai tetap jalan penuh dengan model lain.
+    Ia hanya syarat untuk model API — karena itu pemeriksaannya berupa
     pertanyaan (has_), bukan syarat mati saat startup.
+
+    opencode/*: jalur utama kini lewat CLI `opencode run` (2026-09-23), jadi
+    cukup binary `opencode` ada di PATH — OPENCODE_API_KEY tidak disyaratkan
+    (akses anonim HTTP ke Zen sudah ditutup penyedianya, tapi CLI diizinkan).
     """
     if provider == "openrouter":
         return bool(OPENROUTER_API_KEY)
     if provider == "opencode":
-        # Dulu SELALU True: akses anonim per-IP ke opencode.ai/zen/v1 masih
-        # terbuka (TERUKUR 2026-08-29), jadi key murni opsional dan gerbang ini
-        # tak pernah menolak. TERUKUR ULANG 2026-09-21: permintaan TANPA header
-        # Authorization — persis yang dikirim llm._headers_tanpa_auth — kini
-        # dibalas HTTP 403 "OpenCode's free tier can only be used from within
-        # OpenCode". Karena itu jawabannya SEKARANG jujur: tanpa key, provider
-        # ini tidak bisa dipakai. Akibatnya models._pastikan_aktif menolak
-        # model opencode/* SAAT DIPILIH dengan menyebut OPENCODE_API_KEY, bukan
-        # membiarkannya lolos lalu gagal 403 di tengah giliran pengguna.
-        return bool(OPENCODE_API_KEY)
+        return opencode_cli_tersedia() or bool(OPENCODE_API_KEY)
     if provider == "nvidia":
         return bool(NVIDIA_API_KEY)
-    return bool(NVIDIA_API_KEY) or bool(OPENROUTER_API_KEY) or bool(OPENCODE_API_KEY)
+    return (bool(NVIDIA_API_KEY) or bool(OPENROUTER_API_KEY)
+            or opencode_cli_tersedia() or bool(OPENCODE_API_KEY))
 
 
 def require_api_key(provider: str = "") -> None:
-    """Pastikan kunci penyedia ada; kalau tidak, jelaskan cara mengisinya.
+    """Pastikan penyedia siap (kunci terisi atau CLI tersedia); kalau tidak, jelaskan.
 
-    Pesannya menyebut jalan keluar yang TIDAK butuh kredensial (pindah ke model
-    browser) supaya pengguna tak merasa terkunci hanya karena memilih model
-    API tanpa punya key.
+    Pesannya menyebut jalan keluar yang TIDAK butuh kredensial (CLI OpenCode
+    gratis, atau pindah ke model lain) supaya pengguna tak merasa terkunci
+    hanya karena memilih model API tanpa punya key.
     """
     env_name = api_key_env(provider)
     if has_api_key(provider):
         return
+    if provider == "opencode":
+        raise RuntimeError(
+            "Model opencode/* lewat CLI `opencode run`, tapi binary "
+            "`opencode` tidak ditemukan di PATH. Install dulu "
+            "(npm i -g opencode-ai), atau isi OPENCODE_API_KEY untuk "
+            f"jalur cadangan HTTP di {ENV_FILE}."
+        )
     raise RuntimeError(
         f"Model ini lewat API dan butuh {env_name}, yang belum diisi. "
         f"Isi di {ENV_FILE} (baris: {env_name}=...) — atau ketik /model "

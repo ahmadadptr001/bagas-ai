@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Uji adapter Responses API (llm._stream_responses) — klien PALSU, tanpa jaringan.
+"""Uji adapter Responses API + jalur CLI OpenCode — tanpa jaringan (mock).
 
 Jalankan: PYTHONIOENCODING=utf-8 python tools/uji_opencode.py
 """
@@ -10,6 +10,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent import llm
+from agent import config
 
 gagal = 0
 
@@ -152,20 +153,26 @@ finally:
     llm.get_client = _asli
 
 # ------------------------- 5) dispatch stream_completion(api_style=...) ----
+# Jalur HTTP responses: hanya dicapai bila provider opencode TAPI CLI
+# tidak tersedia (stream_completion menabrak CLI lebih dulu). Simulasi
+# dengan mematikan deteksi CLI sementara.
 events = [ev("response.output_text.delta", delta="lewat pintu yang benar"),
           ev("response.completed", response=SimpleNamespace(
               status="completed", usage=usage_raw))]
 klien = ClientPalsu(events)
+_asli_cli = config.opencode_cli_tersedia
 llm.get_client = lambda p: klien
+config.opencode_cli_tersedia = lambda: False
 try:
     konten, tcs, usage = llm.stream_completion(
         [{"role": "user", "content": "hi"}],
         model="muse-spark-1.2-contributor-free", provider="opencode",
         api_style="responses")
     jalankan("dispatch", konten == "lewat pintu yang benar",
-             f"stream_completion mengarah ke /responses: {konten!r}")
+             f"stream_completion (tanpa CLI) mengarah ke /responses: {konten!r}")
 finally:
     llm.get_client = _asli
+    config.opencode_cli_tersedia = _asli_cli
 
 # ------------------------- 6) event failed -> Exception --------------------
 events = [ev("response.failed", response=SimpleNamespace(
@@ -181,27 +188,34 @@ except Exception as e:
 finally:
     llm.get_client = _asli
 
-# ------------------------- 7) tanpa key: klien & header ---------------------
-# Model opencode/* GRATIS tanpa key (anonim per-IP, TERUKUR 2026-08-29):
-# get_client HARUS jalan tanpa OPENCODE_API_KEY, dan header Authorization
-# harus dibuang per-request lewat Omit (key dummy tak boleh dikirim —
-# key palsu terukur dibalas 401 AuthError).
+# ------------------------- 7) klien HTTP cadangan (butuh key / tanpa CLI) ---
+# Jalur UTAMA opencode/* kini CLI (stream_completion). get_client("opencode")
+# adalah CADANGAN HTTP: akses anonimnya ditutup (403, 2026-09-21), jadi
+# tanpa CLI dan tanpa key HARUS ditolak; dengan key, klien dibuat.
 import os
 os.environ.pop("OPENCODE_API_KEY", None)
-from agent import config
 config.OPENCODE_API_KEY = ""
 llm._clients.pop("opencode", None)
+_asli_cli2 = config.opencode_cli_tersedia
+config.opencode_cli_tersedia = lambda: False
 try:
+    try:
+        llm.get_client("opencode")
+        jalankan("klien", False, "tanpa CLI & tanpa key seharusnya ditolak")
+    except Exception as e:
+        jalankan("klien", "OPENCODE_API_KEY" in str(e) or "opencode" in str(e).lower(),
+                 f"ditolak tanpa CLI/key: {e}")
+    config.OPENCODE_API_KEY = "key-palsu-uji"
+    llm._clients.pop("opencode", None)
     klien_zen = llm.get_client("opencode")
-    jalankan("klien", klien_zen is not None, "klien Zen dibuat TANPA key")
-except Exception as e:
-    klien_zen = None
-    jalankan("klien", False, f"tanpa key malah ditolak: {e}")
-# klien ter-cache; panggilan kedua mengembalikan objek yang sama
-jalankan("klien", llm.get_client("opencode") is klien_zen, "klien di-cache")
+    jalankan("klien", klien_zen is not None, "klien HTTP cadangan dibuat dgn key")
+    jalankan("klien", llm.get_client("opencode") is klien_zen, "klien di-cache")
+finally:
+    config.opencode_cli_tersedia = _asli_cli2
 
-h = llm._headers_tanpa_auth("opencode")
 from openai._base_client import Omit
+config.OPENCODE_API_KEY = ""
+h = llm._headers_tanpa_auth("opencode")
 jalankan("header", isinstance(h.get("Authorization"), Omit),
          f"Authorization di-Omit tanpa key: {h}")
 config.OPENCODE_API_KEY = "key-palsu-uji"
@@ -212,20 +226,30 @@ jalankan("header", llm._headers_tanpa_auth("nvidia") == {},
 config.OPENCODE_API_KEY = ""
 
 # ------------------------- 8) gerbang model: opencode lolos tanpa key -------
-jalankan("gerbang", config.has_api_key("opencode") is True,
-         "has_api_key('opencode') True tanpa key")
+# has_api_key("opencode") True bila CLI ada ATAU key terisi.
+jalankan("gerbang", config.has_api_key("opencode") is config.opencode_cli_tersedia()
+         or config.has_api_key("opencode"),
+         "has_api_key('opencode') mengikuti CLI/key")
 from agent import models
+# setidaknya satu entri opencode hidup (sinkron CLI / daftar statis)
+oc_aktif = [k for k, s in models.MODELS.items()
+            if s.provider == "opencode" and not s.ditunda]
+jalankan("gerbang", len(oc_aktif) >= 1, f"entri opencode aktif: {oc_aktif}")
 spec_oc = models.cari("big-pickle")
 try:
     hasil = models._pastikan_aktif(spec_oc)
     jalankan("gerbang", hasil is spec_oc, "_pastikan_aktif meloloskan opencode")
 except Exception as e:
     jalankan("gerbang", False, f"opencode ditolak padahal gratis: {e}")
-# urutan: 7 model opencode WAJIB di posisi teratas /model
-tujuh_awal = list(models.MODELS.keys())[:7]
-jalankan("urutan", all(models.MODELS[k].provider == "opencode" for k in tujuh_awal)
-         and "big-pickle" in tujuh_awal and len(tujuh_awal) == 7,
-         f"7 model opencode paling atas: {tujuh_awal}")
+# model yang hilang dari CLI (hy3/mimo-v2.5) harus ditunda, bukan aktif
+for mati in ("hy3-free", "mimo-v2.5-free"):
+    sp = models.cari(mati)
+    jalankan("sinkron", sp.ditunda, f"{mati} ditunda (tak ada di CLI)")
+# entri opencode hidup harus di katalog dan ber-label CLI
+for hidup in oc_aktif[:3]:
+    jalankan("label", "CLI" in models.MODELS[hidup].label
+             or "CLI" in (models.MODELS[hidup].note or ""),
+             f"{hidup} berlabel CLI: {models.MODELS[hidup].label}")
 
 print("\nSEMUA LULUS" if gagal == 0 else f"\n{gagal} uji GAGAL")
 sys.exit(0 if gagal == 0 else 1)

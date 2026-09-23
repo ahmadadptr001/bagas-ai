@@ -6,15 +6,16 @@ bagas-ai punya DUA jalur model yang cara kerjanya berbeda mendasar:
      Playwright memakai akun pengguna sendiri. Konteks dipegang SITUSNYA,
      tool dipanggil lewat protokol teks [[TOOL]], dan /effort berarti
      MENGKLIK tombol mode berpikir di halamannya.
-  2. API (`nvidia/...`, `openrouter/...`, `opencode/...`) — endpoint
-     OpenAI-compatible. Konteks dipegang KITA (dikirim ulang tiap request),
-     tool memakai function-calling ASLI, dan /effort berarti mengirim
-     parameter `extra_body` hanya bila parameter modelnya memang terverifikasi.
+  2. API (`nvidia/...`, `openrouter/...`) — endpoint OpenAI-compatible.
+     Konteks dipegang KITA (dikirim ulang tiap request), tool memakai
+     function-calling ASLI, dan /effort berarti mengirim parameter
+     `extra_body` hanya bila parameter modelnya memang terverifikasi.
      Penyedianya dibedakan lewat ModelSpec.provider:
        - "nvidia"      : integrate.api.nvidia.com (NVIDIA_API_KEY)
        - "openrouter"  : openrouter.ai/api/v1     (OPENROUTER_API_KEY)
-       - "opencode"    : opencode.ai/zen/v1       (TANPA key — gratis anonim;
-                          OPENCODE_API_KEY hanya opsional)
+       - "opencode"    : CLI `opencode run` (butuh binary di PATH;
+                          OPENCODE_API_KEY tidak disyaratkan — katalog
+                          disinkronkan dinamis lewat `opencode models`)
 
 Karena itu `ModelSpec.is_web` adalah satu-satunya titik percabangan; lihat
 core.Agent.run().
@@ -73,14 +74,15 @@ class ModelSpec:
     connector: str = ""
     multimodal: bool = True  # situs AI web menerima lampiran gambar
     note: str = ""  # keterangan singkat
-    # DITUNDA: entrinya tetap disimpan tetapi disembunyikan dari /model. Lihat catatan _DITUNDA di bawah.
+    # DITUNDA: entrinya tetap disimpan tetapi disembunyikan dari /model.
+    # Lihat catatan _DITUNDA di bawah.
     ditunda: bool = False
 
     # --- khusus jalur API (kosong/nol untuk model web) ----------------------
     # Penyedia endpoint: "nvidia" (integrate.api.nvidia.com), "openrouter"
-    # (openrouter.ai/api/v1), atau "opencode" (opencode.ai/zen/v1 — gateway
-    # OpenCode Zen). Menentukan klien, API key, dan pesan galat mana yang
-    # dipakai.
+    # (openrouter.ai/api/v1), atau "opencode" (CLI `opencode run`; kunci
+    # OPENCODE_API_KEY hanya untuk jalur cadangan HTTP Zen). Menentukan
+    # klien, API key, dan pesan galat mana yang dipakai.
     provider: str = "nvidia"
     # Gaya protokol endpoint: "chat" (/chat/completions — bawaan) atau
     # "responses" (/responses, protokol OpenAI Responses API). Sebagian model
@@ -132,7 +134,7 @@ class ModelSpec:
     @property
     def is_api(self) -> bool:
         """True bila model ini lewat endpoint API (kebanyakan butuh API key
-        penyedia; kecuali opencode/* yang gratis & anonim)."""
+        penyedia; kecuali opencode/* yang gratis lewat CLI tanpa key)."""
         return not self.connector
 
     @property
@@ -210,19 +212,12 @@ _DITUNDA = {
     #     model (web) butuh jendela Chrome, login, dan detik-detik menunggu
     #     situsnya, sementara jalur API menjawab tanpa browser sama sekali.
     "chatgpt-web", "kimi-web", "gemini-web", "qwen-web", "glm-web", "dola-web",
-    # (2) Seluruh jalur OpenCode Zen — atas permintaan pengguna (2026-09-21)
-    #     juga, karena struktur jalur ini akan diubah besar-besaran. Ditunda
-    #     LEBIH DULU dari perubahannya supaya versi yang sedang dipakai tak
-    #     diam-diam berpindah perilaku di tengah pekerjaan itu.
-    #
-    #     Kebetulan yang membantu: penyedianya SENDIRI menutup akses anonim
-    #     jalur ini di hari yang sama (TERUKUR 2026-09-21: HTTP 403
-    #     FreeTierError), jadi tanpa key pun entri-entri ini sudah tak bisa
-    #     menjawab — lihat config.has_api_key("opencode") yang kini menuntut
-    #     key, dan catatan di blok entri opencode di bawah.
-    "big-pickle", "hy3-free", "ling-3.0-flash-fin-free", "mimo-v2.5-free",
-    "muse-spark-1.2-contributor-free", "nemotron-3-ultra-free",
-    "nemotron-3.5-lightning-free",
+    # (2) Jalur OpenCode Zen HTTP DITUTTUP penyedianya (TERUKUR 2026-09-21:
+    #     HTTP 403 FreeTierError "only from within OpenCode"). Entri lama yang
+    #     TIDAK muncul lagi di `opencode models` ikut ditunda di sini sebagai
+    #     fallback statis; entri yang MASIH hidup di CLI justru dikeluarkan dari
+    #     himpunan ini oleh sinkron_model_opencode() di bawah.
+    "hy3-free", "mimo-v2.5-free",
 }
 
 # Penanda tampilan untuk model yang ditunda di menu SelectScreen (UI Textual).
@@ -234,100 +229,103 @@ _TANDA_DITUNDA = "\x00DITUNDA"
 
 # Alias pendek -> spesifikasi. Urutan menentukan nomor pada /model.
 MODELS: dict[str, ModelSpec] = {
-    # --- jalur OpenCode Zen (opencode.ai/zen/v1) — PALING ATAS ---------------
-    # TERUKUR 2026-09-21: akses anonimnya SUDAH DITUTUP penyedianya. Permintaan
-    # TANPA header Authorization — persis yang dikirim llm._headers_tanpa_auth
-    # selama ini — kini dibalas HTTP 403 "OpenCode's free tier can only be used
-    # from within OpenCode". Dengan header key palsu malah 401 AuthError, jadi
-    # tak ada lagi jalan masuk tanpa kredensial. Catatan "GRATIS tanpa API key"
-    # di tiap entri karena itu DIHAPUS: membiarkannya berarti pengguna memilih
-    # model ini lalu tertipu dua kali — sekali saat dipilih, sekali saat gagal.
+    # --- jalur OpenCode CLI (`opencode run`) — PALING ATAS -------------------
+    # TERUKUR 2026-09-23: akses HTTP anonim ke Zen sudah DITUTUP penyedianya
+    # (HTTP 403 "only from within OpenCode"), tapi binary CLI `opencode` tetap
+    # diizinkan — dan `opencode run -m <model> --format json` menjawab TANPA
+    # API key sama sekali. Karena itu gerbang config.has_api_key("opencode")
+    # kini menanyakan keberadaan binary itu (atau OPENCODE_API_KEY untuk
+    # jalur cadangan HTTP), bukan menuntut key.
     #
-    # Entrinya SENGAJA TIDAK DIHAPUS dan TIDAK masuk _DITUNDA: yang berubah
-    # kebijakan PENYEDIANYA, bukan katalog ini. Isi OPENCODE_API_KEY (atau
-    # jalankan `opencode auth login`) dan seluruh entri ini langsung hidup lagi
-    # tanpa satu pun suntingan di sini. config.has_api_key("opencode") yang
-    # menjaga gerbangnya, jadi penolakannya terjadi SAAT DIPILIH — dengan nama
-    # env yang harus diisi — bukan 403 di tengah giliran.
+    # Katalog di bawah adalah FALLBACK statis. Saat import, sinkron_model_
+    # opencode() mencoba `opencode models` (CLI) dan MENAMBAH/MEMPERBARUI
+    # entri sesuai daftar hidup penyedia — model baru muncul, model yang
+    # hilang ditandai ditunda. Bila CLI tak ada / perintah gagal, daftar
+    # statis ini dipakai apa adanya.
     #
-    # Label rekomendasi DICABUT dari semua entri di sini mengikuti aturan
-    # katalog: label itu menandai model yang TERUKUR cepat MENJAWAB, dan model
-    # yang tak bisa menjawab sama sekali jelas tidak memenuhinya.
-    #
-    # Kebijakan reasoning tiap model BELUM diukur — jadi /effort sengaja tidak
-    # ditawarkan. Flag CLI OpenCode `--variant` TIDAK dikirim mentah sebagai
-    # field API; dokumentasinya menjelaskan variant sebagai pemetaan opsi
-    # provider/model di sisi klien. api_style "responses" hanya untuk model
-    # yang memang TERUKUR hanya dilayani di endpoint /responses.
+    # api_style "responses" hanya dipertahankan untuk jalur CADANGAN HTTP;
+    # jalur CLI mengabaikannya (opencode run yang memegang protokolnya).
     "big-pickle": ModelSpec(
         id="opencode/big-pickle",
-        label="Big Pickle (API)",
+        label="Big Pickle (CLI)",
         provider="opencode",
-        api_model="big-pickle",
+        api_model="opencode/big-pickle",
         multimodal=False,
-        note=("Via OpenCode Zen — model pilihan tim opencode untuk agent "
-              "koding; butuh OPENCODE_API_KEY (akses anonim ditutup "
-              "penyedianya 2026-09-21)"),
+        note=("Via CLI opencode run — model pilihan tim opencode untuk "
+              "agent koding; gratis tanpa API key"),
         max_tokens=16384,
     ),
     "hy3-free": ModelSpec(
         id="opencode/hy3-free",
-        label="Hy3 Free (API)",
+        label="Hy3 Free (CLI)",
         provider="opencode",
-        api_model="hy3-free",
+        api_model="opencode/hy3-free",
         multimodal=False,
-        note="Via OpenCode Zen — butuh OPENCODE_API_KEY",
+        note="Via CLI opencode run — gratis tanpa API key",
         max_tokens=16384,
     ),
     "ling-3.0-flash-fin-free": ModelSpec(
         id="opencode/ling-3.0-flash-fin-free",
-        label="Ling 3.0 Flash Fin Free (API)",
+        label="Ling 3.0 Flash Fin Free (CLI)",
         provider="opencode",
-        api_model="ling-3.0-flash-fin-free",
+        api_model="opencode/ling-3.0-flash-fin-free",
         multimodal=False,
-        note="Via OpenCode Zen — butuh OPENCODE_API_KEY",
+        note="Via CLI opencode run — gratis tanpa API key",
         max_tokens=16384,
     ),
     "mimo-v2.5-free": ModelSpec(
         id="opencode/mimo-v2.5-free",
-        label="MiMo-V2.5 Free (API)",
+        label="MiMo-V2.5 Free (CLI)",
         provider="opencode",
-        api_model="mimo-v2.5-free",
+        api_model="opencode/mimo-v2.5-free",
         multimodal=False,
-        note="Via OpenCode Zen — butuh OPENCODE_API_KEY",
+        note="Via CLI opencode run — gratis tanpa API key",
+        max_tokens=16384,
+    ),
+    "mimo-v2.6-flash-free": ModelSpec(
+        id="opencode/mimo-v2.6-flash-free",
+        label="MiMo-V2.6 Flash Free (CLI)",
+        provider="opencode",
+        api_model="opencode/mimo-v2.6-flash-free",
+        multimodal=False,
+        note="Via CLI opencode run — gratis tanpa API key",
         max_tokens=16384,
     ),
     "muse-spark-1.2-contributor-free": ModelSpec(
         id="opencode/muse-spark-1.2-contributor-free",
-        label="Muse Spark 1.2 Contributor Free (API)",
+        label="Muse Spark 1.2 Contributor Free (CLI)",
         provider="opencode",
-        api_model="muse-spark-1.2-contributor-free",
+        api_model="opencode/muse-spark-1.2-contributor-free",
         multimodal=False,
-        api_style="responses",  # TERUKUR: /chat/completions membalas error 500
-        note=("Via OpenCode Zen — butuh OPENCODE_API_KEY (hanya endpoint "
-              "/responses)"),
+        api_style="responses",  # cadangan HTTP: /chat membalas 500 utk model ini
+        note="Via CLI opencode run — gratis tanpa API key",
+        max_tokens=16384,
+    ),
+    "muse-spark-1.3-contributor-free": ModelSpec(
+        id="opencode/muse-spark-1.3-contributor-free",
+        label="Muse Spark 1.3 Contributor Free (CLI)",
+        provider="opencode",
+        api_model="opencode/muse-spark-1.3-contributor-free",
+        multimodal=False,
+        note="Via CLI opencode run — gratis tanpa API key",
         max_tokens=16384,
     ),
     "nemotron-3-ultra-free": ModelSpec(
         id="opencode/nemotron-3-ultra-free",
-        label="Nemotron 3 Ultra Free (API)",
+        label="Nemotron 3 Ultra Free (CLI)",
         provider="opencode",
-        api_model="nemotron-3-ultra-free",
+        api_model="opencode/nemotron-3-ultra-free",
         multimodal=False,
-        note="Via OpenCode Zen — butuh OPENCODE_API_KEY",
+        note="Via CLI opencode run — gratis tanpa API key",
         max_tokens=16384,
     ),
     "nemotron-3.5-lightning-free": ModelSpec(
         id="opencode/nemotron-3.5-lightning-free",
-        label="Nemotron 3.5 Lightning Free (API)",
+        label="Nemotron 3.5 Lightning Free (CLI)",
         provider="opencode",
-        api_model="nemotron-3.5-lightning-free",
+        api_model="opencode/nemotron-3.5-lightning-free",
         multimodal=False,
-        # Saat pengukuran awal (2026-08-29) upstream Zen untuk model ini masih
-        # membalas 404 "Provider returned error" di /chat/completions — pasang
-        # masuk tapi beri catatan jujur; penyedianya sendiri yang bermasalah.
-        note=("Via OpenCode Zen — butuh OPENCODE_API_KEY (upstream-nya kadang "
-              "404; bila gagal, pilih varian lain)"),
+        note="Via CLI opencode run — gratis tanpa API key",
         max_tokens=16384,
     ),
 
@@ -489,6 +487,25 @@ MODELS: dict[str, ModelSpec] = {
         max_tokens=16384,
         rekomendasi=True,
     ),
+    "glm-flash": ModelSpec(
+        id="nvidia/glm-flash",
+        label="GLM 5.3 Flash (API)",
+        # build.nvidia.com memakai glm-5-3-flash di URL, tapi ID API-nya
+        # z-ai/glm-5.3-flash (titik) — bentuk yang sama dipakai docs.api.nvidia.com
+        # dan tools/uji_nvidia_models.py.
+        api_model="z-ai/glm-5.3-flash",
+        multimodal=True,  # multimodal native: teks + gambar
+        note=("Via API NVIDIA — 320B MoE / 18B aktif, multimodal & tool calling; "
+              "ringan untuk throughput tinggi"),
+        # Saklar mode berpikir BELUM diukur untuk entri ini (lihat docstring
+        # modul): asumsi kuncinya berarti mengirim parameter yang mungkin
+        # diabaikan diam-diam.
+        reasoning_key="",
+        effort_levels=(),
+        effort_catatan=("saklar mode berpikir model ini belum diukur — "
+                        "tak ada tingkatan yang bisa ditawarkan"),
+        max_tokens=16384,
+    ),
     # Dihapus 2026-08-25: deepseek-v4-flash (nvidia/deepseek) — paling lambat
     # memulai dari semuanya (TERUKUR 106-169 dtk sampai kata pertama, 4 dari 8
     # permintaan uji habis waktu). Digantikan ox-alpha via OpenRouter.
@@ -523,11 +540,16 @@ MODELS: dict[str, ModelSpec] = {
 # Kurasi 2026-09-23: endpoint :free, harga input/output nol, mendukung tools.
 # Urutan prioritas coding/agent; bukan peringkat universal lintas benchmark.
 _OPENROUTER_FREE = [
-    ("inkling", "thinkingmachines/inkling:free", "Inkling", True, "1M konteks; AA Coding 52.1 / Agentic 22.5"),
-    ("or-nemotron-ultra", "nvidia/nemotron-3-ultra-550b-a55b:free", "Nemotron 3 Ultra", False, "1M konteks; AA Coding 49.3 / Agentic 20.1"),
-    ("laguna-s", "poolside/laguna-s-2.1:free", "Laguna S 2.1", False, "262K konteks; spesialis coding, Terminal-Bench 2.1 70.2%"),
-    ("nex-pro", "nex-agi/nex-n2.5-pro:free", "Nex N2.5 Pro", True, "262K konteks; coding dan agen visual"),
-    ("qwen38", "qwen/qwen3.8-27b:free", "Qwen 3.8 27B", True, "262K konteks; alternatif multimodal"),
+    ("inkling", "thinkingmachines/inkling:free", "Inkling", True,
+     "1M konteks; AA Coding 52.1 / Agentic 22.5"),
+    ("or-nemotron-ultra", "nvidia/nemotron-3-ultra-550b-a55b:free",
+     "Nemotron 3 Ultra", False, "1M konteks; AA Coding 49.3 / Agentic 20.1"),
+    ("laguna-s", "poolside/laguna-s-2.1:free", "Laguna S 2.1", False,
+     "262K konteks; spesialis coding, Terminal-Bench 2.1 70.2%"),
+    ("nex-pro", "nex-agi/nex-n2.5-pro:free", "Nex N2.5 Pro", True,
+     "262K konteks; coding dan agen visual"),
+    ("qwen38", "qwen/qwen3.8-27b:free", "Qwen 3.8 27B", True,
+     "262K konteks; alternatif multimodal"),
 ]
 MODELS = {
     **{alias: ModelSpec(
@@ -562,12 +584,8 @@ _SIAP = [
 # /model, atau nama yang tinggal disalin pengguna). Bedanya dengan _SIAP hanya
 # pada keadaan darurat: bila belum satu pun kunci terisi, _SIAP kosong dan
 # daftar ini jatuh ke katalog TAK-DITUNDA supaya pesannya masih bisa menyebut
-# nama yang benar-benar ada di katalog.
-#
-# Jatuh ke katalog TAK-DITUNDA, bukan ke _ORDER: _ORDER dimulai dari entri
-# opencode/* yang kini ditunda, dan karena DEFAULT_ID diambil dari unsur
-# pertama daftar ini, memakai _ORDER berarti keadaan "belum ada key"
-# mendaratkan bagas-ai di model yang pengguna sendiri tak boleh memilih.
+# nama yang benar-benar ada di katalog. _hitung_ulang_katalog() (di bawah)
+# memperbarui daftar ini kapan pun MODELS berubah — mis. sesudah sinkron CLI.
 _AKTIF = _SIAP or [k for k in _ORDER if MODELS[k].aktif] or _ORDER
 
 # Model bawaan bila tak ada preferensi tersimpan / preferensinya tak dikenal.
@@ -581,6 +599,96 @@ DEFAULT_ID = MODELS[_AKTIF[0]].id
 # yang menyesatkan, sebab situsnya sendiri masih mengalihkan cici.com ke Dola.
 _ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web"}
 _TIDAK_DIDUKUNG = {"opencode/hy3-free"}
+
+
+def _hitung_ulang_katalog() -> None:
+    """Hitung ulang _ORDER/_SIAP/_AKTIF/DEFAULT_ID setelah MODELS berubah."""
+    global _ORDER, _SIAP, _AKTIF, DEFAULT_ID
+    for k in list(MODELS):
+        spec = MODELS[k]
+        if k in _DITUNDA and not spec.ditunda:
+            MODELS[k] = replace(spec, ditunda=True)
+        elif (k not in _DITUNDA and spec.ditunda
+              and spec.provider == "opencode"):
+            # Hanya opencode/* yang boleh dibuka kembali sinkron CLI;
+            # entri (web) tetap di _DITUNDA sampai diminta pengguna.
+            MODELS[k] = replace(spec, ditunda=False)
+    _ORDER = [k for k, spec in MODELS.items() if spec.aktif]
+    _SIAP = [
+        k for k in _ORDER
+        if MODELS[k].aktif
+        and (not MODELS[k].is_api or config.has_api_key(MODELS[k].provider))
+    ]
+    _AKTIF = _SIAP or [k for k in _ORDER if MODELS[k].aktif] or _ORDER
+    DEFAULT_ID = MODELS[_AKTIF[0]].id
+
+
+def sinkron_model_opencode(*, refresh: bool = False) -> list[str]:
+    """Sinkron katalog opencode/* dari CLI `opencode models` (dinamis).
+
+    Mengembalikan daftar alias yang terlihat di CLI. Gagal total (binary tak
+    ada, perintah error, timeout) -> kembalikan [] dan biarkan daftar statis
+    dipakai apa adanya — import tidak boleh meledak hanya karena CLI absen.
+
+    `refresh=True` menambah flag --refresh (paksa update cache models.dev);
+    bawaan memakai cache CLI supaya startup tetap cepat.
+    """
+    import shutil
+    import subprocess
+
+    exe = shutil.which("opencode")
+    if not exe:
+        return []
+    cmd = [exe, "models", "opencode"]
+    if refresh:
+        cmd.append("--refresh")
+    try:
+        proses = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=20,
+            encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    if proses.returncode != 0:
+        return []
+    alias_hidup: list[str] = []
+    for baris in (proses.stdout or "").splitlines():
+        baris = baris.strip()
+        if not baris.startswith("opencode/"):
+            continue
+        alias = baris[len("opencode/"):].strip()
+        if not alias or "/" in alias:
+            continue
+        alias_hidup.append(alias)
+    if not alias_hidup:
+        return []
+    hidup = set(alias_hidup)
+    for alias in alias_hidup:
+        if alias not in MODELS:
+            MODELS[alias] = ModelSpec(
+                id=f"opencode/{alias}",
+                label=f"{alias} (CLI)",
+                provider="opencode",
+                api_model=f"opencode/{alias}",
+                multimodal=False,
+                note="Via CLI opencode run — gratis tanpa API key",
+                max_tokens=16384,
+            )
+    for k, spec in list(MODELS.items()):
+        if (spec.provider == "opencode" and k not in hidup
+                and not spec.ditunda):
+            MODELS[k] = replace(spec, ditunda=True)
+    for alias in alias_hidup:
+        if alias in _DITUNDA:
+            _DITUNDA.discard(alias)
+    _hitung_ulang_katalog()
+    return alias_hidup
+
+
+# Sinkron SEKALI saat import (best-effort, pakai cache CLI). Tanpa CLI,
+# katalog statis di atas dipakai apa adanya.
+sinkron_model_opencode()
 
 
 def _sebut_yang_bisa_dipakai() -> str:
@@ -641,20 +749,18 @@ def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
                 "https://openrouter.ai/keys."
             )
         if spec.provider == "opencode":
-            # Cabang ini baru TERJANGKAU sejak 2026-09-21: sebelumnya akses
-            # anonimnya masih terbuka sehingga has_api_key("opencode") selalu
-            # True dan tak ada yang pernah sampai ke sini. Penyedianya menutup
-            # akses itu (HTTP 403 FreeTierError), jadi key sungguhan kini
-            # satu-satunya jalan masuk — dan gerbangnya dipindah ke ATAS, ke
-            # momen memilih model, bukan dibiarkan meledak di tengah giliran.
+            # Cabang ini TERJANGKAU hanya bila binary `opencode` juga hilang
+            # dari PATH: biasanya has_api_key("opencode") True cukup dengan
+            # keberadaan CLI (lihat config.opencode_cli_tersedia). Jalur
+            # cadangan HTTP butuh key karena akses anonimnya ditutup penyedia
+            # (TERUKUR 2026-09-21: HTTP 403 FreeTierError).
             raise ValueError(
-                f"Model {spec.label} lewat API OpenCode Zen dan butuh "
-                f"{env_name}, yang belum diisi. Akses tanpa key jalur ini "
-                "SUDAH DITUTUP penyedianya (TERUKUR 2026-09-21: HTTP 403 "
-                "FreeTierError), jadi model ini tak bisa dipakai tanpa key. "
-                f"Isi di {config.ENV_FILE} (baris: {env_name}=...); ambil key "
-                "di https://opencode.ai/auth, atau jalankan `opencode auth "
-                "login` — berkasnya dibaca otomatis oleh bagas-ai."
+                f"Model {spec.label} lewat CLI `opencode run`, tapi binary "
+                "`opencode` tidak ditemukan di PATH dan OPENCODE_API_KEY juga "
+                "kosong (dipakai jalur cadangan HTTP; akses anonimnya sudah "
+                "ditutup — TERUKUR 2026-09-21, HTTP 403). Pasang CLI "
+                "(`npm i -g opencode-ai`), atau isi OPENCODE_API_KEY di "
+                f"{config.ENV_FILE} / jalankan `opencode auth login`."
             )
         raise ValueError(
             f"Model {spec.label} lewat API NVIDIA dan butuh {env_name}, "
@@ -803,13 +909,13 @@ def _varian_layanan() -> dict[str, list[tuple[str, str]]]:
 def kategori_model(spec: ModelSpec) -> str:
     """Nama kategori model di menu /model — PEMISAH antar kelompok.
 
-    Tiga kelompok: OpenCode Zen (gratis, tanpa key), AI web (browser), dan
-    API ber-key. Urutan kemunculannya mengikuti urutan MODELS, jadi kategori
-    tak perlu didaftarkan terpisah."""
+    Tiga kelompok: OpenCode CLI (gratis, tanpa API key), AI web (browser),
+    dan API ber-key. Urutan kemunculannya mengikuti urutan MODELS, jadi
+    kategori tak perlu didaftarkan terpisah."""
     if spec.provider == "openrouter":
         return "OpenRouter - gratis, dengan batas kuota"
     if spec.provider == "opencode":
-        return "OpenCode Zen — gratis, tanpa API key"
+        return "OpenCode CLI — gratis, tanpa API key"
     if spec.is_web:
         return "AI Web — via browser"
     return "API — butuh API key"

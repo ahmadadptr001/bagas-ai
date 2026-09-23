@@ -1,18 +1,21 @@
-"""Klien endpoint API OpenAI-compatible (NVIDIA, OpenRouter & OpenCode Zen)
-+ penanganan error tanpa pengiriman ulang otomatis.
+"""Klien endpoint API OpenAI-compatible (NVIDIA, OpenRouter) + jalur CLI
+OpenCode, dengan penanganan error tanpa pengiriman ulang otomatis.
 
 Modul ini melayani jalur model bagas-ai yang berbasis API: model `nvidia/*`
 (integrate.api.nvidia.com), `openrouter/*` (openrouter.ai/api/v1, kunci
-OPENROUTER_API_KEY), dan `opencode/*` (opencode.ai/zen/v1 — model gratisnya
-jalan TANPA key, akses anonim per-IP; OPENCODE_API_KEY opsional). Jalur
+OPENROUTER_API_KEY), dan `opencode/*` (JALUR UTAMA: subprocess CLI
+`opencode run --format json` — butuh binary di PATH, TANPA API key;
+OPENCODE_API_KEY hanya dipakai cadangan HTTP bila CLI absen). Jalur
 lainnya (model `web/*`) tak menyentuh berkas ini
 sama sekali — ia lewat agent/connectors + Agent._run_connector, dan padanan
 penanganan "sementara" di sana berbentuk lain sesuai medianya (WebBusyError
 untuk server penuh, WebLimitError untuk kuota situs habis).
 
-Permintaan dikirim sekali. Error dilaporkan tanpa retry otomatis.
-Batas baca NVIDIA terpisah; pembatalan pengguna tetap responsif ketika
-koneksi sedang menunggu data.
+Permintaan non-busy dikirim sekali tanpa retry. Kondisi sibuk/overload
+(503/529) di-retry sampai 10 kali berturut-turut dengan backoff; satu
+keberhasilan mereset hitungan ke 0. Setelah 10 kegagalan berturut-turut,
+ProviderBusyError dilempar ke UI. Batas baca NVIDIA terpisah; pembatalan
+pengguna tetap responsif ketika koneksi sedang menunggu data.
 """
 from __future__ import annotations
 
@@ -20,6 +23,8 @@ import json as _json
 import re as _re
 import time
 import queue
+import shutil
+import subprocess
 import threading
 from typing import Any, Callable
 
@@ -76,7 +81,15 @@ class ProviderReadTimeout(Exception):
 
 
 class ProviderBusyError(Exception):
-    """Penyedia menolak sementara karena sibuk/tidak tersedia."""
+    """Penyedia menolak sementara; sudah di-retry 10 kali berturut-turut."""
+
+
+# Retry khusus kondisi sibuk (503/529 / "overloaded"): maksimal 10 kali
+# berturut-turut. Sukses di percobaan mana pun mereset hitungan ke 0 —
+# jadi "10 kali gagal" selalu berarti 10 kegagalan BERTURUT-TURUT, bukan
+# akumulasi sepanjang sesi. Error non-busy (auth, konteks, payload) TIDAK
+# masuk jalur ini: tetap dilaporkan sekali tanpa pengiriman ulang.
+_BUSY_MAX_RETRY = 10
 
 
 def _read_timeout(provider: str) -> float:
@@ -403,6 +416,23 @@ def _sleep_cancellable(seconds: float, cancel_event: Any) -> None:
         time.sleep(min(0.2, remaining))
 
 
+def _busy_backoff(attempt: int) -> float:
+    """Tunggu antar retry busy: 2s, 4s, 6s, … maks 20s (linear berdempet)."""
+    return min(2.0 * attempt, 20.0)
+
+
+def _busy_error(provider: str, percobaan: int, exc: Exception) -> ProviderBusyError:
+    label = {"nvidia": "NVIDIA", "openrouter": "OpenRouter",
+             "opencode": "OpenCode"}.get(provider or "nvidia", provider)
+    return ProviderBusyError(
+        f"Layanan {label} sedang sibuk atau sementara tidak tersedia. "
+        f"Sudah dicoba ulang {percobaan} kali berturut-turut tanpa hasil. "
+        "Percakapan dan jawaban parsial tetap dipertahankan. "
+        "Tunggu sebentar lalu lanjutkan, atau pilih model lain lewat /model. "
+        "Menaikkan timeout tidak mengatasi penolakan dari server ini."
+    )
+
+
 def _call_with_retry(
     do: Callable[[], Any],
     *,
@@ -411,31 +441,43 @@ def _call_with_retry(
     sudah_mengalir: Callable[[], bool] | None = None,
     provider: str = "",
 ) -> Any:
-    """Jalankan permintaan sekali; jangan kirim ulang otomatis.
+    """Jalankan permintaan; retry HANYA untuk kondisi busy/sibuk (maks 10x).
 
-    Nama dan argumen lama dipertahankan untuk kompatibilitas pemanggil.
-    Error koneksi tidak membuktikan model sudah berhenti menjawab di server.
+    Error non-busy (auth, konteks penuh, payload salah, kuota) tetap naik
+    tanpa pengiriman ulang. Retry busy berhenti lebih awal bila jawaban
+    sudah mengalir (`sudah_mengalir`) — mengulang berarti menghapus
+    jawaban yang sedang tampil. Percobaan ke-10 yang tetap gagal melempar
+    ProviderBusyError (pesan merah di UI).
     """
-    if cancel_event is not None and cancel_event.is_set():
-        raise Cancelled()
-    try:
-        return do()
-    except Cancelled:
-        raise
-    except Exception as exc:
-        if _is_free_usage_limit(exc):
-            raise _quota_error(exc) from exc
-        if _is_provider_busy(exc):
-            label = {"nvidia": "NVIDIA", "openrouter": "OpenRouter",
-                     "opencode": "OpenCode"}.get(provider or "nvidia", provider)
-            raise ProviderBusyError(
-                f"Layanan {label} sedang sibuk atau sementara tidak tersedia. "
-                "Permintaan dihentikan tanpa mengirim ulang prompt otomatis. "
-                "Percakapan dan jawaban parsial tetap dipertahankan. "
-                "Tunggu sebentar lalu lanjutkan, atau pilih model lain lewat /model. "
-                "Menaikkan timeout tidak mengatasi penolakan dari server ini."
-            ) from exc
-        raise
+    percobaan_busy = 0
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise Cancelled()
+        try:
+            hasil = do()
+            # Sukses -> reset: hitungan "10 gagal" selalu BERTURUT-TURUT.
+            percobaan_busy = 0
+            return hasil
+        except Cancelled:
+            raise
+        except Exception as exc:
+            if _is_free_usage_limit(exc):
+                raise _quota_error(exc) from exc
+            if not _is_provider_busy(exc):
+                raise
+            # Jawaban parsial sudah di layar: jangan restart dari nol.
+            if sudah_mengalir is not None and sudah_mengalir():
+                raise _busy_error(provider, percobaan_busy or 1, exc) from exc
+            percobaan_busy += 1
+            if percobaan_busy >= _BUSY_MAX_RETRY:
+                raise _busy_error(provider, percobaan_busy, exc) from exc
+            tunggu = _busy_backoff(percobaan_busy)
+            if on_retry:
+                try:
+                    on_retry(percobaan_busy, tunggu, exc)
+                except Exception:  # noqa: BLE001 — UI callback tak boleh mematikan retry
+                    pass
+            _sleep_cancellable(tunggu, cancel_event)
 
 
 # Satu klien PER PENYEDIA dipakai ulang di seluruh aplikasi.
@@ -470,9 +512,11 @@ def get_client(provider: str = ""):
 
     provider="" atau "nvidia" -> integrate.api.nvidia.com (NVIDIA_API_KEY);
     provider="openrouter"     -> openrouter.ai/api/v1 (OPENROUTER_API_KEY);
-    provider="opencode"       -> opencode.ai/zen/v1 (TANPA key pun jalan —
-                                 model gratisnya anonim; OPENCODE_API_KEY
-                                 hanya opsional).
+    provider="opencode"       -> CADANGAN HTTP opencode.ai/zen/v1 (jalur
+                                 utama opencode/* lewat CLI `opencode run`
+                                 di stream_completion; klien ini hanya
+                                 dipakai bila CLI absen tapi OPENCODE_API_KEY
+                                 ada — akses anonim HTTP ditutup 2026-09-21).
     """
     p = provider if provider in ("nvidia", "openrouter", "opencode") else "nvidia"
     client = _clients.get(p)
@@ -487,23 +531,13 @@ def get_client(provider: str = ""):
                 default_headers=_OPENROUTER_HEADERS,
             )
         elif p == "opencode":
-            # OpenCode Zen: gateway OpenAI-compatible. Tanpa header atribusi
-            # ( itu kebutuhan khusus OpenRouter) — Zen tak memintanya.
-            #
-            # TANPA require_api_key: dulu model gratisnya jalan secara ANONIM
-            # (TERUKUR 2026-08-29: request tanpa Authorization dibalas 200).
-            # TERUKUR ULANG 2026-09-21: jalur itu SUDAH DITUTUP penyedianya —
-            # request tanpa Authorization kini dibalas HTTP 403 FreeTierError
-            # ("OpenCode's free tier can only be used from within OpenCode").
-            # Mekanisme dummy key + _headers_tanpa_auth di bawah TETAP benar
-            # dan tetap dipakai bila OPENCODE_API_KEY kosong; yang berubah cuma
-            # gerbangnya: config.has_api_key("opencode") sekarang menuntut key,
-            # jadi keadaan itu tak lagi bisa dicapai lewat /model.
-            #
-            # SDK openai memang mewajibkan api_key non-kosong saat klien
-            # dibuat, makanya dipakai dummy lalu header Authorization-nya
-            # dibuang per-request lewat _headers_tanpa_auth() — dummy key tak
-            # bisa sekadar dikirim: key PALSU terukur dibalas 401 AuthError.
+            # CADANGAN HTTP (bukan jalur utama — lihat stream_completion):
+            # dipakai hanya bila binary `opencode` hilang tapi OPENCODE_API_KEY
+            # ada. Akses ANONIM HTTP sudah ditutup penyedia (TERUKUR
+            # 2026-09-21: HTTP 403 FreeTierError), jadi jalur ini butuh key
+            # sungguhan. Dummy key + _headers_tanpa_auth di bawah hanya
+            # memuaskan syarat minimum SDK openai saat key kosong.
+            config.require_api_key("opencode")
             client = _oa().OpenAI(
                 base_url=config.OPENCODE_BASE_URL,
                 api_key=config.OPENCODE_API_KEY or "tanpa-key",
@@ -573,6 +607,276 @@ def _base_kwargs(
 # penjaga "diam N detik" lagi di sini: jeda panjang BUKAN bukti stream mati.
 
 
+def _prompt_dari_messages(messages: list[dict[str, Any]]) -> str:
+    """Ratakan riwayat chat bagas-ai jadi SATU string prompt untuk CLI.
+
+    `opencode run` menerima prompt tunggal (argv / stdin), bukan daftar pesan
+    OpenAI. Peran dilabeli supaya batas giliran tetap terbaca model:
+      [SYSTEM] / [ASSISTANT] / [USER] / [TOOL <nama>]. Lampiran multimodal
+    dilepas diam-diam — jalur CLI ini jalur teks.
+    """
+    blok: list[str] = []
+    for msg in messages:
+        role = str(msg.get("role") or "user")
+        konten = msg.get("content")
+        if isinstance(konten, list):
+            teks = [
+                bag.get("text") or "" for bag in konten
+                if isinstance(bag, dict) and bag.get("type") == "text"
+            ]
+            konten = "\n".join(teks)
+        konten = (konten or "").strip()
+        if not konten and role != "assistant":
+            continue
+        if role == "system":
+            label = "SYSTEM"
+        elif role == "assistant":
+            label = "ASSISTANT"
+        elif role == "tool":
+            label = f"TOOL {msg.get('name') or msg.get('tool_call_id') or ''}".strip()
+        else:
+            label = "USER"
+        blok.append(f"[{label}]\n{konten}".rstrip())
+    return "\n\n".join(blok)
+
+
+class _UsageCLI:
+    """Usage ala Chat Completions yang dibaca TokenUsage.add — dari event
+    step_finish CLI OpenCode.
+
+    TERUKUR 2026-09-23: field ada di `part.tokens` (bukan root event):
+    {"total","input","output","reasoning","cache":{"write","read"}} dan
+    cost di `part.cost`. cache.read = bagian prompt yang terkena cache.
+    """
+
+    def __init__(self, step: dict[str, Any]) -> None:
+        part = step.get("part") if isinstance(step.get("part"), dict) else {}
+        src = part or step
+        tok = src.get("tokens") or step.get("tokens") or {}
+        self.prompt_tokens = int(tok.get("input") or 0)
+        self.completion_tokens = int(tok.get("output") or 0)
+        try:
+            self.cost = float(src.get("cost") or step.get("cost") or 0)
+        except (TypeError, ValueError):
+            self.cost = 0.0
+
+        class _Det:
+            pass
+
+        cache = tok.get("cache")
+        if isinstance(cache, dict):
+            cache = cache.get("read") or 0
+        elif not isinstance(cache, (int, float)):
+            cache = tok.get("cache_read") or 0
+        reason = tok.get("reasoning") or 0
+        pdet = _Det()
+        pdet.cached_tokens = int(cache or 0)
+        self.prompt_tokens_details = pdet
+        cdet = _Det()
+        cdet.reasoning_tokens = int(reason or 0)
+        self.completion_tokens_details = cdet
+
+
+def _stream_opencode_cli(
+    messages: list[dict[str, Any]],
+    *,
+    model: str | None = None,
+    on_content: Any = None,
+    on_tool_pending: Callable[[str], None] | None = None,
+    on_reasoning: Any = None,
+    cancel_event: Any = None,
+) -> tuple[str, list[dict[str, Any]], Any]:
+    """Streaming lewat subprocess `opencode run --format json` (tanpa key).
+
+    OpenCode MENGENDALIKAN loop agennya sendiri (tool dipanggil & dieksekusi
+    di sana dengan `--auto`), jadi fungsi ini:
+      * mengirim riwayat sebagai prompt stdin (argv Windows ~32k — stdin aman);
+      * menyiarkan potongan teks dari event `text` via on_content;
+      * menyalakan on_tool_pending saat event `tool_use` (umpan balik live);
+      * menutup dengan teks akhir + tool_calls KOSONG — loop tool bagas-ai
+        selesai satu giliran (hasil tool sudah diproses di dalam CLI).
+    `tools` dari pemanggil DIABAIKAN: OpenCode memakai tool bawaannya.
+    """
+    exe = shutil.which("opencode")
+    if not exe:
+        raise ProviderBusyError(
+            "Binary `opencode` tidak ditemukan di PATH. Install dulu "
+            "(npm i -g opencode-ai), atau isi OPENCODE_API_KEY untuk "
+            "jalur cadangan HTTP."
+        )
+    prompt = _prompt_dari_messages(messages)
+    if not prompt:
+        raise EmptyResponseError("Prompt kosong untuk CLI OpenCode.")
+    api_model = (model or "").strip() or "opencode/big-pickle"
+    cmd = [exe, "run", "-m", api_model, "--format", "json", "--auto"]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — argumen di-build lokal, bukan shell
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=flags if subprocess.CREATE_NO_WINDOW else 0,
+            cwd=None,
+        )
+    except OSError as exc:
+        raise ProviderBusyError(
+            f"Gagal menjalankan CLI OpenCode: {exc}"
+        ) from exc
+
+    antre: queue.Queue[Any] = queue.Queue()
+    selesai = threading.Event()
+
+    def _baca() -> None:
+        try:
+            assert proc.stdout is not None
+            for baris in proc.stdout:
+                antre.put(baris)
+            try:
+                proc.wait(timeout=15)
+            except Exception:  # noqa: BLE001 — timeout menunggu: biarkan
+                pass
+            sisa = ""
+            if proc.stderr is not None:
+                sisa = proc.stderr.read() or ""
+            if sisa.strip():
+                antre.put(("__stderr__", sisa.strip()))
+        except Exception as exc:  # noqa: BLE001
+            antre.put(exc)
+        finally:
+            selesai.set()
+            antre.put(None)
+
+    def _matikan() -> None:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+    thread = threading.Thread(target=_baca, daemon=True, name="opencode-cli")
+    thread.start()
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        _matikan()
+        raise ProviderBusyError("CLI OpenCode menutup stdin lebih dulu.") from None
+
+    potongan: list[str] = []
+    usage: Any = None
+    tool_pending_seen = False
+    teks_part: dict[str, int] = {}  # id part -> panjang teks yang sudah dikirim
+    last_exc: Exception | None = None
+    stderr_teks = ""
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            _matikan()
+            raise Cancelled()
+        try:
+            item = antre.get(timeout=0.25)
+        except queue.Empty:
+            if selesai.is_set() and antre.empty():
+                break
+            continue
+        if item is None:
+            break
+        if isinstance(item, Exception):
+            last_exc = item
+            break
+        if isinstance(item, tuple) and item and item[0] == "__stderr__":
+            stderr_teks = str(item[1])
+            continue
+        baris = str(item).strip()
+        if not baris:
+            continue
+        try:
+            ev = _json.loads(baris)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        # Beberapa build membalas {type:"error"/"message", error:...}
+        if ev.get("type") in ("error", "message_error") or "error" in ev and (
+            ev.get("type") in ("error",)
+        ):
+            err = ev.get("error") or ev.get("message") or ev
+            last_exc = ProviderBusyError(
+                f"OpenCode CLI: {err if isinstance(err, str) else _json.dumps(err)}"
+            )
+            continue
+        tipe = str(ev.get("type") or "")
+        part = ev.get("part") if isinstance(ev.get("part"), dict) else {}
+        if tipe == "text":
+            pid = str(part.get("id") or id(ev))
+            teks = str(part.get("text") or "")
+            sudah = teks_part.get(pid, 0)
+            if len(teks) > sudah:
+                delta = teks[sudah:]
+                teks_part[pid] = len(teks)
+                potongan.append(delta)
+                if on_content is not None:
+                    try:
+                        on_content(delta)
+                    except Exception:  # noqa: BLE001 — UI boleh gagal sendiri
+                        pass
+        elif tipe == "reasoning":
+            pid = str(part.get("id") or id(ev))
+            teks = str(part.get("text") or "")
+            sudah = teks_part.get(pid, 0)
+            if len(teks) > sudah:
+                delta = teks[sudah:]
+                teks_part[pid] = len(teks)
+                if on_reasoning is not None:
+                    try:
+                        on_reasoning(delta)
+                    except Exception:  # noqa: BLE001
+                        pass
+        elif tipe == "tool_use":
+            tool_pending_seen = True
+            nama = str(
+                part.get("tool") or part.get("name")
+                or ev.get("tool") or ev.get("name") or "tool"
+            )
+            if on_tool_pending is not None:
+                try:
+                    on_tool_pending(nama)
+                except Exception:  # noqa: BLE001
+                    pass
+        elif tipe == "step_finish":
+            usage = _UsageCLI(ev)
+
+    if cancel_event is not None and cancel_event.is_set():
+        _matikan()
+        raise Cancelled()
+    if last_exc is not None and not potongan:
+        raise last_exc
+
+    content = "".join(potongan)
+    # OpenCode sudah mengeksekusi tool-nya; teks yang berisi penanda tool
+    # mentah (jarang, tapi bisa bocor dari provider) dibersihkan seperti
+    # jalur HTTP — tanpa mengubahnya jadi tool_calls bagas-ai.
+    if content and _HAS_TOOLTEXT.search(content):
+        cleaned = _re.sub(r"<tool_call>.*?</tool_call>", "", content,
+                          flags=_re.DOTALL | _re.IGNORECASE)
+        cleaned = _re.sub(r"<function\s*=.*?</function>", "", cleaned,
+                          flags=_re.DOTALL | _re.IGNORECASE)
+        cleaned = _re.sub(r"<tool_call>.*$", "", cleaned,
+                          flags=_re.DOTALL | _re.IGNORECASE)
+        cleaned = _re.sub(r"<function\s*=.*$", "", cleaned,
+                          flags=_re.DOTALL | _re.IGNORECASE)
+        # Jangan jadikan tool_calls: loop agent di CLI sudah selesai.
+        content = cleaned.strip()
+    if not content and not tool_pending_seen:
+        detail = stderr_teks.strip().splitlines()
+        pesan = detail[-1] if detail else "respons CLI kosong"
+        raise EmptyResponseError(f"OpenCode CLI tidak menjawab ({pesan}).")
+    return content, [], usage
+
+
 def stream_completion(
     messages: list[dict[str, Any]],
     *,
@@ -596,12 +900,23 @@ def stream_completion(
     `cancel_event` tiap chunk supaya responsif saat dibatalkan. Error koneksi
     atau throttle dilaporkan langsung tanpa mengirim ulang prompt.
 
-    `api_style="chat"` (bawaan) -> /chat/completions; `api_style="responses"`
-    -> /responses (Responses API — dipakai model OpenCode Zen yang hanya
-    dilayani di sana, mis. muse-spark-1.2-contributor-free).
+    provider="opencode" -> SUBPROSES CLI `opencode run` (jalur utama; lihat
+    _stream_opencode_cli). `api_style="chat"` (bawaan) -> /chat/completions;
+    `api_style="responses"` -> /responses (cadangan HTTP untuk model Zen yang
+    hanya dilayani di sana, mis. muse-spark-1.2-contributor-free).
 
     Mengembalikan (teks_final, daftar_tool_calls, usage).
     """
+    if provider == "opencode" and config.opencode_cli_tersedia():
+        # Cabang PALING ATAS: CLI menang atas HTTP (kunci OPENCODE_API_KEY
+        # opsional), sebab akses anonim HTTP Zen sudah ditutup penyedia.
+        # tools/temperature/extra_body/max_tokens diabaikan — protokolnya
+        # milik `opencode run`, bukan Chat Completions.
+        return _stream_opencode_cli(
+            messages, model=model, on_content=on_content,
+            on_tool_pending=on_tool_pending, on_reasoning=on_reasoning,
+            cancel_event=cancel_event,
+        )
     if provider == "openrouter" and model and model.endswith(":free"):
         extra_body = dict(extra_body or {})
         routing = dict(extra_body.get("provider") or {})
@@ -628,6 +943,11 @@ def stream_completion(
     except Exception:  # noqa: BLE001 — tanpa httpx pun tetap jalan (timeout klien)
         pass
 
+    # Dibuat DI LUAR _do supaya penanda "sudah mengalir" bertahan antar
+    # percobaan retry busy — tanpa ini tiap retry mengira stream masih kosong
+    # lalu mengulang jawaban yang sudah tampil di layar.
+    mengalir = {"ada": False}
+
     def _do() -> tuple[str, list[dict[str, Any]], Any]:
         try:
             stream = _stream_cancellable(
@@ -641,9 +961,6 @@ def stream_completion(
         tool_slots: dict[int, dict[str, str]] = {}
         usage = None
         finish_reason = None
-        # Penanda "sudah ada yang tampil di layar" — dibaca `_call_with_retry`
-        # supaya percobaan ini tak pernah diulang sesudah jawaban mengalir.
-        mengalir = {"ada": False}
         try:
             try:
                 for chunk in stream:
@@ -761,6 +1078,7 @@ def stream_completion(
 
     return _call_with_retry(
         _do, cancel_event=cancel_event, on_retry=on_retry,
+        sudah_mengalir=lambda: mengalir["ada"],
         provider=provider,
     )
 
@@ -781,6 +1099,7 @@ def stream_completion(
 # description, parameters}.
 
 _API_ROLES = frozenset(("system", "user", "assistant", "tool"))
+
 
 def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Pesan gaya chat -> daftar item input Responses API."""
@@ -839,7 +1158,7 @@ def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]
             "name": fn.get("name"),
             "description": fn.get("description") or "",
             "parameters": fn.get("parameters")
-                          or {"type": "object", "properties": {}},
+            or {"type": "object", "properties": {}},
         })
     return out
 
@@ -914,6 +1233,9 @@ def _stream_responses(
     except Exception:  # noqa: BLE001 — tanpa httpx pun tetap jalan
         pass
 
+    # DI LUAR _do: penanda antar percobaan retry busy (lihat jalur chat).
+    mengalir = {"ada": False}
+
     def _do() -> tuple[str, list[dict[str, Any]], Any]:
         try:
             stream = _stream_cancellable(
@@ -929,9 +1251,6 @@ def _stream_responses(
         tool_slots: dict[int, dict[str, str]] = {}
         usage = None
         finish_reason = None
-        # Penanda "sudah ada yang tampil di layar" — dibaca `_call_with_retry`
-        # supaya percobaan ini tak pernah diulang sesudah jawaban mengalir.
-        mengalir = {"ada": False}
         try:
             try:
                 for ev in stream:
@@ -1032,5 +1351,6 @@ def _stream_responses(
 
     return _call_with_retry(
         _do, cancel_event=cancel_event, on_retry=on_retry,
+        sudah_mengalir=lambda: mengalir["ada"],
         provider=provider,
     )

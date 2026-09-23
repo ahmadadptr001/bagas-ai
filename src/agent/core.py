@@ -2838,9 +2838,10 @@ class Agent:
                     max_tokens=spec.max_tokens,
                     # Penyedia endpoint menentukan klien (base_url + API key):
                     # nvidia -> NVIDIA_API_KEY, openrouter -> OPENROUTER_API_KEY,
-                    # opencode -> tanpa key pun jalan (anonim; key opsional).
+                    # opencode -> CLI `opencode run` (tanpa key; OPENCODE_API_KEY
+                    # hanya cadangan HTTP bila CLI absen).
                     # api_style memilih protokol endpoint: "responses" utk model
-                    # Zen yang hanya dilayani di /responses.
+                    # Zen yang hanya dilayani di /responses (jalur cadangan).
                     provider=spec.provider,
                     api_style=getattr(spec, "api_style", "chat"),
                     on_content=on_content,

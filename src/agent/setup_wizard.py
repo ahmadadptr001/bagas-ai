@@ -2,21 +2,20 @@
 
 Dipanggil lewat `bagas-ai login` (atau `bagas-ai setup`).
 
-Sejak 2026-09-21 ada SATU kredensial yang praktis wajib, dan itu perubahan
-nyata dari sebelumnya: seluruh model (web) ditunda dan penyedia OpenCode Zen
-menutup akses anonimnya (HTTP 403), jadi satu-satunya model yang bisa dipilih
-adalah jalur (API) nvidia/* dan openrouter/* — yang jelas butuh key. Karena
-itu NVIDIA_API_KEY (atau OPENROUTER_API_KEY) harus terisi; tanpa keduanya,
-pemasangan berhasil tapi tiap model ditolak models._pastikan_aktif.
+Sejak 2026-09-23 ada SATU kredensial yang SANGAT DISARANKAN, bukan lagi
+wajib-mutlak: seluruh model (web) masih ditunda, tapi model `opencode/*`
+kini jalan lewat CLI `opencode run` TANPA API key (cukup binary `opencode`
+di PATH — npm i -g opencode-ai). NVIDIA_API_KEY / OPENROUTER_API_KEY tetap
+dibutuhkan bila pengguna ingin jalur nvidia/* atau openrouter/*, dan
+OPENCODE_API_KEY hanya relevan sebagai cadangan HTTP bila CLI absen.
 
-Melewatinya tetap TIDAK menggagalkan pemasangan — wizard tak pernah memaksa,
+Melewatinya TIDAK menggagalkan pemasangan — wizard tak pernah memaksa,
 ia hanya berhenti menawarkan model yang pasti ditolak. Kredensial yang SUDAH
 terisi di .env dilewati otomatis; menggantinya lewat pertanyaan "Ganti
 kredensial". Wizard dibuka DISCLAIMER yang wajib disetujui sebelum apa pun
-ditanya atau disimpan. (OPENCODE_API_KEY tak perlu ditanyakan: seluruh model
-opencode/* kini ditunda, jadi key-nya tak membuka apa pun sekarang; bila
-kelak diisi manual atau lewat `opencode auth login`, config membacanya
-sendiri — lihat config._baca_key_opencode.)
+ditanya atau disimpan. (OPENCODE_API_KEY tak ditanyakan: jalur utama
+opencode/* lewat CLI tanpa key; bila kelak diisi manual atau lewat
+`opencode auth login`, config membacanya sendiri — config._baca_key_opencode.)
 """
 from __future__ import annotations
 
@@ -55,15 +54,16 @@ _ENV_KOMENTAR = {
         "# Key gratis: https://build.nvidia.com",
     ],
     "OPENROUTER_API_KEY": [
-        "# Kunci untuk model (API) openrouter/* (model :free, gratis dengan batas kuota) - OPSIONAL.",
+        "# Kunci untuk model (API) openrouter/* (model :free, gratis dengan "
+        "batas kuota) - OPSIONAL.",
         "# Ambil key: https://openrouter.ai/keys (awalan sk-or-...).",
     ],
     "OPENCODE_API_KEY": [
-        "# OPSIONAL — model opencode/* SUDAH GRATIS tanpa key ini",
-        "# (akses anonim per-IP ke OpenCode Zen). Key dari",
-        "# https://opencode.ai/auth hanya menaikkan kuota pribadi, dan",
-        "# kalau `opencode auth login` pernah dijalankan, bagas-ai membacanya",
-        "# otomatis dari auth.json CLI-nya (tak perlu ditulis di sini).",
+        "# OPSIONAL — model opencode/* JALAN TANPA key ini lewat CLI",
+        "# `opencode run` (binary di PATH; npm i -g opencode-ai).",
+        "# Key dari https://opencode.ai/auth hanya untuk jalur cadangan",
+        "# HTTP bila CLI absen; `opencode auth login` menyimpannya di",
+        "# auth.json dan config membacanya otomatis.",
     ],
     "CONNECTOR_BROWSER_CHANNEL": [
         "# Browser yang dipakai connector. Pilihan: brave, chrome,",
@@ -80,11 +80,10 @@ _ENV_KOMENTAR = {
 }
 
 _DEFAULTS = {
-    # Ikut models._DITUNDA: menulis model yang ditunda ke .env pemasangan baru
-    # berarti tiap sesi dimulai dengan pemetaan-ulang diam-diam. Seluruh model
-    # (web) kini ditunda, jadi bawaannya jalur API NVIDIA — dan .env pemasangan
-    # baru WAJIB menanyakan NVIDIA_API_KEY-nya, sebab tanpa key itu modelnya
-    # ditolak models._pastikan_aktif.
+    # Ikut models: bawaan TIDAK menunjuk model (web) yang ditunda. Bawaan
+    # jalur API NVIDIA — .env pemasangan baru lebih baik menanyakan
+    # NVIDIA_API_KEY-nya (model opencode/* tetap jalan tanpa key lewat CLI
+    # bila binary `opencode` ada di PATH).
     "CHAT_MODEL": "nvidia/nemotron",
     # Ditulis TEGAS ke .env, bukan dibiarkan mengandalkan bawaan di config.py:
     # bawaannya pernah berubah (chrome -> brave) lewat pembaruan, dan pemasangan
@@ -265,18 +264,18 @@ _KREDENSIAL = {
     },
 }
 # Sengaja TAK ADA entri OPENCODE_API_KEY di atas, dan itu keputusan, bukan
-# kelalaian: seluruh model opencode/* kini DITUNDA (models._DITUNDA), jadi
-# key-nya tak membuka model apa pun — menanyakannya cuma membuat pengguna
-# baru mengejar kunci yang sia-sia. Key tetap dihormati bila diisi manual di
-# .env / lewat `opencode auth login`, dan langsung berguna begitu penundaan
-# itu dicabut.
+# kelalaian: jalur utama opencode/* kini lewat CLI `opencode run` tanpa key
+# (lihat docstring). Key tetap dihormati bila diisi manual di .env / lewat
+# `opencode auth login` — dipakai cadangan HTTP bila binary `opencode`
+# hilang dari PATH.
 
-# Dua kredensial yang menentukan ADA-TIDAKNYA model yang bisa dipakai: jalur
-# (API) nvidia/* & openrouter/* adalah satu-satunya yang tersisa selama model
-# (web) ditunda. Dipakai hanya untuk MEMILIH KALIMAT pertanyaan — keduanya
-# tetap boleh dilewati, sebab memasang tanpa key masih sah; yang salah cuma
-# menyebutnya "opsional" lalu membiarkan pengguna menemukan sendiri bahwa
-# /model menolak semuanya.
+# Dua kredensial yang menentukan ADA-TIDAKNYA model ber-key: jalur
+# (API) nvidia/* & openrouter/* butuh keduanya selama model (web) ditunda.
+# Model opencode/* TIDAK masuk daftar ini — ia jalan tanpa key lewat CLI
+# (bila binary `opencode` ada di PATH). Dipakai hanya untuk MEMILIH KALIMAT
+# pertanyaan — keduanya tetap boleh dilewati, sebab memasang tanpa key masih
+# sah; yang salah cuma menyebutnya "opsional" lalu membiarkan pengguna
+# menemukan sendiri bahwa /model menolak model ber-key tanpa kunci.
 _KEY_MODEL = ("NVIDIA_API_KEY", "OPENROUTER_API_KEY")
 
 
@@ -451,18 +450,32 @@ def run(console: Console | None = None) -> bool:
         return False
     console.print(f"  [green]✔ Konfigurasi disimpan:[/green] [dim]{config.ENV_FILE}[/dim]")
     # Diperingatkan SETELAH simpan, bukan sebagai penghalang: pemasangan tetap
-    # sah, tapi keadaan "tak ada satu pun key model" kini berarti tak ada satu
-    # pun model yang bisa dipilih — model (web) ditunda, opencode/* ditunda dan
-    # penyedianya menutup akses anonim. Lebih baik diberitahukan di sini
-    # daripada pengguna menemukannya sendiri lewat /model yang menolak semua.
+    # sah. Tanpa NVIDIA/OPENROUTER key, model ber-key memang tak bisa dipilih —
+    # TAPI model opencode/* masih jalan lewat CLI `opencode run` bila binary
+    # `opencode` ada di PATH, jadi peringatan "belum ada model" hanya untuk
+    # keadaan CLI juga absen.
     if not (env.get("NVIDIA_API_KEY") or env.get("OPENROUTER_API_KEY")):
-        console.print(
-            "  [yellow]Catatan:[/yellow] NVIDIA_API_KEY dan OPENROUTER_API_KEY "
-            "sama-sama kosong,\n"
-            "  jadi BELUM ADA model yang bisa dipilih — jalankan "
-            "[bold cyan]bagas-ai login[/bold cyan] lagi\n"
-            "  untuk mengisinya (gratis di https://build.nvidia.com)."
-        )
+        if config.opencode_cli_tersedia():
+            console.print(
+                "  [yellow]Catatan:[/yellow] NVIDIA_API_KEY & OPENROUTER_API_KEY "
+                "sama-sama kosong,\n"
+                "  jadi model nvidia/* & openrouter/* belum bisa dipilih — "
+                "isi lewat [bold cyan]bagas-ai login[/bold cyan]\n"
+                "  (gratis di https://build.nvidia.com / "
+                "https://openrouter.ai/keys). Model opencode/* tetap jalan "
+                "lewat CLI."
+            )
+        else:
+            console.print(
+                "  [yellow]Catatan:[/yellow] NVIDIA_API_KEY dan OPENROUTER_API_KEY "
+                "sama-sama kosong,\n"
+                "  dan binary `opencode` tak ada di PATH, jadi BELUM ADA model "
+                "yang bisa dipilih —\n"
+                "  jalankan [bold cyan]bagas-ai login[/bold cyan] lagi untuk "
+                "mengisinya\n"
+                "  (gratis di https://build.nvidia.com), atau pasang CLI "
+                "[cyan]npm i -g opencode-ai[/cyan]."
+            )
     console.print(
         "\n  [bold]Selesai![/bold] Ketik [bold cyan]bagas-ai[/bold cyan] untuk mulai chat"
         " ·  [bold cyan]bagas-ai telegram[/bold cyan] untuk bot."
