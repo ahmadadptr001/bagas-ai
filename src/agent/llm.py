@@ -1,5 +1,5 @@
 """Klien endpoint API OpenAI-compatible (NVIDIA, OpenRouter & OpenCode Zen)
-+ retry tahan-banting.
++ penanganan error tanpa pengiriman ulang otomatis.
 
 Modul ini melayani jalur model bagas-ai yang berbasis API: model `nvidia/*`
 (integrate.api.nvidia.com), `openrouter/*` (openrouter.ai/api/v1, kunci
@@ -15,12 +15,17 @@ dengan bentuk yang BERMACAM-MACAM — bukan cuma HTTP 429/RateLimitError, tapi
 juga pesan seperti "worker local total request limit reached", body KOSONG
 dengan HTTP 200, atau 5xx sesaat. Semuanya ditahan di sini: tunggu lalu ulangi
 langkah yang sama, supaya tugas pengguna berlanjut alih-alih dibatalkan.
+
+BATASNYA (2026-09-23): pengulangan itu hanya berlaku SELAMA jawaban belum
+mengalir. Begitu ada potongan yang sudah tampil di layar, kegagalan apa pun
+dilempar apa adanya — tak ada lagi "batalkan lalu minta ulang", karena di mata
+pengguna itu berarti jawaban yang sedang berjalan dihapus dan model disuruh
+mengulang dari nol.
 """
 from __future__ import annotations
 
 import json as _json
 import re as _re
-import threading
 import time
 from typing import Any, Callable
 
@@ -72,24 +77,14 @@ class ProviderQuotaError(Exception):
     """Kuota layanan benar-benar habis dan retry cepat tidak akan menolong."""
 
 
-class StreamStalled(Exception):
-    """Stream MACET berulang (tak ada data melewati batas) dan sudah dicoba
-    ulang beberapa kali tanpa hasil.
-
-    Dilempar ke core supaya bisa menaikkan effort lalu mengulang dengan konteks
-    yang sama — bukan menggantung selamanya di panggilan yang tak bergerak.
-    """
-
-
-class _StallTimeout(Exception):
-    """Internal: watchdog antar-token menutup stream yang berhenti bergerak.
-
-    Kelas sendiri, bukan menumpang pesan galat httpx: `_is_timeout` harus bisa
-    mengenalinya dengan PASTI. Saat socket ditutup dari thread lain, galat yang
-    muncul dari pembacaan bisa berupa apa saja (ReadError, StreamClosed,
-    RuntimeError, dsb) — mencocokkan teksnya berarti watchdog kadang dianggap
-    kegagalan fatal lalu tak pernah diulang.
-    """
+# StreamStalled & _StallTimeout DIHAPUS (2026-09-23) bersama watchdog antar-
+# token yang melahirkannya. Keduanya ADA untuk membatalkan stream yang sedang
+# mengalir ("diam >45 dtk") lalu meminta ulang dari nol — dan justru itu
+# keluhannya: model yang butuh jeda panjang di tengah jawaban tampak
+# "dibatalkan padahal sedang menjawab", tulisannya lenyap, lalu ia mulai lagi
+# dari awal. Penjaga liveness sekarang tinggal batas baca httpx
+# (TTFT_TIMEOUT), dan retry tak pernah lagi menyentuh jawaban yang sudah
+# mengalir (lihat sudah_mengalir di _call_with_retry).
 
 
 # Kata kunci pada PESAN error yang menandakan kondisi SEMENTARA (throttle /
@@ -195,7 +190,7 @@ def _is_transient(exc: Exception) -> bool:
         # KonteksPenuh: mengulang payload yang sama PASTI ditolak lagi —
         # pemulihannya bukan retry, melainkan penjelasan + /compact (di core).
         return False
-    if isinstance(exc, (EmptyResponseError, _StallTimeout)):
+    if isinstance(exc, EmptyResponseError):
         return True
     # Tipe exception openai dicek HANYA bila openai sudah dimuat (pasti sudah,
     # karena exc ini datang dari panggilan yang memakai klien openai).
@@ -220,17 +215,6 @@ def _is_transient(exc: Exception) -> bool:
     if o is not None and isinstance(exc, o.APIError):
         return True
     return False
-
-
-def _is_timeout(exc: Exception) -> bool:
-    """True bila error bertipe MACET (stream berhenti mengirim data)."""
-    if isinstance(exc, _StallTimeout):
-        return True
-    o = _openai
-    if o is not None and isinstance(exc, (o.APITimeoutError, o.APIConnectionError)):
-        return True
-    msg = str(getattr(exc, "message", "") or exc).lower()
-    return "timed out" in msg or "timeout" in msg
 
 
 _HAS_TOOLTEXT = _re.compile(r"<tool_call>|<function\s*=", _re.IGNORECASE)
@@ -305,55 +289,23 @@ def _call_with_retry(
     *,
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
-    stall_escape: int | None = None,
+    sudah_mengalir: Callable[[], bool] | None = None,
 ) -> Any:
-    """Jalankan `do()` dengan retry SABAR untuk error NVIDIA yang sementara.
+    """Jalankan permintaan sekali; jangan kirim ulang otomatis.
 
-    Backoff eksponensial (maks. 60 dtk/percobaan) sampai TOTAL tunggu melewati
-    `config.RETRY_MAX_SECONDS`, baru menyerah. Tunggunya bisa dibatalkan. Saat
-    akan mengulang, `on_retry(attempt, wait, exc)` dipanggil supaya UI bisa
-    mengabari bahwa bagas-ai MENUNGGU lalu melanjutkan — bukan gagal.
-
-    `stall_escape`: bila diberi N, error MACET (timeout/stream berhenti) yang
-    terjadi N kali tak diulang lagi di sini melainkan dilempar sebagai
-    StreamStalled, supaya core bisa mengubah setelan alih-alih menggantung
-    berulang-ulang pada panggilan yang sama.
+    Nama dan argumen lama dipertahankan untuk kompatibilitas pemanggil.
+    Error koneksi tidak membuktikan model sudah berhenti menjawab di server.
     """
-    attempt = 0
-    waited = 0.0
-    delay = 3.0
-    stalls = 0
-    budget = config.RETRY_MAX_SECONDS
-    while True:
-        attempt += 1
-        try:
-            return do()
-        except Cancelled:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            # Limit gratis anonim bersifat kuota per-IP/akun, bukan lonjakan
-            # sesaat. Mengulang payload yang sama selama RETRY_MAX_SECONDS
-            # hanya membuat pengguna menunggu lima menit untuk error yang sama.
-            if _is_free_usage_limit(exc):
-                raise _quota_error(exc) from exc
-            if stall_escape is not None and _is_timeout(exc):
-                stalls += 1
-                if stalls >= stall_escape:
-                    raise StreamStalled(
-                        f"stream macet {stalls}x (tak ada data "
-                        f">{config.STREAM_STALL_TIMEOUT:.0f} dtk)"
-                    ) from exc
-            if not _is_transient(exc) or waited >= budget:
-                raise
-            wait = min(delay, 60.0)
-            delay *= 1.8
-            waited += wait
-            if on_retry:
-                try:
-                    on_retry(attempt, wait, exc)
-                except Exception:  # noqa: BLE001 — UI gagal tak boleh membatalkan retry
-                    pass
-            _sleep_cancellable(wait, cancel_event)
+    if cancel_event is not None and cancel_event.is_set():
+        raise Cancelled()
+    try:
+        return do()
+    except Cancelled:
+        raise
+    except Exception as exc:
+        if _is_free_usage_limit(exc):
+            raise _quota_error(exc) from exc
+        raise
 
 
 # Satu klien PER PENYEDIA dipakai ulang di seluruh aplikasi.
@@ -401,7 +353,7 @@ def get_client(provider: str = ""):
                 base_url=config.OPENROUTER_BASE_URL,
                 api_key=config.OPENROUTER_API_KEY,
                 timeout=config.REQUEST_TIMEOUT,
-                max_retries=0,  # retry ditangani _call_with_retry di atas
+                max_retries=0,  # tidak mengirim ulang permintaan otomatis
                 default_headers=_OPENROUTER_HEADERS,
             )
         elif p == "opencode":
@@ -434,7 +386,7 @@ def get_client(provider: str = ""):
                 base_url=config.NVIDIA_BASE_URL,
                 api_key=config.NVIDIA_API_KEY,
                 timeout=config.REQUEST_TIMEOUT,
-                max_retries=0,  # retry ditangani _call_with_retry di atas
+                max_retries=0,  # tidak mengirim ulang permintaan otomatis
             )
         _clients[p] = client
     return client
@@ -479,46 +431,16 @@ def _base_kwargs(
 # Hidupkan kembali dari riwayat git bila suatu saat benar-benar diperlukan.
 
 
-def _pasang_watchdog(stream: Any, state: dict[str, Any]) -> threading.Thread | None:
-    """Jaga stream yang BERHENTI BERGERAK sesudah token pertama tiba.
-
-    Kenapa perlu thread sendiri, bukan cukup timeout httpx: batas baca httpx
-    berlaku untuk SATU operasi baca socket, jadi satu angka mengatur dua hal
-    yang lamanya berbeda jauh — penantian token PERTAMA dan jeda ANTAR-token.
-    TERUKUR 2026-08-23: deepseek-v4-flash butuh 106-169 dtk sampai kata
-    pertama, sementara nemotron & muse-glimmer menjawab dalam hitungan detik.
-    Klien lama memakai satu angka untuk keduanya (read=STREAM_STALL_TIMEOUT),
-    sehingga permintaan yang sebenarnya SEHAT dibatalkan cuma karena modelnya
-    lambat memulai. Menaikkan angka itu ke 300 dtk memperbaiki yang lambat
-    memulai tapi MENGHILANGKAN perlindungan macet — stream yang menggantung di
-    tengah jawaban jadi diam lima menit.
-
-    Jadi keduanya dipisah: httpx menjaga TTFT (read=TTFT_TIMEOUT, sekaligus
-    jaring terakhir bila thread ini gagal), dan thread ini menjaga jeda
-    antar-token dengan MENUTUP stream begitu diam melewati batas. Penutupan itu
-    membuat pembacaan di thread utama melempar galat, yang lalu diterjemahkan
-    jadi _StallTimeout supaya ikut jalur retry biasa.
-    """
-    batas = config.STREAM_STALL_TIMEOUT
-    if batas <= 0:
-        return None
-
-    def _jaga() -> None:
-        while not state["selesai"]:
-            time.sleep(0.5)
-            if state["selesai"] or not state["mulai"]:
-                continue  # belum ada token pertama -> itu wilayah TTFT, bukan macet
-            if time.monotonic() - state["ts"] > batas:
-                state["macet"] = True
-                try:
-                    stream.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                return
-
-    t = threading.Thread(target=_jaga, name="bagasai-stall-watchdog", daemon=True)
-    t.start()
-    return t
+# _pasang_watchdog() DIHAPUS (2026-09-23). Dulu thread daemon ini menutup
+# stream yang diam >STREAM_STALL_TIMEOUT (45 dtk) SESUDAH token pertama, dan
+# penutupan itu sengaja diterjemahkan jadi error "sementara" supaya ikut jalur
+# retry biasa. Niatnya melindungi dari server menggantung; akibatnya model yang
+# sekadar butuh jeda panjang di tengah jawaban (menyusun tabel, menimbang
+# tool berikutnya, atau bernalar tanpa mengirim delta) DIBATALKAN lalu diminta
+# ulang dari nol. Penjaganya sekarang cuma batas baca httpx (read=TTFT_TIMEOUT)
+# yang berlaku per operasi baca — jauh lebih longgar, dan kegagalannya pun tak
+# lagi memicu pengulangan karena jawabannya sudah mengalir. Jangan pasang
+# penjaga "diam N detik" lagi di sini: jeda panjang BUKAN bukti stream mati.
 
 
 def stream_completion(
@@ -536,13 +458,12 @@ def stream_completion(
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
 ) -> tuple[str, list[dict[str, Any]], Any]:
-    """Streaming chat completion dengan retry tahan-banting.
+    """Streaming chat completion tanpa pengiriman ulang otomatis.
 
     Memanggil `on_content(teks)` tiap potongan jawaban tiba (token realtime),
     `on_reasoning(teks)` untuk potongan "pikiran" bila disediakan, dan memeriksa
-    `cancel_event` tiap chunk supaya responsif saat dibatalkan. Bila endpoint
-    throttle di awal/tengah, seluruh panggilan diulang otomatis dengan backoff
-    lewat `_call_with_retry`, dan `on_retry` mengabari UI.
+    `cancel_event` tiap chunk supaya responsif saat dibatalkan. Error koneksi
+    atau throttle dilaporkan langsung tanpa mengirim ulang prompt.
 
     `api_style="chat"` (bawaan) -> /chat/completions; `api_style="responses"`
     -> /responses (Responses API — dipakai model OpenCode Zen yang hanya
@@ -582,17 +503,14 @@ def stream_completion(
         tool_slots: dict[int, dict[str, str]] = {}
         usage = None
         finish_reason = None
-        state: dict[str, Any] = {
-            "ts": time.monotonic(), "mulai": False, "macet": False,
-            "selesai": False,
-        }
-        watchdog = _pasang_watchdog(stream, state)
+        # Penanda "sudah ada yang tampil di layar" — dibaca `_call_with_retry`
+        # supaya percobaan ini tak pernah diulang sesudah jawaban mengalir.
+        mengalir = {"ada": False}
         try:
             try:
                 for chunk in stream:
                     if cancel_event is not None and cancel_event.is_set():
                         raise Cancelled()
-                    state["ts"] = time.monotonic()
                     if getattr(chunk, "usage", None):
                         usage = chunk.usage
                     if not getattr(chunk, "choices", None):
@@ -603,7 +521,7 @@ def stream_completion(
                     delta = choice.delta
                     piece = getattr(delta, "content", None)
                     if piece:
-                        state["mulai"] = True
+                        mengalir["ada"] = True
                         content_parts.append(piece)
                         if on_content:
                             on_content(piece)
@@ -616,14 +534,14 @@ def stream_completion(
                     rpiece = (getattr(delta, "reasoning_content", None)
                               or getattr(delta, "reasoning", None))
                     if rpiece:
-                        state["mulai"] = True
+                        mengalir["ada"] = True
                         reasoning_parts.append(rpiece)
                         if on_reasoning:
                             on_reasoning(rpiece)
                         elif on_content:
                             on_content(rpiece)
                     for tc in getattr(delta, "tool_calls", None) or []:
-                        state["mulai"] = True
+                        mengalir["ada"] = True
                         # DIKUNCI PER tc.index, dan itu bukan kerapian: satu
                         # giliran bisa memuat beberapa panggilan tool BERNAMA
                         # SAMA (TERUKUR: `bagi` di index 0 dan index 1).
@@ -642,14 +560,6 @@ def stream_completion(
             except Cancelled:
                 raise
             except Exception as exc:  # noqa: BLE001
-                # Watchdog menutup socket -> galatnya bisa berbentuk apa saja.
-                # Terjemahkan ke _StallTimeout supaya masuk jalur retry/naik-
-                # kelas, bukan dilaporkan sebagai kerusakan tak dikenal.
-                if state["macet"]:
-                    raise _StallTimeout(
-                        f"stream diam >{config.STREAM_STALL_TIMEOUT:.0f} dtk "
-                        "sesudah token pertama"
-                    ) from exc
                 # Provider kadang mengirim error 400/413 sebagai CHUNK PERTAMA
                 # (bukan saat create()) — tanpa ini, "konteks penuh" jatuh ke
                 # jalur generik dan pemulih pemangkasannya tak pernah jalan.
@@ -657,9 +567,6 @@ def stream_completion(
                     raise KonteksPenuh(str(exc)) from exc
                 raise
         finally:
-            state["selesai"] = True
-            if watchdog is not None:
-                watchdog.join(timeout=1.0)
             try:
                 stream.close()
             except Exception:  # noqa: BLE001
@@ -707,7 +614,7 @@ def stream_completion(
 
     return _call_with_retry(
         _do, cancel_event=cancel_event, on_retry=on_retry,
-        stall_escape=max(1, config.MAX_STALLS_PER_CALL),
+        sudah_mengalir=lambda: mengalir["ada"],
     )
 
 
@@ -826,9 +733,9 @@ def _stream_responses(
     """Streaming via /responses — protokol Responses API (lihat catatan blok).
 
     Sama semangatnya dengan stream_completion: token realtime lewat
-    on_content/on_reasoning, panggilan tool diakumulasi per-index, watchdog
-    menjaga stream yang macet, dan hasil akhirnya (teks + tool_calls + usage)
-    sama bentuknya dengan jalur chat supaya core tak perlu tahu bedanya."""
+    on_content/on_reasoning, panggilan tool diakumulasi per-index, dan hasil
+    akhirnya (teks + tool_calls + usage) sama bentuknya dengan jalur chat
+    supaya core tak perlu tahu bedanya."""
     client = get_client(provider)
     kwargs: dict[str, Any] = {
         "model": model or config.NVIDIA_DEFAULT_MODEL,
@@ -873,22 +780,19 @@ def _stream_responses(
         tool_slots: dict[int, dict[str, str]] = {}
         usage = None
         finish_reason = None
-        state: dict[str, Any] = {
-            "ts": time.monotonic(), "mulai": False, "macet": False,
-            "selesai": False,
-        }
-        watchdog = _pasang_watchdog(stream, state)
+        # Penanda "sudah ada yang tampil di layar" — dibaca `_call_with_retry`
+        # supaya percobaan ini tak pernah diulang sesudah jawaban mengalir.
+        mengalir = {"ada": False}
         try:
             try:
                 for ev in stream:
                     if cancel_event is not None and cancel_event.is_set():
                         raise Cancelled()
-                    state["ts"] = time.monotonic()
                     tipe = getattr(ev, "type", "")
                     if tipe == "response.output_text.delta":
                         piece = getattr(ev, "delta", None)
                         if piece:
-                            state["mulai"] = True
+                            mengalir["ada"] = True
                             content_parts.append(piece)
                             if on_content:
                                 on_content(piece)
@@ -896,7 +800,7 @@ def _stream_responses(
                                   "response.reasoning_summary_text.delta"):
                         piece = getattr(ev, "delta", None)
                         if piece:
-                            state["mulai"] = True
+                            mengalir["ada"] = True
                             reasoning_parts.append(piece)
                             if on_reasoning:
                                 on_reasoning(piece)
@@ -905,7 +809,7 @@ def _stream_responses(
                     elif tipe == "response.output_item.added":
                         item = getattr(ev, "item", None)
                         if getattr(item, "type", "") == "function_call":
-                            state["mulai"] = True
+                            mengalir["ada"] = True
                             tool_slots[getattr(ev, "output_index",
                                                len(tool_slots))] = {
                                 "id": str(getattr(item, "call_id", "") or ""),
@@ -936,18 +840,10 @@ def _stream_responses(
             except Cancelled:
                 raise
             except Exception as exc:  # noqa: BLE001
-                if state["macet"]:
-                    raise _StallTimeout(
-                        f"stream diam >{config.STREAM_STALL_TIMEOUT:.0f} dtk "
-                        "sesudah token pertama"
-                    ) from exc
                 if _apakah_konteks_penuh(exc):
                     raise KonteksPenuh(str(exc)) from exc
                 raise
         finally:
-            state["selesai"] = True
-            if watchdog is not None:
-                watchdog.join(timeout=1.0)
             try:
                 stream.close()
             except Exception:  # noqa: BLE001
@@ -981,5 +877,5 @@ def _stream_responses(
 
     return _call_with_retry(
         _do, cancel_event=cancel_event, on_retry=on_retry,
-        stall_escape=max(1, config.MAX_STALLS_PER_CALL),
+        sudah_mengalir=lambda: mengalir["ada"],
     )

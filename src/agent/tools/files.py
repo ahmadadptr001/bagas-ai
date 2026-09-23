@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import difflib
 import json as _json
+import os
 import re
 import shutil
 import subprocess
@@ -449,10 +450,13 @@ def list_dir(path: str = ".") -> str:
     if not target.is_dir():
         return f"Folder tidak ditemukan: {path}"
     entries = []
-    for p in sorted(target.iterdir()):
-        kind = "dir " if p.is_dir() else "file"
-        size = p.stat().st_size if p.is_file() else "-"
-        entries.append(f"[{kind}] {p.name} ({size})")
+    # DirEntry memakai metadata hasil enumerasi OS; hindari stat berulang
+    # untuk setiap path (terutama mahal di folder besar/network drive).
+    with os.scandir(target) as scan:
+        for p in sorted(scan, key=lambda entry: Path(entry.name)):
+            kind = "dir " if p.is_dir() else "file"
+            size = p.stat().st_size if p.is_file() else "-"
+            entries.append(f"[{kind}] {p.name} ({size})")
     return "\n".join(entries) if entries else "(kosong)"
 
 

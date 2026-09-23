@@ -2763,6 +2763,19 @@ class BagasAIApp(App):
             pass
 
         msg_list = self.query_one("#messages", MessageList)
+        # SEGEL JAWABAN YANG SUDAH MENGALIR (2026-09-23). Sejak pengulangan
+        # "batalkan lalu minta ulang" dibuang (lihat catatan di core._api_loop),
+        # kegagalan di TENGAH jawaban memang sampai ke sini alih-alih ditelan
+        # tangga retry. Jawaban yang sudah tampil itu milik pengguna — ia TIDAK
+        # dihapus — tapi tidak boleh dibiarkan sebagai aliran yang masih
+        # TERBUKA: token giliran berikutnya akan menempel di belakangnya,
+        # sehingga dua jawaban berbeda menyatu dalam satu blok. ``end_stream()``
+        # tanpa argumen menyegel yang benar-benar ada di layar ke riwayat lalu
+        # mengosongkan buffer — persis seperti giliran yang selesai normal.
+        try:
+            msg_list.end_stream()
+        except Exception:  # noqa: BLE001 — penyegelan tak boleh menutup jalur error
+            pass
         if isinstance(exc, KeyboardInterrupt):
             msg_list.append_notice("⚠ Dibatalkan oleh pengguna.",
                                   style=f"bold {tema.p('exit_footer')}")
@@ -2777,6 +2790,7 @@ class BagasAIApp(App):
                 f"⚠ {pesan}",
                 style=f"bold {tema.p('exit_footer')}"
             )
+        self._process_queue()
         self.query_one("#chatbox", ChatBox).focus()
 
     # ─── Agent Callbacks (called from worker thread) ───────────────────

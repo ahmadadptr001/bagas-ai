@@ -251,7 +251,6 @@ Disimpan di `~/.bagasai/.env`.
 | `VOICE_STT_MODEL` | Model Whisper untuk `/voice`: `tiny` (±75 MB, tercepat), `base`, `small` (default, ±460 MB), `medium` (±1,5 GB). |
 | `VISION_MODEL` | Model untuk analisis gambar. |
 | `TELEGRAM_BOT_TOKEN` | Token bot untuk mode `telegram`. |
-| `RETRY_MAX_SECONDS` | Berapa lama bertahan mencoba ulang saat kena rate-limit (default 300). |
 | `MAX_TOOL_ITERATIONS` | Batas loop tool per giliran (default 8). |
 | `ALLOW_CODE_EXEC` | `true`/`false` — aktifkan eksekusi kode. |
 | `CODE_EXEC_TIMEOUT` | Timeout eksekusi kode (detik). |
@@ -341,7 +340,7 @@ bagas-ai --skip-permissions      # semua folder boleh, tanpa konfirmasi
 ```
 src/agent/
   config.py      # baca .env & path config
-  llm.py         # klien model + retry otomatis
+  llm.py         # klien model tanpa retry otomatis
   core.py        # Agent: loop tool-calling
   memory.py      # riwayat percakapan
   prompts.py     # system prompt

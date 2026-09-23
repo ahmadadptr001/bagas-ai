@@ -196,29 +196,28 @@ TEMPERATURE: float = float(os.getenv("TEMPERATURE", "1.0"))
 TOP_P: float = float(os.getenv("TOP_P", "0.95"))
 # Batas waktu satu permintaan (dipakai klien openai untuk panggilan non-stream).
 REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "600"))
-# TOTAL anggaran menunggu saat endpoint throttle (retry berjenjang) sebelum
-# benar-benar menyerah. Free tier NVIDIA ±40 RPM, jadi menunggu jauh lebih
-# berguna daripada membatalkan tugas pengguna.
-RETRY_MAX_SECONDS: float = float(os.getenv("RETRY_MAX_SECONDS", "300"))
 
-# DUA anggaran waktu yang SENGAJA DIPISAH — jangan disatukan lagi.
+# SATU anggaran waktu untuk liveness — dan itu memang cukup (2026-09-23).
 #
 # TERUKUR (2026-08-23, integrate.api.nvidia.com): deepseek-v4-flash butuh
 # ±120 detik sampai token PERTAMA keluar, sementara nemotron & muse-glimmer
-# menjawab dalam hitungan detik. Klien lama memakai SATU angka
+# menjawab dalam hitungan detik. Klien lama memakai satu angka
 # (httpx read=STREAM_STALL_TIMEOUT) untuk keduanya — dan karena httpx
 # menghitung read-timeout per operasi baca socket, angka itu ikut membatasi
 # penantian token pertama. Akibatnya permintaan yang sebenarnya SEHAT
 # dibatalkan hanya karena modelnya lambat memulai.
 #
-# TTFT_TIMEOUT  : sabar — menunggu token PERTAMA (model bisa mengantre).
-# STREAM_STALL_TIMEOUT: ketat — jeda antar-token SESUDAH token pertama tiba;
-#                       di titik itu stream yang diam berarti server menggantung.
+# Perbaikannya waktu itu: angka kedua yang KETAT untuk jeda antar-token
+# (STREAM_STALL_TIMEOUT=45) lewat watchdog thread, yang menutup stream diam
+# supaya "ikut jalur retry biasa". Angka itu DIHAPUS bersama watchdognya: jeda
+# panjang di tengah jawaban ternyata BUKAN bukti stream mati — model yang
+# menyusun tabel besar atau menimbang tool berikutnya memang diam lama — tapi
+# watchdog memperlakukannya sebagai kerusakan, membatalkan jawaban yang sedang
+# mengalir, lalu meminta ulang dari nol. Sekarang yang tersisa cuma
+# TTFT_TIMEOUT: batas baca httpx yang berlaku PER OPERASI BACA, jadi ia sudah
+# menutup koneksi yang benar-benar mati tanpa menghukum model yang hanya
+# butuh waktu. Jangan tambahkan lagi penjaga "diam N detik" di atasnya.
 TTFT_TIMEOUT: float = float(os.getenv("BAGASAI_TTFT_TIMEOUT", "300"))
-STREAM_STALL_TIMEOUT: float = float(os.getenv("STREAM_STALL_TIMEOUT", "45"))
-# Berapa kali MACET (bukan throttle) boleh diulang dalam satu panggilan sebelum
-# dilempar sebagai StreamStalled ke core.
-MAX_STALLS_PER_CALL: int = int(os.getenv("MAX_STALLS_PER_CALL", "2"))
 # Anggaran total panggilan tool dalam SATU giliran (jaring pengaman anti-liar).
 MAX_TOOL_CALLS: int = int(os.getenv("MAX_TOOL_CALLS", "40"))
 # Berapa kali bagas-ai boleh MENAIKKAN effort sendiri dalam satu giliran saat

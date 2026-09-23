@@ -1,10 +1,11 @@
 """Agent inti: satu giliran percakapan + eksekusi tool. Dipakai semua antarmuka.
 
-SELURUH model bagas-ai berbasis browser (lihat models.py), jadi tiap giliran
-diteruskan ke situs AI web lewat Playwright dan tool "dipanggil" memakai
-protokol penanda [[TOOL]] di bawah. Jalur API NVIDIA — streaming delta,
-tool-calling gaya OpenAI, retry rate-limit, watchdog macet, naik-kelas otomatis
-— sudah dihapus seluruhnya.
+SELURUH jalur browser (`web/*`, lihat models.py) sedang DITUNDA, jadi giliran
+normalnya berjalan lewat jalur API: streaming delta (token + pikiran realtime),
+tool-calling gaya OpenAI, retry rate-limit, dan naik-kelas effort otomatis.
+Jalur browser-nya sendiri — situs AI web lewat Playwright, tool "dipanggil"
+memakai protokol penanda [[TOOL]] di bawah — tetap hidup di _run_connector
+untuk saat model (web) dihidupkan lagi.
 
 Menangani: system prompt dinamis, protokol tool web, kaitan sesi terminal <->
 percakapan browser, dan penyimpanan sesi.
@@ -2425,9 +2426,11 @@ class Agent:
         dipakai UI untuk menampilkan hasil (mis. output perintah) secara ringkas.
         `on_notice(teks)` dipanggil saat bagas-ai mengambil tindakan anti-macet
         otomatis (mis. memaksa menyimpulkan sesudah tool gagal beruntun).
-        `on_retry(percobaan, tunggu, exc)` dipanggil saat situs sedang PENUH
+        `on_retry(percobaan, tunggu, exc)` dipanggil saat endpoint sedang PENUH
         dan bagas-ai menunggu lalu mengirim ulang — UI memakainya untuk
-        hitung-mundur sisa waktu di footer.
+        hitung-mundur sisa waktu di footer. HANYA terjadi sebelum satu potong
+        jawaban pun tampil: sesudah jawabannya mengalir, tak ada pengulangan
+        (2026-09-23 — lihat catatan di handler galat _api_loop).
         Bila `cancel_event` diset di tengah jalan, melempar llm.Cancelled.
         """
         # Penanda [GAMBAR] <path> di TEKS pengguna (mis. drag-drop foto dari
@@ -2682,7 +2685,6 @@ class Agent:
         force_final = False
         weak_hits = 0
         empty_hits = 0
-        stall_rounds = 0
         # Cache media MILIK GILIRAN INI: data-URL dihitung sekali, dipakai
         # ulang tiap putaran rantai tool (tanpa ini, video 30 MB dibaca &
         # dienkode ulang berkali-kali — biaya & waktu sia-sia). `media_lewat`
@@ -2719,8 +2721,20 @@ class Agent:
             # "fase": None -> belum ada apa pun, "pikir" -> pikiran mengalir,
             # "jawab" -> jawaban mengalir. Dipakai supaya status hanya
             # berubah saat FASENYA berpindah, bukan tiap potongan token.
+            partial_content: list[str] = []
             state = {"completion_est": 0, "reasoning_est": 0, "fase": None}
             self.tokens_live = self.tokens_last.total + prompt_est
+
+            def _sudah_mengalir() -> bool:
+                """True bila putaran ini sudah mencetak sesuatu ke layar.
+
+                Jawaban (atau pikiran) yang sudah tampil TIDAK PERNAH diulang:
+                mengulang di titik itu berarti menghapus apa yang sedang dibaca
+                pengguna lalu meminta model mengulang dari nol. Dipakai
+                pemulih 400 generik di bawah.
+                """
+                return bool(state["completion_est"] or state["reasoning_est"])
+
             if on_status:
                 # NETRAL: pada titik ini permintaan baru dikirim dan belum satu
                 # potong pun kembali, jadi kita belum tahu model akan bernalar
@@ -2729,6 +2743,7 @@ class Agent:
                 on_status(f"{spec.label} sedang memproses")
 
             def on_content(piece: str) -> None:
+                partial_content.append(piece)
                 # Jawaban SUNGGUHAN. Begitu ia mulai mengalir, status kembali
                 # dari "berpikir" ke "menjawab" supaya keduanya tak tertukar.
                 if state.get("fase") != "jawab":
@@ -2807,41 +2822,32 @@ class Agent:
                     cancel_event=cancel_event,
                     on_retry=_on_retry,
                 )
-            except llm.Cancelled:
+            except (llm.Cancelled, KeyboardInterrupt):
+                if partial_content:
+                    self.memory.add_assistant_text("".join(partial_content))
                 raise
-            except llm.StreamStalled:
-                # URUTAN NYAWA (pelajaran 2026-08-26): handler SPESIFIK wajib
-                # di ATAS except Exception — dulu ia di bawahnya sehingga
-                # selalu tertelan duluan dan pemulih macet tak pernah jalan.
-                # Stream berhenti mengirim data berulang kali. Naikkan effort
-                # lalu ULANGI: memory belum disentuh di putaran ini, jadi
-                # konteksnya masih utuh dan tak ada pekerjaan yang hilang.
-                stall_rounds += 1
-                if stall_rounds > 3:
-                    final = (
-                        f"Maaf, model terus macet (berhenti mengirim respons) "
-                        "meski sudah kubatalkan & kuulang otomatis beberapa "
-                        f"kali. Kemungkinan server {spec.provider} sedang "
-                        "bermasalah — coba lagi sebentar lagi, atau ganti "
-                        "model dengan /model (model (web) tak lewat server "
-                        "ini)."
-                    )
-                    self.memory.add_assistant_text(final)
-                    self._persist()
-                    return final
-                changed = self._escalate(
-                    "respons macet — stream diam terlalu lama")
-                if on_notice:
-                    on_notice(changed or
-                              "respons macet — dibatalkan & diulang otomatis")
-                continue
             except Exception as exc:
+                # Simpan teks yang sudah terlihat, termasuk jika stream putus.
+                # _run_api menyimpan memori ke disk sebelum meneruskan error.
+                if partial_content:
+                    self.memory.add_assistant_text("".join(partial_content))
+                # TAK ADA LAGI PEMULIH "STREAM MACET" (2026-09-23). Dulu di
+                # sini ada handler StreamStalled: begitu stream diam melewati
+                # batas sesudah token pertama, watchdog menutupnya, core
+                # menaikkan effort, lalu MENGULANG putaran — sampai tiga kali.
+                # Yang pengguna lihat: jawaban yang sedang ditulis lenyap lalu
+                # diminta ulang dari nol, berkali-kali, padahal modelnya cuma
+                # butuh jeda panjang. Sekarang jeda panjang dibiarkan apa
+                # adanya (batas baca httpx yang menjaga koneksi benar-benar
+                # mati), dan lapisan llm pun tak lagi mengulang setelah ada
+                # potongan yang tampil.
                 # 400 generik BUKAN bukti konteks penuh. Coba ulang dengan
                 # payload lebih konservatif, tetapi jangan sentuh riwayat.
                 # Ini menyelamatkan provider yang menolak extra_body/schema
                 # tanpa mengubah error request menjadi kehilangan konteks.
                 generik = (_permintaan_api_ditolak(exc)
-                           and not isinstance(exc, llm.KonteksPenuh))
+                           and not isinstance(exc, llm.KonteksPenuh)
+                           and not _sudah_mengalir())
                 if generik:
                     if extra and not extra_diblokir:
                         extra_diblokir = True
@@ -2891,7 +2897,8 @@ class Agent:
                 if not isinstance(exc, llm.KonteksPenuh):
                     raise          # bukan keluarga ini: biarkan naik seperti biasa
 
-                if any(v for v in media_cache.values()) and not media_diblokir:
+                if (any(v for v in media_cache.values()) and not media_diblokir
+                        and not _sudah_mengalir()):
                     media_diblokir = True
                     if on_notice:
                         on_notice("konteks model penuh — dicoba ulang TANPA "
@@ -3109,37 +3116,6 @@ class Agent:
         return fallback
 
     # --- pemulihan saat situsnya bermasalah -------------------------------
-    def _pulihkan_chat_rusak(self, exc, user_text, on_status, on_notice) -> str:
-        """Chat di situs rusak -> buka chat BARU lalu kirim ulang sekali.
-
-        Tak menanyakan apa pun ke pengguna: kuotanya baik-baik saja dan
-        satu-satunya jalan keluar memang ini, jadi bertanya cuma menunda hal
-        yang jawabannya sudah pasti."""
-        from . import connectors
-        if on_notice:
-            on_notice(f"chat di {self.model_spec.label} rusak — "
-                      "membuka chat baru lalu mengirim ulang")
-        try:
-            connectors.get_connector(self.model_spec.connector)
-            # Kaitan ke chat yang rusak DILEPAS, dan konteks pembuka ditandai
-            # perlu dikirim ulang — keduanya sekaligus. Dulu di sini ada
-            # `conn.new_chat()`, method yang tak pernah ada di connector mana
-            # pun: AttributeError-nya tertelan `except` di bawah, jadi
-            # pemulihan ini SELALU berakhir "tak bisa dipulihkan" tanpa pernah
-            # benar-benar mencoba.
-            self._lupakan_chat_web()
-            jawab = self._run_connector(
-                user_text, on_status=on_status, on_notice=on_notice)
-        except Exception as exc2:  # noqa: BLE001
-            return (
-                f"⚠ **Chat di {self.model_spec.label} rusak dan tak bisa "
-                f"dipulihkan.**\n\n> {exc}\n\n"
-                f"Percobaan chat baru juga gagal: {exc2}\n\n"
-                "Coba `/new` untuk memulai percakapan bersih, atau `/model` "
-                "untuk pindah layanan."
-            )
-        return jawab
-
     def _tangani_limit(self, exc, user_text, on_status, on_notice) -> str:
         """Kuota habis -> TANYAKAN mau menunggu atau ganti model.
 
@@ -3410,68 +3386,18 @@ class Agent:
             # relaunch kapan pun selalu kembali ke percakapan yang benar.
             if open_chat_id is None:
                 open_chat_id = self._web_chat_id
-            # "Server sedang sibuk" itu SEMENTARA (kuota kita aman) dan biasanya
-            # pulih dalam hitungan detik, jadi ditangani di sini: tunggu lalu
-            # kirim ULANG pesan yang sama. Menyerahkannya ke pengguna berarti
-            # tugas yang sedang berjalan putus di tengah tanpa alasan nyata.
-            # Jeda menaik supaya tak menambah beban server yang sedang penuh.
-            jeda = (15, 40, 75)
-            for percobaan in range(len(jeda) + 1):
-                # Dihitung PER PERCOBAAN: pesannya benar-benar diketik & dikirim
-                # ulang tiap kali, jadi menghitungnya sekali di luar loop membuat
-                # estimasi token meremehkan lalu lintas justru pada giliran yang
-                # paling banyak menghabiskan kuota situs.
-                prompt_chars += len(msg)
-                _sync_tokens()
-                try:
-                    out = conn.send(
-                        msg, on_status=on_status, on_token=on_token,
-                        cancel_event=cancel_event, new_chat=new_chat,
-                        open_chat_id=open_chat_id,
-                        complete_when=_web_reply_complete,
-                        attachments=attachments,
-                        # Kabar yang HARUS terbaca pengguna (captcha muncul,
-                        # jendela dibuka, verifikasi selesai). Lewat on_status
-                        # kalimatnya diringkas jadi satu kata fase dan hilang.
-                        on_notice=on_notice,
-                    )
-                    break
-                except connectors.WebBusyError:
-                    if percobaan >= len(jeda):
-                        raise           # sudah cukup sabar -> laporkan jujur
-                    # Percobaan berikutnya harus MASUK KE CHAT YANG SAMA. Tanpa
-                    # ini, kirim pertama sebuah sesi (new_chat=True) mengulang
-                    # dengan new_chat=True juga, sehingga tiap percobaan membuat
-                    # chat BARU: sampai empat chat terlantar berisi pesan yang
-                    # sama, dan sesi akhirnya tertaut ke chat terakhir saja —
-                    # persis pola kehilangan konteks yang sudah pernah diperbaiki.
-                    dibuat = getattr(conn, "last_chat_id", "") or ""
-                    if dibuat:
-                        new_chat = False
-                        open_chat_id = dibuat
-                        self._link_web_chat(dibuat)
-                    tunggu = jeda[percobaan]
-                    _status(f"{self.model_spec.label} sibuk — menunggu "
-                            f"{tunggu}s lalu mencoba lagi "
-                            f"({percobaan + 1}/{len(jeda)})")
-                    # UI sudah punya hitung-mundur khusus penantian seperti ini
-                    # (footer "layanan sibuk — menunggu lalu melanjutkan Ns").
-                    # Dulu menganggur karena on_retry tak pernah dipanggil lagi
-                    # sesudah jalur API dihapus, sehingga penantian 75 detik
-                    # hanya ditandai sebaris teks fase tanpa sisa waktu.
-                    if on_retry is not None:
-                        try:
-                            on_retry(percobaan + 1, float(tunggu),
-                                     connectors.WebBusyError("server penuh"))
-                        except Exception:  # noqa: BLE001 - UI tak boleh menggagalkan
-                            pass
-                    # Tidur dipecah supaya Esc/batal tetap responsif; cancel_event
-                    # yang menyala mengakhiri penungguan seketika.
-                    habis = time.time() + tunggu
-                    while time.time() < habis:
-                        if cancel_event is not None and cancel_event.is_set():
-                            raise llm.Cancelled()
-                        time.sleep(0.2)
+            # Kirim sekali. Deteksi server sibuk bisa muncul ketika AI masih
+            # menjawab; mengirim ulang dapat mengganggu giliran yang berjalan.
+            prompt_chars += len(msg)
+            _sync_tokens()
+            out = conn.send(
+                msg, on_status=on_status, on_token=on_token,
+                cancel_event=cancel_event, new_chat=new_chat,
+                open_chat_id=open_chat_id,
+                complete_when=_web_reply_complete,
+                attachments=attachments,
+                on_notice=on_notice,
+            )
             reply_chars += len(out or "")
             _sync_tokens()
             # Panjang percakapan di situs — dasar simpanan otomatis. Dihitung
@@ -4264,18 +4190,18 @@ class Agent:
             answer = (
                 f"🕒 **Server {self.model_spec.label} sedang penuh.**\n\n"
                 f"> {exc}\n\n"
-                "Sudah kucoba ulang beberapa kali dengan jeda, tapi masih penuh. "
+                "Permintaan tidak dikirim ulang otomatis. "
                 "Kirim ulang sebentar lagi, atau ketik `/model` untuk pindah ke "
                 "layanan web lain (Kimi/Qwen/Gemini) supaya bisa lanjut sekarang."
             )
         except connectors.WebChatRusakError as exc:
-            # Percakapan di situsnya tak bisa dilanjutkan (mis. Qwen: "Invalid
-            # input chat parent_id … is not exist"). Kuota kita baik-baik saja,
-            # jadi ini TAK PERLU merepotkan pengguna: buka chat baru lalu kirim
-            # ulang. Sekali saja — kalau chat yang baru pun rusak, sebabnya
-            # bukan chat-nya, dan mencoba terus cuma memutar.
-            answer = self._pulihkan_chat_rusak(
-                exc, user_text, on_status, on_notice)
+            # Jangan membuka chat baru atau mengirim ulang secara otomatis.
+            answer = (
+                f"⚠ Chat di {self.model_spec.label} tidak bisa dilanjutkan.\n\n"
+                f"> {exc}\n\n"
+                "Permintaan tidak dikirim ulang otomatis. Gunakan `/new` "
+                "untuk memulai chat baru, atau `/model` untuk pindah layanan."
+            )
         except connectors.WebLimitError as exc:
             # Kuota situs habis. Pengguna DITANYA mau apa, bukan cuma diberi
             # tahu: dua jalan keluarnya (menunggu vs pindah model) punya
@@ -4312,3 +4238,8 @@ class Agent:
     # model web memakai protokol penanda [[TOOL]] yang dieksekusi di
     # _run_connector. Menyimpannya hanya akan jadi ~250 baris kode mati yang
     # mustahil dijangkau.
+    # Alur API itu HIDUP LAGI sebagai _api_loop (2026-09-21, saat jalur
+    # browser ditunda) dengan satu bagian yang tak dibawa serta: watchdog
+    # "stream diam" yang membatalkan jawaban yang sedang mengalir. Jangan
+    # baca catatan di atas sebagai "jalur API sudah tiada" — yang tiada
+    # hanya nama lamanya.

@@ -177,6 +177,8 @@ def glob_files(pattern: str, max_results: int = 100) -> str:
     pat = (pattern or "").strip().replace("\\", "/")
     if not pat:
         return "[error] pattern kosong."
+    if max_results <= 0:
+        return "[error] max_results harus lebih besar dari 0."
     hanya_nama = "/" not in pat
     hasil = []
     semua: list[str] = []
@@ -187,6 +189,8 @@ def glob_files(pattern: str, max_results: int = 100) -> str:
                  else fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, "**/" + pat))
         if cocok and len(hasil) < max_results:
             hasil.append(rel)
+            if len(hasil) >= max_results:
+                break
     if hasil:
         hasil.sort()
         kepala = f"{len(hasil)} berkas cocok '{pattern}':"
@@ -235,7 +239,7 @@ def _pindai(rx: re.Pattern, lolos, max_results: int,
         for i, baris in enumerate(teks.split("\n"), 1):
             if rx.search(baris):
                 baris_cocok.append((i, baris))
-                if len(baris_cocok) >= per_berkas:
+                if len(baris_cocok) >= min(per_berkas, max_results - total):
                     terpotong = True
                     break
         if not baris_cocok:
@@ -362,6 +366,8 @@ def search_text(query: str, pattern: str = "", regex: bool = False,
     q = query or ""
     if not q:
         return "[error] query kosong."
+    if max_results <= 0:
+        return "[error] max_results harus lebih besar dari 0."
     try:
         rx = re.compile(q if regex else re.escape(q), re.IGNORECASE)
     except re.error as e:
@@ -447,13 +453,17 @@ def search_multi_text(queries: list[str], pattern: str = "", regex: bool = False
         return "[error] queries kosong."
     if len(queries) > 5:
         return "[error] maksimal 5 query sekaligus."
+    if max_results <= 0:
+        return "[error] max_results harus lebih besar dari 0."
 
     # Kompilasi regex tiap query.
     rxs: list[tuple[str, re.Pattern]] = []
+    seen: set[str] = set()
     for q in queries:
         q = q.strip()
-        if not q:
+        if not q or q in seen:
             continue
+        seen.add(q)
         try:
             rx = re.compile(q if regex else re.escape(q), re.IGNORECASE)
         except re.error:  # regex rusak -> teks biasa
@@ -480,16 +490,20 @@ def search_multi_text(queries: list[str], pattern: str = "", regex: bool = False
         if teks is None:
             continue
         rel = _rel(p)
+        lines = None
         for q, rx in rxs:
             if q in selesai_q:
                 continue
             if not rx.search(teks):
                 continue
+            if lines is None:
+                lines = teks.split("\n")
             baris_cocok: list[tuple[int, str]] = []
-            for i, baris in enumerate(teks.split("\n"), 1):
+            for i, baris in enumerate(lines, 1):
                 if rx.search(baris):
                     baris_cocok.append((i, baris))
-                    if len(baris_cocok) >= _MAKS_PER_BERKAS:
+                    if len(baris_cocok) >= min(
+                            _MAKS_PER_BERKAS, max_results - total_per_q[q]):
                         terpotong_q.add(q)
                         break
             if not baris_cocok:
