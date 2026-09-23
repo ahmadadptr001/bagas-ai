@@ -26,3 +26,19 @@ dist/
 # web_preview & take_screenshot menulis PNG ke sini tiap kali dipanggil.
 # Sempat ikut ter-commit dari uji end-to-end — repo bukan tempat menyimpannya.
 screenshots/
+
+# Sampah artefak redirect shell yang salah quoting (akar saja, 0 byte)
+/2}]
+/6
+/75
+/core
+/dict\[str
+/list\[dict\[str
+/pengantarnya
+/retry
+/{config.STREAM_STALL_TIMEOUT
+
+# Eksperimen / binari di akar — bukan bagian paket
+/panorama.html
+/panorama.jpg
+/test.png

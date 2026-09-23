@@ -41,20 +41,16 @@ async def tunggu(pilot, kondisi, maks=100, jeda=0.05,
 def cek_grup():
     grup = models.pilihan_model_grup()
     kategori = [k for k, _ in grup]
-    assert kategori[0].startswith("OpenCode Zen"), kategori
-    assert any(k.startswith("AI Web") for k in kategori), kategori
-    assert any(k.startswith("API") for k in kategori), kategori
-
-    zen = dict(grup)[kategori[0]]
-    tampil = {t: n for t, n in zen}  # tampilan -> nilai
-    assert tampil.get("big-pickle (rekomendasi)") == "big-pickle"
-    assert tampil.get("hy3-free (rekomendasi)") == "hy3-free"
-    assert tampil.get("nemotron-3-ultra-free (rekomendasi)") == \
-        "nemotron-3-ultra-free"
-    # nemotron-3.5-lightning-free TANPA label (upstream masih 404)
-    assert tampil.get("nemotron-3.5-lightning-free") == \
-        "nemotron-3.5-lightning-free"
-    print("  grup kategori + label rekomendasi: OK")
+    assert kategori[0].startswith("OpenRouter"), kategori
+    assert len(kategori) == 2, kategori
+    choices = [v for _, options in grup for _, v in options]
+    assert choices == models.pilihan_model()
+    assert choices[0] == "or-nemotron-ultra"
+    assert all(models.cari(v).aktif for v in choices)
+    assert all(models.cari(str(i)) == spec for i, _, spec in models.catalog())
+    assert "ditunda" not in models.list_text().lower()
+    assert "oxalpha" not in choices
+    print("  kategori, filter model, nomor pilihan: OK")
 
 
 class AgentPalsu:
@@ -87,15 +83,15 @@ async def cek_menu():
         assert layar.options[0] == (_SEP, layar.options[0][1]), \
             "opsi pertama harus pemisah kategori"
         ada_sep = sum(1 for o in layar.options if o[0] == _SEP)
-        assert ada_sep >= 3, f"butuh >=3 pemisah kategori, ada {ada_sep}"
+        assert ada_sep == 2, f"butuh >=3 pemisah kategori, ada {ada_sep}"
 
         # Render pemisah: nama kategori bold.
         tampil_sep = layar._tampilan(layar.options[0])
-        assert "OpenCode Zen" in str(tampil_sep)
+        assert "OpenRouter" in str(tampil_sep)
         # Render label rekomendasi: "(rekomendasi)" terpisah & bold.
         idx_rec = next(i for i, o in enumerate(layar.options)
                        if isinstance(o, tuple) and o[0] != _SEP
-                       and o[1] == "big-pickle")
+                       and o[1] == "nemotron")
         tampil_rec = layar._tampilan(layar.options[idx_rec])
         assert "(rekomendasi)" in tampil_rec.plain
         spans = [s.style for s in tampil_rec.spans]
@@ -114,7 +110,7 @@ async def cek_menu():
         # Pilih opsi rekomendasi → nilai ALIAS MURNI yang dikirim.
         opt_list.highlighted = idx_rec
         await pilot.press("enter")
-        await tunggu(pilot, lambda: ag.pilihan == ["big-pickle"],
+        await tunggu(pilot, lambda: ag.pilihan == ["nemotron"],
                      pesan=f"set_model harus menerima alias murni, "
                            f"terekam: {ag.pilihan}")
     print("  menu UI: pemisah, bold, nilai murni: OK")
@@ -124,7 +120,7 @@ async def main():
     cek_grup()
     await cek_menu()
     print("OK - menu /model: kategori terpisah, label (rekomendasi) "
-          "bold pada model opencode kecuali nemotron-3.5-lightning-free")
+          "bold pada model NVIDIA")
 
 
 asyncio.run(main())

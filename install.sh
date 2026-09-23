@@ -359,7 +359,7 @@ else
   fi
 fi
 
-# --- 5. Wizard setup (bot Telegram opsional; TIDAK ada API key) ---
+# --- 5. Wizard setup (API key NVIDIA / OpenRouter; bot Telegram opsional) ---
 # bagas-ai tak punya kredensial wajib: model dipilih lewat /model lalu login
 # dilakukan sekali di jendela browser.
 if [ "${BAGASAI_SKIP_LOGIN:-0}" = "1" ]; then

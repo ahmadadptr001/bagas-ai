@@ -55,7 +55,7 @@ _ENV_KOMENTAR = {
         "# Key gratis: https://build.nvidia.com",
     ],
     "OPENROUTER_API_KEY": [
-        "# Kunci untuk model (API) openrouter/* (mis. ox-alpha) - OPSIONAL.",
+        "# Kunci untuk model (API) openrouter/* (model :free, gratis dengan batas kuota) - OPSIONAL.",
         "# Ambil key: https://openrouter.ai/keys (awalan sk-or-...).",
     ],
     "OPENCODE_API_KEY": [
@@ -175,42 +175,24 @@ def validate_nvidia_key(key: str) -> tuple[bool, str]:
 
 
 def validate_openrouter_key(key: str) -> tuple[bool, str]:
-    """Cek OPENROUTER_API_KEY dengan SATU permintaan chat sungguhan.
-
-    Sama alasannya dengan validate_nvidia_key: endpoint yang benar-benar
-    memeriksa kredensial adalah chat/completions. Modelnya ox-alpha sendiri —
-    key yang valid untuk model lain tak menjamin model ini bisa dipakai.
-    """
+    """Validasi kredensial tanpa inference berbayar atau ketergantungan model."""
     try:
-        r = requests.post(
-            f"{config.OPENROUTER_BASE_URL.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {key}",
-                     "Content-Type": "application/json"},
-            json={"model": "stealth/ox-alpha",
-                  "messages": [{"role": "user", "content": "hi"}],
-                  "max_tokens": 1, "stream": False},
-            timeout=60,
+        r = requests.get(
+            f"{config.OPENROUTER_BASE_URL.rstrip('/')}/key",
+            headers={"Authorization": f"Bearer {key}"}, timeout=20,
         )
-    except requests.RequestException as e:
-        return False, f"koneksi gagal: {str(e)[:80]}"
+    except requests.RequestException:
+        return False, "koneksi gagal; key belum dapat diverifikasi"
     if r.status_code == 200:
-        return True, "key valid"
-    if r.status_code == 401:
-        return False, "key ditolak (No auth credentials)"
-    if r.status_code == 402:
-        # 402 = kredit habis. Key-nya BENAR; menyatakannya tidak valid akan
-        # menyuruh pengguna mengganti key yang sebenarnya benar.
-        return True, "key diterima (kredit habis — isi saldo dulu di dashboard)"
-    if r.status_code == 429:
-        # Ditolak karena RAMAI/rate limit, bukan karena salah.
-        return True, "key diterima (endpoint sedang penuh / rate limit)"
-    detail = ""
-    try:
-        err = r.json().get("error")
-        detail = (err.get("message") if isinstance(err, dict) else str(err))[:80]
-    except ValueError:
-        detail = r.text[:80]
-    return False, f"HTTP {r.status_code} {detail or 'gagal'}".strip()
+        try:
+            if isinstance(r.json().get("data"), dict):
+                return True, "key valid - model :free tersedia sesuai kuota akun"
+        except ValueError:
+            pass
+        return False, "respons validasi tidak dikenali"
+    if r.status_code in (401, 403):
+        return False, "key ditolak; periksa key OpenRouter"
+    return False, f"HTTP {r.status_code}; key belum dapat diverifikasi, coba lagi nanti"
 
 
 def validate_telegram(token: str) -> tuple[bool, str]:
@@ -450,6 +432,10 @@ def run(console: Console | None = None) -> bool:
         if pilih:
             _isi_kredensial(console, env, pilih)
 
+    # Instalasi OpenRouter saja harus langsung memilih provider yang terisi.
+    if env.get("OPENROUTER_API_KEY") and not env.get("NVIDIA_API_KEY"):
+        if not env.get("CHAT_MODEL", "").startswith("openrouter/"):
+            env["CHAT_MODEL"] = "openrouter/or-nemotron-ultra"
     # --- Simpan ---
     _write_env(config.ENV_FILE, env)
     try:

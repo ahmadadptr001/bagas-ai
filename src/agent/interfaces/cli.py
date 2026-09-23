@@ -5415,7 +5415,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         profil login tersimpan). Return "" bila batal / tak ada."""
         from ..connectors import browser as _br
         svcs = []
-        for _, _key, spec in models.catalog():
+        for _, _key, spec in models.catalog(include_postponed=True):
             if spec.connector and spec.connector not in svcs:
                 if _br.profile_dir(spec.connector).exists():
                     svcs.append(spec.connector)

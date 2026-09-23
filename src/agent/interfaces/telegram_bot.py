@@ -540,17 +540,11 @@ def build_application(on_event: OnEvent | None = None, agent: Agent | None = Non
             return
         agent = _get_agent(update.effective_chat.id)
         rows = []
-        # Telegram tak punya tombol "mati", jadi model yang ditunda TIDAK
-        # dijadikan tombol — kalau dijadikan, satu-satunya kabar yang didapat
-        # pengguna adalah penolakan sesudah ia menekannya. Keberadaannya tetap
-        # disebut di baris keterangan di bawah.
-        tunda = [s.label for _, _k, s in models.catalog() if s.ditunda]
         for _, key, spec in models.catalog_aktif():
             mark = "● " if spec.id == agent.model else ""
             rows.append([InlineKeyboardButton(f"{mark}{spec.label}"[:60],
                                               callback_data=f"model:{key}")])
-        catatan = ("\n\n⏸ ditunda sementara: " + ", ".join(tunda)) if tunda else ""
-        await update.message.reply_text("🔀 Pilih model:" + catatan,
+        await update.message.reply_text("Pilih model:",
                                         reply_markup=InlineKeyboardMarkup(rows))
 
     async def cmd_effort(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

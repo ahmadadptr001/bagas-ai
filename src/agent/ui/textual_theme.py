@@ -102,8 +102,8 @@ Screen {
 #logo {
     width: 100%;
     height: auto;
-    max-height: 12;
-    padding: 0 1;
+    max-height: 4;
+    padding: 1 2;
     color: $t-aksen;
 }
 
@@ -112,7 +112,7 @@ Screen {
     height: 1fr;
     background: $t-gema_bg;
     color: $t-teks;
-    padding: 0 1;
+    padding: 0 2;
     overflow-x: hidden;
     overflow-y: auto;
 }
@@ -125,6 +125,7 @@ Screen {
     height: auto;
     max-height: 75%;
     background: $t-gema_bg;
+    padding: 0 1;
 }
 
 #statusbar-sidebar-toggle {

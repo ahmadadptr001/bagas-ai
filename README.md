@@ -246,6 +246,32 @@ Disimpan di `~/.bagasai/.env`.
 | Variabel | Keterangan |
 |---|---|
 | `CHAT_MODEL` | Model chat default. Ganti kapan pun lewat `/model`. |
+| `OPENROUTER_API_KEY` | Key OpenRouter, diisi lewat `bagas-ai login`; pilihan `:free` tidak membutuhkan saldo inference. Tetap berlaku kuota akun/provider. |
+
+Pilihan OpenRouter gratis (kurasi 23 September 2026), berurutan menurut
+prioritas kemampuan coding/agent: `or-nemotron-ultra`, `laguna-s`, `nex-pro`,
+`qwen38`. Ini urutan rekomendasi, bukan peringkat universal: Nemotron Ultra
+memiliki AA Coding 49.3/Agentic 20.1, sedangkan Laguna S melaporkan
+Terminal-Bench 2.1 70.2%; benchmark tersebut tidak dapat dibandingkan langsung.
+Nex Pro menyediakan kemampuan agen visual, Qwen menjadi alternatif multimodal.
+
+Semua ID memakai akhiran `:free`, terdaftar mendukung tools dan harga token
+input/output nol di [katalog resmi](https://openrouter.ai/collections/free-models/).
+Request dibatasi harga prompt/completion/request/image nol; tidak ada fallback
+ke model berbayar. Gratis bukan tanpa batas: endpoint dapat membalas 429/503.
+Uji langsung Nemotron Ultra dan Nex Pro berhasil memanggil tools; Laguna S dan
+Qwen terkena rate limit upstream. Inkling disembunyikan karena akses BagasAI
+ditolak (403, hanya harness tertentu), dan Ox Alpha lama sudah tidak tersedia.
+Model ditunda tidak ditampilkan pada menu, tetapi profil connector tetap disimpan.
+
+Installer Windows/Linux menggunakan wizard yang sama. Wizard memvalidasi key
+lewat `/api/v1/key` tanpa mengirim chat; instalasi dengan key OpenRouter saja
+memilih `openrouter/or-nemotron-ultra`. Key milik pengguna tidak disertakan dalam
+installer/repository. Endpoint gratis dapat menyimpan input/output untuk
+peningkatan layanan sesuai kebijakan provider, termasuk NVIDIA dan Poolside;
+periksa kebijakan model sebelum mengirim data rahasia.
+| `NVIDIA_READ_TIMEOUT` | Batas menunggu data NVIDIA per operasi baca, termasuk saat streaming (default 900 detik). Pembatalan tetap responsif; timeout tidak mengirim ulang prompt. |
+| `BAGASAI_TTFT_TIMEOUT` | Batas baca streaming penyedia API lain (default 300 detik). |
 | `CONNECTOR_BROWSER_CHANNEL` | Browser yang dipakai connector: `brave` (default), `chrome`, `chrome-beta`, `msedge`. Kalau yang diminta belum terpasang, browser asli lain dipakai otomatis. Tiap browser punya profil login sendiri, jadi berganti berarti login ulang. |
 | `VOICE_JANGKAUAN` | Seberapa jauh mikrofon `/voice` boleh mendengar: `jauh` (default — bisa dari kasur / ruangan sebelah), `normal`, `dekat`. Ukur dari tempat dudukmu sendiri lewat `/voice jangkau`. |
 | `VOICE_STT_MODEL` | Model Whisper untuk `/voice`: `tiny` (±75 MB, tercepat), `base`, `small` (default, ±460 MB), `medium` (±1,5 GB). |

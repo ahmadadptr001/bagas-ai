@@ -134,8 +134,10 @@ async def main() -> None:
             print("  /voice listener aktif", flush=True)
             assert isinstance(app.screen, VoiceScreen)
             orb = app.screen.query_one("#voice-orb", VoiceOrb)
-            assert orb.size.width >= 70 and orb.size.height >= 20, (
-                f"orb harus dominan, ukuran aktual {orb.size}")
+            assert 25 <= orb.size.width <= 64 and 5 <= orb.size.height <= 17, (
+                f"orb harus ringkas dan menyisakan ruang status, ukuran aktual {orb.size}")
+            assert app.screen.query_one("#voice-status").display
+            assert app.screen.query_one("#voice-meter").display
             app._refresh_status()
             assert app.query_one("#statusbar", StatusBar).voice_state == "dengar"
 

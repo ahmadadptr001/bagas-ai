@@ -73,8 +73,7 @@ class ModelSpec:
     connector: str = ""
     multimodal: bool = True  # situs AI web menerima lampiran gambar
     note: str = ""  # keterangan singkat
-    # DITUNDA: entrinya tetap ada & tetap tampil di /model, tapi tak bisa
-    # dipilih. Lihat catatan _DITUNDA di bawah.
+    # DITUNDA: entrinya tetap disimpan tetapi disembunyikan dari /model. Lihat catatan _DITUNDA di bawah.
     ditunda: bool = False
 
     # --- khusus jalur API (kosong/nol untuk model web) ----------------------
@@ -494,6 +493,7 @@ MODELS: dict[str, ModelSpec] = {
     # memulai dari semuanya (TERUKUR 106-169 dtk sampai kata pertama, 4 dari 8
     # permintaan uji habis waktu). Digantikan ox-alpha via OpenRouter.
     "oxalpha": ModelSpec(
+        ditunda=True,
         id="openrouter/ox-alpha",
         label="Ox Alpha (API)",
         provider="openrouter",
@@ -519,6 +519,26 @@ MODELS: dict[str, ModelSpec] = {
     ),
 }
 
+
+# Kurasi 2026-09-23: endpoint :free, harga input/output nol, mendukung tools.
+# Urutan prioritas coding/agent; bukan peringkat universal lintas benchmark.
+_OPENROUTER_FREE = [
+    ("inkling", "thinkingmachines/inkling:free", "Inkling", True, "1M konteks; AA Coding 52.1 / Agentic 22.5"),
+    ("or-nemotron-ultra", "nvidia/nemotron-3-ultra-550b-a55b:free", "Nemotron 3 Ultra", False, "1M konteks; AA Coding 49.3 / Agentic 20.1"),
+    ("laguna-s", "poolside/laguna-s-2.1:free", "Laguna S 2.1", False, "262K konteks; spesialis coding, Terminal-Bench 2.1 70.2%"),
+    ("nex-pro", "nex-agi/nex-n2.5-pro:free", "Nex N2.5 Pro", True, "262K konteks; coding dan agen visual"),
+    ("qwen38", "qwen/qwen3.8-27b:free", "Qwen 3.8 27B", True, "262K konteks; alternatif multimodal"),
+]
+MODELS = {
+    **{alias: ModelSpec(
+        id="openrouter/" + alias, label=label + " (gratis)",
+        provider="openrouter", api_model=remote, multimodal=vision,
+        ditunda=(alias == "inkling"),  # HTTP 403: harness BagasAI belum diizinkan.
+        note=note + "; gratis dengan batas kuota", max_tokens=16384,
+    ) for alias, remote, label, vision, note in _OPENROUTER_FREE},
+    **MODELS,
+}
+
 MODELS = {k: (v if k not in _DITUNDA else
               # replace(): ModelSpec frozen, jadi penandaannya dibuat sebagai
               # salinan. Ditandai DI SINI, bukan ditulis satu per satu di tiap
@@ -527,7 +547,7 @@ MODELS = {k: (v if k not in _DITUNDA else
               replace(v, ditunda=True))
           for k, v in MODELS.items()}
 
-_ORDER = list(MODELS.keys())
+_ORDER = [k for k, spec in MODELS.items() if spec.aktif]
 # "Siap" berarti BENAR-BENAR bisa dipilih sekarang, bukan sekadar tak ditunda:
 # model (API) yang kunci penyedianya kosong sama tak bisanya dipakai, dan
 # models._pastikan_aktif akan menolaknya juga. Menyaringnya di sini membuat
@@ -691,10 +711,6 @@ def cari(name: str) -> ModelSpec:
     # "bisa dipakai sekarang", jadi yang disebut justru sebabnya.
     pesan = (f"Model '{name}' tidak dikenal. " + _sebut_yang_bisa_dipakai()
              + " Ketik /model untuk melihat katalog.")
-    _tunda = [MODELS[k].label for k in _ORDER if not MODELS[k].aktif]
-    if _tunda:
-        pesan += (" (Ada juga yang ditunda dan belum bisa dipakai: "
-                  + ", ".join(_tunda) + ".)")
     raise ValueError(pesan)
 
 
@@ -765,10 +781,12 @@ def _varian_layanan() -> dict[str, list[tuple[str, str]]]:
     Gagal total (Playwright tak ada / impor error) -> kosong: /model tetap
     menampilkan layanan, hanya tanpa pemulia varian."""
     hasil: dict[str, list[tuple[str, str]]] = {}
+    if not any(s.is_web and s.aktif for s in MODELS.values()):
+        return hasil
     try:
         from . import connectors  # impor tunda: connectors butuh Playwright?
         for key, spec in MODELS.items():
-            if not (spec.is_web and spec.connector):
+            if not (spec.aktif and spec.is_web and spec.connector):
                 continue
             try:
                 conn = connectors.get_connector(spec.connector)
@@ -788,6 +806,8 @@ def kategori_model(spec: ModelSpec) -> str:
     Tiga kelompok: OpenCode Zen (gratis, tanpa key), AI web (browser), dan
     API ber-key. Urutan kemunculannya mengikuti urutan MODELS, jadi kategori
     tak perlu didaftarkan terpisah."""
+    if spec.provider == "openrouter":
+        return "OpenRouter - gratis, dengan batas kuota"
     if spec.provider == "opencode":
         return "OpenCode Zen — gratis, tanpa API key"
     if spec.is_web:
@@ -804,7 +824,8 @@ def pilihan_model_grup() -> list[tuple[str, list[tuple[str, str]]]]:
     diterima Agent.set_model."""
     grup: dict[str, list[tuple[str, str]]] = {}
     varian = _varian_layanan()
-    for key, spec in MODELS.items():
+    for key in _ORDER:
+        spec = MODELS[key]
         if spec.is_web:
             ops = varian.get(key)
             if ops:
@@ -814,13 +835,8 @@ def pilihan_model_grup() -> list[tuple[str, list[tuple[str, str]]]]:
         else:
             items = [key]
         label_bebas = " (rekomendasi)" if spec.rekomendasi else ""
-        # Model yang ditunda TETAP ditampilkan — dengan penanda yang membuat
-        # SelectScreen merendernya redup & melewatinya. Menyembunyikannya akan
-        # membuat pengguna mengira connectornya sudah dihapus, padahal ia utuh
-        # dan cuma sedang tak boleh dipilih.
-        awalan = _TANDA_DITUNDA if spec.ditunda else ""
         grup.setdefault(kategori_model(spec), []).extend(
-            (awalan + it + label_bebas, it) for it in items)
+            (it + label_bebas, it) for it in items)
     return list(grup.items())
 
 
@@ -834,7 +850,8 @@ def pilihan_model() -> list[str]:
     Model API tampil apa adanya."""
     out: list[str] = []
     varian = _varian_layanan()
-    for key, spec in MODELS.items():
+    for key in _ORDER:
+        spec = MODELS[key]
         if spec.is_web:
             ops = varian.get(key)
             if ops:
@@ -872,12 +889,10 @@ def resolve_varian(name: str) -> tuple[str, str] | None:
 # dan memutus konteks percakapan, persis alasan naik-kelas otomatis dihapus.
 
 
-def catalog() -> list[tuple[int, str, ModelSpec]]:
-    """Daftar (nomor, alias, spec) terurut — TERMASUK yang ditunda.
-
-    Sengaja lengkap: /model menampilkannya (redup, tak bisa dipilih) dan /web
-    tetap perlu mengurus profil login layanan yang sedang ditunda."""
-    return [(i, key, MODELS[key]) for i, key in enumerate(_ORDER, start=1)]
+def catalog(*, include_postponed: bool = False) -> list[tuple[int, str, ModelSpec]]:
+    """Pilihan aktif; profil browser lama dapat diakses oleh administrasi /web."""
+    keys = list(MODELS) if include_postponed else _ORDER
+    return [(i, key, MODELS[key]) for i, key in enumerate(keys, start=1)]
 
 
 def catalog_aktif() -> list[tuple[int, str, ModelSpec]]:
@@ -897,17 +912,7 @@ def catalog_aktif() -> list[tuple[int, str, ModelSpec]]:
 
 def list_text(current_id: str | None = None) -> str:
     """Daftar model siap tampil untuk perintah /model."""
-    lines = ["Model — (web) lewat browser + login sekali, "
-             "(API) lewat API key tanpa browser:"]
-    # Sebut yang DITUNDA, bukan yang aktif: dulu baris ini mendaftar yang aktif,
-    # dan begitu modelnya bertambah ia berbunyi "untuk sementara hanya
-    # <delapan model> yang bisa dipilih" — kalimat yang isinya justru
-    # menyembunyikan satu-satunya keterangan yang berguna.
-    _tunda = [MODELS[k].label for k in _ORDER if not MODELS[k].aktif]
-    if _tunda:
-        lines.append(
-            "Ditunda (connector-nya tak dihapus, bisa dibuka lagi): "
-            + ", ".join(_tunda) + ".")
+    lines = ["Model tersedia - OpenRouter gratis dan NVIDIA:"]
     for i, key in enumerate(_ORDER, start=1):
         spec = MODELS[key]
         tag = f"  [{spec.note}]" if spec.note else ""

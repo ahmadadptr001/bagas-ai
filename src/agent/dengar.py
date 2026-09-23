@@ -68,7 +68,8 @@ _DIAM_SELESAI_LANGSUNG = 1.2
                         # terlalu panjang membuat setiap balasan terasa lelet.
                         # Barge-in sudah memangkas waktu tunggu terbesar, jadi
                         # endpoint boleh lebih gesit dari dugaan lama 2,2 dtk.
-_MIN_UCAPAN = 0.35      # lebih pendek dari ini: dentuman meja, bukan ucapan
+_MIN_UCAPAN = 0.24      # energi saja perlu lebih dari satu bunyi impuls
+_MIN_UCAPAN_VAD = 0.16  # ucapan singkat seperti "ya" bila dikenali VAD
 _MAKS_UCAPAN_LANGSUNG = 30.0
                         # Di mode langsung, satu potongan adalah satu prompt.
                         # Batas lama 15 detik membelah instruksi panjang dan
@@ -384,6 +385,13 @@ class _Pengenal:
     def _whisperkenali(self, data: bytes) -> str:
         import numpy as np
         audio = np.frombuffer(data, dtype=np.int16).astype("float32") / 32768.0
+        # Potongan sudah lolos deteksi ucapan. Naikkan suara pelan secara
+        # terbatas agar Whisper tidak menerima sinyal hampir nol; jangan
+        # normalisasi derau/sunyi tanpa batas atau sampai clipping.
+        if audio.size:
+            peak = float(np.max(np.abs(audio)))
+            if 0.001 < peak < 0.1:
+                audio *= min(8.0, 0.1 / peak)
 
         # Pass utama tidak memakai Silero VAD: audio sudah dipotong WebRTC dan
         # VAD kedua dapat membuang suara nyata yang jauh/pelan.
@@ -701,6 +709,11 @@ class Pendengar:
         return any(t.is_alive() for t in self._threads)
 
     @property
+    def memproses(self) -> bool:
+        """Ada ucapan yang sedang menunggu atau diproses pengenal."""
+        return self._menunggu > 0
+
+    @property
     def merekam(self) -> bool:
         """True bila ucapan pengguna sedang dikumpulkan.
 
@@ -786,6 +799,8 @@ class Pendengar:
 
         potongan: list[Any] = list(suara_saat_kalibrasi)
         sampel_potongan = sum(len(x) for x in potongan)
+        durasi_suara = sampel_potongan / LAJU
+        ada_vad = bool(potongan)
         self._sedang_ucapan = bool(potongan)
         # Sedikit rekaman SEBELUM ambang terlampaui ikut disimpan: suku kata
         # pertama selalu lebih pelan dari sisanya, dan tanpa ini "bagas" kerap
@@ -837,11 +852,12 @@ class Pendengar:
                     dasar = _persentil(sorted(self._bocor), 0.9)
                     sela = tingkat_tts > max(self.ambang,
                                              dasar * 1.6 + 10.0)
-                    if depan.vad_tersedia:
-                        sela = sela and vad_suara
                 self._menyela = self._menyela + 1 if sela else 0
-                if self._menyela >= 5:
-                    # ±0,3 detik bersambung di atas kebocoran: ini pengguna.
+                batas_sela = 3 if vad_suara else 5
+                if self._menyela >= batas_sela:
+                    # VAD + lonjakan energi bisa menangkap respons 0,2 detik.
+                    # Tanpa VAD tetap butuh energi kuat lebih lama agar satu
+                    # suku kata dari speaker tidak dianggap sebagai penyela.
                     # Bacaannya dipotong SEKARANG, dan yang sudah terkumpul di
                     # `awalan` jadi awal ucapan penyela.
                     try:
@@ -851,6 +867,8 @@ class Pendengar:
                         pass
                     potongan = list(awalan)
                     sampel_potongan = sum(len(x) for x in potongan)
+                    durasi_suara = self._menyela * len(data_bersih) / LAJU
+                    ada_vad = vad_suara
                     awalan = []
                     sunyi, energi_beruntun = 0.0, 0
                     self._sedang_ucapan = True
@@ -870,6 +888,8 @@ class Pendengar:
                     self._bocor.append(tingkat_tts)
                 potongan = []
                 sampel_potongan = 0
+                durasi_suara = 0.0
+                ada_vad = False
                 energi_beruntun = 0
                 self._sedang_ucapan = False
                 self._lapor_level(tingkat_tts, False)
@@ -904,7 +924,7 @@ class Pendengar:
             if not potongan and not vad_suara:
                 # Tanpa VAD, jangan belajar dari bunyi yang sudah melewati
                 # ambang lama — itu mungkin ucapan, bukan perubahan derau.
-                if depan.vad_tersedia or tingkat < self.ambang:
+                if tingkat < self.ambang_lanjut:
                     derau_adaptif.append(tingkat)
             if (len(derau_adaptif) >= 12
                     and time.time() - adaptasi_terakhir >= 0.8):
@@ -927,10 +947,16 @@ class Pendengar:
                     sampel_potongan = sum(len(x) for x in potongan)
                     awalan = []
                     sunyi = 0.0
+                    durasi_suara = lama_blok * (
+                        2 if energi_beruntun >= 2 else 1)
+                    ada_vad = vad_suara
                     self._sedang_ucapan = True
                 continue
             potongan.append(data_bersih.copy())
             sampel_potongan += len(data_bersih)
+            if keras:
+                durasi_suara += lama_blok
+                ada_vad = ada_vad or vad_suara
             sunyi = 0.0 if keras else sunyi + lama_blok
             # Durasi harus berasal dari audio, bukan jam dinding. Driver dapat
             # menyerahkan beberapa buffer sekaligus sesudah terlambat; memakai
@@ -941,12 +967,15 @@ class Pendengar:
             # dan batas panjangnya wajib cukup longgar agar kalimat dengan jeda
             # alami tidak berubah menjadi beberapa prompt.
             if sunyi >= _DIAM_SELESAI_LANGSUNG or panjang >= _MAKS_UCAPAN_LANGSUNG:
-                if panjang - sunyi >= _MIN_UCAPAN:
+                minimum = _MIN_UCAPAN_VAD if ada_vad else _MIN_UCAPAN
+                if durasi_suara >= minimum:
                     blob = np.concatenate(potongan).tobytes()
                     self._menunggu += 1
                     self._antre.put(blob)
                 potongan = []
                 sampel_potongan = 0
+                durasi_suara = 0.0
+                ada_vad = False
                 self._sedang_ucapan = False
                 self._lapor_level(0.0, False, paksa=True)
                 sunyi = 0.0

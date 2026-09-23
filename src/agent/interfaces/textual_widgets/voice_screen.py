@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from rich.text import Text
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
@@ -20,6 +20,8 @@ class VoiceOrb(Static):
         "menangkap": ("#43bfff", "#53f0c0", "#e4fff7"),
         "berpikir": ("#8a62ff", "#d063ff", "#f4dcff"),
         "berbicara": ("#e45dff", "#ff7e9f", "#fff0b8"),
+        "mengenali": ("#5877ff", "#57d5ff", "#d9f6ff"),
+        "kurang-jelas": ("#b49155", "#e7c684", "#fff0c8"),
     }
 
     def __init__(self, **kwargs):
@@ -38,9 +40,9 @@ class VoiceOrb(Static):
         # Orb sengaja menjadi elemen dominan layar voice. Ukuran mengikuti
         # ruang widget, sedangkan rasio sel terminal dikoreksi agar hasilnya
         # tetap tampak bulat pada terminal lebar maupun sempit.
-        lebar = max(25, self.size.width - 2)
-        tinggi = max(13, self.size.height - 1)
-        radius_y = max(5.0, min((tinggi - 2) / 2, (lebar - 2) / 4))
+        lebar = max(1, self.size.width - 2)
+        tinggi = max(1, self.size.height - 1)
+        radius_y = max(1.0, min((tinggi - 2) / 2, (lebar - 2) / 4))
         radius_x = radius_y * 2.0
         t = self._bingkai * 0.16
         level = self._level
@@ -94,7 +96,8 @@ class VoiceScreen(ModalScreen[None]):
     }
 
     VoiceScreen #voice-stage {
-        width: 100%;
+        width: 64;
+        max-width: 100%;
         height: 100%;
         align: center middle;
         background: #080a12;
@@ -102,19 +105,20 @@ class VoiceScreen(ModalScreen[None]):
     }
 
     VoiceScreen #voice-orb {
-        width: 92%;
+        width: 100%;
         height: 1fr;
-        min-height: 15;
+        max-height: 17;
+        min-height: 5;
         content-align: center middle;
         text-align: center;
         background: transparent;
     }
 
     VoiceScreen #voice-close {
-        width: 7;
-        min-width: 7;
+        width: 18;
+        min-width: 18;
         height: 3;
-        margin: 1 0 0 0;
+        margin: 0;
         border: none;
         background: #171b29;
         color: #e8ecff;
@@ -125,6 +129,19 @@ class VoiceScreen(ModalScreen[None]):
     VoiceScreen #voice-close:focus {
         background: #252b40;
         color: white;
+    }
+    VoiceScreen #voice-title, VoiceScreen #voice-status,
+    VoiceScreen #voice-hint, VoiceScreen #voice-meter {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: #d9e8ff;
+    }
+    VoiceScreen #voice-title { text-style: bold; margin-bottom: 1; }
+    VoiceScreen #voice-hint { color: #a5b1c8; margin-top: 1; }
+    VoiceScreen #voice-meter { color: #57d5ff; height: 1; }
+    VoiceScreen #voice-controls {
+        width: 100%; height: 3; margin-top: 1; align: center middle;
     }
     """
 
@@ -143,8 +160,13 @@ class VoiceScreen(ModalScreen[None]):
 
     def compose(self):
         with Vertical(id="voice-stage"):
+            yield Static("Percakapan suara", id="voice-title")
             yield VoiceOrb(id="voice-orb")
-            yield Button("⌵", id="voice-close", variant="default")
+            yield Static("Menyiapkan mikrofon…", id="voice-status")
+            yield Static("", id="voice-meter")
+            yield Static("Bicara seperti biasa · Esc untuk menutup", id="voice-hint")
+            with Horizontal(id="voice-controls"):
+                yield Button("Tutup voice", id="voice-close", variant="default")
 
     def on_mount(self) -> None:
         self._timer = self.set_interval(0.08, self._tick)
@@ -165,6 +187,18 @@ class VoiceScreen(ModalScreen[None]):
         try:
             fase, level = self._state_getter()
             self.query_one("#voice-orb", VoiceOrb).set_state(fase, level)
+            labels = {
+                "menyiapkan": "Menyiapkan mikrofon…",
+                "mendengar": "Mendengarkan",
+                "menangkap": "Suaramu tertangkap",
+                "mengenali": "Mengenali ucapan…",
+                "berpikir": "Menyiapkan jawaban…",
+                "berbicara": "Sedang menjawab",
+                "kurang-jelas": "Ucapan belum jelas, silakan ulangi",
+            }
+            self.query_one("#voice-status", Static).update(labels.get(fase, "Mendengarkan"))
+            bars = round(max(0.0, min(1.0, level)) * 12)
+            self.query_one("#voice-meter", Static).update("▰" * bars + "▱" * (12 - bars))
         except Exception:
             # Animasi bersifat dekoratif; kegagalannya tak boleh menghentikan
             # sesi mikrofon yang masih menyimpan percakapan di layar utama.

@@ -1511,6 +1511,11 @@ class BagasAIApp(App):
             return "menyiapkan", level
         if self._voice_state.get("hearing"):
             return "menangkap", level
+        listener = self._voice_state.get("pendengar")
+        if listener is not None and getattr(listener, "memproses", False) is True:
+            return "mengenali", level
+        if time.monotonic() < self._voice_state.get("feedback_until", 0.0):
+            return "kurang-jelas", level
         return "mendengar", level
 
     def _voice_level(self, level: float, hearing: bool) -> None:
@@ -1762,6 +1767,7 @@ class BagasAIApp(App):
     def _voice_dengar_ui(self) -> None:
         if not self._voice_state.get("session_active"):
             return
+        self._voice_state["feedback_until"] = time.monotonic() + 4.0
         self._audio_notice(
             "Ucapan tertangkap, tetapi belum terbaca jelas. Coba ulang "
             "dengan suara sedikit lebih dekat.")
@@ -2781,8 +2787,9 @@ class BagasAIApp(App):
                                   style=f"bold {tema.p('exit_footer')}")
         else:
             try:
-                from ..llm import ProviderQuotaError
-                pesan = (str(exc) if isinstance(exc, ProviderQuotaError)
+                from ..llm import ProviderBusyError, ProviderQuotaError, ProviderReadTimeout
+                pesan = (str(exc) if isinstance(exc, (
+                    ProviderBusyError, ProviderQuotaError, ProviderReadTimeout))
                          else f"{type(exc).__name__}: {exc}")
             except Exception:  # noqa: BLE001 — formatter tak boleh tutup UI
                 pesan = f"{type(exc).__name__}: {exc}"
@@ -2993,6 +3000,8 @@ class BagasAIApp(App):
     def _fase_status(msg: str) -> str:
         """Map verbose status strings to clean phase labels."""
         lower = msg.lower()
+        if lower.startswith(("menerima instruksi tool:", "menjalankan tool:")):
+            return msg[:100]
         if "menyiapkan" in lower or "prepare" in lower:
             return "menyiapkan model..."
         if "menunggu" in lower or "waiting" in lower:

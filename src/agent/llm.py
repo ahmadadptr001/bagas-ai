@@ -10,23 +10,17 @@ sama sekali — ia lewat agent/connectors + Agent._run_connector, dan padanan
 penanganan "sementara" di sana berbentuk lain sesuai medianya (WebBusyError
 untuk server penuh, WebLimitError untuk kuota situs habis).
 
-Poin penting jalur API: free tier NVIDIA (~40 request/menit) membalas throttle
-dengan bentuk yang BERMACAM-MACAM — bukan cuma HTTP 429/RateLimitError, tapi
-juga pesan seperti "worker local total request limit reached", body KOSONG
-dengan HTTP 200, atau 5xx sesaat. Semuanya ditahan di sini: tunggu lalu ulangi
-langkah yang sama, supaya tugas pengguna berlanjut alih-alih dibatalkan.
-
-BATASNYA (2026-09-23): pengulangan itu hanya berlaku SELAMA jawaban belum
-mengalir. Begitu ada potongan yang sudah tampil di layar, kegagalan apa pun
-dilempar apa adanya — tak ada lagi "batalkan lalu minta ulang", karena di mata
-pengguna itu berarti jawaban yang sedang berjalan dihapus dan model disuruh
-mengulang dari nol.
+Permintaan dikirim sekali. Error dilaporkan tanpa retry otomatis.
+Batas baca NVIDIA terpisah; pembatalan pengguna tetap responsif ketika
+koneksi sedang menunggu data.
 """
 from __future__ import annotations
 
 import json as _json
 import re as _re
 import time
+import queue
+import threading
 from typing import Any, Callable
 
 from . import config
@@ -75,6 +69,119 @@ class Cancelled(Exception):
 
 class ProviderQuotaError(Exception):
     """Kuota layanan benar-benar habis dan retry cepat tidak akan menolong."""
+
+
+class ProviderReadTimeout(Exception):
+    """Koneksi tidak mengirim data sampai batas baca, tanpa retry otomatis."""
+
+
+class ProviderBusyError(Exception):
+    """Penyedia menolak sementara karena sibuk/tidak tersedia."""
+
+
+def _read_timeout(provider: str) -> float:
+    return (config.NVIDIA_READ_TIMEOUT if provider in ("", "nvidia")
+            else config.TTFT_TIMEOUT)
+
+
+def _jelaskan_timeout(exc: Exception, provider: str) -> Exception:
+    import httpx
+    cause = exc
+    seen = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, httpx.ReadTimeout):
+            name = provider or "nvidia"
+            return ProviderReadTimeout(
+                f"Koneksi ke {name} berhenti mengirim data saat menunggu respons "
+                f"(batas baca {_read_timeout(provider):g} detik). "
+                "Jawaban yang sudah tampil tetap disimpan; prompt tidak dikirim "
+                "ulang otomatis. Coba lanjutkan setelah layanan/koneksi pulih.")
+        cause = cause.__cause__ or cause.__context__
+    return exc
+
+
+def _stream_cancellable(create: Callable[[], Any], cancel_event: Any):
+    """Baca jaringan di worker; callback/model state tetap di thread pemanggil.
+
+    Hanya pembatalan pengguna yang menutup stream, bukan jeda antar-token.
+    Worker yang masih menunggu header membersihkan respons saat ia tiba;
+    batas baca jaringan tetap berlaku agar request tidak hidup selamanya.
+    """
+    if cancel_event is None:
+        stream = create()
+        try:
+            yield from stream
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        return
+    if cancel_event.is_set():
+        raise Cancelled()
+    events = queue.Queue(maxsize=16)
+    stopped = threading.Event()
+    stream_box = []
+    close_lock = threading.Lock()
+    closed = False
+
+    def close():
+        nonlocal closed
+        with close_lock:
+            if closed or not stream_box:
+                return
+            closed = True
+        try:
+            stream_box[0].close()
+        except Exception:
+            pass
+
+    def put(kind, value=None):
+        while not stopped.is_set():
+            try:
+                events.put((kind, value), timeout=0.1)
+                return
+            except queue.Full:
+                pass
+
+    def read():
+        try:
+            stream = create()
+            stream_box.append(stream)
+            if stopped.is_set():
+                return
+            for item in stream:
+                if stopped.is_set():
+                    break
+                put("item", item)
+        except BaseException as exc:
+            put("error", exc)
+        finally:
+            close()
+            put("done")
+
+    threading.Thread(target=read, name="bagasai-api-reader", daemon=True).start()
+    try:
+        while True:
+            if cancel_event.is_set():
+                raise Cancelled()
+            try:
+                kind, value = events.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if cancel_event.is_set():
+                raise Cancelled()
+            if kind == "done":
+                return
+            if kind == "error":
+                raise value
+            yield value
+    finally:
+        stopped.set()
+        # close() pada beberapa transport bisa menunggu bacaan socket.
+        # Jangan tahan thread UI/agent ketika pengguna sudah membatalkan.
+        threading.Thread(target=close, name="bagasai-api-close", daemon=True).start()
 
 
 # StreamStalled & _StallTimeout DIHAPUS (2026-09-23) bersama watchdog antar-
@@ -134,6 +241,20 @@ def _is_free_usage_limit(exc: Exception) -> bool:
     teks = _error_text(exc).lower().replace("_", "")
     return ("freeusagelimiterror" in teks
             or ("free usage" in teks and "limit" in teks))
+
+
+def _is_provider_busy(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    # Jangan menyamarkan auth, payload salah, konteks penuh, atau kuota akun.
+    if status in _FATAL_STATUS or isinstance(exc, (Cancelled, KonteksPenuh)):
+        return False
+    teks = _error_text(exc).lower()
+    if any(word in teks for word in ("insufficient_quota", "freeusagelimiterror")):
+        return False
+    return status in (503, 529) or any(word in teks for word in (
+        "service temporarily overloaded", "overloaded", "server is busy",
+        "service at capacity",
+    ))
 
 
 def _quota_error(exc: Exception) -> ProviderQuotaError:
@@ -231,7 +352,7 @@ def _extract_text_tool_calls(text: str) -> list[dict[str, str]]:
     HANYA blok LENGKAP (ada tag penutup) yang diterima: panggilan yang terpotong
     (mis. kena batas token) tak boleh dieksekusi setengah jadi.
     """
-    calls: list[tuple[str, dict]] = []
+    calls: list[tuple[str, Any]] = []
     # Format A: <function=nama> ... <parameter=kunci>nilai</parameter> ... </function>
     for m in _re.finditer(r"<function\s*=\s*([^\s>]+)\s*>(.*?)</function>",
                           text, _re.DOTALL | _re.IGNORECASE):
@@ -244,7 +365,10 @@ def _extract_text_tool_calls(text: str) -> list[dict[str, str]]:
                 val = val[1:]
             args[pm.group(1).strip()] = val.rstrip("\n")
         if name:
-            calls.append((name, args))
+            # Beberapa model membungkus objek JSON langsung dengan <function>.
+            # Jangan mengganti argumen itu dengan {} hanya karena bukan XML parameter.
+            body = m.group(2).strip()
+            calls.append((name, args if args or not body else body))
     # Format B: <tool_call>{"name":..,"arguments":..}</tool_call>
     if not calls:
         for m in _re.finditer(r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
@@ -255,19 +379,14 @@ def _extract_text_tool_calls(text: str) -> list[dict[str, str]]:
                 continue
             name = obj.get("name")
             a = obj.get("arguments", obj.get("parameters", {}))
-            if isinstance(a, str):
-                try:
-                    a = _json.loads(a)
-                except ValueError:
-                    a = {}
             if name:
-                calls.append((name, a if isinstance(a, dict) else {}))
+                calls.append((name, a))
     out: list[dict[str, str]] = []
     for i, (name, args) in enumerate(calls):
         out.append({
             "id": f"txt_{i}",
             "name": name,
-            "arguments": _json.dumps(args, ensure_ascii=False),
+            "arguments": args if isinstance(args, str) else _json.dumps(args, ensure_ascii=False),
         })
     return out
 
@@ -290,6 +409,7 @@ def _call_with_retry(
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
     sudah_mengalir: Callable[[], bool] | None = None,
+    provider: str = "",
 ) -> Any:
     """Jalankan permintaan sekali; jangan kirim ulang otomatis.
 
@@ -305,6 +425,16 @@ def _call_with_retry(
     except Exception as exc:
         if _is_free_usage_limit(exc):
             raise _quota_error(exc) from exc
+        if _is_provider_busy(exc):
+            label = {"nvidia": "NVIDIA", "openrouter": "OpenRouter",
+                     "opencode": "OpenCode"}.get(provider or "nvidia", provider)
+            raise ProviderBusyError(
+                f"Layanan {label} sedang sibuk atau sementara tidak tersedia. "
+                "Permintaan dihentikan tanpa mengirim ulang prompt otomatis. "
+                "Percakapan dan jawaban parsial tetap dipertahankan. "
+                "Tunggu sebentar lalu lanjutkan, atau pilih model lain lewat /model. "
+                "Menaikkan timeout tidak mengatasi penolakan dari server ini."
+            ) from exc
         raise
 
 
@@ -454,6 +584,7 @@ def stream_completion(
     provider: str = "",
     api_style: str = "chat",
     on_content: Any = None,
+    on_tool_pending: Callable[[str], None] | None = None,
     on_reasoning: Any = None,
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
@@ -471,11 +602,17 @@ def stream_completion(
 
     Mengembalikan (teks_final, daftar_tool_calls, usage).
     """
+    if provider == "openrouter" and model and model.endswith(":free"):
+        extra_body = dict(extra_body or {})
+        routing = dict(extra_body.get("provider") or {})
+        routing["max_price"] = {"prompt": 0, "completion": 0, "request": 0, "image": 0}
+        extra_body["provider"] = routing
     if api_style == "responses":
         return _stream_responses(
             messages, tools=tools, model=model, temperature=temperature,
             extra_body=extra_body, max_tokens=max_tokens, provider=provider,
             on_content=on_content, on_reasoning=on_reasoning,
+            on_tool_pending=on_tool_pending,
             cancel_event=cancel_event, on_retry=on_retry)
     client = get_client(provider)
     kwargs = _base_kwargs(messages, tools, model, temperature, extra_body,
@@ -486,14 +623,15 @@ def stream_completion(
     try:
         import httpx  # dependensi openai — pasti ada sesudah get_client()
         kwargs["timeout"] = httpx.Timeout(
-            connect=15.0, read=config.TTFT_TIMEOUT, write=60.0, pool=15.0
+            connect=15.0, read=_read_timeout(provider), write=60.0, pool=15.0
         )
     except Exception:  # noqa: BLE001 — tanpa httpx pun tetap jalan (timeout klien)
         pass
 
     def _do() -> tuple[str, list[dict[str, Any]], Any]:
         try:
-            stream = client.chat.completions.create(**kwargs)
+            stream = _stream_cancellable(
+                lambda: client.chat.completions.create(**kwargs), cancel_event)
         except Exception as exc:  # noqa: BLE001
             if _apakah_konteks_penuh(exc):
                 raise KonteksPenuh(str(exc)) from exc
@@ -555,8 +693,14 @@ def stream_completion(
                         fn = getattr(tc, "function", None)
                         if fn and fn.name:
                             slot["name"] += fn.name
+                            if on_tool_pending:
+                                on_tool_pending(slot["name"])
                         if fn and fn.arguments:
                             slot["arguments"] += fn.arguments
+                    # Gateway bisa membiarkan SSE terbuka setelah pilihan selesai.
+                    # Eksekusi tidak perlu menunggu socket ditutup/read timeout.
+                    if finish_reason is not None:
+                        break
             except Cancelled:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -565,6 +709,9 @@ def stream_completion(
                 # jalur generik dan pemulih pemangkasannya tak pernah jalan.
                 if _apakah_konteks_penuh(exc):
                     raise KonteksPenuh(str(exc)) from exc
+                explained = _jelaskan_timeout(exc, provider)
+                if explained is not exc:
+                    raise explained from exc
                 raise
         finally:
             try:
@@ -614,7 +761,7 @@ def stream_completion(
 
     return _call_with_retry(
         _do, cancel_event=cancel_event, on_retry=on_retry,
-        sudah_mengalir=lambda: mengalir["ada"],
+        provider=provider,
     )
 
 
@@ -726,6 +873,7 @@ def _stream_responses(
     max_tokens: int | None = None,
     provider: str = "",
     on_content: Any = None,
+    on_tool_pending: Callable[[str], None] | None = None,
     on_reasoning: Any = None,
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
@@ -761,14 +909,15 @@ def _stream_responses(
     try:
         import httpx  # dependensi openai — pasti ada sesudah get_client()
         kwargs["timeout"] = httpx.Timeout(
-            connect=15.0, read=config.TTFT_TIMEOUT, write=60.0, pool=15.0
+            connect=15.0, read=_read_timeout(provider), write=60.0, pool=15.0
         )
     except Exception:  # noqa: BLE001 — tanpa httpx pun tetap jalan
         pass
 
     def _do() -> tuple[str, list[dict[str, Any]], Any]:
         try:
-            stream = client.responses.create(**kwargs)
+            stream = _stream_cancellable(
+                lambda: client.responses.create(**kwargs), cancel_event)
         except Exception as exc:  # noqa: BLE001
             if _apakah_konteks_penuh(exc):
                 raise KonteksPenuh(str(exc)) from exc
@@ -816,6 +965,8 @@ def _stream_responses(
                                 "name": str(getattr(item, "name", "") or ""),
                                 "arguments": "",
                             }
+                            if on_tool_pending:
+                                on_tool_pending(str(getattr(item, "name", "") or ""))
                     elif tipe == "response.function_call_arguments.delta":
                         idx = getattr(ev, "output_index", None)
                         slot = tool_slots.get(idx)
@@ -828,6 +979,7 @@ def _stream_responses(
                         if getattr(resp, "usage", None):
                             usage = _UsageResponses(resp.usage)
                         finish_reason = getattr(resp, "status", "completed")
+                        break
                     elif tipe == "response.failed":
                         resp = getattr(ev, "response", None)
                         err = getattr(resp, "error", None)
@@ -842,6 +994,9 @@ def _stream_responses(
             except Exception as exc:  # noqa: BLE001
                 if _apakah_konteks_penuh(exc):
                     raise KonteksPenuh(str(exc)) from exc
+                explained = _jelaskan_timeout(exc, provider)
+                if explained is not exc:
+                    raise explained from exc
                 raise
         finally:
             try:
@@ -877,5 +1032,5 @@ def _stream_responses(
 
     return _call_with_retry(
         _do, cancel_event=cancel_event, on_retry=on_retry,
-        sudah_mengalir=lambda: mengalir["ada"],
+        provider=provider,
     )

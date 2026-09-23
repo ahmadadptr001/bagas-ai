@@ -197,27 +197,14 @@ TOP_P: float = float(os.getenv("TOP_P", "0.95"))
 # Batas waktu satu permintaan (dipakai klien openai untuk panggilan non-stream).
 REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "600"))
 
-# SATU anggaran waktu untuk liveness — dan itu memang cukup (2026-09-23).
-#
-# TERUKUR (2026-08-23, integrate.api.nvidia.com): deepseek-v4-flash butuh
-# ±120 detik sampai token PERTAMA keluar, sementara nemotron & muse-glimmer
-# menjawab dalam hitungan detik. Klien lama memakai satu angka
-# (httpx read=STREAM_STALL_TIMEOUT) untuk keduanya — dan karena httpx
-# menghitung read-timeout per operasi baca socket, angka itu ikut membatasi
-# penantian token pertama. Akibatnya permintaan yang sebenarnya SEHAT
-# dibatalkan hanya karena modelnya lambat memulai.
-#
-# Perbaikannya waktu itu: angka kedua yang KETAT untuk jeda antar-token
-# (STREAM_STALL_TIMEOUT=45) lewat watchdog thread, yang menutup stream diam
-# supaya "ikut jalur retry biasa". Angka itu DIHAPUS bersama watchdognya: jeda
-# panjang di tengah jawaban ternyata BUKAN bukti stream mati — model yang
-# menyusun tabel besar atau menimbang tool berikutnya memang diam lama — tapi
-# watchdog memperlakukannya sebagai kerusakan, membatalkan jawaban yang sedang
-# mengalir, lalu meminta ulang dari nol. Sekarang yang tersisa cuma
-# TTFT_TIMEOUT: batas baca httpx yang berlaku PER OPERASI BACA, jadi ia sudah
-# menutup koneksi yang benar-benar mati tanpa menghukum model yang hanya
-# butuh waktu. Jangan tambahkan lagi penjaga "diam N detik" di atasnya.
+# Batas baca per operasi socket untuk penyedia selain NVIDIA.
+# Berlaku sebelum token pertama maupun ketika streaming. Tanpa watchdog
+# antar-token dan tanpa pengiriman ulang otomatis.
 TTFT_TIMEOUT: float = float(os.getenv("BAGASAI_TTFT_TIMEOUT", "300"))
+# NVIDIA bisa lama mengantre/bernalar tanpa mengirim byte. Tetap terbatas,
+# tetapi terpisah dari penyedia lain; ini bukan interval retry.
+NVIDIA_READ_TIMEOUT: float = max(
+    1.0, float(os.getenv("NVIDIA_READ_TIMEOUT", "900")))
 # Anggaran total panggilan tool dalam SATU giliran (jaring pengaman anti-liar).
 MAX_TOOL_CALLS: int = int(os.getenv("MAX_TOOL_CALLS", "40"))
 # Berapa kali bagas-ai boleh MENAIKKAN effort sendiri dalam satu giliran saat

@@ -21,6 +21,7 @@ import mimetypes
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
@@ -118,7 +119,25 @@ _MAKS_PADAT = 2
 # tak ada yang perlu divalidasi). Ekstensi berkas kode difilter terpisah agar
 # perubahan pada aset/teks (mis. gambar hasil download) tak memicu validasi.
 _TOOL_MUTASI = {
-    "write_file", "edit_file", "append_file", "replace_in_files", "move_file",
+    "write_file", "edit_file", "edit_files", "append_file", "replace_in_files",
+    "move_file", "delete_file", "copy_file", "undo_changes",
+}
+
+# Pengingat internal, bukan tool atau retry permintaan. Diberikan sekali
+# setelah langkah kerja supaya model memilih pengujian dari konteks proyek.
+_VERIFIKASI_PASIF = (
+    "[SISTEM] Verifikasi pasif: sebelum menutup pekerjaan proyek, tentukan "
+    "sendiri skenario uji dari permintaan dan perubahan. Pakai bukti yang sudah "
+    "ada; jika belum cukup, jalankan tes/aplikasi dengan kemampuan eksekusi "
+    "yang tersedia dan periksa perilaku nyata, bukan hanya proses menyala. "
+    "Tidak wajib memakai tool validasi khusus. Jika gagal, perbaiki dan uji "
+    "ulang bagian terdampak setelah edit terakhir. Hormati batas pengguna, "
+    "batalkan bila diminta, dan bersihkan proses uji milikmu. Jika tidak bisa "
+    "diuji, jelaskan penghalangnya; jangan mengulang tanpa kemajuan. Jawaban "
+    "akhir menyebut hasil uji dan keterbatasan, bukan jaminan bebas semua bug."
+)
+_LANGKAH_VERIFIKASI = _TOOL_MUTASI | {
+    "run_command", "run_python", "run_script", "run_command_bg",
 }
 # Tool yang MENGUBAH KEADAAN (file/sistem/proses). Sesudah salah satunya SUKSES,
 # cache anti-ulang dibersihkan: hasil read_file/list_dir/run_command yang
@@ -2685,6 +2704,7 @@ class Agent:
         force_final = False
         weak_hits = 0
         empty_hits = 0
+        verifikasi_diingatkan = False
         # Cache media MILIK GILIRAN INI: data-URL dihitung sekali, dipakai
         # ulang tiap putaran rantai tool (tanpa ini, video 30 MB dibaca &
         # dienkode ulang berkali-kali — biaya & waktu sia-sia). `media_lewat`
@@ -2733,7 +2753,8 @@ class Agent:
                 pengguna lalu meminta model mengulang dari nol. Dipakai
                 pemulih 400 generik di bawah.
                 """
-                return bool(state["completion_est"] or state["reasoning_est"])
+                return bool(state["completion_est"] or state["reasoning_est"]
+                            or state.get("tool_received"))
 
             if on_status:
                 # NETRAL: pada titik ini permintaan baru dikirim dan belum satu
@@ -2780,6 +2801,11 @@ class Agent:
                 if on_reasoning:
                     on_reasoning(piece)
 
+            def _on_tool_pending(name: str) -> None:
+                state["tool_received"] = True
+                if on_status:
+                    on_status(f"Menerima instruksi tool: {name}")
+
             def _on_retry(attempt: int, wait: float, exc: Exception) -> None:
                 # Panggilan diulang DARI AWAL, jadi estimasi token parsial
                 # direset — tanpa ini tiap percobaan menambah angka yang
@@ -2818,6 +2844,7 @@ class Agent:
                     provider=spec.provider,
                     api_style=getattr(spec, "api_style", "chat"),
                     on_content=on_content,
+                    on_tool_pending=_on_tool_pending,
                     on_reasoning=_on_reasoning,
                     cancel_event=cancel_event,
                     on_retry=_on_retry,
@@ -2984,6 +3011,16 @@ class Agent:
             if content and content.strip() and on_message:
                 on_message(content)
 
+            # ID sintetis/parser teks bisa berulang setiap putaran. Riwayat
+            # membutuhkan ID unik agar hasil tool lama tidak tertukar saat repair.
+            used_ids = {call.get("id") for msg in self.memory.messages
+                        for call in msg.get("tool_calls", [])}
+            tool_calls = [dict(tc) for tc in tool_calls]
+            for tc in tool_calls:
+                if not tc.get("id") or tc["id"] in used_ids:
+                    tc["id"] = "call_" + uuid.uuid4().hex
+                used_ids.add(tc["id"])
+
             self.memory.add({
                 "role": "assistant",
                 "content": content or "",
@@ -2999,20 +3036,32 @@ class Agent:
                     for i, tc in enumerate(tool_calls)
                 ],
             })
+            langkah_proyek = False
             for i, tc in enumerate(tool_calls):
                 if cancel_event is not None and cancel_event.is_set():
                     raise llm.Cancelled()
                 name = tc["name"]
+                argument_error = ""
                 try:
                     args = json.loads(tc["arguments"] or "{}")
-                except json.JSONDecodeError:
+                    if not isinstance(args, dict):
+                        raise ValueError("argumen harus objek JSON")
+                except (ValueError, TypeError) as exc:
                     args = {}
+                    argument_error = (
+                        f"[error] Instruksi tool {name} tidak dijalankan: "
+                        f"argumen JSON tidak valid ({exc}). Kirim ulang hanya "
+                        "panggilan ini dengan objek JSON lengkap; jangan ulangi langkah yang berhasil.")
                 if on_tool:
                     on_tool(name, args)
+                if on_status:
+                    on_status(f"Menjalankan tool: {name}")
                 key = name + "::" + json.dumps(
                     args, sort_keys=True, ensure_ascii=False, default=str
                 )
-                if key in seen_tools:
+                if argument_error:
+                    result = argument_error
+                elif key in seen_tools:
                     dup_hits += 1
                     result = (
                         "[SISTEM] Kamu SUDAH memanggil tool ini dengan argumen "
@@ -3023,22 +3072,35 @@ class Agent:
                     )
                 else:
                     result = tools.execute(name, args)
+                    # Setelah perubahan, tes dengan perintah sama harus
+                    # benar-benar dijalankan lagi, bukan memakai hasil lama.
+                    if name in _TOOL_STATE and not (
+                        "[GAGAL" in result or result.lstrip().startswith(
+                            ("GAGAL", "[DITOLAK", "[error]"))
+                    ):
+                        seen_tools.clear()
                     seen_tools[key] = result
+                    langkah_proyek |= name in _LANGKAH_VERIFIKASI
                     if tool_dinamis and name in ("cari_tool", "list_tools"):
                         # Hasil katalog memakai format yang kita buat sendiri;
                         # parser katalog memverifikasi tiap nama ke REGISTRY.
                         nama_tool_aktif.update(
                             _katalog.nama_dari_daftar(result))
-                    # Hasil ditampilkan HANYA saat tool benar-benar dieksekusi,
-                    # bukan saat dedup mengembalikan cache + teguran.
-                    if on_tool_result:
-                        on_tool_result(name, result)
+                # Setiap on_tool harus punya hasil, termasuk cache/error argumen.
+                # Tanpanya UI meninggalkan indikator tool seperti masih berjalan.
+                if on_tool_result:
+                    on_tool_result(name, result)
                 total_calls += 1
                 self.memory.add({
                     "role": "tool",
                     "tool_call_id": tc["id"] or f"call_{i}",
                     "content": result,
                 })
+                self._persist()
+
+            if langkah_proyek and not verifikasi_diingatkan and not force_final:
+                verifikasi_diingatkan = True
+                self.memory.add_user(_VERIFIKASI_PASIF)
 
             # SISIPKAN pesan susulan pengguna, tepat di batas langkah ini.
             # TIDAK saat force_final: di sana model justru sedang disuruh
@@ -3668,12 +3730,8 @@ class Agent:
             # dihasilkan tak dibuang percuma) sambil ditegur; kalau masih
             # menumpuk juga, barulah yang dijalankan cuma blok pertama.
             batch_hits = 0
-            # Validasi otomatis sebelum jawaban akhir: `mutasi_kode` menyala bila
-            # ada tool yang benar-benar MENGUBAH berkas kode; `validasi_jalan`
-            # mencegah paksaan validasi berulang tanpa henti bila hasilnya tetap
-            # gagal (setelah sekali dipaksa, keputusan diserahkan ke AI).
-            mutasi_kode = False
-            validasi_jalan = False
+            perlu_verifikasi = False
+            verifikasi_diingatkan = False
             # Penegakan "lihat sendiri hasilnya": `ubah_tampilan` menyala bila
             # ada berkas yang KELIHATAN diubah, `dilihat` bila AI benar-benar
             # memakai web_preview/take_screenshot. Dulu ini cuma imbauan prosa
@@ -3682,10 +3740,6 @@ class Agent:
             ubah_tampilan = False
             dilihat = False
             lihat_dipaksa = False
-            # Berkas kode yang diubah giliran ini — dioper ke validate_project
-            # agar pemeriksaan per-berkas (py_compile/smoke-run/php -l) tepat
-            # menyasar yang barusan disentuh, bukan menebak-nebak.
-            berkas_mutasi: set[str] = set()
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise llm.Cancelled()
@@ -3865,36 +3919,6 @@ class Agent:
                         "diverifikasi secara visual.")
                     continue
 
-                # VALIDASI OTOMATIS sebelum menutup: kalau kode berubah tapi AI
-                # belum sekali pun memanggil validate_project, jalankan sendiri
-                # dan paksa AI menyelesaikan temuannya. Ini penegakan, bukan
-                # sekadar imbauan protokol — "selesai" tanpa bukti kode masih
-                # waras persis yang ingin dihindari pengguna. Dipaksa MAKS sekali
-                # per giliran (validasi_jalan) agar tak memutar tanpa henti.
-                if (not calls and not force_final and mutasi_kode
-                        and not validasi_jalan):
-                    validasi_jalan = True
-                    if on_notice:
-                        on_notice("memvalidasi kode sebelum menutup…")
-                    args_val = {"paths": " ".join(sorted(berkas_mutasi))}
-                    hasil_val = tools.execute("validate_project", args_val)
-                    if on_tool:
-                        on_tool("validate_project", args_val)
-                    if on_tool_result:
-                        on_tool_result("validate_project", hasil_val)
-                    gagal_val = ("✗" in hasil_val or "GAGAL" in hasil_val
-                                 or "TIMEOUT" in hasil_val)
-                    if gagal_val:
-                        reply = _send(
-                            "[SISTEM] Sebelum menutup, aku menjalankan "
-                            "validate_project atas kode yang barusan berubah dan "
-                            "ADA yang GAGAL. Perbaiki dulu, lalu validasi lagi — "
-                            "jangan nyatakan selesai selagi masih gagal.\n\n"
-                            f"[[HASIL validate_project]]\n{hasil_val}\n"
-                            "[[/HASIL]]")
-                        continue
-                    # Lulus: lanjut ke penutupan normal di bawah.
-
                 if not calls or steps >= _WEB_MAX_STEPS:
                     # Tak ada tool -> ini jawaban AKHIR. Bersihkan sisa penanda
                     # DAN usulan JSON tanpa penanda (mis. saat model tetap
@@ -4025,8 +4049,6 @@ class Agent:
                                 on_tim([a.nama for a in bangun])
                         # Tandai bila kode BERUBAH (untuk validasi otomatis di
                         # akhir), dan catat bila validasi memang sudah dijalankan.
-                        if name == "validate_project":
-                            validasi_jalan = True
                         if name in ("web_preview", "take_screenshot"):
                             dilihat = True
                         if (name in _TOOL_MUTASI
@@ -4034,15 +4056,7 @@ class Agent:
                                     ("GAGAL", "[DITOLAK"))
                                 and _menyentuh_tampilan(args)):
                             ubah_tampilan = True
-                        if (name in _TOOL_MUTASI
-                              and not result.lstrip().startswith("GAGAL")
-                              and not result.lstrip().startswith("[DITOLAK")
-                              and _menyentuh_kode(name, args)):
-                            mutasi_kode = True
-                            for kunci_path in ("path", "dest"):
-                                nilai = args.get(kunci_path)
-                                if isinstance(nilai, str) and nilai:
-                                    berkas_mutasi.add(nilai)
+                        perlu_verifikasi |= name in _LANGKAH_VERIFIKASI
                     steps += 1
                     # Tool yang menghasilkan GAMBAR (mis. screenshot): file-nya
                     # dilampirkan ke pesan berikutnya supaya AI web melihatnya
@@ -4179,6 +4193,9 @@ class Agent:
                                 f"{n} pesan susulanmu disisipkan ke giliran ini"
                                 if n > 1 else
                                 "pesan susulanmu disisipkan ke giliran ini")
+                if perlu_verifikasi and not verifikasi_diingatkan and not force_final:
+                    verifikasi_diingatkan = True
+                    follow += "\n\n" + _VERIFIKASI_PASIF
                 reply = _send(follow, attachments=images)
         except llm.Cancelled:
             self.memory.repair_dangling_tools()
