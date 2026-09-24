@@ -57,7 +57,8 @@ _TOLAK = "Tolak"
 # bukan sekadar "mengakses". Yang tak terdaftar memakai kata umum.
 _KERJA = {
     "read_file": "membaca", "list_dir": "melihat isi", "search_text": "mencari di",
-    "glob_files": "mencari berkas di", "write_file": "MENULIS",
+    "glob_files": "mencari berkas di", "grep": "mencari isi di",
+    "write_file": "MENULIS",
     "append_file": "MENAMBAH isi", "edit_file": "MENGUBAH",
     "delete_file": "MENGHAPUS", "move_file": "MEMINDAHKAN",
     "copy_file": "menyalin ke", "make_dir": "MEMBUAT folder",

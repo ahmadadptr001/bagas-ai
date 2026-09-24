@@ -147,7 +147,9 @@ TEMA: dict[str, dict] = {
         "desc": "ala VS Code Light Modern — bersih & kontras untuk siang hari",
         "aksen": "#005fb8", "aksen2": "#0a7d6f",
         "aksen_terang": "#0a5ca8", "tepi": "#c8c8c8",
-        "tepi_redup": "#e0e0e0", "redup": "#6f6f6f", "teks": "#3b3b3b",
+        # tepi_redup = border picker/scrollbar: cukup gelap agar terlihat
+        # di atas gema_bg putih (kontras ~3.2:1, ambang UI non-teks).
+        "tepi_redup": "#909090", "redup": "#6f6f6f", "teks": "#3b3b3b",
         "grad": ["#d6ecff", "#b3d8f8", "#7ab8ef", "#4a9be0",
                  "#2a80cc", "#005fb8", "#00457f"],
         "gema_bg": "#ffffff", "gema_garis": "#3b3b3b", "gema_teks": "#1f1f1f",
@@ -156,9 +158,12 @@ TEMA: dict[str, dict] = {
         "muted_footer": "#6f6f6f", "cmd_footer": "#005fb8",
         "exit_footer": "#cd3131", "git_footer": "#107c10",
         "ubah_footer": "#8a5a00",
-        "menu_bg": "#ffffff", "menu_teks": "#3b3b3b",
+        # menu_bg sengaja BUKAN #ffffff: panel picker harus terlihat
+        # sebagai kartu terpisah dari kanvas gema_bg (dulu keduanya sama
+        # putih — picker menyatu dan border 1.3:1 nyaris tak terlihat).
+        "menu_bg": "#f6f6f6", "menu_teks": "#3b3b3b",
         "menu_aktif_bg": "#cfe4fb", "menu_aktif_teks": "#1f1f1f",
-        "menu_meta_bg": "#f8f8f8", "menu_meta_teks": "#6f6f6f",
+        "menu_meta_bg": "#ececec", "menu_meta_teks": "#6f6f6f",
     },
 }
 

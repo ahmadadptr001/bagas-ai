@@ -190,26 +190,26 @@ Tiga tool bawaan yang membuat AI bekerja lebih efektif di proyek ini:
 - **`sasaran(tugas)`** — hitung berkas paling relevan untuk satu tugas (dari
   peta proyek + kata kunci) lengkap dengan alasannya, supaya AI tidak membuka
   berkas asal-asalan.
-- **`test_function(path, symbol, args)`** — uji satu fungsi/kelas dari berkas
-  proyek dengan argumen contoh di subproses terisolasi; `read_file` juga sudah
-  anti-baca-ulang (berkas yang tak berubah tidak dikirim ulang isinya).
+- **Verifikasi mandiri** — tool bantu `test_function` / `validate_project` /
+  `run_tests` / `web_preview` DIHAPUS; AI wajib menemukan sendiri cara cek &
+  menjalankan proyek (`run_command` / `run_python` / `take_screenshot`),
+  layaknya tester. `read_file` selalu mengirim isi segar
+  (anti-baca-ulang dilepas — model bebas membaca ulang bila perlu).
 
 ---
 
 ## 🎯 Server MCP — sasaran tepat untuk AI
 
 `bagas-ai mcp` menjalankan server **MCP** (Model Context Protocol, transport
-stdio) yang menegakkan tiga disiplin kerja saat AI menangani proyek ini:
+stdio) yang menegakkan dua disiplin kerja saat AI menangani proyek ini:
 
 1. **Sasaran tepat** — tool `sasaran(tugas)` menghitung berkas yang relevan
    untuk tugas itu (dari peta proyek + kata kunci) lengkap dengan alasannya,
    jadi AI langsung tahu berkas mana yang boleh disentuh, bukan menebak.
-2. **Tanpa baca ulang** — tool `baca` mengingat sidik jari tiap berkas yang
-   sudah dibaca sesi ini; dipanggil lagi untuk berkas yang tak berubah, ia
-   menolak mengirim isi ulang dan menyuruh memakai yang sudah ada di konteks.
-3. **Tidak asal buka file** — begitu `sasaran` dipanggil, `baca` MENOLAK
+2. **Tidak asal buka file** — begitu `sasaran` dipanggil, `baca` MENOLAK
    berkas di luar daftar; perpanjangan hanya lewat `perluas_sasaran` dengan
-   alasan.
+   alasan. (Anti-baca-ulang dilepas: isi selalu segar, model bebas membaca
+   ulang bila perlu.)
 
 Server ini memakai mesin yang sama dengan agent (peta proyek `projectindex`,
 batas folder aman `workspace`, logika `read_file`), jadi perilakunya konsisten.

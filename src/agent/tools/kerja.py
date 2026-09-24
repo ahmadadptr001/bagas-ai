@@ -13,27 +13,22 @@ Tiga keluhan yang dijawab di sini:
   2. AI membuka berkas ASAL-ASALAN. Solusi: `sasaran(tugas)` menghitung berkas
      yang paling relevan untuk tugas itu (dari peta proyek + kata kunci),
      lengkap dengan alasan — sehingga AI tahu tepat berkas mana yang perlu
-     disentuh sebelum menjelajah. Dipasangkan dengan cache baca di read_file
-     (files.py): berkas yang sudah dibaca & tak berubah tidak dikirim ulang.
+     disentuh sebelum menjelajah. (Anti-baca-ulang read_file DIHAPUS — model
+     boleh membaca ulang kapan pun perlu.)
 
-  3. AI jarang MENGUJI hal kompleks dengan Python. Solusi: `test_function`
-     menjalankan SATU fungsi/kelas dari berkas proyek dengan argumen contoh
-     di subproses terisolasi — cara tercepat membuktikan "kode ini benar"
-     tanpa menulis harness dari nol. `run_python` tetap ada untuk eksperimen
-     bebas.
+  3. AI jarang MENGUJI hal kompleks. `test_function` DIHAPUS dari registry:
+     model WAJIB menemukan sendiri cara menguji (run_python / run_command),
+     layaknya tester.
 """
 from __future__ import annotations
 
 import json
-import re
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from .. import config, projectindex, workspace
 from .base import tool
-from .shell import _execute
 
 # Kata tugas/isi umum yang BUKAN sasaran — dipakai sasaran() untuk mempertajam
 # peringkat. Disalin dari mcp_server supaya konsisten (satu sumber kebenaran
@@ -286,105 +281,10 @@ def _cari_modul(p: Path) -> tuple[str | None, str | None]:
     return str(folder), ".".join(nama)
 
 
-@tool
+# test_function TIDAK didaftarkan (@tool dilepas): model wajib menguji sendiri
+# lewat run_python / run_command, seperti tester — tanpa tool uji jadi.
+
 def test_function(path: str, symbol: str, args: list | str = "[]") -> str:
-    """UJI satu fungsi/kelas dari berkas proyek dengan argumen contoh — jalankan dan lihat hasil/errornya.
-
-    Cara tercepat membuktikan kode benar: impor fungsi itu dari berkasnya
-    (bukan menyalin-menyusun ulang), panggil dengan argumen contoh, dan lihat
-    hasilnya atau traceback-nya. Berjalan di subproses terisolasi dengan
-    timeout — aman & tidak menggantung. File di dalam package (pakai relative
-    import) diimpor lewat nama modulnya, jadi tetap jalan. Untuk eksperimen
-    bebas, pakai run_python; tool ini khusus menguji SATU simbol yang sudah ada.
-
-    path: berkas proyek yang memuat fungsi (mis. 'src/agent/tools/files.py').
-    symbol: nama atribut tingkat modul, mis. 'hitung' atau 'Hitung.jumlah'.
-        Untuk fungsi di dalam kelas, tulis 'Kelas.fungsi'.
-    args: argumen posisi sebagai JSON array, mis. '[2, 3]' atau '["a", 1]'.
-        Argumen kata kunci belum didukung — tulis urut posisi saja.
-    """
-    p, rel = _resolusi_aman(path)
-    if p is None:
-        return f"[error] {rel}"
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", symbol or ""):
-        return ("[error] symbol harus nama atribut valid, mis. 'hitung' atau "
-                "'Hitung.jumlah'.")
-    # Model web kerap mengirim args sebagai LIST langsung (bentuk paling alami)
-    # alih-alih string JSON. Dulu skema hanya menerima str, lalu base.py
-    # menggabungkan list jadi '2\n3' yang bukan JSON valid — uji yang sebenarnya
-    # valid malah ditolak dengan error menyesatkan. Terima keduanya.
-    if isinstance(args, (list, tuple)):
-        args_list = list(args)
-    else:
-        try:
-            args_list = json.loads(args or "[]")
-        except ValueError as e:
-            return f"[error] args bukan JSON valid: {e}"
-    if not isinstance(args_list, list):
-        return "[error] args harus JSON array, mis. '[2, 3]'."
-    if not config.ALLOW_CODE_EXEC:
-        return ("[dinonaktifkan] Eksekusi kode dimatikan. Set "
-                "ALLOW_CODE_EXEC=true di .env untuk mengaktifkan.")
-
-    bagian = symbol.split(".")
-    # Impor lewat NAMA MODUL bila file di dalam package (relative import tetap
-    # jalan); fallback ke impor file-biasa bila bukan package.
-    sys_dir, nama_modul = _cari_modul(p)
-    if nama_modul:
-        kode = (
-            "import importlib, sys, traceback\n"
-            f"sys.path.insert(0, {sys_dir!r})\n"
-            "try:\n"
-            f"    mod = importlib.import_module({nama_modul!r})\n"
-            f"    obj = mod\n"
-            f"    for _b in {bagian!r}:\n"
-            "        obj = getattr(obj, _b)\n"
-            f"    hasil = obj(*{args_list!r})\n"
-            "    print('HASIL:', repr(hasil))\n"
-            "except Exception:\n"
-            "    print('GAGAL:', traceback.format_exc())\n"
-        )
-    else:
-        kode = (
-            "import importlib.util, sys, traceback\n"
-            f"sys.path.insert(0, {str(config.PROJECT_ROOT)!r})\n"
-            "try:\n"
-            f"    spec = importlib.util.spec_from_file_location('_mod_uji', "
-            f"{str(p)!r})\n"
-            "    mod = importlib.util.module_from_spec(spec)\n"
-            "    spec.loader.exec_module(mod)\n"
-            f"    obj = mod\n"
-            f"    for _b in {bagian!r}:\n"
-            "        obj = getattr(obj, _b)\n"
-            f"    hasil = obj(*{args_list!r})\n"
-            "    print('HASIL:', repr(hasil))\n"
-            "except Exception:\n"
-            "    print('GAGAL:', traceback.format_exc())\n"
-        )
-    rc, out, timed_out = _execute(
-        [sys.executable, "-c", kode], shell=False,
-        timeout=config.CODE_EXEC_TIMEOUT,
-    )
-    if timed_out:
-        return (f"[GAGAL/timeout] uji {symbol} di {rel} melebihi "
-                f"{config.CODE_EXEC_TIMEOUT} detik — dihentikan. JANGAN anggap "
-                f"berhasil.\n{out[-2000:]}")
-    out = (out or "").strip()
-    if "HASIL:" in out:
-        hasil = out.split("HASIL:", 1)[1].strip()
-        return (f"✓ {symbol} ({rel}) dengan args {args_list!r} BERHASIL:\n"
-                f"  hasil = {hasil}\n\n"
-                "Kalau hasilnya sesuai harapan, tandai selesai; kalau tidak, "
-                "perbaiki kodenya lalu uji lagi.")
-    if "GAGAL:" in out:
-        tb = out.split("GAGAL:", 1)[1].strip()
-        # Traceback bisa panjang — tampilkan ekor (tempat error sebenarnya).
-        ekor = tb.splitlines()[-8:]
-        return (f"✗ {symbol} ({rel}) dengan args {args_list!r} GAGAL:\n"
-                + "\n".join(ekor)
-                + "\n\nBaca error di atas, perbaiki kodenya, lalu uji lagi — "
-                  "jangan anggap selesai.")
-    if rc != 0:
-        return (f"[GAGAL] proses uji berhenti dengan exit_code={rc} "
-                f"(kemungkinan error impor).\n{out[-2000:]}")
-    return f"[error] output uji tak terbaca:\n{out[-1000:]}"
+    """(dihapus) Uji simbol — gunakan run_python langsung."""
+    return ("[dihapus] test_function tidak lagi tersedia. Uji sendiri dengan "
+            "run_python / run_command.")

@@ -13,10 +13,14 @@ menyediakan jalan mengambilnya sama saja memangkas kemampuan diam-diam, dan itu
 jauh lebih buruk daripada katalog yang kepanjangan.
 
 Aturan penempatan (dipakai saat menimbang tool baru):
-  - INTI  = dipakai di sebagian besar giliran ngoding, ATAU dibutuhkan untuk
-            menegakkan aturan protokol (mis. validate_project, web_preview).
+  - INTI  = dipakai di sebagian besar giliran ngoding.
   - LAIN  = berguna tapi situasional; giliran yang membutuhkannya sudah pasti
             tahu ia sedang membutuhkannya (mis. memotong video, membuat zip).
+
+CATATAN: tool bantu validasi/preview (validate_project, run_tests,
+web_preview, test_function) DIHAPUS — model WAJIB menemukan sendiri cara
+mengecek & menjalankan proyek (run_command / run_python), seperti tester.
+Kategori "sistem" dilebur ke "pro" (clipboard/notify/open_path tetap ada).
 """
 from __future__ import annotations
 
@@ -31,9 +35,9 @@ INTI: tuple[str, ...] = (
     # ditemukan lewat cari_tool/list_tools agar tidak membebani tiap request.
     "read_file", "read_files", "write_file", "edit_file", "edit_files",
     "append_file",
-    "search_text", "search_multi_text", "glob_files",
+    "search_text", "search_multi_text", "glob_files", "grep",
     "run_command", "run_python", "run_command_bg", "bg_output",
-    "validate_project", "project_info", "web_preview",
+    "project_info",
     "git_status", "git_diff",
     "web_search", "fetch_url",
     "kerja_terakhir", "catat_kerja", "sasaran",
@@ -57,14 +61,14 @@ LAIN: dict[str, tuple[str, ...]] = {
               "media_merge", "media_extract_audio", "media_thumbnail"),
     "arsip": ("zip_create", "zip_extract"),
     "berkas": ("delete_file", "list_dir", "make_dir", "move_file",
-                "copy_file", "diff_files", "replace_in_files",
-                "undo_changes"),
-    "sistem": ("clipboard_read", "clipboard_write", "notify", "open_path"),
+               "copy_file", "diff_files", "replace_in_files",
+               "undo_changes"),
     "skrip": ("save_script", "run_script", "list_scripts"),
     "memori": ("remember", "list_memory", "forget"),
     "proses": ("bg_send", "bg_stop", "bg_list"),
     "git": ("git_log", "git_commit", "git_stash", "git_blame", "git_show"),
-    "pro": ("run_tests", "test_function", "take_screenshot", "active_window",
+    "pro": ("take_screenshot", "active_window", "clipboard_read",
+            "clipboard_write", "notify", "open_path",
             "find_todos", "code_metrics", "diagnose", "bookmark", "changelog"),
 }
 
@@ -129,16 +133,8 @@ def baris_tool(nama: str) -> str:
 
 
 def katalog_inti() -> str:
-    """Baris katalog untuk tool INTI saja (yang ikut di pesan pembuka).
-
-    web_preview dibuang dari daftar saat dijeda (config.WEB_PREVIEW): biar
-    hemat sungguhan, bukan cuma kosmetik — deskripsi tool ikut dibayar di
-    pesan pembuka SETIAP sesi, dan namanya yang masih tercantum hanya
-    menggoda model mencobanya lalu gagal."""
-    from .. import config
-    nama_inti = (n for n in INTI
-                 if config.WEB_PREVIEW or n != "web_preview")
-    return "\n".join(b for b in (baris_tool(n) for n in nama_inti) if b)
+    """Baris katalog untuk tool INTI saja (yang ikut di pesan pembuka)."""
+    return "\n".join(b for b in (baris_tool(n) for n in INTI) if b)
 
 
 def ringkasan_kategori() -> str:
@@ -250,7 +246,7 @@ def cari_tool(kebutuhan: str, jumlah: int = 5) -> str:
 
 @tool
 def list_tools(kategori: str = "") -> str:
-    """Ambil daftar tool DI LUAR yang sudah kamu punya, per kategori: aset (mengunduh gambar/font/audio/dataset), media (video & audio), arsip (zip), berkas (pindah/salin/banding/ganti massal), sistem (clipboard, notifikasi, buka berkas), skrip, memori, proses (kelola proses latar), git. Panggil ini saat butuh sesuatu yang tak ada di daftar langkahmu — jangan menyerah atau menyuruh pengguna melakukannya sendiri.
+    """Ambil daftar tool DI LUAR yang sudah kamu punya, per kategori: aset (mengunduh gambar/font/audio/dataset), media (video & audio), arsip (zip), berkas (pindah/salin/banding/ganti massal), skrip, memori, proses (kelola proses latar), git, pro (screenshot/clipboard/notif/buka path). Panggil ini saat butuh sesuatu yang tak ada di daftar langkahmu — jangan menyerah atau menyuruh pengguna melakukannya sendiri.
 
     kategori: nama kategori di atas. Kosongkan untuk melihat daftar kategori
         beserta isinya secara ringkas.

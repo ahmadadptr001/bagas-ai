@@ -19,7 +19,8 @@ from . import extras  # noqa: F401,E402
 from . import pro  # noqa: F401,E402
 from . import validate  # noqa: F401,E402
 from . import checkpoint  # noqa: F401,E402
-from . import web_preview  # noqa: F401,E402
+# web_preview DIHAPUS: model wajib memverifikasi sendiri lewat run_command /
+# take_screenshot — tool preview tak lagi didaftarkan.
 from . import kerja  # noqa: F401,E402
 from . import git_tool  # noqa: F401,E402
 from . import plan_tool  # noqa: F401,E402

@@ -1,24 +1,22 @@
-"""Server MCP khusus bagas-ai — sasaran tepat, tanpa baca ulang, tanpa buka file asal.
+"""Server MCP khusus bagas-ai — sasaran tepat, tanpa buka file asal.
 
 Dijalankan dengan `bagas-ai mcp` (transport stdio) lalu dihubungkan ke klien MCP
-(Claude Desktop, Cursor, dsb). Server ini menegakkan tiga disiplin yang diminta:
+(Claude Desktop, Cursor, dsb). Server ini menegakkan dua disiplin yang diminta:
 
   1. SASARAN TEPAT — tool `sasaran(tugas)` menetapkan daftar berkas yang relevan
      untuk tugas itu (dihitung dari peta proyek + kata kunci), lengkap dengan
      alasan. AI tahu persis berkas mana yang boleh disentuh — bukan menebak.
 
-  2. TANPA BACA ULANG — tool `baca` mengingat sidik jari tiap berkas yang sudah
-     dibaca dalam sesi ini; bila dipanggil lagi untuk berkas yang TIDAK berubah,
-     ia menolak mengirim isi ulang dan menyuruh memakai yang sudah ada di konteks
-     (atau force=True bila model sungguh-sungguh kehilangan isinya).
-
-  3. TIDAK ASAL BUKA FILE — begitu `sasaran` dipanggil, `baca` MENOLAK berkas di
+  2. TIDAK ASAL BUKA FILE — begitu `sasaran` dipanggil, `baca` MENOLAK berkas di
      luar sasaran (kecuali force=True). Perluasan cuma lewat `perluas_sasaran`
      dengan alasan — keputusan yang disengaja, bukan asal.
 
+Anti-baca-ulang DIHAPUS: model selalu menerima isi segar agar bisa membaca ulang
+kapan pun perlu.
+
 Server ini memakai mesin yang SUDAH dipakai agent: peta proyek (projectindex),
-batas folder aman (workspace.allowed_roots), dan logika baca `read_file` yang
-sama — jadi perilakunya konsisten dengan bagas-ai itu sendiri, bukan tiruan.
+dan batas folder aman (workspace.allowed_roots) — jadi perilakunya konsisten
+dengan bagas-ai itu sendiri, bukan tiruan.
 
 Modul `mcp` diimpor LAZY (di main) supaya paket bagas-ai tetap jalan normal
 tanpa SDK MCP terpasang; hanya perintah `bagas-ai mcp` yang membutuhkannya.
@@ -54,13 +52,11 @@ how about into over after before between out up down off on in at by to of is
 it its as or be been being do does did done need needs want wants
 """.split())
 
-# Sidik jari berkas: (mtime_ns, size). Cukup untuk "apakah isinya berubah" tanpa
-# membaca ulang isi — dua angka ini berubah hampir pasti bila isi berubah.
-_SIDIK = tuple[int, int]
+# Sidik jari berkas tidak lagi dipakai (anti-baca-ulang dihapus).
 
 
 class _Keadaan:
-    """Negara bagian sesi MCP: sasaran aktif + cache berkas yang sudah dibaca.
+    """Negara bagian sesi MCP: sasaran aktif (anti-baca-ulang dihapus).
 
     Satu server stdio melayani SATU klien, jadi negara bagian global per proses
     sudah tepat — tidak perlu per-sesi manual.
@@ -69,12 +65,9 @@ class _Keadaan:
     def __init__(self) -> None:
         # path relatif -> alasan mengapa masuk sasaran
         self.sasaran: dict[str, str] = {}
-        # path relatif -> sidik jari saat terakhir dibaca
-        self.cache: dict[str, _SIDIK] = {}
 
     def reset(self) -> None:
         self.sasaran = {}
-        self.cache = {}
 
 
 _KEADAAN = _Keadaan()
@@ -114,11 +107,6 @@ def _resolusi(path: str) -> tuple[Path | None, str]:
     except ValueError:
         rel = str(p)
     return p, rel
-
-
-def _sidik(p: Path) -> _SIDIK:
-    st = p.stat()
-    return (st.st_mtime_ns, st.st_size)
 
 
 # --- sasaran: menetapkan berkas yang relevan untuk satu tugas -----------------
@@ -230,50 +218,47 @@ def perluas_sasaran(paths: list[str], alasan: str = "") -> str:
 
 
 def sasaran_aktif() -> str:
-    """Tampilkan sasaran aktif saat ini (dan berapa berkas yang sudah dibaca)."""
+    """Tampilkan sasaran aktif saat ini."""
     if not _KEADAAN.sasaran:
         return ("Sasaran aktif KOSONG — `baca` tidak dibatasi. Panggil "
                 "`sasaran(tugas)` lebih dulu untuk menetapkan fokus.")
     baris = [f"Sasaran aktif ({len(_KEADAAN.sasaran)} berkas):"]
     for rel, alasan in _KEADAAN.sasaran.items():
-        sudah = " ✓ sudah dibaca" if rel in _KEADAAN.cache else ""
-        baris.append(f"- {rel}{sudah} — {alasan}")
+        baris.append(f"- {rel} — {alasan}")
     return "\n".join(baris)
 
 
 def tutup_sasaran() -> str:
-    """Bersihkan sasaran aktif & cache bacaan — mulai tugas baru dari nol."""
+    """Bersihkan sasaran aktif — mulai tugas baru dari nol."""
     n_s = len(_KEADAAN.sasaran)
-    n_c = len(_KEADAAN.cache)
     _KEADAAN.reset()
-    return (f"Sasaran & cache dibersihkan ({n_s} berkas sasaran, "
-            f"{n_c} berkas ter-cache). Mulai tugas baru dengan `sasaran(tugas)`.")
+    return (f"Sasaran dibersihkan ({n_s} berkas). "
+            "Mulai tugas baru dengan `sasaran(tugas)`.")
 
 
-# --- baca: guard + cache, lalu menyerahkan isi ke read_file yang sama ---------
+# --- baca: guard sasaran, lalu menyerahkan isi ke read_file yang sama ---------
 def baca(path: str, start_line: int = 0, end_line: int = 0,
          outline: bool = False, force: bool = False) -> str:
-    """Baca isi berkas — DENGAN PENJAGA: hanya berkas dalam sasaran aktif, dan TANPA BACA ULANG.
+    """Baca isi berkas — DENGAN PENJAGA: hanya berkas dalam sasaran aktif.
 
     Aturan main:
     - Bila sasaran aktif TIDAK kosong dan berkas ini TIDAK ada di dalamnya,
       bacaan DITOLAK — panggil `perluas_sasaran` dulu (dengan alasan).
-    - Bila berkas ini sudah dibaca sesi ini dan isinya TIDAK berubah, isi
-      TIDAK dikirim ulang — pakai yang sudah ada di konteks. force=True hanya
-      bila isi sebelumnya benar-benar hilang dari konteks.
+    - Isi selalu dikirim segar (anti-baca-ulang dihapus) — model bebas membaca
+      ulang kapan pun perlu.
     - Isi yang dikirim memakai format `read_file` bagas-ai yang sama
       (potongan, kerangka, nomor baris 1-based), jadi konsisten dengan agent.
 
     path: relatif terhadap root project (atau absolut untuk folder konteks).
     start_line/end_line: rentang baris 1-based (0 = dari awal / sampai akhir).
     outline: true = peta definisi saja, bukan isi penuh.
-    force: true = baca ulang walau sudah dibaca / di luar sasaran (keputusan sadar).
+    force: true = baca walau di luar sasaran (keputusan sadar).
     """
     p, rel = _resolusi(path)
     if p is None:
         return f"[error] {rel}"
 
-    # GUARD 1: di luar sasaran -> tolak (kecuali force).
+    # GUARD: di luar sasaran -> tolak (kecuali force).
     if not force and _KEADAAN.sasaran and rel not in _KEADAAN.sasaran:
         daftar = "\n".join(f"- {r}" for r in _KEADAAN.sasaran)
         return (f"[DITOLAK] '{rel}' TIDAK termasuk sasaran aktif.\n"
@@ -282,20 +267,6 @@ def baca(path: str, start_line: int = 0, end_line: int = 0,
                 f"perluas_sasaran(paths=['{rel}'], alasan='...') — jangan "
                 "memaksakan baca.")
 
-    # GUARD 2: sudah dibaca & tak berubah -> jangan kirim isi ulang.
-    # KUNCI cache = (path, lingkup): outline != isi penuh, dan rentang baris
-    # berbeda berarti bagian yang berbeda. Dulu kuncinya cuma path — outline
-    # lalu start_line=1/end_line=20 yang BELUM pernah dibaca ikut ditolak
-    # sebagai "sudah dibaca", padahal isinya tak pernah dilihat.
-    sidik = _sidik(p)
-    kunci = (rel, int(start_line or 0), int(end_line or 0), bool(outline))
-    if not force and kunci in _KEADAAN.cache and _KEADAAN.cache[kunci] == sidik:
-        return (f"[SUDAH DIBACA] '{rel}' (lingkup yang sama) tidak berubah "
-                f"sejak terakhir dibaca sesi ini — pakai isi yang sudah ada di "
-                "konteks, JANGAN baca ulang.\nBila isi sebelumnya benar-benar "
-                "hilang dari konteks, baru panggil baca dengan force=True.")
-
-    _KEADAAN.cache[kunci] = sidik
     return _read_file(path, start_line=int(start_line or 0),
                       end_line=int(end_line or 0), outline=bool(outline))
 
@@ -343,11 +314,9 @@ def _buat_server():
     mcp = _Server(
         "bagas-ai-sasaran",
         instructions=(
-            "Server ini menegakkan tiga disiplin kerja: (1) panggil "
+            "Server ini menegakkan disiplin kerja: (1) panggil "
             "`sasaran(tugas)` dulu untuk menetapkan berkas yang "
-            "relevan; (2) `baca` tidak mengirim ulang isi berkas yang "
-            "sudah dibaca & tak berubah — pakai yang ada di konteks; "
-            "(3) berkas di luar sasaran ditolak, perluas lewat "
+            "relevan; (2) berkas di luar sasaran ditolak, perluas lewat "
             "`perluas_sasaran` dengan alasan. Gunakan `cari` untuk "
             "menemukan lokasi sebelum membaca, dan baca resource "
             "peta proyek untuk memahami struktur."),

@@ -69,9 +69,9 @@ async def main():
     rekam_jawaban: list[str] = []
     _asli_ai = MessageList.append_ai_message
 
-    def _catat_ai(self, text):
+    def _catat_ai(self, text, paksa_header: bool = False, **kw):
         rekam_jawaban.append(text)
-        _asli_ai(self, text)
+        _asli_ai(self, text, paksa_header=paksa_header, **kw)
 
     MessageList.append_ai_message = _catat_ai
     try:
@@ -95,9 +95,9 @@ async def main():
     # boleh menambah jawaban AI apa pun (belum ada giliran).
     _batas = len(rekam_jawaban)
 
-    def _catat_ai2(self, text):
+    def _catat_ai2(self, text, paksa_header: bool = False, **kw):
         rekam_jawaban.append(text)
-        _asli_ai(self, text)
+        _asli_ai(self, text, paksa_header=paksa_header, **kw)
 
     MessageList.append_ai_message = _catat_ai2
     try:

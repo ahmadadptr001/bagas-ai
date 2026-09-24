@@ -27,7 +27,7 @@ from pathlib import Path
 
 from .. import config
 from .base import tool
-from .shell import _clip, _execute, _guard
+from .shell import _clip, _execute
 
 ROOT: Path = config.PROJECT_ROOT
 
@@ -443,144 +443,20 @@ def _deteksi_tests() -> list[tuple[str, str | list[str], bool]]:
     return runs
 
 
-@tool
+# run_tests & validate_project TIDAK didaftarkan sebagai tool (@tool dilepas):
+# model dipaksa MENEMUKAN SENDIRI cara menguji proyek (run_command/run_python),
+# layaknya tester — bukan menyerahkan pemeriksaan ke tool bantu jadi.
+
 def run_tests() -> str:
-    """Jalankan TEST SUITE proyek — deteksi sendiri runnernya (npm/pnpm/yarn test, pytest/unittest, go test, cargo test) lalu laporkan LULUS/GAGAL + output pentingnya. Pelengkap validate_project (yang hanya cek statik): pakai ini sesudah perubahan besar atau saat proyek memang punya test.
-
-    Tanpa argumen — seluruh suite. Untuk menjalankan subset/test tertentu
-    (mis. `pytest tests/test_x.py -k nama`), pakai run_command langsung.
-    """
-    blocked = _guard()
-    if blocked:
-        return blocked
-    runs = _deteksi_tests()
-    if not runs:
-        return (
-            "[tes] Tak ada test suite yang terdeteksi (tidak ada skrip "
-            "package.json 'test' yang sungguhan, berkas test_*.py, go.mod, "
-            "maupun Cargo.toml — atau runnernya belum terpasang). Kalau kamu "
-            "yakin proyek ini punya test, jalankan langsung dengan run_command."
-        )
-    bagian: list[str] = []
-    gagal = 0
-    for label, cmd, sh in runs:
-        rc, out, timed_out = _execute(cmd, shell=sh, timeout=_TEST_TIMEOUT)
-        if timed_out:
-            gagal += 1
-            bagian.append(
-                f"⏱ {label}: TIMEOUT (> {_TEST_TIMEOUT}s, dihentikan) — anggap "
-                f"BELUM lulus. Output terakhir:\n{_clip(out, 2000)}")
-        elif rc == 0:
-            # Ekor output disertakan: "LULUS" tanpa bukti (mis. 'Ran 0 tests')
-            # menyesatkan — biarkan modelnya menilai jumlah test yang jalan.
-            ekor = "\n".join(out.strip().splitlines()[-5:])
-            bagian.append(f"✓ {label}: LULUS\n{_clip(ekor, 500)}")
-        else:
-            gagal += 1
-            bagian.append(f"✗ {label}: GAGAL (exit={rc})\n{_clip(out, 4000)}")
-    kepala = (
-        f"[tes] {len(runs) - gagal}/{len(runs)} runner lulus."
-        if gagal else f"[tes] SEMUA {len(runs)} runner LULUS.")
-    if gagal:
-        kepala += (" Ada test yang GAGAL — baca detailnya, perbaiki, lalu "
-                   "jalankan lagi. JANGAN nyatakan tugas selesai.")
-    return kepala + "\n\n" + "\n\n".join(bagian)
+    """(dihapus) Jalankan TEST SUITE — gunakan run_command langsung."""
+    return ("[dihapus] run_tests tidak lagi tersedia. Jalankan suite sendiri "
+            "dengan run_command (mis. pytest, npm test).")
 
 
-@tool
 def validate_project(paths: str = "", extra_checks: str = "") -> str:
-    """Validasi ulang kode proyek — MENYUSUN SENDIRI cara memeriksanya sesuai isi proyek: semua skrip package.json yang relevan (bukan cuma lint/typecheck), runner yang terpasang (ruff/flake8/pylint/tsc/eslint/cargo/go/php/make), perintah validasi yang ditulis README, PLUS langkah uji yang kamu ciptakan sendiri lewat extra_checks. Lalu jalankan & laporkan LULUS/GAGAL. Panggil ini SEBELUM menyatakan tugas selesai.
-
-    Cara kerjanya: (1) baca SEMUA skrip package.json dan pilih yang paling
-    menandakan "kode valid" (type/lint/check/validate/verify); (2) deteksi
-    runner yang benar-benar terpasang; (3) baca README untuk perintah validasi
-    yang ditulis penulis proyek; (4) eksekusi semuanya. Bila ada yang GAGAL,
-    perbaiki dulu; jangan anggap tugas selesai.
-
-    paths: opsional, daftar berkas yang baru kamu ubah (dipisah spasi/koma).
-        Kosong = dipakai otomatis berkas yang barusan diubah sesi ini (worklog).
-    extra_checks: perintah uji TAMBAHAN yang kamu ciptakan sendiri, satu per
-        baris — khusus untuk perubahan yang barusan dibuat, mis.:
-        'pytest tests/test_util.py -k hitung' atau 'node -e \"require(\"./x.js\")\"'
-        atau 'python -c \"from src.a import b; b()\"'. Dijalankan dengan format
-        LULUS/GAGAL yang sama, jadi kamu bisa membuktikan perilaku spesifik
-        yang tidak dicakup lint.
-    """
-    blocked = _guard()
-    if blocked:
-        return blocked
-    # paths kosong -> pakai berkas yang barusan DIUBAH sesi ini (worklog).
-    # Validasi yang tahu "apa yang baru berubah" jauh lebih tajam daripada
-    # validasi seluruh proyek — dan itulah yang membuatnya terasa dinamis.
-    if not (paths or "").strip():
-        try:
-            from .kerja import file_tersentuh
-            paths = " ".join(file_tersentuh())
-        except Exception:  # noqa: BLE001 - worklog tak tersedia: validasi semua
-            paths = ""
-    ekstra = [b for b in (extra_checks or "").splitlines() if b.strip()]
-    checks = _detect_checks(paths, ekstra)
-    smoke = _smoke_python(_split_paths(paths))
-    if not checks and not smoke:
-        return (
-            "[validasi] Tak ada cara validasi otomatis yang terdeteksi untuk "
-            "proyek ini (tak ada package.json/pyproject/Cargo.toml/go.mod/… yang "
-            "dikenali, atau perkakasnya belum terpasang). Kamu bisa menciptakan "
-            "sendiri cara ujinya lewat extra_checks — mis. perintah import/"
-            "smoke-run untuk berkas yang baru diubah — atau jalankan programnya "
-            "dengan run_command / run_command_bg dan pastikan tak ada error "
-            "saat start."
-        )
-
-    # Kepala laporan menyebut APA yang disusun & dari mana — supaya terlihat
-    # bahwa validasi ini MENYUSUN SENDIRI rencananya (skrip proyek, runner,
-    # README, langkah ciptaan AI), bukan menjalankan tabel mati.
-    sumber = []
-    if _pkg_scripts():
-        sumber.append("skrip package.json")
-    if any(shutil.which(x) for x in ("ruff", "flake8", "pylint", "tsc",
-                                     "eslint", "cargo", "go", "php", "make")):
-        sumber.append("runner terpasang")
-    if _perintah_dari_readme():
-        sumber.append("README")
-    if ekstra:
-        sumber.append(f"{len(ekstra)} langkah ciptaan AI")
-    rencana = ", ".join(sumber) if sumber else "deteksi otomatis"
-
-    bagian: list[str] = []
-    gagal = 0
-    for label, cmd, shell, batas in checks:
-        rc, out, timed_out = _execute(cmd, shell=shell, timeout=batas)
-        if timed_out:
-            gagal += 1
-            bagian.append(
-                f"⏱ {label}: TIMEOUT (> {batas}s, dihentikan) — anggap "
-                f"BELUM lulus.\n{_clip(out, 1500)}")
-        elif rc == 0:
-            bagian.append(f"✓ {label}: LULUS")
-        else:
-            gagal += 1
-            bagian.append(
-                f"✗ {label}: GAGAL (exit={rc})\n{_clip(out, 3000)}")
-
-    for label, ket, buruk in smoke:
-        if buruk:
-            gagal += 1
-            bagian.append(f"✗ {label}: {ket}")
-        else:
-            bagian.append(f"✓ {label}: {ket}")
-
-    total = len(checks) + len(smoke)
-    kepala = (
-        f"[validasi] {total - gagal}/{total} pemeriksaan lulus "
-        f"(rencana disusun dari: {rencana})."
-        if gagal else
-        f"[validasi] SEMUA {total} pemeriksaan LULUS "
-        f"(rencana disusun dari: {rencana}).")
-    if gagal:
-        kepala += (" Ada yang GAGAL — baca detailnya, PERBAIKI kodenya, lalu "
-                   "validasi lagi. JANGAN nyatakan tugas selesai.")
-    return kepala + "\n\n" + "\n\n".join(bagian)
+    """(dihapus) Validasi proyek — gunakan run_command langsung."""
+    return ("[dihapus] validate_project tidak lagi tersedia. Periksa kode "
+            "sendiri dengan run_command / run_python (lint, typecheck, tes).")
 
 
 # --- project_info -----------------------------------------------------------

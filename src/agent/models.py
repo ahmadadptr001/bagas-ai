@@ -949,24 +949,12 @@ def pilihan_model_grup() -> list[tuple[str, list[tuple[str, str]]]]:
 def pilihan_model() -> list[str]:
     """Daftar pilihan untuk menu /model: nama MODEL SUNGGUHAN.
 
-    Tiap layanan web memuai jadi tiap variannya ("glm GLM-5.2", "glm
-    GLM-5-Turbo", …) memakai bentuk "<alias> <varian>" — itulah yang
-    diterima Agent.set_model. Bila connectornya tak bisa diimpor, layanan
-    itu tetap tampil satu baris (nama layanannya) supaya /model tak kosong.
-    Model API tampil apa adanya."""
-    out: list[str] = []
-    varian = _varian_layanan()
-    for key in _ORDER:
-        spec = MODELS[key]
-        if spec.is_web:
-            ops = varian.get(key)
-            if ops:
-                out.extend(f"{key} {label}" for label, _desc in ops)
-            else:
-                out.append(key)
-        else:
-            out.append(key)
-    return out
+    Urutannya SAMA dengan hasil rata pilihan_model_grup() — bukan sekadar
+    daftar setara — supaya nomor/urutan di menu selalu cocok dengan
+    kelompok kategori. Tiap layanan web memuai jadi tiap variannya
+    ("glm GLM-5.2", …) memakai bentuk "<alias> <varian>" — itulah yang
+    diterima Agent.set_model."""
+    return [v for _, ops in pilihan_model_grup() for _, v in ops]
 
 
 def resolve_varian(name: str) -> tuple[str, str] | None:

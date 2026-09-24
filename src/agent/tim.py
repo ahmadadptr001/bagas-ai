@@ -30,7 +30,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from . import config
+from . import config  # noqa: F401 — mungkin dipakai elsewhere; pastikan import tetap
 
 # Jumlah anggota yang boleh bangun dalam SATU langkah.
 _MAKS_PER_LANGKAH = 2
@@ -59,21 +59,18 @@ def perlu_untuk_tugas(teks: str) -> bool:
     return (len(bersih) >= 160 or "\n" in (teks or "")
             or bool(_TUGAS_KOMPLEKS.search(bersih)))
 
-# Poin pemeriksaan yang menyuruh web_preview — hanya disertakan saat tool itu
-# aktif. Saat dijeda, seruan memakainya hanya membuah putaran browser untuk
-# jawaban "dinonaktifkan" (lihat config.WEB_PREVIEW).
+# Poin pemeriksaan FE — tanpa web_preview (tool dihapus). Alur dibuktikan
+# lewat take_screenshot / run_command (dev server + curl/log), bukan preview.
 _POIN_PREVIEW_FE = (
-    "alurnya DIBUKTIKAN jalan, bukan dinilai dari kode: web_preview(url, "
-    "actions=['isi #x = nilai', 'klik button[type=submit]', "
-    "'tunggu .hasil']) melaporkan tiap langkah DAN teks yang muncul",
-) if config.WEB_PREVIEW else ()
+    "alurnya DIBUKTIKAN jalan, bukan dinilai dari kode: jalankan dev server "
+    "lewat run_command, uji endpoint/alur dengan curl atau skrip singkat, "
+    "lalu take_screenshot bila UI-nya bisa dijepret",
+)
 _POIN_PREVIEW_RESPONSIF = (
-    "BUKTIKAN, jangan dikira-kira: web_preview(url, "
-    "widths=[360, 768, 1280]) menyebut elemen mana yang meluber — di "
-    "gambar hal itu justru terpotong sehingga tampak baik-baik saja",
-) if config.WEB_PREVIEW else (
-    "uji lebar sempit dengan menelusuri aturan media-query-nya di berkas "
-    "(apa yang berubah di tiap breakpoint), bukan dikira-kira",
+    "BUKTIKAN, jangan dikira-kira: take_screenshot (widths bila didukung) "
+    "menyebut elemen mana yang meluber — di gambar hal itu justru terpotong "
+    "sehingga tampak baik-baik saja, atau telusuri aturan media-query-nya di "
+    "berkas (apa yang berubah di tiap breakpoint), bukan dikira-kira",
 )
 
 

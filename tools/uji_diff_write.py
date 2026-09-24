@@ -5,8 +5,8 @@ Jalankan: PYTHONIOENCODING=utf-8 python tools/uji_diff_write.py
 
 Yang dicek:
 1. write_file pada file BARU -> blok "write(nama_file)" tampil; ringkas
-   maks 7 baris + penanda "+N baris"; klik judul membuka penuh, klik lagi
-   menutup.
+   maks 7 baris + penanda "+N baris"; klik di MANAPUN area (judul/isi)
+   membuka penuh, klik lagi menutup — tanpa pesan perintah "klik judul".
 2. write_file menimpa file lama -> blok tampil TANPA label "(baru)".
 3. edit_file -> diff berwarna (header + baris +/- @ nomor baris).
 4. edit_files -> satu diff per suntingan.
@@ -74,24 +74,26 @@ async def main():
             "versi ringkas maks 7 baris isi"
         assert "+5 baris" in tampil, tampil  # 12 - 7
         assert "(baru)" in tampil
+        assert "klik judul" not in tampil.lower(), tampil
 
-        # Klik judul blok -> TERBUKA penuh (semua 12 baris).
-        baris_judul = next(li for li, b in msgs._blok_klik.items()
-                           if b is blok)
-        await pilot.click(msgs, offset=(2, baris_judul
+        # Klik di AREA isi (bukan judul) -> TERBUKA penuh (semua 12 baris).
+        baris_awal = min(li for li, b in msgs._blok_klik.items()
+                         if b is blok)
+        baris_isi = baris_awal + 2  # baris kedua isi (setelah judul)
+        await pilot.click(msgs, offset=(2, baris_isi
                                         - int(msgs.scroll_offset.y)))
         await tunggu(pilot, lambda: blok.terbuka,
-                     pesan="klik judul harus membuka blok")
+                     pesan="klik di area isi harus membuka blok")
         tampil = blok.__rich__().plain
         assert "baris 12" in tampil, "versi terbuka menampilkan semua baris"
-        assert "menutup" in tampil, tampil
-        # Klik lagi -> menutup.
-        baris_judul = next(li for li, b in msgs._blok_klik.items()
-                           if b is blok)
-        await pilot.click(msgs, offset=(2, baris_judul
-                                        - int(msgs.scroll_offset.y)))
+        assert "klik judul" not in tampil.lower(), tampil
+        # Klik lagi (masih di area) -> menutup.
+        baris_awal = min(li for li, b in msgs._blok_klik.items()
+                         if b is blok)
+        await pilot.click(msgs, offset=(2, baris_awal
+                                        + 2 - int(msgs.scroll_offset.y)))
         await tunggu(pilot, lambda: not blok.terbuka,
-                     pesan="klik kedua harus menutup blok")
+                     pesan="klik kedua di area harus menutup blok")
 
         # ── 2. write_file menimpa file LAMA: tanpa "(baru)" ──
         (tmp / "lama.txt").write_text("isi lama\n", encoding="utf-8")
@@ -138,9 +140,9 @@ async def main():
         paths = [p for p, _, _ in ag.memory.diff_log]
         assert "baru.py" in paths and "lama.txt" in paths, paths
 
-    print("OK - write(): ringkas 7 baris + klik buka/tutup; edit_file/"
-          "edit_files diff berwarna; suntingan tolak tanpa diff; memory "
-          "tercatat")
+    print("OK - write(): ringkas 7 baris + klik area (bukan cuma judul); "
+          "edit_file/edit_files diff berwarna; suntingan tolak tanpa diff; "
+          "memory tercatat")
 
 
 asyncio.run(main())

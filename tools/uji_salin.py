@@ -6,7 +6,7 @@ Jalankan: PYTHONIOENCODING=utf-8 python tools/uji_salin.py
 Yang dicek:
 1. Seret = seleksi per karakter (bukan per baris penuh): menyeret
    sebagian baris tersalin sebagian.
-2. Klik polos menghapus sorotan (dan tetap membuka blok write()).
+2. Klik polos menghapus sorotan (dan tetap membuka blok write() di area mana pun).
 3. Seret ke atas (arah terbalik) tetap benar.
 4. Klik GANDA = satu kata; klik TIGA KALI = satu baris penuh.
 5. render_line membalik hanya rentang terpilih (baris luar tetap polos).

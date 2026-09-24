@@ -14,9 +14,8 @@ Yang dicek:
    Rencana BARU dari model mengisi seksi yang sama kembali.
 5. core.run() mereset rencana (plan_tool.reset) -> panel kosong.
 6. Handler ask_choice TERPASANG (ask_user tak lagi "[tidak interaktif]"):
-   - pilih satu (Enter),
-   - pilih banyak (spasi tandai, Enter),
-   - isian bebas "✎ Tulis jawaban sendiri…".
+   prompt INLINE di riwayat (bukan modal) — pilih satu (nomor+Enter),
+   pilih banyak (koma), isian bebas "✎ Tulis jawaban sendiri…".
 """
 import asyncio
 import sys
@@ -28,9 +27,7 @@ sys.path.insert(0, r"C:/Users/user/Documents/PROJECTS/ai-agent/src")
 
 from agent.interfaces.textual_app import BagasAIApp, _OPSI_TULIS
 from agent.interfaces.textual_widgets import (PlanPanel, PlanSidebar,
-                                               InfoSidebar, SystemPanel,
-                                               SelectScreen, MultiSelectScreen,
-                                               TextPromptScreen)
+                                               InfoSidebar, SystemPanel)
 from agent.tools import plan_tool
 
 
@@ -174,51 +171,66 @@ async def uji_ask(app, pilot):
     def panggil(question, options, multiple):
         hasil["jawab"] = app._handler_pilihan_ref(question, options, multiple)
 
-    # ── pilih satu: Enter memilih baris pertama ──
+    # ── pilih satu: ketik nomor 1 lalu Enter → merah ──
     t = threading.Thread(
         target=panggil,
         args=("Pilih warna", ["merah", "hijau"], False),
         daemon=True)
     t.start()
-    await tunggu(pilot, lambda: isinstance(app.screen, SelectScreen),
-                 pesan="SelectScreen harus muncul")
-    assert app.screen.title_text == "Pilih warna"
-    assert _OPSI_TULIS in app.screen.options, "isian bebas harus ada"
+    await tunggu(pilot, lambda: app._prompt_inline is not None,
+                 pesan="prompt pilihan harus muncul (inline)")
+    st = app._prompt_inline
+    assert st is not None and st["judul"] == "Pilih warna", st
+    assert any(_OPSI_TULIS in b for b in st["baris"]), st["baris"]
+    assert st["mode"] == "pilihan", st["mode"]
+    await pilot.press("1")
+    await pilot.pause(0.1)
     await pilot.press("enter")
     t.join(timeout=5)
     assert not t.is_alive(), "handler harus kembali setelah Enter"
     assert hasil["jawab"] == "merah", hasil["jawab"]
+    await pilot.pause(0.1)
+    assert app._prompt_inline is None, "prompt harus tertutup setelah jawab"
 
-    # ── pilih banyak: spasi menandai dua item, Enter mengirim ──
+    # ── pilih banyak: ketik "1,3" (apel + pisang), Enter ──
     t = threading.Thread(
         target=panggil,
         args=("Pilih buah", ["apel", "jeruk", "pisang"], True),
         daemon=True)
     t.start()
-    await tunggu(pilot, lambda: isinstance(app.screen, MultiSelectScreen),
-                 pesan="MultiSelectScreen harus muncul untuk multiple=True")
-    await pilot.press("space")          # tandai apel
-    await pilot.press("down")
-    await pilot.press("space")          # tandai jeruk
+    await tunggu(pilot, lambda: app._prompt_inline is not None,
+                 pesan="prompt multi harus muncul (inline)")
+    st = app._prompt_inline
+    assert st is not None and st["mode"] == "multi", st
+    await pilot.press("1", ",", "3")
+    await pilot.pause(0.1)
     await pilot.press("enter")
     t.join(timeout=5)
     assert not t.is_alive()
-    assert hasil["jawab"] == "(1) apel; (2) jeruk", hasil["jawab"]
+    # Format multi: "(1) apel; (3) pisang" — cek bagian "apel" dan "pisang"
+    jwb = hasil["jawab"] or ""
+    assert "apel" in jwb and "pisang" in jwb, jwb
+    await pilot.pause(0.1)
+    assert app._prompt_inline is None
 
-    # ── isian bebas: pilih "✎ Tulis jawaban sendiri…" lalu ketik ──
+    # ── isian bebas: pilih nomor _OPSI_TULIS lalu ketik ──
     t = threading.Thread(
         target=panggil,
         args=("Nama siapa", ["andi", "budi"], False),
         daemon=True)
     t.start()
-    await tunggu(pilot, lambda: isinstance(app.screen, SelectScreen),
-                 pesan="SelectScreen harus muncul (isian bebas)")
-    # sorot entri isian bebas (terakhir) lalu Enter
-    for _ in range(len(app.screen.options) - 1):
-        await pilot.press("down")
+    await tunggu(pilot, lambda: app._prompt_inline is not None,
+                 pesan="prompt harus muncul (isian bebas)")
+    st = app._prompt_inline
+    assert st is not None and st["tulis_nomor"] is not None, st
+    # Ketik nomor opsi tulis (biasanya 3) lalu Enter -> mode tulis
+    await pilot.press(str(st["tulis_nomor"]))
+    await pilot.pause(0.1)
     await pilot.press("enter")
-    await tunggu(pilot, lambda: isinstance(app.screen, TextPromptScreen),
-                 pesan="TextPromptScreen harus muncul untuk isian bebas")
+    await tunggu(pilot,
+                 lambda: app._prompt_inline is not None
+                 and app._prompt_inline.get("mode") == "tulis",
+                 pesan="prompt harus pindah ke mode tulis")
     await pilot.press(*"bagas")
     await pilot.press("enter")
     t.join(timeout=5)
@@ -297,8 +309,7 @@ async def uji_batal_antre(app, pilot, pintu, ag):
     """Ctrl+C saat giliran berjalan -> pesan antrean MAJU sebagai giliran
     baru begitu worker yang dibatalkan benar-benar mati (dulu: tersangkut
     sampai pengguna mengirim pesan lagi)."""
-    from agent.interfaces.textual_widgets import ChatBox, QueueStrip
-    chatbox = app.query_one("#chatbox", ChatBox)
+    from agent.interfaces.textual_widgets import QueueStrip
     inputw = app.query_one("#chat-input")
     strip = app.query_one("#queue-strip", QueueStrip)
     ag.dijalankan.clear()
@@ -350,7 +361,7 @@ async def main():
         await uji_recall(app, pilot, pintu)
         await uji_batal_antre(app, pilot, pintu, ag)
     print("OK - sidebar sistem+rencana (lebar/sempit/reset/auto-hide tuntas) "
-          "+ ask_* (satu/banyak/isian bebas) + panah-atas antrean/riwayat "
+          "+ ask_* INLINE (satu/banyak/isian bebas) + panah-atas antrean/riwayat "
           "+ antrean maju setelah dibatalkan semuanya berfungsi")
 
 

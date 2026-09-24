@@ -607,6 +607,27 @@ def _base_kwargs(
 # penjaga "diam N detik" lagi di sini: jeda panjang BUKAN bukti stream mati.
 
 
+def _kaitan_terima_detail(cb: Callable[..., None]) -> bool:
+    """True bila `cb(nama, detail)` diterima; False bila hanya `cb(nama)`.
+
+    Dipakai jalur OpenCode: kaitan lama 1-argumen tetap hidup, tapi TypeError
+    dari DALAM badan kaitan tidak boleh memicu panggilan ulang (efek samping
+    ganda). Signature gagal diukur -> anggap 2-argumen (tanpa fallback).
+    """
+    try:
+        from inspect import Parameter, signature
+        params = signature(cb).parameters
+    except (TypeError, ValueError):
+        return True
+    if any(p.kind == Parameter.VAR_POSITIONAL for p in params.values()):
+        return True
+    n_pos = sum(
+        1 for p in params.values()
+        if p.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    return n_pos >= 2
+
+
 def _prompt_dari_messages(messages: list[dict[str, Any]]) -> str:
     """Ratakan riwayat chat bagas-ai jadi SATU string prompt untuk CLI.
 
@@ -682,7 +703,7 @@ def _stream_opencode_cli(
     *,
     model: str | None = None,
     on_content: Any = None,
-    on_tool_pending: Callable[[str], None] | None = None,
+    on_tool_pending: Callable[..., None] | None = None,
     on_reasoning: Any = None,
     cancel_event: Any = None,
 ) -> tuple[str, list[dict[str, Any]], Any]:
@@ -837,15 +858,47 @@ def _stream_opencode_cli(
                         pass
         elif tipe == "tool_use":
             tool_pending_seen = True
+            part_state = part.get("state") if isinstance(part.get("state"), dict) else {}
             nama = str(
                 part.get("tool") or part.get("name")
                 or ev.get("tool") or ev.get("name") or "tool"
             )
+            # Event tool_use OpenCode membawa SELURUH jejak: input, output,
+            # metadata (filepath, diff, exists). Teruskan ke UI supaya TUI
+            # bisa menggambar diff/write-block seperti jalur API — tanpa ini
+            # jawaban OpenCode hanya baris status "Menerima instruksi tool".
+            detail = {
+                "tool": nama,
+                "status": str(part_state.get("status") or ""),
+                "input": (
+                    part_state.get("input")
+                    if isinstance(part_state.get("input"), dict) else {}
+                ),
+                "output": str(part_state.get("output") or ""),
+                "metadata": (
+                    part_state.get("metadata")
+                    if isinstance(part_state.get("metadata"), dict) else {}
+                ),
+                "title": str(part_state.get("title") or ""),
+            }
             if on_tool_pending is not None:
+                # Panggil dengan detail bila kaitan menerimanya. Fallback ke
+                # 1-argumen HANYA bila signature tak menerima detail —
+                # TypeError dari DALAM badan kaitan tidak boleh mengulang
+                # panggilan (efek samping ganda: status/on_tool dobel).
                 try:
-                    on_tool_pending(nama)
-                except Exception:  # noqa: BLE001
+                    on_tool_pending(nama, detail)
+                except TypeError:
+                    if not _kaitan_terima_detail(on_tool_pending):
+                        try:
+                            on_tool_pending(nama)
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception:  # noqa: BLE001 — UI boleh gagal sendiri
                     pass
+                # Narasi "✓ tool" via on_content DIHAPUS: ia menyisipkan kode
+                # inline ke dalam aliran jawaban (merusak teks akhir). Jejak
+                # tool sudah digambar UI lewat on_tool + on_tool_result.
         elif tipe == "step_finish":
             usage = _UsageCLI(ev)
 
@@ -860,16 +913,19 @@ def _stream_opencode_cli(
     # mentah (jarang, tapi bisa bocor dari provider) dibersihkan seperti
     # jalur HTTP — tanpa mengubahnya jadi tool_calls bagas-ai.
     if content and _HAS_TOOLTEXT.search(content):
-        cleaned = _re.sub(r"<tool_call>.*?</tool_call>", "", content,
+        # Ganti penanda dengan SPASI (bukan ""): membuang blok yang
+        # menempel di antara dua kata tanpa spasi menyatukan kata-kata
+        # itu ("selesai.edit_file()menjadi" -> bug "kadang gak ada spasi").
+        cleaned = _re.sub(r"<tool_call>.*?</tool_call>", " ", content,
                           flags=_re.DOTALL | _re.IGNORECASE)
-        cleaned = _re.sub(r"<function\s*=.*?</function>", "", cleaned,
+        cleaned = _re.sub(r"<function\s*=.*?</function>", " ", cleaned,
                           flags=_re.DOTALL | _re.IGNORECASE)
-        cleaned = _re.sub(r"<tool_call>.*$", "", cleaned,
+        cleaned = _re.sub(r"<tool_call>.*$", " ", cleaned,
                           flags=_re.DOTALL | _re.IGNORECASE)
-        cleaned = _re.sub(r"<function\s*=.*$", "", cleaned,
+        cleaned = _re.sub(r"<function\s*=.*$", " ", cleaned,
                           flags=_re.DOTALL | _re.IGNORECASE)
         # Jangan jadikan tool_calls: loop agent di CLI sudah selesai.
-        content = cleaned.strip()
+        content = _re.sub(r"[ \t]{2,}", " ", cleaned).strip()
     if not content and not tool_pending_seen:
         detail = stderr_teks.strip().splitlines()
         pesan = detail[-1] if detail else "respons CLI kosong"
@@ -888,7 +944,7 @@ def stream_completion(
     provider: str = "",
     api_style: str = "chat",
     on_content: Any = None,
-    on_tool_pending: Callable[[str], None] | None = None,
+    on_tool_pending: Callable[..., None] | None = None,
     on_reasoning: Any = None,
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
@@ -1049,17 +1105,18 @@ def stream_completion(
                 tool_calls = parsed
             # Buang blok XML tool dari konten supaya tak bocor ke layar — baik
             # yang sudah dieksekusi maupun yang TERPOTONG/gagal-parse. Panggilan
-            # tool setengah jadi tak boleh tampil sebagai "jawaban".
-            cleaned = _re.sub(r"<tool_call>.*?</tool_call>", "", content,
+            # tool setengah jadi tak boleh tampil sebagai "jawaban". Spasi
+            # pengganti (bukan "") mencegah dua kata menempel setelah blok dibuang.
+            cleaned = _re.sub(r"<tool_call>.*?</tool_call>", " ", content,
                               flags=_re.DOTALL | _re.IGNORECASE)
-            cleaned = _re.sub(r"<function\s*=.*?</function>", "", cleaned,
+            cleaned = _re.sub(r"<function\s*=.*?</function>", " ", cleaned,
                               flags=_re.DOTALL | _re.IGNORECASE)
             # Sisa penanda tak berpasangan (terpotong) -> potong dari situ.
-            cleaned = _re.sub(r"<tool_call>.*$", "", cleaned,
+            cleaned = _re.sub(r"<tool_call>.*$", " ", cleaned,
                               flags=_re.DOTALL | _re.IGNORECASE)
-            cleaned = _re.sub(r"<function\s*=.*$", "", cleaned,
+            cleaned = _re.sub(r"<function\s*=.*$", " ", cleaned,
                               flags=_re.DOTALL | _re.IGNORECASE)
-            content = cleaned.strip()
+            content = _re.sub(r"[ \t]{2,}", " ", cleaned).strip()
         # Model hanya "berpikir" tanpa jawaban akhir (mis. anggaran thinking
         # habis): pakai isi pikirannya supaya pengguna TETAP dapat respons,
         # bukan layar kosong.
@@ -1192,7 +1249,7 @@ def _stream_responses(
     max_tokens: int | None = None,
     provider: str = "",
     on_content: Any = None,
-    on_tool_pending: Callable[[str], None] | None = None,
+    on_tool_pending: Callable[..., None] | None = None,
     on_reasoning: Any = None,
     cancel_event: Any = None,
     on_retry: Callable[[int, float, Exception], None] | None = None,
@@ -1332,15 +1389,15 @@ def _stream_responses(
             parsed = _extract_text_tool_calls(content)
             if parsed:
                 tool_calls = parsed
-            cleaned = _re.sub(r"<tool_call>.*?</tool_call>", "", content,
+            cleaned = _re.sub(r"<tool_call>.*?</tool_call>", " ", content,
                               flags=_re.DOTALL | _re.IGNORECASE)
-            cleaned = _re.sub(r"<function\s*=.*?</function>", "", cleaned,
+            cleaned = _re.sub(r"<function\s*=.*?</function>", " ", cleaned,
                               flags=_re.DOTALL | _re.IGNORECASE)
-            cleaned = _re.sub(r"<tool_call>.*$", "", cleaned,
+            cleaned = _re.sub(r"<tool_call>.*$", " ", cleaned,
                               flags=_re.DOTALL | _re.IGNORECASE)
-            cleaned = _re.sub(r"<function\s*=.*$", "", cleaned,
+            cleaned = _re.sub(r"<function\s*=.*$", " ", cleaned,
                               flags=_re.DOTALL | _re.IGNORECASE)
-            content = cleaned.strip()
+            content = _re.sub(r"[ \t]{2,}", " ", cleaned).strip()
         if not content and reasoning and not tool_calls:
             content = reasoning.strip()
         if not content and not tool_calls:

@@ -214,11 +214,10 @@ MAX_ESCALATIONS: int = int(os.getenv("MAX_ESCALATIONS", "2"))
 
 # --- Keamanan ---
 ALLOW_CODE_EXEC: bool = _get_bool("ALLOW_CODE_EXEC", True)
-# Tool web_preview DIJEDA secara bawaan: tiap panggilannya melampirkan
-# screenshot (gambar = boros kuota/ataensi di situs AI web), deskripsinya
-# panjang dan ikut pesan pembuka, dan loop agent kerap MEMAKSA model
-# memakainya di tiap perubahan UI. Aktifkan lagi dengan WEB_PREVIEW=true
-# di .env bila tampilan memang perlu dilihat lagi.
+# Tool web_preview DIHAPUS dari registry (bukan sekadar dijeda): model wajib
+# memverifikasi sendiri lewat run_command / take_screenshot. Flag di bawah
+# masih dibaca berkas tools/web_preview.py bila dimuat langsung, tapi tool
+# tidak lagi terdaftar — WEB_PREVIEW=true TIDAK mengaktifkannya kembali.
 WEB_PREVIEW: bool = _get_bool("WEB_PREVIEW", False)
 CODE_EXEC_TIMEOUT: int = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))
 # Timeout untuk perintah shell (run_command) — lebih longgar karena bisa lama

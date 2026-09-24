@@ -16,6 +16,9 @@ Karena mahalnya itu pula, keduanya dirancang supaya SATU panggilan sudah cukup:
   - saat TIDAK ketemu, hasilnya tidak pernah buntu: lingkupnya dilebarkan
     sendiri, spasi dilonggarkan, dan nama yang mirip diusulkan.
 
+grep() adalah alias bergaya CLI untuk cari kata kunci (ignore_case/glob/regex)
+— memudahkan model yang terbiasa dengan perintah grep menemukan jalurnya.
+
 Keduanya sengaja melewati folder yang tak pernah relevan (.git, node_modules,
 venv, __pycache__, dist/build) — bukan sekadar demi kecepatan, tapi supaya
 hasilnya tidak tenggelam oleh ribuan kecocokan di dependensi.
@@ -218,6 +221,46 @@ def glob_files(pattern: str, max_results: int = 100) -> str:
         pesan += (f"\nProyek ini berisi {len(semua)} berkas. Coba pola lebih "
                   "longgar (mis. '*.py'), atau cari ISI-nya dengan search_text.")
     return pesan
+
+
+# Urutan registrasi sengaja: glob_files lalu grep — sepasang pencari
+# berkas/isi berdampingan (sama seperti urutan INTI di katalog).
+@tool
+def grep(pattern: str, glob: str = "", ignore_case: bool = True,
+         regex: bool = False, max_results: int = 60, context: int = -1) -> str:
+    """Cari KATA KUNCI di seluruh berkas proyek - gaya perintah grep.
+
+    Satu panggilan sudah cukup: hasil dikelompokkan per berkas dengan nomor
+    baris, dan bila kecocokannya sedikit baris sekitarnya ikut ditampilkan.
+    Kalau tak ketemu, coba persempit/lebarkan pattern atau pakai glob.
+
+    pattern: kata kunci yang dicari (atau regex bila regex=true).
+    glob: batasi ke berkas tertentu, mis. '*.py' atau 'src/**' (kosong = semua).
+    ignore_case: abaikan huruf besar/kecil (default true).
+    regex: true bila pattern adalah regex.
+    max_results: batas jumlah baris hasil (default 60).
+    context: baris sekitar tiap kecocokan. -1 = otomatis, 0 = ringkas.
+    """
+    q = pattern or ""
+    if not q:
+        return "[error] pattern kosong."
+    if max_results <= 0:
+        return "[error] max_results harus lebih besar dari 0."
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        rx = re.compile(q if regex else re.escape(q), flags)
+    except re.error as e:
+        return f"[error] regex tidak sah: {e}"
+    temuan, terpotong = _pindai(rx, _penyaring(glob), max_results)
+    if not temuan:
+        lingkup = f" pada berkas '{glob}'" if glob else ""
+        return f"Tidak ditemukan '{pattern}'{lingkup}."
+    pdef = None if regex else _pola_definisi(q)
+    konteks = context
+    if konteks < 0:
+        n = sum(len(b) for _, b, _ in temuan)
+        konteks = 2 if n <= 12 else 0
+    return _susun(temuan, konteks, pdef, terpotong, pattern, max_results)
 
 
 def _pindai(rx: re.Pattern, lolos, max_results: int,

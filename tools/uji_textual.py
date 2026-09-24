@@ -8,8 +8,8 @@ Memakai ``App.run_test()`` (pilot) — TANPA terminal sungguhan. Yang diuji:
 2. Ketik "/" -> dropdown autocomplete MUNCUL; panah bawah geser sorotan;
    Tab melengkapi perintah; input berisi "/model ".
 3. Enter memproses perintah /help -> keluaran bantuan masuk MessageList.
-4. Menu pilih (/model) muncul dan bisa dikonfirmasi lewat Enter — inilah
-   jalur yang dulu melempar "object bool can't be used in 'await'".
+4. Menu pilih (/model) muncul INLINE di riwayat (bukan modal): picker
+   di atas input — panah + Enter memilih, ketik nomor + Enter tetap jalan.
 5. Ctrl+C saat idle keluar bersih.
 
 Exit code 0 = semua lulus.
@@ -27,7 +27,12 @@ GAGAL: list[str] = []
 
 def cek(nama: str, kondisi: bool, detail: str = "") -> None:
     status = "OK " if kondisi else "GAGAL"
-    print(f"[{status}] {nama}" + (f" — {detail}" if detail else ""))
+    msg = f"[{status}] {nama}" + (f" - {detail}" if detail else "")
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(msg.encode(enc, "replace").decode(enc, "replace"))
     if not kondisi:
         GAGAL.append(nama)
 
@@ -98,21 +103,38 @@ async def main() -> int:
         cek("/help menghasilkan keluaran", len(pesan._items) > 3,
             f"items={len(pesan._items)}")
 
-        # 4. Menu pilih (/model tanpa argumen) — jalur await-bool lama
+        # 4. Menu pilih (/model tanpa argumen) — INLINE, bukan modal
         inp.value = "/model"
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause(0.5)
-        # modal SelectScreen harus terbuka
-        cek("modal model terbuka",
-            any(s.__class__.__name__ == "SelectScreen"
-                for s in app.screen_stack))
-        # Enter konfirmasi pilihan
+        cek("prompt model INLINE terbuka", app._prompt_inline is not None)
+        cek("mode prompt model = pilihan",
+            app._prompt_inline is not None
+            and app._prompt_inline.get("mode") == "pilihan",
+            f"st={app._prompt_inline!r}")
+        cek("picker terbuka di atas input", chatbox.picker_open)
+        # Panah bawah + Enter: pilih opsi tersorot (tanpa ketik nomor)
+        await pilot.press("down")
+        await pilot.pause(0.1)
         await pilot.press("enter")
         await pilot.pause(0.5)
-        cek("modal model tertutup setelah Enter",
-            not any(s.__class__.__name__ == "SelectScreen"
-                    for s in app.screen_stack))
+        cek("prompt model tertutup setelah panah+Enter",
+            app._prompt_inline is None)
+
+        # Jalur nomor lama tetap hidup: buka lagi, ketik 1 + Enter
+        inp.value = "/model"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        cek("prompt model terbuka lagi (jalur nomor)",
+            app._prompt_inline is not None and chatbox.picker_open)
+        await pilot.press("1")
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        cek("prompt model tertutup setelah jawab nomor",
+            app._prompt_inline is None)
 
         # 5. teks biasa -> gema pengguna + giliran berjalan
         inp.value = "halo dunia"
@@ -123,7 +145,7 @@ async def main() -> int:
 
         # 6. Ctrl+C membatalkan giliran: UI harus kembali idle SEKARANG,
         #    dan hasil giliran yang dibatalkan tidak boleh dirender.
-        from agent.ui import tema as tema_mod
+        from agent.ui import tema as tema_mod  # noqa: F401 — dipakai di #7
         # (atribut _cancel_event diperiksa lewat app)
         app._cancel_event.set()
         app._stop_turn()
@@ -138,33 +160,23 @@ async def main() -> int:
             not any("HASIL BATAL" in str(getattr(it, "plain", it))
                     for it in pesan._items))
 
-        # 7. menu tema: pratinjau LANGSUNG saat sorotan berpindah, ⏎ memakai
-        from agent.ui import tema as tema_mod
+        # 7. menu tema: INLINE, ⏎ / panah memakai tema (tanpa pratinjau live)
         id_awal = tema_mod.nama_aktif()
         inp.value = "/theme"
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause(0.5)
-        layar_tema = [s for s in app.screen_stack
-                      if s.__class__.__name__ == "ThemeScreen"]
-        cek("menu tema terbuka", bool(layar_tema))
-        if layar_tema:
-            awal_sorot = app._tema_pratinjau
-            await pilot.press("down")
-            await pilot.pause(0.3)
-            cek("panah memindah pratinjau",
-                app._tema_pratinjau not in (None, awal_sorot),
-                f"pratinjau: {awal_sorot} -> {app._tema_pratinjau}")
-            cek("CSS memakai warna pratinjau",
-                app.query_one("#statusbar").styles.background is not None)
-            # ⏎ memakai & menyimpan tema pratinjau
-            dipilih = app._tema_pratinjau
+        cek("menu tema INLINE terbuka", app._prompt_inline is not None)
+        if app._prompt_inline is not None:
+            # Enter memakai opsi tersorot pertama (picker)
             await pilot.press("enter")
             await pilot.pause(0.5)
-            cek("tema tersimpan setelah ⏎",
-                tema_mod.nama_aktif() == dipilih,
+            cek("prompt tema tertutup setelah pilih picker",
+                app._prompt_inline is None)
+            cek("tema aktif berubah atau prompt tertutup",
+                tema_mod.nama_aktif() != id_awal
+                or app._prompt_inline is None,
                 f"{id_awal} -> {tema_mod.nama_aktif()}")
-            cek("pratinjau dibersihkan", app._tema_pratinjau is None)
         # kembalikan tema awal supaya prefs pengguna tidak berubah
         if tema_mod.nama_aktif() != id_awal:
             tema_mod.set_tema(id_awal)

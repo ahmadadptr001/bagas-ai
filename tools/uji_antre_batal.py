@@ -78,9 +78,9 @@ async def main():
         jawaban_tercatat: list[str] = []
         _asli_ai = msgs.append_ai_message
 
-        def _catat_ai(text: str):
+        def _catat_ai(text: str, paksa_header: bool = False, **kw):
             jawaban_tercatat.append(text)
-            _asli_ai(text)
+            _asli_ai(text, paksa_header=paksa_header, **kw)
 
         msgs.append_ai_message = _catat_ai
 

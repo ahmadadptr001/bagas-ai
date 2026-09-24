@@ -27,9 +27,9 @@ from textual.widgets import Button
 from .textual_widgets import (
     StatusBar, ChatBox, MessageList, PlanPanel, PlanSidebar, InfoSidebar,
     SystemPanel, ImagePreview, TurnProgressBar, LogoWidget,
-    ThinkingBlock, SelectScreen, MultiSelectScreen,
-    ConfirmScreen, TextPromptScreen, ThemeScreen, QueueStrip, BtwScreen,
+    ThinkingBlock, QueueStrip,
     BukaBerkas, FileEditorScreen, VoiceScreen,
+    BtwScreen,
 )
 from ..ui.textual_theme import generate_css, variabel as variabel_tema
 from ..ui import tema
@@ -106,7 +106,7 @@ class BagasAIApp(App):
         # autocomplete. Binding global akan merebut tombol dari input.
     ]
 
-        # State
+    # State
     is_turn_active: reactive[bool] = reactive(False)
     typing_buf: reactive[str] = reactive("")
     typing_pos: reactive[int] = reactive(0)
@@ -154,6 +154,9 @@ class BagasAIApp(App):
         self._pending_gambar: dict = {}
         self._image_task_active = False
         self._tui_mode = True
+        # Prompt INLINE (ask_user / menu / konfirmasi) — tanpa modal overlay.
+        # None = tidak sedang menunggu jawaban. Lihat _mulai_prompt_inline.
+        self._prompt_inline: dict | None = None
         # /live: ambil SATU screenshot terbaru tepat sebelum tiap pertanyaan
         # normal dikirim. Bukan perekaman video kontinu di latar belakang.
         self._live_screen = False
@@ -162,7 +165,7 @@ class BagasAIApp(App):
         self._first_idle = True
         self._worker_thread: threading.Thread | None = None
         self._turn_id = 0
-        self._pending_tool_args: dict[str, dict] = {}
+        self._pending_tool_args: dict[str, list[dict]] = {}
         self._progress_timer = None
         # Snapshot rencana terakhir (lihat _poll_plan) — dipakai untuk
         # menggambar ulang panel saat layout berpindah sidebar <-> footer.
@@ -211,7 +214,7 @@ class BagasAIApp(App):
         """Tampilkan ``theme_id`` di seluruh layar TANPA menyimpannya.
 
         ``None`` mengembalikan tampilan ke tema yang benar-benar aktif.
-        Dipanggil ThemeScreen tiap kali sorotan berpindah.
+        Dipakai pratinjau bila ada (menu inline memakai langsung).
         """
         if self._tema_pratinjau == theme_id:
             return
@@ -220,6 +223,7 @@ class BagasAIApp(App):
             self.refresh_css()
         except Exception:  # noqa: BLE001 — CSS cacat jangan matikan app
             pass
+        self._pasang_gaya_markdown()
 
     def _safe_call(self, method, *args, **kwargs):
         """Call method on main thread safely.
@@ -269,6 +273,7 @@ class BagasAIApp(App):
         """Initialize app after mount."""
         self._show_welcome()
         self.query_one("#chatbox", ChatBox).focus()
+        self._pasang_gaya_markdown()
 
         # Status mikrofon harus cepat berubah dari "dengar" ke "merekam";
         # jeda dua detik membuat indikator privasi terlambat sepanjang satu
@@ -637,15 +642,361 @@ class BagasAIApp(App):
         )
         return True, detail
 
+    # ─── Prompt inline (ask_user / menu / konfirmasi tanpa modal) ─────
+    #
+    # UX terminal: pertanyaan + opsi bernomor DIGAMBAR di riwayat chat,
+    # pengguna mengetik nomor (atau y/n, atau teks bebas) di kotak input
+    # yang sama. Tidak ada ModalScreen / overlay yang menutupi layar —
+    # kembaran _tanya_pilihan di cli.py, tapi di dalam Textual.
+
+    _PLACEHOLDER_PROMPT = {
+        "pilihan": "Enter pilih · atau ketik nomor…",
+        "multi": "ketik nomor, contoh: 1,3…",
+        "tulis": "tulis jawaban…",
+        "confirm": "Enter konfirmasi · atau y/n…",
+        "teks": "ketik jawaban…",
+    }
+
+    def _mulai_prompt_inline(self, *, judul: str, mode: str, callback,
+                             baris: list[str] | None = None,
+                             nilai: list[str] | None = None,
+                             tulis_nomor: int | None = None,
+                             hint: str = "") -> None:
+        """Buka prompt terminal-style di riwayat (JALAN DI THREAD UI).
+
+        mode:
+          - "pilihan" / "multi" : pilihan 1 = picker di atas input (panah +
+            Enter); multi masih ketik nomor ("1,3"). Nomor tulis_nomor
+            (atau teks non-angka) = jawaban bebas.
+          - "confirm"           : picker Ya/Tidak (juga y/n / 1/2).
+          - "teks"              : teks bebas = jawaban.
+          - "tulis"             : lanjutan isian bebas (multi + free text).
+        callback(hasil) dipanggil saat selesai; None = batal.
+        """
+        if self._prompt_inline is not None:
+            self._selesaikan_prompt_inline(None, batal=True)
+
+        self._prompt_inline = {
+            "mode": mode,
+            "judul": judul,
+            "callback": callback,
+            "baris": list(baris or []),
+            "nilai": list(nilai or []),
+            "tulis_nomor": tulis_nomor,
+            "terpilih": [],
+            "echo": [],
+        }
+        self._gambar_prompt_inline(hint or self._hint_prompt(mode))
+
+        try:
+            chatbox = self.query_one("#chatbox", ChatBox)
+            chatbox.set_prompt_mode(self._PLACEHOLDER_PROMPT.get(
+                mode, "ketik jawaban…"))
+            self._buka_picker_prompt(judul)
+        except Exception:  # noqa: BLE001 — belum ter-mount
+            pass
+
+    def _opsi_picker_prompt(self) -> list[tuple[str, str]]:
+        """Bangun entri picker ``(tampil, nilai)`` dari state prompt.
+
+        Pemisah ``── kategori ──`` jadi baris non-selectable (nilai "").
+        Mode confirm memakai Ya/Tidak; mode lain memakai baris+nilai
+        bernomor (baris tanpa nilai = pemisah / ditunda, dilewati).
+        """
+        st = self._prompt_inline
+        if not st:
+            return []
+        if st["mode"] == "confirm":
+            return [("Ya", "y"), ("Tidak", "n")]
+        import re as _re
+        opsi: list[tuple[str, str]] = []
+        ni = 0
+        nilai = st["nilai"]
+        for b in st["baris"]:
+            if b.startswith("──"):
+                opsi.append((b, ""))
+                continue
+            m = _re.match(r"^\d+\)\s*(.*)$", b)
+            if not m:
+                continue
+            if ni >= len(nilai):
+                break
+            opsi.append((m.group(1), nilai[ni]))
+            ni += 1
+        return opsi
+
+    def _buka_picker_prompt(self, judul: str) -> None:
+        """Buka daftar panah+Enter di atas input untuk mode pilihan/confirm."""
+        st = self._prompt_inline
+        if not st or st["mode"] not in ("pilihan", "confirm"):
+            return
+        opsi = self._opsi_picker_prompt()
+        if not any(v for _t, v in opsi):
+            return
+        try:
+            chatbox = self.query_one("#chatbox", ChatBox)
+            chatbox.open_picker(opsi, title=judul)
+        except Exception:  # noqa: BLE001 — belum ter-mount
+            pass
+
+    def _hint_prompt(self, mode: str) -> str:
+        if mode == "multi":
+            return "ketik nomor (boleh banyak: 1,3) · teks bebas = jawaban sendiri · ctrl+c batal"
+        if mode == "pilihan":
+            return "panah pilih · Enter konfirmasi · ketik nomor/filter · ctrl+c batal"
+        if mode == "confirm":
+            return "panah pilih · Enter konfirmasi · y/n · ctrl+c batal"
+        if mode == "tulis":
+            return "tulis jawabanmu · ctrl+c batal"
+        return "ketik lalu Enter · ctrl+c batal"
+
+    def _gambar_prompt_inline(self, hint: str = "") -> None:
+        """Gambar blok prompt (+ echo terakhir bila mode lanjutan).
+
+        Mode pilihan/confirm: daftar bernomor TIDAK dicetak ke riwayat —
+        opsi sudah tampil di picker atas input. Mencetak dua kali membuat
+        blok ``? Judul`` + angka ala inquirer rich, padahal UI-nya modern.
+        Cukup judul + petunjuk; echo jawaban menyusul saat dipilih.
+        """
+        st = self._prompt_inline
+        if not st:
+            return
+        try:
+            ml = self.query_one("#messages", MessageList)
+        except Exception:  # noqa: BLE001 — UI ditutup
+            return
+        echo = st["echo"][-1] if st["echo"] else None
+        pakai_picker = st["mode"] in ("pilihan", "confirm")
+        baris = [] if pakai_picker else st["baris"]
+        ml.append_prompt(st["judul"], lines=baris, hint=hint, echo=echo)
+
+    def _catat_echo_prompt(self, teks: str) -> None:
+        st = self._prompt_inline
+        if st is None:
+            return
+        st["echo"].append(teks)
+        try:
+            ml = self.query_one("#messages", MessageList)
+            # Sama seperti _gambar_prompt_inline: mode picker tak mengulang
+            # daftar bernomor di riwayat — cukup judul + jawaban terpilih.
+            pakai_picker = st["mode"] in ("pilihan", "confirm")
+            baris = [] if pakai_picker else st["baris"]
+            ml.append_prompt(st["judul"], lines=baris, hint="", echo=teks)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _ganti_placeholder_prompt(self, mode: str) -> None:
+        try:
+            chatbox = self.query_one("#chatbox", ChatBox)
+            chatbox.set_prompt_mode(self._PLACEHOLDER_PROMPT.get(
+                mode, "ketik jawaban…"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _selesaikan_prompt_inline(self, hasil, batal: bool = False) -> None:
+        """Tutup prompt & panggil callback (batal -> None / False)."""
+        st = self._prompt_inline
+        if st is None:
+            return
+        self._prompt_inline = None
+        if batal:
+            hasil = False if st["mode"] == "confirm" else None
+        try:
+            self.query_one("#chatbox", ChatBox).set_prompt_mode(None)
+        except Exception:  # noqa: BLE001 — UI ditutup
+            pass
+        cb = st.get("callback")
+        if cb is not None:
+            try:
+                cb(hasil)
+            except Exception:  # noqa: BLE001 — callback tak boleh merusak UI
+                pass
+
+    def on_chatbox_picked(self, event: ChatBox.Picked):
+        """Opsi picker di atas input diterima (Enter / klik)."""
+        st = self._prompt_inline
+        if st is None:
+            return
+        mode = st["mode"]
+        nilai = (event.value or "").strip()
+        if not nilai:
+            return
+        self._catat_echo_prompt(event.display or nilai)
+        if mode == "confirm":
+            self._selesaikan_prompt_inline(nilai in ("y", "ya", "1"))
+            return
+        if mode == "pilihan":
+            if nilai == _OPSI_TULIS or (
+                    st["tulis_nomor"] is not None
+                    and 1 <= st["tulis_nomor"] <= len(st["nilai"])
+                    and nilai == st["nilai"][st["tulis_nomor"] - 1]):
+                st["mode"] = "tulis"
+                st["terpilih"] = []
+                self._ganti_placeholder_prompt("tulis")
+                try:
+                    self.query_one("#chatbox", ChatBox).close_picker()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._gambar_prompt_inline(
+                    "Jawabanmu: teks bebas · ctrl+c batal")
+                return
+            if nilai in st["nilai"]:
+                self._selesaikan_prompt_inline(nilai)
+                return
+            self._selesaikan_prompt_inline(nilai)
+            return
+        self._selesaikan_prompt_inline(nilai)
+
+    def _batalkan_prompt_inline(self) -> None:
+        if self._prompt_inline is None:
+            return
+        judul = self._prompt_inline.get("judul", "")
+        self._selesaikan_prompt_inline(None, batal=True)
+        try:
+            q = judul if len(judul) <= 46 else judul[:45] + "…"
+            self.query_one("#messages", MessageList).append_notice(
+                f"✗ {q} · (dibatalkan)", style=tema.p("redup"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _terima_prompt_inline(self, teks: str) -> None:
+        """Satu baris dari ChatBox sebagai jawaban prompt (THREAD UI)."""
+        st = self._prompt_inline
+        if st is None:
+            return
+        teks = (teks or "").strip()
+        if not teks:
+            return
+        self._catat_echo_prompt(teks)
+        mode = st["mode"]
+
+        if mode == "confirm":
+            t = teks.lower()
+            if t in ("y", "ya", "yes", "iya", "1"):
+                self._selesaikan_prompt_inline(True)
+            elif t in ("n", "tidak", "no", "0", "2"):
+                self._selesaikan_prompt_inline(False)
+            else:
+                self._ulang_prompt_inline("Balas dengan y atau n.")
+            return
+
+        if mode == "teks":
+            self._selesaikan_prompt_inline(teks)
+            return
+
+        if mode == "tulis":
+            if st["terpilih"]:
+                self._selesaikan_prompt_inline(
+                    _format_multi(st["terpilih"] + [teks]))
+            else:
+                self._selesaikan_prompt_inline(teks)
+            return
+
+        if mode == "pilihan":
+            if teks.isdigit():
+                n = int(teks)
+                if st["tulis_nomor"] is not None and n == st["tulis_nomor"]:
+                    st["mode"] = "tulis"
+                    st["terpilih"] = []
+                    self._ganti_placeholder_prompt("tulis")
+                    self._gambar_prompt_inline("Jawabanmu: teks bebas · ctrl+c batal")
+                    return
+                if 1 <= n <= len(st["nilai"]):
+                    self._selesaikan_prompt_inline(st["nilai"][n - 1])
+                    return
+                self._ulang_prompt_inline(
+                    f"Nomor {n} di luar pilihan (1–{len(st['nilai'])}).")
+                return
+            # Bukan angka = jawaban bebas (setara "tulis sendiri").
+            self._selesaikan_prompt_inline(teks)
+            return
+
+        if mode == "multi":
+            import re as _re
+            parts = [p for p in _re.split(r"[\s,;]+", teks) if p]
+            if parts and all(p.isdigit() for p in parts):
+                nums = [int(p) for p in parts]
+                if any(n < 1 or n > len(st["nilai"]) for n in nums):
+                    self._ulang_prompt_inline(
+                        f"Nomor di luar pilihan (1–{len(st['nilai'])}).")
+                    return
+                if st["tulis_nomor"] is not None and st["tulis_nomor"] in nums:
+                    terpilih = [st["nilai"][n - 1] for n in nums
+                                if n != st["tulis_nomor"]
+                                and st["nilai"][n - 1]]
+                    # Buang entri "tulis sendiri" yang mungkin ikut ter-copy.
+                    terpilih = [t for t in terpilih if t != _OPSI_TULIS]
+                    st["terpilih"] = terpilih
+                    st["mode"] = "tulis"
+                    self._ganti_placeholder_prompt("tulis")
+                    self._gambar_prompt_inline(
+                        "Jawaban tambahanmu: teks bebas · ctrl+c batal")
+                    return
+                hasil = [st["nilai"][n - 1] for n in nums
+                         if st["nilai"][n - 1] != _OPSI_TULIS]
+                if not hasil:
+                    self._selesaikan_prompt_inline("(tidak memilih apa pun)")
+                    return
+                self._selesaikan_prompt_inline(_format_multi(hasil))
+                return
+            # Bukan daftar nomor = jawaban bebas.
+            self._selesaikan_prompt_inline(teks)
+            return
+
+        self._selesaikan_prompt_inline(teks)
+
+    def _ulang_prompt_inline(self, pesan: str) -> None:
+        """Pesan galat di riwayat; prompt tetap terbuka."""
+        try:
+            # append_notice sudah menambah _indent ("  ") — jangan ditambah
+            # lagi di sini (dulu f"  {pesan}" -> indentasi ganda).
+            self.query_one("#messages", MessageList).append_notice(
+                pesan, style=f"bold {tema.p('exit_footer')}")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.query_one("#chatbox", ChatBox).focus()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _baris_pilihan_inline(self, options) -> tuple[list[str], list[str],
+                                                      int | None]:
+        """Normalisasi opsi menu -> (baris render, nilai, nomor tulis).
+
+        Mendukung string polos, (tampil, nilai), dan (_SEP, kategori)
+        dari pilihan_model_grup. Pemisah & model ditunda TANPA nomor.
+        """
+        from .textual_widgets.modal_screens import _SEP
+        baris: list[str] = []
+        nilai: list[str] = []
+        tulis_nomor: int | None = None
+        for item in options:
+            if isinstance(item, tuple) and item[0] == _SEP:
+                baris.append(f"── {item[1]} ──")
+                continue
+            if isinstance(item, tuple):
+                tampil, val = item
+            else:
+                tampil = val = item
+            if str(tampil).startswith(models._TANDA_DITUNDA):
+                baris.append(f"   {str(tampil)[len(models._TANDA_DITUNDA):]}"
+                             "  ⏸ ditunda")
+                continue
+            if tampil == _OPSI_TULIS:
+                tulis_nomor = len(nilai) + 1
+            nilai.append(str(val))
+            baris.append(f"{len(nilai)}) {tampil}")
+        return baris, nilai, tulis_nomor
+
     # ─── ask_user / ask_choice (dari thread pekerja) ──────────────────
 
     def _handler_pilihan(self, question: str, options: list[str],
                          multiple: bool) -> str:
         """Handler interaction.ask_choice — dipanggil DI THREAD PEKERJA.
 
-        Dorong modal ke thread UI lewat call_from_thread, lalu BLOKIR thread
-        pekerja di threading.Event sampai modal ditutup. core.run() memang
-        menunggu jawaban ini sebelum melanjutkan giliran.
+        Dorong prompt inline ke thread UI lewat call_from_thread, lalu
+        BLOKIR thread pekerja di threading.Event sampai pengguna menjawab
+        di kotak chat (tanpa modal). core.run() menunggu jawaban ini.
         """
         hasil = {"jawab": None}
         selesai = threading.Event()
@@ -687,52 +1038,23 @@ class BagasAIApp(App):
         return jawab
 
     def _push_pilihan(self, question, options, multiple, tutup):
-        """Alur modal pilihan — JALAN DI THREAD UI.
+        """Alur pilihan INLINE — JALAN DI THREAD UI (tanpa modal)."""
+        daftar = [o for o in options if o] + [_OPSI_TULIS]
+        baris = [f"{i}) {o}" for i, o in enumerate(daftar, 1)]
+        nilai = list(daftar)
+        tulis_nomor = len(daftar)
 
-        Sama persis semangatnya dengan cli._tanya_pilihan: opsi + isian
-        bebas di urutan terakhir; isian kosong mengembalikan ke menunya.
-        """
-        semua = [o for o in options if o] + [_OPSI_TULIS]
+        def selesai(hasil):
+            tutup(hasil)
 
-        def tulis_sendiri(kembali, tambahan: list[str] | None = None):
-            def kirim(teks):
-                teks = (teks or "").strip()
-                if not teks:
-                    kembali()
-                    return
-                if tambahan:
-                    tutup(_format_multi(tambahan + [teks]))
-                else:
-                    tutup(teks)
-            self.push_screen(TextPromptScreen(
-                title=question, placeholder="jawabanmu…"), kirim)
-
-        def menu():
-            if not multiple:
-                def pilih_satu(hasil):
-                    if hasil == _OPSI_TULIS:
-                        tulis_sendiri(menu)
-                    elif hasil is None:
-                        tutup(None)
-                    else:
-                        tutup(hasil)
-                self.push_screen(SelectScreen(title=question, options=semua),
-                                 pilih_satu)
-                return
-
-            def pilih_banyak(terpilih):
-                terpilih = list(terpilih or [])
-                bebas = _OPSI_TULIS in terpilih
-                terpilih = [t for t in terpilih if t != _OPSI_TULIS]
-                if bebas:
-                    tulis_sendiri(menu, tambahan=terpilih)
-                else:
-                    tutup(_format_multi(terpilih))
-
-            self.push_screen(MultiSelectScreen(title=question, options=semua),
-                             pilih_banyak)
-
-        menu()
+        if multiple:
+            self._mulai_prompt_inline(
+                judul=question, mode="multi", callback=selesai,
+                baris=baris, nilai=nilai, tulis_nomor=tulis_nomor)
+        else:
+            self._mulai_prompt_inline(
+                judul=question, mode="pilihan", callback=selesai,
+                baris=baris, nilai=nilai, tulis_nomor=tulis_nomor)
 
     def _show_welcome(self):
         """Display welcome screen with logo and tagline."""
@@ -776,7 +1098,7 @@ class BagasAIApp(App):
             elif role == "diff":
                 msg_list.append_diff_replay(m)
             elif content:
-                msg_list.append_ai_message(content)
+                msg_list.append_ai_message(content, paksa_header=True)
         msg_list.append_notice("── lanjut di bawah ──",
                                style=tema.p("tepi_redup"))
 
@@ -803,6 +1125,13 @@ class BagasAIApp(App):
         text = event.text.strip()
         if not text:
             return
+
+        # Prompt inline (ask_user / menu / konfirmasi): teks adalah JAWABAN,
+        # bukan pesan AI / perintah slash — intercept SEBELUM antrean giliran.
+        if self._prompt_inline is not None:
+            self._terima_prompt_inline(text)
+            return
+
         teks_tampil = text
         lisan = self._voice_state.pop("terucap", None) == text
 
@@ -895,6 +1224,9 @@ class BagasAIApp(App):
 
     def on_chatbox_cancelled(self, event: ChatBox.Cancelled):
         """Handle Ctrl+C in chatbox."""
+        if self._prompt_inline is not None:
+            self._batalkan_prompt_inline()
+            return
         if self.is_turn_active:
             self._cancel_event.set()
             self._stop_turn()
@@ -1806,7 +2138,7 @@ class BagasAIApp(App):
 
     def _cmd_delete(self):
         """Delete current session."""
-        async def on_confirm(result: bool):
+        def on_confirm(result: bool | None):
             if result:
                 msg_list = self.query_one("#messages", MessageList)
                 self.agent.reset()
@@ -1814,9 +2146,10 @@ class BagasAIApp(App):
                 msg_list.append_notice("✓ Sesi dihapus.",
                                       style=f"bold {tema.p('aksen')}")
 
-        self.push_screen(ConfirmScreen(
-            title="Hapus sesi ini? Semua riwayat akan hilang."
-        ), on_confirm)
+        self._mulai_prompt_inline(
+            judul="Hapus sesi ini? Semua riwayat akan hilang.",
+            mode="confirm", callback=on_confirm,
+            baris=["1) Ya", "2) Tidak"])
 
     # ─── Model Command ─────────────────────────────────────────────────
 
@@ -1854,13 +2187,15 @@ class BagasAIApp(App):
         if getattr(self.agent, "_web_varian", None):
             current += f" · {self.agent._web_varian}"
 
-        async def on_select(result: str | None):
+        baris, nilai, _tulis = self._baris_pilihan_inline(options)
+
+        def on_select(result: str | None):
             self._setelah_ganti_model(result)
 
-        self.push_screen(SelectScreen(
-            title=f"Model (saat ini: {current})",
-            options=options,
-        ), on_select)
+        self._mulai_prompt_inline(
+            judul=f"Model (saat ini: {current})",
+            mode="pilihan", callback=on_select,
+            baris=baris, nilai=nilai)
 
     def _setelah_ganti_model(self, result: str | None):
         """Pesan + statusbar setelah model berganti (dipakai 2 tempat).
@@ -1987,16 +2322,18 @@ class BagasAIApp(App):
                 style=tema.p("redup"))
             return
 
-        async def on_select(result: str | None):
+        def on_select(result: str | None):
             if not result:
                 return
             self._klik_web_option(conn, result)
 
-        self.push_screen(SelectScreen(
-            title=f"Usaha berpikir {spec.label} (diklik di situsnya)",
-            options=[label for label, _desc in opts],
-            hint="; ".join(f"{l} = {d}" for l, d in opts)[:200],
-        ), on_select)
+        self._mulai_prompt_inline(
+            judul=f"Usaha berpikir {spec.label} (diklik di situsnya)",
+            mode="pilihan", callback=on_select,
+            baris=[f"{i}) {label}" for i, (label, _d) in enumerate(opts, 1)],
+            nilai=[label for label, _d in opts],
+            hint="; ".join(f"{l} = {d}" for l, d in opts)[:200]
+            or "ketik nomor lalu Enter · ctrl+c batal")
 
     def _klik_web_option(self, conn, label: str) -> None:
         """Klik tombol UI web dari thread pekerja + tampilkan hasilnya."""
@@ -2042,19 +2379,39 @@ class BagasAIApp(App):
             return
         options = list(spec.effort_levels)
 
-        async def on_select(result: str | None):
+        def on_select(result: str | None):
             if result:
                 self._effort_api_set(result)
 
-        self.push_screen(SelectScreen(
-            title=f"Effort {spec.label}",
-            options=options,
+        self._mulai_prompt_inline(
+            judul=f"Effort {spec.label}",
+            mode="pilihan", callback=on_select,
+            baris=[f"{i}) {l}" for i, l in enumerate(options, 1)],
+            nilai=options,
             hint=" · ".join(
                 f"{l} = {models.EFFORT_INFO[l][1]}" if l in models.EFFORT_INFO
-                else l for l in options),
-        ), on_select)
+                else l for l in options)
+            or "ketik nomor lalu Enter · ctrl+c batal")
 
     # ─── Theme Command ─────────────────────────────────────────────────
+
+    def _pasang_gaya_markdown(self):
+        """Suntik gaya Rich ``markdown.*`` ke console — paritas CLI.
+
+        RichLog me-render ``Markdown`` lewat ``app.console``; tanpa theme
+        ini heading/list/inline-code memakai warna default rich yang kontras
+        dengan palet zenitsu. Dipanggil saat mount dan setiap ganti tema
+        (push theme baru supaya warna ikut ``/theme``).
+        """
+        try:
+            from rich.theme import Theme
+            from ..ui.textual_theme import markdown_styles
+            if getattr(self, "_md_theme_terpasang", False):
+                self.console.pop_theme()
+            self.console.push_theme(Theme(markdown_styles(self._tema_pratinjau)))
+            self._md_theme_terpasang = True
+        except Exception:  # noqa: BLE001 — theme markdown opsional
+            pass
 
     def _terapkan_tema(self):
         """Terapkan tema aktif ke SELURUH UI, sekali jalan.
@@ -2068,6 +2425,7 @@ class BagasAIApp(App):
             self.refresh_css()
         except Exception:  # noqa: BLE001 — CSS cacat jangan matikan app
             pass
+        self._pasang_gaya_markdown()
 
     def _cmd_theme(self, text: str):
         """Handle /theme command."""
@@ -2104,9 +2462,10 @@ class BagasAIApp(App):
             pass
 
     def _show_theme_menu(self):
-        """Menu tema dengan pratinjau langsung saat sorotan berpindah."""
+        """Menu tema inline — pilih nomor di riwayat chat (tanpa modal)."""
+        daftar = tema.daftar()  # [(id, label, desc)]
+
         def on_select(result: str | None):
-            # Apa pun hasilnya (pakai/batal), hentikan pratinjau.
             self._tema_pratinjau = None
             if result:
                 tema.set_tema(result)
@@ -2114,6 +2473,10 @@ class BagasAIApp(App):
                 self.refresh_css()
             except Exception:  # noqa: BLE001
                 pass
+            # Suntik ulang gaya markdown.* (inline-code bg ikut terang/gelap)
+            # SEBELUM gambar ulang riwayat — kalau tidak, blok kode lama
+            # tetap memakai latar #3a2a1a di atas kanvas vslight.
+            self._pasang_gaya_markdown()
             self._segar_tema_widget()
             if result:
                 msg_list = self.query_one("#messages", MessageList)
@@ -2121,7 +2484,12 @@ class BagasAIApp(App):
                     f"✓ Tema: {tema.label_aktif()}",
                     style=f"bold {tema.p('aksen')}")
 
-        self.push_screen(ThemeScreen(themes=tema.daftar()), on_select)
+        baris = []
+        for i, (_tid, label, desc) in enumerate(daftar, 1):
+            baris.append(f"{i}) {label}" + (f"  — {desc}" if desc else ""))
+        self._mulai_prompt_inline(
+            judul="Tema", mode="pilihan", callback=on_select,
+            baris=baris, nilai=[tid for tid, _, _ in daftar])
 
     # ─── Memory Command ────────────────────────────────────────────────
 
@@ -2175,7 +2543,6 @@ class BagasAIApp(App):
 
     def _cmd_compact(self):
         """Compact context — save conversation to memory file."""
-        msg_list = self.query_one("#messages", MessageList)
         progress = self.query_one("#progress", TurnProgressBar)
         progress.show(0.0, "memadatkan ingatan...")
 
@@ -2198,7 +2565,7 @@ class BagasAIApp(App):
         msg_list.append_notice("✓ Riwayat tersimpan.",
                               style=f"bold {tema.p('aksen')}")
         if result:
-            msg_list.append_ai_message(result)
+            msg_list.append_ai_message(result, paksa_header=True)
 
     def _compact_error(self, exc: Exception):
         """Handle compact error."""
@@ -2234,16 +2601,16 @@ class BagasAIApp(App):
         if len(parts) == 2:
             path = parts[1].strip().strip('"').strip("'")
             try:
-                p = workspace.add(path)
+                workspace.add(path)
                 self.agent.refresh_system_prompt()
-                msg_list.append_notice(f"✓ Folder konteks ditambahkan: {path}",
-                                      style=f"bold {tema.p('aksen')}")
+                msg_list.append_notice(
+                    f"✓ Folder konteks ditambahkan: {path}",
+                    style=f"bold {tema.p('aksen')}")
             except ValueError as e:
                 msg_list.append_notice(f"✗ {e}",
                                       style=f"bold {tema.p('exit_footer')}")
         else:
-            # Show text prompt for path input
-            async def on_input(result: str | None):
+            def on_input(result: str | None):
                 if result:
                     path = result.strip().strip('"').strip("'")
                     if path:
@@ -2260,11 +2627,11 @@ class BagasAIApp(App):
                             ml.append_notice(f"✗ {e}",
                                             style=f"bold {tema.p('exit_footer')}")
 
-            self.push_screen(TextPromptScreen(
-                title="Path folder yang mau ditambahkan:",
-                placeholder="/path/to/folder",
-                hint="Masukkan path folder absolut",
-            ), on_input)
+            self._mulai_prompt_inline(
+                judul="Path folder yang mau ditambahkan:",
+                mode="teks", callback=on_input,
+                baris=["/path/to/folder"],
+                hint="path folder absolut · ctrl+c batal")
 
     # ─── Dirs Command ──────────────────────────────────────────────────
 
@@ -2383,16 +2750,15 @@ class BagasAIApp(App):
 
     def _cmd_web(self, text: str):
         """Handle /web command — web session management."""
-        parts = text.split(maxsplit=1)
         msg_list = self.query_one("#messages", MessageList)
 
         if self.agent.model_spec.is_web:
             msg_list.append_notice(
                 "Web session management:\n"
                 "  /web connect  — koneksi ke situs model\n"
-                "  /web logout   — logout dari situs model\n"
+                "  /web logout   — logout dari sesi model\n"
                 "  /web status   — lihat status sesi",
-                style=tema.p("redup")
+                style=tema.p("redup"),
             )
         else:
             msg_list.append_notice(
@@ -2503,10 +2869,12 @@ class BagasAIApp(App):
         # Counter untuk progress tool steps
         self._tool_count = 0
         self._tool_total = 0
+        self._pikiran_sudah_simpan = False
 
         # Reset thinking block
         thinking = self.query_one("#thinking-block", ThinkingBlock)
         thinking.clear()
+        self._pikiran_sudah_simpan = False
 
         # Begin streaming in message list
         msg_list = self.query_one("#messages", MessageList)
@@ -2667,6 +3035,19 @@ class BagasAIApp(App):
         self.is_turn_active = False
         self._worker_thread = None
         self._stop_progress_timer()
+        # Simpan isi pikiran ke riwayat SEBELUM blok disembunyikan — dulu
+        # reasoning hanya hidup di widget temporary dan lenyap tiap giliran.
+        # Bila sudah di-snapshoot di _forward_token (potongan pertama jawaban),
+        # jangan simpan ulang di sini.
+        try:
+            if not getattr(self, "_pikiran_sudah_simpan", False):
+                thinking = self.query_one("#thinking-block", ThinkingBlock)
+                isi = (thinking._text or "").strip()
+                if isi and len(isi) > 8:
+                    self.query_one("#messages", MessageList).append_reasoning(isi)
+                    self._pikiran_sudah_simpan = True
+        except Exception:  # noqa: BLE001 — widget sedang dibongkar
+            pass
         try:
             self.query_one("#progress", TurnProgressBar).hide()
             self.query_one("#thinking-block", ThinkingBlock).hide()
@@ -2818,6 +3199,14 @@ class BagasAIApp(App):
         keliru: logo hanya berputar selama ``fraction < 0.95``, jadi
         mendorongnya ke 0.9 justru MEMBEKUKAN animasinya di tengah jawaban.
         """
+        # Potongan pertama jawaban = penalaran selesai. Snapshoot ke riwayat
+        # SEBELUM token masuk aliran, supaya urutannya pikiran -> jawaban
+        # (bukan pikiran yang disimpan di akhir giliran setelah jawaban).
+        thinking = self.query_one("#thinking-block", ThinkingBlock)
+        isi_pikir = (thinking._text or "").strip()
+        if isi_pikir and len(isi_pikir) > 8 and not self._pikiran_sudah_simpan:
+            self._pikiran_sudah_simpan = True
+            self.query_one("#messages", MessageList).append_reasoning(isi_pikir)
         msg_list = self.query_one("#messages", MessageList)
         msg_list.append_token(piece)
         msg_list.flush_stream()
@@ -2840,11 +3229,20 @@ class BagasAIApp(App):
             progress = self.query_one("#progress", TurnProgressBar)
             progress.update_progress(0.0, "berpikir...")
 
+    # Tool tulis/ubah yang pratinjaunya berupa diff/blok (selaras
+    # _TOOL_DIFF di cli.py).
+    _TOOL_DIFF = ("write_file", "edit_file", "edit_files", "append_file")
+
     def agent_on_tool(self, name: str, args: dict):
-        """Tool about to execute — store args keyed by name."""
+        """Tool about to execute — queue args per name (FIFO).
+
+        Satu giliran bisa memuat beberapa tool BERNAMA SAMA berjalan
+        paralel; simpan sebagai antrian supaya hasil pertama tidak
+        mengambil args milik yang kedua (race overwrite).
+        """
         if not hasattr(self, '_pending_tool_args'):
             self._pending_tool_args = {}
-        self._pending_tool_args[name] = args
+        self._pending_tool_args.setdefault(name, []).append(args)
         self._safe_call(self._show_tool_start, name, args)
 
     def _show_tool_start(self, name: str, args: dict):
@@ -2855,18 +3253,18 @@ class BagasAIApp(App):
         # edit_files => diff berwarna; delete_file => isi yang akan hilang.
         # Di sini (thread UI) file pun BELUM tersentuh, jadi isi lamanya
         # masih bisa dibaca untuk di-diff.
+        # Kecuali OpenCode CLI: tool SUDAH dieksekusi di subprocess sebelum
+        # callback ini — ditandai _oc_selesai di args (lihat proses()).
         self._pratinjau_file(name, args)
-
-    # Tool tulis/ubah yang pratinjaunya berupa diff/blok (selaras
-    # _TOOL_DIFF di cli.py).
-    _TOOL_DIFF = ("write_file", "edit_file", "edit_files", "append_file")
 
     def _pratinjau_file(self, name: str, args: dict) -> None:
         """Diff / blok write() sebelum tool mengubah isi disk.
 
         Kalau prediksinya "tak akan berubah apa pun" (old == new pada file
         yang ada), jangan tampilkan apa pun — tool-nya akan menolak dan
-        pesan galatnya yang tampil sebagai hasil langkah.
+        pesan galatnya yang tampil sebagai hasil langkah. Pengecualian
+        OpenCode CLI (``_oc_selesai``): tool sudah dieksekusi, jadi cek
+        old==new dilewati dan diff direkonstruksi dari argumen.
         """
         if not isinstance(args, dict):
             return
@@ -2881,6 +3279,11 @@ class BagasAIApp(App):
             return
 
         def proses(path, sub_args, nama_tool):
+            # OpenCode CLI: tool sudah SELESAI dieksekusi di dalam subprocess
+            # sebelum callback ini dipanggil. Cek "tak akan berubah" (old==new)
+            # harus DILEWATI — file sudah berisi konten baru, jadi old==new
+            # secara harfiah, padahal diff-nya justru yang ingin ditampilkan.
+            sudah = bool(sub_args.get("_oc_selesai"))
             try:
                 target = _safe_path(path)
                 ada = target.is_file()
@@ -2889,18 +3292,69 @@ class BagasAIApp(App):
             except Exception:  # noqa: BLE001 — baca gagal: tanpa pratinjau
                 return
             if nama_tool == "write_file":
-                if ada and lama == (sub_args.get("content") or ""):
+                if (ada and not sudah
+                        and lama == (sub_args.get("content") or "")):
                     return  # tak akan berubah
+                # Label "(baru)": media non-OC pakai keberadaan file; OC pakai
+                # metadata.exists (file SUDAH tertulis, jadi ada=True meski
+                # dulu baru).
+                if sudah and "_oc_baru" in sub_args:
+                    baru = bool(sub_args.get("_oc_baru"))
+                else:
+                    baru = not ada
                 msg_list.append_write_block(
-                    path, sub_args.get("content") or "", is_new=not ada)
+                    path, sub_args.get("content") or "", is_new=baru)
                 self._catat_diff_memory(path, lama,
                                         sub_args.get("content") or "",
-                                        not ada)
+                                        baru)
                 return
-            # edit_file / append_file / suntingan satuan edit_files.
+            # append_file SETELAH OpenCode: file sudah memuat konten yang
+            # barusan ditambahkan. `_hitung_sesudah` akan menghitung
+            # lama+content = konten TERMASUK ganda — buang dulu ekornya.
+            if sudah and nama_tool == "append_file":
+                tambahan = sub_args.get("content") or ""
+                lama_asli = lama
+                if tambahan and lama.endswith(tambahan):
+                    lama_asli = lama[: -len(tambahan)]
+                if lama_asli != lama:
+                    msg_list.append_diff(path, lama_asli, lama,
+                                         is_new=not ada)
+                    self._catat_diff_memory(path, lama_asli, lama, not ada)
+                return
+            # edit_file / suntingan satuan edit_files.
+            # Setelah OpenCode selesai, file sudah memuat new_text.
+            # Prioritas: rekonstruksi old/new (diff sintaks penuh) -> unified
+            # diff dari metadata OpenCode -> skip (jangan menyesatkan).
+            if sudah and nama_tool == "edit_file":
+                cari = sub_args.get("old_text") or ""
+                ganti = sub_args.get("new_text") or ""
+                lama_asli = lama
+                if cari and ganti and ganti in lama and cari not in lama:
+                    lama_asli = lama.replace(ganti, cari, 1)
+                if lama_asli != lama:
+                    msg_list.append_diff(path, lama_asli, lama,
+                                         is_new=not ada)
+                    self._catat_diff_memory(path, lama_asli, lama, not ada)
+                    return
+                oc_diff = str(sub_args.get("_oc_diff") or "")
+                if oc_diff:
+                    msg_list.append_diff_replay(
+                        {"path": path, "diff": oc_diff,
+                         "is_new": not ada, "deleted": False})
+                    try:
+                        ag = self.agent
+                        if ag is not None and hasattr(ag, "memory"):
+                            ag.memory.add_diff(path, oc_diff, is_new=not ada)
+                    except Exception:  # noqa: BLE001 — memory opsional
+                        pass
+                return
+            if sudah and nama_tool in ("append_file", "replace_in_files"):
+                return  # tanpa rekonstruksi andal — jangan menyesatkan
             baru = self._hitung_sesudah(nama_tool, lama, sub_args)
-            if ada and lama == baru:
+            if ada and not sudah and lama == baru:
                 return  # akan ditolak/tanpa efek — jangan menyesatkan
+            if sudah and lama == baru:
+                return  # simulasi tanpa delta padahal file sudah berubah
             msg_list.append_diff(path, lama, baru, is_new=not ada)
             self._catat_diff_memory(path, lama, baru, not ada)
 
@@ -2909,6 +3363,30 @@ class BagasAIApp(App):
                 for e in (args.get("edits") or []):
                     if isinstance(e, dict) and e.get("path"):
                         proses(e["path"], e, "edit_file")
+            elif name == "delete_file" and args.get("path"):
+                # Selaras cli._print_delete: isi yang HILANG dicetak
+                # bergaris merah. OpenCode: file SUDAH terhapus — isi tak
+                # bisa dibaca lagi; tetap cetak baris jejak (tanpa body)
+                # supaya langkah hapus tidak hilang dari riwayat.
+                try:
+                    target = _safe_path(args["path"])
+                    if target.is_file():
+                        isi = target.read_text(
+                            encoding="utf-8", errors="replace")
+                        msg_list.append_delete(args["path"], isi)
+                        try:
+                            ag = self.agent
+                            if ag is not None and hasattr(ag, "memory"):
+                                ag.memory.add_diff(
+                                    args["path"],
+                                    "\n".join(isi.splitlines()[:200]),
+                                    is_new=False, deleted=True)
+                        except Exception:  # noqa: BLE001 — memory opsional
+                            pass
+                    elif args.get("_oc_selesai"):
+                        msg_list.append_delete(args["path"], "")
+                except Exception:  # noqa: BLE001 — pratinjau hapus opsional
+                    pass
             elif name in self._TOOL_DIFF and args.get("path"):
                 proses(args["path"], args, name)
         except Exception:  # noqa: BLE001 — pratinjau tak boleh mematikan UI
@@ -2953,10 +3431,13 @@ class BagasAIApp(App):
             pass
 
     def agent_on_result(self, name: str, result: str):
-        """Tool finished — retrieve stored args by name."""
+        """Tool finished — dequeue stored args by name (FIFO)."""
         if not hasattr(self, '_pending_tool_args'):
             self._pending_tool_args = {}
-        args = self._pending_tool_args.pop(name, {})
+        antre = self._pending_tool_args.get(name) or []
+        args = antre.pop(0) if antre else {}
+        if not antre:
+            self._pending_tool_args.pop(name, None)
         self._safe_call(self._show_tool_result, name, result, args)
 
     def _show_tool_result(self, name: str, result: str, args: dict = None):
@@ -3013,7 +3494,7 @@ class BagasAIApp(App):
         if "tool" in lower or "langkah" in lower:
             return "menjalankan tool..."
         if "retry" in lower or "ulang" in lower:
-            return f"🔄 retry..."
+            return "🔄 retry..."
         if "quota" in lower:
             return "⚠ quota habis..."
         if "busy" in lower or "sibuk" in lower:
@@ -3093,6 +3574,10 @@ class BagasAIApp(App):
 
     def action_cancel(self):
         """Handle Ctrl+C globally."""
+        # Prompt inline terbuka? Batalkan prompt-nya, jangan giliran AI.
+        if self._prompt_inline is not None:
+            self._batalkan_prompt_inline()
+            return
         if self.is_turn_active:
             self._cancel_event.set()
             self._stop_turn()

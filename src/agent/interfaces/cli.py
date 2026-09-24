@@ -24,6 +24,8 @@ import threading
 import time
 from typing import Any
 
+from ..ui.textual_theme import latar_terang as _latar_terang
+
 try:  # keyboard non-blocking (Windows): ketikan-selama-giliran & Ctrl+C
     import msvcrt as _msvcrt
 except ImportError:  # pragma: no cover - non-Windows
@@ -128,18 +130,21 @@ def _TM(markup: str) -> Text:
 # (heading, list, kutipan,
 # kode, tautan) serasi dengan seluruh UI — bukan warna default rich yang kontras.
 # Warna diambil dari TEMA AKTIF saat impor (tersimpan di prefs, dipilih /theme),
-# jadi markdown jawaban ikut tema sejak startup.
+# jadi markdown jawaban ikut tema sejak startup. Latar inline-code mengikuti
+# sisi terang/gelap: #3a2a1a di atas putih = kontras ~2:1 (kotor).
 _MD_THEME = Theme({
     "markdown.h1": f"bold {tema.p('aksen')}",
     "markdown.h1.border": tema.p("aksen"),
     "markdown.h2": f"bold {tema.p('aksen2')}",
     "markdown.h3": f"bold {tema.p('aksen_terang')}",
-    "markdown.h4": "bold #9fc93c",
+    "markdown.h4": "bold #3f701c" if _latar_terang() else "bold #9fc93c",
     "markdown.h5": f"bold {tema.p('aksen_terang')}",
     "markdown.h6": f"bold {tema.p('aksen2')}",
     "markdown.item.bullet": f"bold {tema.p('aksen')}",
     "markdown.item.number": f"bold {tema.p('aksen2')}",
-    "markdown.code": f"{tema.p('aksen_terang')} on #3a2a1a",       # `inline code`
+    "markdown.code": (
+        f"{tema.p('aksen_terang')} on "
+        f"{'#eef1f5' if _latar_terang() else '#3a2a1a'}"),
     "markdown.link": f"{tema.p('aksen2')} underline",
     "markdown.link_url": f"dim {tema.p('aksen_terang')}",
     "markdown.block_quote": f"italic {tema.p('aksen_terang')}",
@@ -173,16 +178,26 @@ def _cetak_tematik(*args, **kwargs):
 
 console.print = _cetak_tematik
 
-# Tema penyorotan sintaks blok kode ```lang``` — 'gruvbox-dark' dipilih karena
-# palet dasarnya memang hangat (kuning/oranye/cokelat), jadi kode di dalam
-# jawaban tak lagi memercikkan ungu-pink ke tengah tema kuning-oranye.
-# Fallback aman bila versi pygments-nya belum punya.
+# Tema penyorotan sintaks blok kode ```lang``` — gruvbox-dark di tema gelap
+# (palet hangat, paritas TUI), gruvbox-light di tema terang (pasangan resmi;
+# nama "github" hanya punya varian "github-dark" di pygments). Dipilih SAAT
+# RENDER supaya /theme vslight ikut berganti tanpa muat ulang. Fallback aman
+# bila versi pygments belum punya gaya itu.
 try:  # pragma: no cover - bergantung versi pygments
     from pygments.styles import get_style_by_name as _gsbn
     _gsbn("gruvbox-dark")
-    _CODE_THEME = "gruvbox-dark"
+    _gsbn("gruvbox-light")
+    _CODE_GELAP = "gruvbox-dark"
+    _CODE_TERANG = "gruvbox-light"
 except Exception:  # pragma: no cover
-    _CODE_THEME = "monokai"
+    _CODE_GELAP = "monokai"
+    _CODE_TERANG = "default"
+
+
+def _tema_kode() -> str:
+    """Tema pygments mengikuti sisi terang/gelap tema aktif."""
+    from ..ui.textual_theme import latar_terang
+    return _CODE_TERANG if latar_terang() else _CODE_GELAP
 
 
 # Garis penghubung gambar pohon direktori (box-drawing, BUKAN ASCII '|').
@@ -248,7 +263,7 @@ def _pagari_pohon(text: str) -> str:
 
 def _md(text: str) -> Markdown:
     """Markdown bertema zenitsu (inline code pakai style `markdown.code`,
-    blok kode ```lang``` disorot tema `gruvbox-dark`).
+    blok kode ```lang``` disorot tema ikut sisi terang/gelap tema aktif).
 
     Escape ANSI dibuang DI SINI karena inilah satu-satunya pintu yang dilewati
     SEMUA teks model menuju layar: narasi antar-langkah dan jawaban akhir. Dulu
@@ -257,7 +272,7 @@ def _md(text: str) -> Markdown:
     PERMANEN: satu \x1b[2J dari log yang disalin model menghapus scrollback
     giliran sebelumnya, dan \x1b[31m tanpa reset mewarnai semua teks sesudahnya
     sampai terminal di-reset manual."""
-    return Markdown(_pagari_pohon(_bersih_kendali(text)), code_theme=_CODE_THEME)
+    return Markdown(_pagari_pohon(_bersih_kendali(text)), code_theme=_tema_kode())
 
 # Padding tepi supaya konten tidak mepet ke pinggir terminal (kiri/kanan/bawah).
 _LPAD = 2
@@ -541,17 +556,22 @@ def _gema_prompt(teks: str, prefix: str = "", antre: bool = False) -> Text:
     return hasil
 
 
-# Warna gaya editor (GitHub-like): teks kalem di atas bg gelap hijau/merah.
+# Warna gaya editor (GitHub-like): teks kalem di atas bg hijau/merah.
 #
-# Sengaja DIREDAM, bukan warna hijau/merah pekat: diff sering menutupi layar
+# Sengaja DIREDAM, bukan warna hijau/merah pepat: diff sering menutupi layar
 # berbaris-baris, dan warna cerah pada seluruh baris itu melelahkan sekaligus
 # menenggelamkan sorotan sintaks yang justru dicari mata (lihat _warna_kode).
 # Latarnya cukup untuk menandai baris mana yang berubah, tak lebih.
-_ADD = "#a3ccad on #0d2312"
-_DEL = "#cca3a3 on #230d0d"
-_CTX = "grey50"
-_GUT_A = "#4f8f5c on #08170b"
-_GUT_D = "#96565a on #170808"
+# Tema TERANG (vslight dsb.) memakai pasangan GitHub-light — latar gelap di
+# atas kanvas putih memberi kontras ~1.3:1 dan nyaris tak terlihat.
+def _gaya_diff() -> tuple[str, str, str, str, str]:
+    """(add, del, ctx, gut_add, gut_del) mengikuti sisi terang/gelap tema."""
+    from ..ui.textual_theme import latar_terang
+    if latar_terang():
+        return ("#1a7f37 on #e6ffec", "#cf222e on #ffebe9", "#6e7781",
+                "#1a7f37 on #ccf2d4", "#cf222e on #ffd6d6")
+    return ("#a3ccad on #0d2312", "#cca3a3 on #230d0d", "grey50",
+            "#4f8f5c on #08170b", "#96565a on #170808")
 
 
 # --- pewarnaan sintaks DI DALAM diff ---------------------------------------
@@ -567,7 +587,8 @@ _GUT_D = "#96565a on #170808"
 # (.highlight), bukan sebagai renderable. Warna latar dari temanya dibuang dan
 # diganti latar diff kita, sementara warna DEPAN tiap token dibiarkan menimpa —
 # jadi kode tetap berwarna di atas bg hijau/merah, persis seperti diff editor.
-_TEMA_KODE = "gruvbox-dark"  # hangat & terbaca di atas bg gelap hijau/merah
+# Tema ikut sisi terang/gelap (lihat _tema_kode) — gruvbox-dark di tema gelap,
+# github di tema terang (gruvbox-light — "github" hanya punya github-dark).
 _MAKS_WARNAI = 400_000      # berkas raksasa: lewati saja, tak sebanding biayanya
 
 
@@ -601,7 +622,7 @@ def _pewarna(path: str, kode: str):
         lexer = Syntax.guess_lexer(path, code=kode)
         if not lexer or lexer in ("text", "default"):
             return None
-        syn = Syntax("", lexer, theme=_TEMA_KODE)
+        syn = Syntax("", lexer, theme=_tema_kode())
         return [_tanpa_latar(b) for b in syn.highlight(kode).split("\n")]
     except Exception:  # noqa: BLE001 - pewarnaan gagal != diff gagal
         return None
@@ -2058,6 +2079,7 @@ def _print_diff(path: str, old: str, new: str, is_new: bool, limit: int = 200,
     # harus diwarnai menurut berkas LAMA, yang ditambah menurut berkas BARU.
     warna_lama = _pewarna(path, old)
     warna_baru = _pewarna(path, new)
+    _ADD, _DEL, _CTX, _, _ = _gaya_diff()
     old_ln = new_ln = 0
     shown = 0
     for line in body:
@@ -2096,6 +2118,7 @@ def _print_delete(path: str, content: str, limit: int = 80,
     rows: list = [_TM(
         f"\n  [bold]🗑 [cyan]{_esc(path)}[/cyan][/bold] [dim](dihapus)[/dim]")]
     warna = _pewarna(path, content)
+    _, _DEL, _, _, _ = _gaya_diff()
     for i, line in enumerate(content.splitlines(), start=1):
         if i > limit:
             rows.append(Text("  ... (dipotong)", style="dim"))
@@ -2121,6 +2144,7 @@ def _replay_diff(rec: dict) -> Group:
         icon, label = ("✨", "dibuat") if rec.get("is_new") else ("📝", "diubah")
     rows = [_TM(f"\n  [bold]{icon} [cyan]{_esc(path)}[/cyan][/bold] "
                 f"[dim]({label})[/dim]")]
+    _ADD, _DEL, _CTX, _, _ = _gaya_diff()
     ln_old = ln_new = 0
     for line in str(rec.get("diff") or "").split("\n"):
         if line.startswith("@@"):
@@ -2345,6 +2369,7 @@ _PHASE = {
     "read_file": "membaca",
     "list_dir": "menelusuri",
     "glob_files": "mencari",
+    "grep": "mencari isi",
     "search_text": "mencari",
     "web_search": "mencari",
     "fetch_url": "membuka",
@@ -2359,9 +2384,6 @@ _PHASE = {
     "analyze_image": "menganalisis",
     "read_image_local": "membaca gambar lokal",
     "attach_file": "mengunggah",
-    "validate_project": "memvalidasi",
-    "run_tests": "menguji",
-    "web_preview": "meninjau",
     "undo_changes": "memulihkan",
     "bg_send": "mengetik",
     "run_command": "menjalankan",
@@ -3409,8 +3431,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
     # Tool yang hasilnya berupa teks substansial & layak di-expand penuh.
     _EXPANDABLE = {"run_command", "run_python", "run_script",
                    "read_file", "list_dir", "web_search",
-                   "search_text", "glob_files", "fetch_url", "http_request",
-                   "validate_project", "diff_files", "bg_output", "media_info"}
+                   "search_text", "glob_files", "grep", "fetch_url",
+                   "http_request",
+                   "diff_files", "bg_output", "media_info"}
 
     def on_tool(name: str, args: dict) -> None:
         """Mulai satu langkah: set fase + timer, dan untuk tulis/hapus tampilkan diff."""
@@ -6232,10 +6255,18 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             # autocomplete prompt_toolkit menangkap gaya saat KONSTRUKSI —
             # tanpa pembangunan ulang semuanya tetap memakai tema lama.
             kotak_chat = _buat_kotak()
+            # Mutasi dict styles pada Theme yang SUDAH di-push ke console:
+            # rich membaca ulang tiap render, jadi heading/inline-code (bg
+            # terang/gelap) ikut tema BARU tanpa muat ulang. Blok ```lang```
+            # / diff dipilih saat render (_tema_kode / _gaya_diff).
+            try:
+                from ..ui.textual_theme import markdown_styles as _ms
+                _MD_THEME.styles.update(_ms())
+            except Exception:  # noqa: BLE001 — theme console opsional
+                pass
             console.print(_TM(
                 f"  [#9fc93c]✓ tema aktif:[/] [bold]{tema.label_aktif()}[/] — "
-                "kotak chat & footer langsung berganti. (Warna markdown "
-                "jawaban menyusul saat bagasai dijalankan ulang.)\n"))
+                "kotak chat, footer, & markdown langsung berganti.\n"))
 
     def open_menu() -> bool:
         try:

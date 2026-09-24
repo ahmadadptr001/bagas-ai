@@ -349,7 +349,9 @@ def _web_tool_protocol() -> str:
         "terarah. WAJIB jalankan program secara langsung setelah fitur selesai; "
         "untuk UI lakukan interaksi pengguna nyata (klik/input/navigasi) dan "
         "laporkan hasil aktual. Test syntax saja tidak cukup bila runtime tersedia. "
-        "Untuk perubahan tampilan gunakan web_preview/take_screenshot bila tersedia.\n"
+        "Temukan sendiri cara cek/jalankan (package.json, README, runner terpasang) "
+        "lewat run_command/run_python — layaknya tester; untuk UI pakai "
+        "take_screenshot bila tersedia.\n"
         "7. Bila keputusan penting ambigu, panggil ask_user dengan 2-6 opsi. "
         "Jangan bertanya lewat pesan biasa di tengah pekerjaan.\n"
         "8. Jika tool yang dibutuhkan tidak ada di daftar inti, panggil "
@@ -2801,10 +2803,86 @@ class Agent:
                 if on_reasoning:
                     on_reasoning(piece)
 
-            def _on_tool_pending(name: str) -> None:
+            def _on_tool_pending(name: str, detail: dict | None = None) -> None:
                 state["tool_received"] = True
                 if on_status:
                     on_status(f"Menerima instruksi tool: {name}")
+                # OpenCode CLI: event tool_use membawa detail lengkap (input/
+                # output/metadata). Teruskan ke UI lewat on_tool+on_tool_result
+                # supaya TUI bisa menggambar diff/write-block — tanpa ini
+                # jalur OpenCode hanya baris status tanpa jejak perubahan file.
+                # Hanya status completed (atau kosong) yang digambar: event
+                # running/pending akan menggambar pratinjau dua kali (sekali
+                # sebelum eksekusi, sekali sesudah) di jalur yang sama.
+                if detail and on_tool:
+                    st = str(detail.get("status") or "")
+                    if st not in ("", "completed"):
+                        return
+                    args = dict(detail.get("input") or {})
+                    # Peta nama tool OpenCode -> nama bagas-ai yang dikenal UI.
+                    peta = {
+                        "write": "write_file",
+                        "edit": "edit_file",
+                        "read": "read_file",
+                        "glob": "glob_files",
+                        "grep": "grep",
+                        "bash": "run_command",
+                        "shell": "run_command",
+                        "list": "list_dir",
+                        "delete": "delete_file",
+                        "patch": "edit_file",
+                    }
+                    ui_name = peta.get(name, name)
+                    # filePath (OpenCode) -> path (bagas-ai).
+                    if "filePath" in args and "path" not in args:
+                        args["path"] = args.pop("filePath")
+                    # edit: oldString/newString -> old_text/new_text.
+                    if "oldString" in args and "old_text" not in args:
+                        args["old_text"] = args.pop("oldString")
+                    if "newString" in args and "new_text" not in args:
+                        args["new_text"] = args.pop("newString")
+                    # Tanda: tool OpenCode sudah dieksekusi — UI melewati
+                    # cek old==new (file sudah berisi konten baru).
+                    args["_oc_selesai"] = True
+                    # write: content sudah sesuai; path absolut -> relatif bila
+                    # metadata menyimpan filepath.
+                    meta = detail.get("metadata") or {}
+                    if ui_name == "write_file" and not args.get("path"):
+                        fp = str(meta.get("filepath") or "")
+                        if fp:
+                            args["path"] = fp
+                    # write baru vs timpa: OpenCode metadata.exists=false =
+                    # file BELUM ada sebelum write (paritas label "(baru)").
+                    if ui_name == "write_file" and "exists" in meta:
+                        args["_oc_baru"] = not bool(meta.get("exists"))
+                    # edit: unified diff siap pakai dari metadata — cadangan
+                    # bila rekonstruksi old/new di UI tidak memungkinkan.
+                    if meta.get("diff") and ui_name in ("edit_file", "edit_files"):
+                        args["_oc_diff"] = str(meta.get("diff") or "")
+                    # edit_files: tandai tiap suntingan agar pratinjau tahu
+                    # file SUDAH berubah (flag di level atas saja tak terbaca
+                    # oleh loop proses() per-edit).
+                    if ui_name == "edit_files":
+                        for e in (args.get("edits") or []):
+                            if isinstance(e, dict):
+                                e["_oc_selesai"] = True
+                                if args.get("_oc_diff"):
+                                    e["_oc_diff"] = args["_oc_diff"]
+                                if "oldString" in e and "old_text" not in e:
+                                    e["old_text"] = e.pop("oldString")
+                                if "newString" in e and "new_text" not in e:
+                                    e["new_text"] = e.pop("newString")
+                                if "filePath" in e and "path" not in e:
+                                    e["path"] = e.pop("filePath")
+                    try:
+                        on_tool(ui_name, args)
+                        if on_tool_result:
+                            on_tool_result(
+                                ui_name,
+                                str(detail.get("output") or detail.get("title") or ""),
+                            )
+                    except Exception:  # noqa: BLE001 — UI boleh gagal sendiri
+                        pass
 
             def _on_retry(attempt: int, wait: float, exc: Exception) -> None:
                 # Panggilan diulang DARI AWAL, jadi estimasi token parsial
@@ -3735,7 +3813,7 @@ class Agent:
             verifikasi_diingatkan = False
             # Penegakan "lihat sendiri hasilnya": `ubah_tampilan` menyala bila
             # ada berkas yang KELIHATAN diubah, `dilihat` bila AI benar-benar
-            # memakai web_preview/take_screenshot. Dulu ini cuma imbauan prosa
+            # memakai take_screenshot. Dulu ini cuma imbauan prosa
             # di pesan pembuka — dan imbauan di pembuka terbukti kalah oleh
             # kebiasaan model. Ditegakkan sekali per giliran.
             ubah_tampilan = False
@@ -3892,27 +3970,24 @@ class Agent:
                     continue
 
                 # UBAH TAMPILAN TAPI TAK PERNAH DILIHAT. Pola yang sama dengan
-                # penegakan validate_project di bawah, dan alasannya sama:
+                # penegakan validasi di bawah, dan alasannya sama:
                 # menyatakan "tampilannya sudah rapi" tanpa pernah melihat
                 # gambarnya itu mengarang. Dipaksa maksimal SEKALI per giliran
                 # supaya tak memutar tanpa henti bila memang tak ada yang bisa
                 # dilihat (tak ada dev server / bukan aplikasi berjendela).
-                # DILEWATI saat web_preview dijeda: menuntut tool yang mati
-                # hanya membuang satu putaran penuh browser untuk jawaban
-                # "dinonaktifkan" — take_screenshot sendirian tak menggantikan
-                # perannya untuk halaman web.
-                if (config.WEB_PREVIEW
-                        and not calls and not force_final and ubah_tampilan
+                # web_preview DIHAPUS: verifikasi visual lewat take_screenshot;
+                # alur web dibuktikan dengan run_command (curl/log server).
+                if (not calls and not force_final and ubah_tampilan
                         and not dilihat and not lihat_dipaksa):
                     lihat_dipaksa = True
                     reply = _send(
                         "[SISTEM] Giliran ini mengubah berkas tampilan, tapi "
                         "kamu belum sekali pun melihat hasilnya. Jangan tutup "
-                        "dulu.\nBuktikan sekarang: kalau ini web, pastikan dev "
-                        "server jalan (run_command_bg 'npm run dev', tunggu "
-                        "lewat bg_output) lalu web_preview URL-nya; kalau "
-                        "aplikasi berjendela, take_screenshot. Sesudah "
-                        "gambarnya kamu terima, sebutkan apa yang benar-benar "
+                        "dulu.\nBuktikan sekarang: kalau ini aplikasi/"
+                        "halaman yang bisa dijepret, take_screenshot. Untuk "
+                        "alur web, jalankan lewat run_command (dev server + "
+                        "curl/log) dan pastikan tanpa error. Sesudah "
+                        "bukti-nya kamu terima, sebutkan apa yang benar-benar "
                         "kamu lihat dan bandingkan dengan yang diminta "
                         "pengguna.\nKalau memang tak ada yang bisa dilihat "
                         "(tak ada server/GUI), katakan itu terus terang di "
@@ -4050,7 +4125,7 @@ class Agent:
                                 on_tim([a.nama for a in bangun])
                         # Tandai bila kode BERUBAH (untuk validasi otomatis di
                         # akhir), dan catat bila validasi memang sudah dijalankan.
-                        if name in ("web_preview", "take_screenshot"):
+                        if name == "take_screenshot":
                             dilihat = True
                         if (name in _TOOL_MUTASI
                                 and not result.lstrip().startswith(

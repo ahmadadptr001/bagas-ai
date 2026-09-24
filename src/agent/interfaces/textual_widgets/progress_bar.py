@@ -70,7 +70,7 @@ class TurnProgressBar(Widget):
     DEFAULT_CSS = """
     TurnProgressBar {
         height: auto;
-        max-height: 3;
+        max-height: 2;
     }
     """
 

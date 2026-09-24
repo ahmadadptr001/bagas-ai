@@ -76,6 +76,68 @@ def variabel(theme_id: str | None = None) -> dict[str, str]:
     return hasil
 
 
+def _terang(hex_warna: str) -> bool:
+    """True bila hex = latar terang (luminance WCAG sederhana)."""
+    try:
+        h = str(hex_warna).lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 140
+    except Exception:  # noqa: BLE001 — hex rusak: anggap gelap (aman)
+        return False
+
+
+def latar_terang(theme_id: str | None = None) -> bool:
+    """True bila latar utama tema (gema_bg) terang — vslight dsb."""
+    if theme_id is not None:
+        src = tema.TEMA.get(theme_id, tema.TEMA.get("biru", {}))
+        bg = src.get("gema_bg", "#121212")
+    else:
+        bg = tema.p("gema_bg")
+    return _terang(bg)
+
+
+def markdown_styles(theme_id: str | None = None) -> dict[str, str]:
+    """Gaya Rich ``markdown.*`` untuk jawaban AI — paritas dengan CLI.
+
+    CLI memakai Theme yang sama (lihat ``cli._MD_THEME``): heading/list/
+    inline-code mengikuti palet zenitsu aktif, bukan warna default rich.
+    Textual me-render Markdown lewat ``app.console``; cukup suntik dict ini
+    ke console saat mount / ganti tema.
+
+    Latar inline-code mengikuti sisi terang/gelap tema: #3a2a1a (cokelat
+    pekat) di atas kanvas putih memberi kontras ~2:1 dan terlihat kotor —
+    tema terang memakai slate netral.
+    """
+    if theme_id is not None:
+        src = tema.TEMA.get(theme_id, tema.TEMA.get("biru", {}))
+        ambil = lambda k: src.get(k, "")  # noqa: E731
+        terang = latar_terang(theme_id)
+    else:
+        ambil = tema.p
+        terang = latar_terang()
+    bg_kode = "#eef1f5" if terang else "#3a2a1a"
+    return {
+        "markdown.h1": f"bold {ambil('aksen')}",
+        "markdown.h1.border": ambil("aksen"),
+        "markdown.h2": f"bold {ambil('aksen2')}",
+        "markdown.h3": f"bold {ambil('aksen_terang')}",
+        "markdown.h4": "bold #9fc93c" if not terang else "bold #3f701c",
+        "markdown.h5": f"bold {ambil('aksen_terang')}",
+        "markdown.h6": f"bold {ambil('aksen2')}",
+        "markdown.item.bullet": f"bold {ambil('aksen')}",
+        "markdown.item.number": f"bold {ambil('aksen2')}",
+        "markdown.code": f"{ambil('aksen_terang')} on {bg_kode}",
+        "markdown.link": f"{ambil('aksen2')} underline",
+        "markdown.link_url": f"dim {ambil('aksen_terang')}",
+        "markdown.block_quote": f"italic {ambil('aksen_terang')}",
+        "markdown.block_quote_border": ambil("tepi"),
+        "markdown.hr": ambil("tepi_redup"),
+        "markdown.strong": f"bold {ambil('teks')}",
+        "markdown.emph": f"italic {ambil('teks')}",
+        "markdown.text": ambil("teks"),
+    }
+
+
 def generate_css(theme_id: str | None = None) -> str:
     """Hasilkan CSS Textual yang memakai variabel ``$t-*``.
 
@@ -112,7 +174,8 @@ Screen {
     height: 1fr;
     background: $t-gema_bg;
     color: $t-teks;
-    padding: 0 2;
+    /* Longgar: napas atas/bawah antar blok pesan + sisi kiri/kanan. */
+    padding: 1 2;
     overflow-x: hidden;
     overflow-y: auto;
 }
@@ -151,7 +214,7 @@ Screen {
     width: 100%;
     height: auto;
     background: $t-gema_bg;
-    padding: 0 1;
+    padding: 1 1;
     margin-top: 1;
 }
 
@@ -172,11 +235,14 @@ Screen {
 #progress {
     width: 100%;
     height: auto;
-    max-height: 3;
+    /* Logo half-block = 2 baris teks; tanpa padding vertikal/margin
+       (dulu padding 1 + margin 1 + max-height 3 = ~4 baris kosong tiap
+       giliran — makan tinggi jawaban cuma untuk animasi menunggu). */
+    max-height: 2;
     background: $t-gema_bg;
     color: $t-aksen;
     padding: 0 1;
-    margin-top: 1;
+    margin-top: 0;
 }
 
 /* ── Strip antrean: DI AREA TERMINAL (bukan footer) ──────────────────── */
@@ -188,7 +254,7 @@ Screen {
     height: auto;
     max-height: 4;
     background: $t-gema_bg;
-    padding: 0 1;
+    padding: 1 1;
 }
 
 /* ── Kotak input ────────────────────────────────────────────────────── */
@@ -197,6 +263,9 @@ Screen {
     width: 100%;
     height: auto;
     background: $t-gema_bg;
+    /* Jarak antara riwayat/panel di atas dan kotak input. */
+    margin-top: 1;
+    padding-bottom: 1;
 }
 
 #input-row {
@@ -207,7 +276,8 @@ Screen {
     height: auto;
     background: $t-gema_bg;
     border: round $t-tepi;
-    padding: 0 1;
+    /* Napas dalam kotak: spasi vertikal + horizontal yang longgar. */
+    padding: 1 1;
 }
 
 #input-row.-sibuk {
@@ -246,20 +316,36 @@ Screen {
 /* diatur sepenuhnya dari sini — termasuk saat baris tersorot, yang      */
 /* dulu membuat teks menyatu dengan background sorotan.                  */
 
+#autocomplete-title {
+    display: none;
+    width: 100%;
+    height: 1;
+    /* left 3 = border(1)+padding-list(1)+padding-option(1): judul sejajar
+       tepi kiri TEKS opsi di bawahnya (dulu left 2, satu kolom nyasar). */
+    padding: 1 3 0 3;
+    color: $t-aksen;
+    text-style: bold;
+    background: $t-gema_bg;
+    overflow-x: hidden;
+}
+
 #autocomplete-list {
     display: none;
     width: 100%;
     height: auto;
-    max-height: 10;
+    max-height: 12;
     background: $t-menu_bg;
     color: $t-menu_teks;
     border: round $t-tepi_redup;
-    padding: 0 1;
+    padding: 1 1;
+    margin-top: 1;
     overflow-x: hidden;
     scrollbar-size-vertical: 1;
 }
 
 #autocomplete-list > .option-list--option {
+    /* vertical 0: tinggi baris = 1 baris teks (dulu 1+teks+1 = 3 baris
+       per opsi — picker jadi renggang dan max-height 12 cuma muat ~4). */
     padding: 0 1;
     background: transparent;
     color: $t-menu_teks;
@@ -268,6 +354,7 @@ Screen {
 #autocomplete-list > .option-list--option-highlighted {
     background: $t-menu_sorot;
     color: $t-menu_teks;
+    text-style: bold;
 }
 
 #autocomplete-list > .option-list--option-hover {
@@ -278,7 +365,8 @@ Screen {
 #autocomplete-hint {
     width: 100%;
     height: 1;
-    padding: 0 2;
+    /* Searah dengan title (left 3) supaya judul, daftar, hint satu garis. */
+    padding: 1 3;
     color: $t-menu_meta_teks;
     background: $t-gema_bg;
 }
@@ -371,13 +459,13 @@ Screen.-sempit #statusbar { padding-left: 3; }
 Screen.-normal #statusbar { padding-left: 3; }
 Screen.-sempit #sidebar-close, Screen.-normal #sidebar-close { display: block; }
 Screen.-sempit #plan { max-height: 5; }
-Screen.-sempit #autocomplete-list { max-height: 5; }
+Screen.-sempit #autocomplete-list { max-height: 6; }
 Screen.-sempit #autocomplete-hint { display: none; }
 
 Screen.-pendek #logo { display: none; }
 Screen.-pendek #footer { max-height: 60%; }
 Screen.-pendek #plan { max-height: 4; }
-Screen.-pendek #autocomplete-list { max-height: 4; }
+Screen.-pendek #autocomplete-list { max-height: 5; }
 Screen.-pendek #autocomplete-hint { display: none; }
 
 /* Kompatibilitas: kelas lama .compact masih dihormati. */

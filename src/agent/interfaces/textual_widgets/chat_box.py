@@ -115,6 +115,15 @@ class ChatInput(TextArea):
             node = node.parent
         return node  # type: ignore[return-value]
 
+    @property
+    def value(self) -> str:
+        """Isi kotak (kompatibilitas test/lama yang memakai Input.value)."""
+        return self.text
+
+    @value.setter
+    def value(self, teks: str) -> None:
+        self.load_text(teks or "")
+
     def on_key(self, event: events.Key) -> None:
         """Tangani tombol SEBELUM perilaku bawaan TextArea & binding global.
 
@@ -204,12 +213,21 @@ class ChatBox(Widget):
             self.media_path = media_path
             super().__init__()
 
+    class Picked(Message, namespace="chatbox"):
+        """Pilihan pada daftar picker di atas input (panah + Enter / klik)."""
+
+        def __init__(self, value: str, display: str = ""):
+            self.value = value
+            self.display = display or value
+            super().__init__()
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._input = ChatInput(
             placeholder="Ketik pesan, / untuk perintah…",
             id="chat-input",
         )
+        self._title = Static("", id="autocomplete-title")
         self._autocomplete = OptionList(id="autocomplete-list")
         self._hint = Static("", id="autocomplete-hint")
         self._prompt = Static("❯", id="input-prompt")
@@ -218,9 +236,20 @@ class ChatBox(Widget):
         self._open = False
         self._mention_mode = False
         self._mention_token = ""
+        # Mode prompt inline (ask_user / menu / konfirmasi tanpa modal):
+        # autocomplete slash dimatikan supaya jawaban bernomor tak terganggu.
+        self._prompt_mode = False
+        self._placeholder_normal = "Ketik pesan, / untuk perintah…"
+        # Picker pilihan (mode pilihan/confirm): daftar di ATAS input —
+        # navigasi panah, Enter = opsi tersorot, ketik = filter / nomor.
+        self._picker = False
+        self._picker_all: list[tuple[str, str]] = []
+        self._picker_view: list[tuple[str, str]] = []
+        self._picker_multi = False
 
     def compose(self):
-        # Urutan penting: dropdown DI ATAS baris input.
+        # Urutan penting: judul + dropdown DI ATAS baris input.
+        yield self._title
         yield self._autocomplete
         yield self._hint
         with Horizontal(id="input-row"):
@@ -231,6 +260,7 @@ class ChatBox(Widget):
         # RichLog/OptionList bisa merebut fokus dari input saat diklik.
         self._autocomplete.can_focus = False
         self._autocomplete.display = False
+        self._title.display = False
         self._hint.display = False
         self._prompt.update(Text("❯", style=f"bold {tema.p('aksen')}"))
         self._input.focus()
@@ -345,6 +375,30 @@ class ChatBox(Widget):
         sehingga setiap tombol yang sampai ke ChatBox melempar
         ``TypeError: object bool can't be used in 'await' expression``.
         """
+        if self._picker:
+            if key in ("down", "ctrl+n"):
+                self._picker_move(1)
+                return True
+            if key in ("up", "ctrl+p"):
+                self._picker_move(-1)
+                return True
+            if key == "pagedown":
+                self._picker_move(5)
+                return True
+            if key == "pageup":
+                self._picker_move(-5)
+                return True
+            if key == "escape":
+                self.close_picker()
+                self.post_message(self.Cancelled())
+                return True
+            if key == "tab":
+                self._accept_picker()
+                return True
+            # enter jatuh ke ChatInput -> kirim() (pilih highlight / nomor /
+            # teks bebas — lihat ChatBox.kirim).
+            return False
+
         if self._open:
             if key in ("down", "ctrl+n"):
                 self._move(1)
@@ -405,7 +459,24 @@ class ChatBox(Widget):
 
     def kirim(self) -> None:
         """Enter di kotak input — kirim teks (dipanggil ChatInput)."""
-        if self._open:
+        if self._picker:
+            teks = self._input.text.strip()
+            if not teks:
+                # Tanpa teks: opsi tersorot (gaya Claude Code / Codex).
+                self._accept_picker()
+                return
+            if teks.isdigit():
+                # Fallback nomor lama (test / kebiasaan ketik angka).
+                self.close_picker()
+                # lanjut kirim teks di bawah
+            elif self._picker_sorot_valid():
+                # Sedang filter lalu Enter -> ambil sorotan.
+                self._accept_picker()
+                return
+            else:
+                # Teks bebas yang tak cocok opsi mana pun.
+                self.close_picker()
+        elif self._open:
             self._accept()
             return
         text = self._input.text.strip()
@@ -418,6 +489,10 @@ class ChatBox(Widget):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Teks berubah — segarkan tawaran autocomplete & tinggi kotak."""
         event.stop()
+        if self._picker:
+            self._filter_picker(self._input.text)
+            self._sesuaikan_tinggi()
+            return
         self._refresh_matches(self._input.text)
         self._sesuaikan_tinggi()
 
@@ -425,6 +500,10 @@ class ChatBox(Widget):
             self, event: OptionList.OptionSelected) -> None:
         """Klik pada salah satu tawaran."""
         event.stop()
+        if self._picker:
+            self._autocomplete.highlighted = event.option_index
+            self._accept_picker()
+            return
         self._autocomplete.highlighted = event.option_index
         self._accept()
 
@@ -448,6 +527,11 @@ class ChatBox(Widget):
             return
         self._mention_mode = False
         self._mention_token = ""
+        if self._picker:
+            return
+        if self._prompt_mode:
+            self._close()
+            return
         if not text.startswith("/"):
             self._close()
             return
@@ -510,14 +594,21 @@ class ChatBox(Widget):
             self._autocomplete.styles.position = "relative"
         self._hint.update(Text(
             "↑↓ pilih · tab lengkapi · esc tutup",
-            style=f"dim {tema.p('redup')}",
+            style="dim",
         ))
         self._hint.display = True
         self._open = True
 
     def _close(self) -> None:
-        """Tutup dropdown."""
+        """Tutup dropdown slash (bukan picker)."""
         if not self._open and not self._autocomplete.display:
+            return
+        if self._picker:
+            # Daftar sedang dipakai picker — jangan disembunyikan di sini.
+            self._open = False
+            self._mention_mode = False
+            self._mention_token = ""
+            self._matches = []
             return
         self._open = False
         self._mention_mode = False
@@ -569,6 +660,152 @@ class ChatBox(Widget):
         baris = text.split("\n")
         self._input.move_cursor((len(baris) - 1, len(baris[-1])))
 
+    # --- Picker pilihan (di atas input, tanpa modal) --------------------
+
+    def open_picker(self, items: list[tuple[str, str]], *,
+                    title: str = "", hint: str = "",
+                    multi: bool = False) -> None:
+        """Buka daftar pilihan DI ATAS kotak input.
+
+        ``items``: ``(tampil, nilai)`` — ``nilai == ""`` = pemisah kategori
+        (tampil beda gaya, tak bisa disorot). Navigasi panah, Enter =
+        opsi tersorot, ketik = filter (nomor murni tetap jalur lama).
+        """
+        self._close()
+        self._picker = True
+        self._picker_all = list(items)
+        self._picker_multi = multi
+        self._set_value("")
+        title = (title or "").strip()
+        if len(title) > 72:
+            title = title[:71] + "…"
+        if title:
+            # Warna DARI CSS (#autocomplete-title) — jangan dibakar di Text:
+            # style berwarna di Text menimpa color CSS, lalu basi saat ganti
+            # tema (refresh_theme tak menggambar ulang judul lama).
+            self._title.update(Text(
+                title,
+                style="bold",
+                no_wrap=True, overflow="ellipsis",
+            ))
+            self._title.display = True
+        else:
+            self._title.update("")
+            self._title.display = False
+        self._filter_picker("")
+        # Hint sama: color dari CSS (#autocomplete-hint / menu_meta_teks).
+        self._hint.update(Text(
+            hint or "↑↓ pilih · enter konfirmasi · ketik filter · esc batal",
+            style="dim",
+        ))
+        self._hint.display = True
+        try:
+            self.focus()
+        except Exception:  # noqa: BLE001 — belum ter-mount
+            pass
+
+    def close_picker(self) -> None:
+        """Tutup daftar picker (bila terbuka)."""
+        if not self._picker:
+            # pastikan sisa DOM bersih walau flag sudah False
+            if not self._open:
+                self._autocomplete.display = False
+                self._hint.display = False
+                self._title.display = False
+            return
+        self._picker = False
+        self._picker_all = []
+        self._picker_view = []
+        self._picker_multi = False
+        self._title.display = False
+        self._title.update("")
+        if not self._open:
+            self._autocomplete.display = False
+            self._hint.display = False
+            try:
+                self._autocomplete.clear_options()
+            except Exception:  # noqa: BLE001 — saat unmount
+                pass
+
+    @property
+    def picker_open(self) -> bool:
+        return self._picker
+
+    def _filter_picker(self, teks: str) -> None:
+        """Render ulang opsi sesuai filter ``teks`` (kosong = semua)."""
+        q = (teks or "").strip().casefold()
+        if not q:
+            view = list(self._picker_all)
+        else:
+            view = [(d, v) for d, v in self._picker_all
+                    if v and (q in d.casefold() or q in v.casefold())]
+        self._picker_view = view
+        self._autocomplete.clear_options()
+        for tampil, nilai in view:
+            if not nilai:
+                # Pemisah kategori: italic TANPA warna bakuan — color dari
+                # CSS (.option-list--option / highlight). Warna bakuan
+                # menimpa color baris tersorot dan membuat teks menyatu
+                # dengan background sorotan.
+                row = Text(tampil, no_wrap=True, overflow="ellipsis",
+                           style="italic dim")
+            else:
+                row = Text(tampil, no_wrap=True, overflow="ellipsis")
+            self._autocomplete.add_option(Option(row))
+        self._autocomplete.highlighted = self._idx_sorot_awal()
+        self._autocomplete.display = True
+        self._autocomplete.styles.position = "relative"
+
+    def _idx_sorot_awal(self) -> int | None:
+        for i, (_d, v) in enumerate(self._picker_view):
+            if v:
+                return i
+        return None if not self._picker_view else 0
+
+    def _picker_sorot_valid(self) -> bool:
+        idx = self._autocomplete.highlighted
+        if idx is None or idx < 0 or idx >= len(self._picker_view):
+            return False
+        return bool(self._picker_view[idx][1])
+
+    def _picker_move(self, delta: int) -> None:
+        """Geser sorotan, lompati pemisah (nilai kosong)."""
+        n = len(self._picker_view)
+        if n == 0:
+            return
+        cur = self._autocomplete.highlighted
+        cur = 0 if cur is None else max(0, min(cur, n - 1))
+        idx = cur
+        for _ in range(n):
+            idx = (idx + delta) % n
+            if self._picker_view[idx][1]:
+                self._autocomplete.highlighted = idx
+                return
+
+    def _accept_picker(self) -> None:
+        """Terima opsi tersorot -> pesan Picked."""
+        if not self._picker:
+            return
+        idx = self._autocomplete.highlighted
+        if idx is None or idx < 0 or idx >= len(self._picker_view):
+            return
+        tampil, nilai = self._picker_view[idx]
+        if not nilai:
+            self._picker_move(1)
+            return
+        if self._picker_multi:
+            # Multi: toggle centang (siap untuk mode multi; belum dipakai app).
+            self._toggle_multi(idx)
+            return
+        self.close_picker()
+        self.post_message(self.Picked(nilai, tampil))
+
+    def _toggle_multi(self, idx: int) -> None:
+        """Toggle baris multi (placeholder sampai mode multi pakai picker)."""
+        # Saat ini app masih memakai ketik "1,3" untuk multi — cabang ini
+        # disiapkan agar penambahan centang tak mengubah kontrak pesan.
+        _ = idx
+
     # --- API publik ----------------------------------------------------
 
     def set_busy(self, busy: bool) -> None:
@@ -581,9 +818,32 @@ class ChatBox(Widget):
         except Exception:  # noqa: BLE001 — belum ter-mount
             pass
 
+    def set_prompt_mode(self, placeholder: str | None) -> None:
+        """Aktif/nonaktifkan mode jawaban inline (prompt tanpa modal).
+
+        ``placeholder=None`` mengembalikan kotak ke keadaan normal
+        (perintah slash aktif lagi). Selama mode aktif, autocomplete
+        slash dimatikan — teks yang dikirim adalah jawaban, bukan perintah.
+        Picker ditutup bersama transisi ini (app membuka ulang bila perlu).
+        """
+        self._prompt_mode = placeholder is not None
+        self._input.placeholder = placeholder or self._placeholder_normal
+        self.close_picker()
+        if self._prompt_mode:
+            self._close()
+        try:
+            self.focus()
+        except Exception:  # noqa: BLE001 — belum ter-mount
+            pass
+
     def refresh_theme(self) -> None:
         """Terapkan warna tema baru pada bagian yang dirender manual."""
         self._prompt.update(Text("❯", style=f"bold {tema.p('aksen')}"))
+        if self._picker:
+            # Judul/hint memakai color CSS (tanpa bakuan di Text) — cukup
+            # render ulang opsi agar pemisah dan baris ikut tema baru.
+            self._filter_picker(self._input.text)
+            return
         if self._open and self._matches:
             self._open_with(self._matches)
 
@@ -592,6 +852,7 @@ class ChatBox(Widget):
 
     def clear(self) -> None:
         self._set_value("")
+        self.close_picker()
         self._close()
 
     @property
