@@ -1,15 +1,15 @@
-"""Klien endpoint API OpenAI-compatible (NVIDIA, OpenRouter) + jalur CLI
-OpenCode, dengan penanganan error tanpa pengiriman ulang otomatis.
+"""Klien jalur CLI OpenCode + sisa endpoint API OpenAI-compatible.
 
-Modul ini melayani jalur model bagas-ai yang berbasis API: model `nvidia/*`
-(integrate.api.nvidia.com), `openrouter/*` (openrouter.ai/api/v1, kunci
-OPENROUTER_API_KEY), dan `opencode/*` (JALUR UTAMA: subprocess CLI
-`opencode run --format json` — butuh binary di PATH, TANPA API key;
-OPENCODE_API_KEY hanya dipakai cadangan HTTP bila CLI absen). Jalur
-lainnya (model `web/*`) tak menyentuh berkas ini
-sama sekali — ia lewat agent/connectors + Agent._run_connector, dan padanan
-penanganan "sementara" di sana berbentuk lain sesuai medianya (WebBusyError
-untuk server penuh, WebLimitError untuk kuota situs habis).
+Modul ini melayani jalur model bagas-ai yang bukan browser: model
+`opencode/*` (JALUR UTAMA: subprocess CLI `opencode run --format json
+--thinking` — butuh binary di PATH, TANPA API key; OPENCODE_API_KEY hanya
+dipakai cadangan HTTP bila CLI absen). Sisa kode klien OpenAI-compatible
+(nvidia/openrouter) dipertahankan sebagai jaring pengaman lama, tetapi model
+keduanya sudah dihapus dari katalog. Jalur lainnya (model `web/*`) tak
+menyentuh berkas ini sama sekali — ia lewat agent/connectors +
+Agent._run_connector, dan padanan penanganan "sementara" di sana berbentuk
+lain sesuai medianya (WebBusyError untuk server penuh, WebLimitError untuk
+kuota situs habis).
 
 Permintaan non-busy dikirim sekali tanpa retry. Kondisi sibuk/overload
 (503/529) di-retry sampai 10 kali berturut-turut dengan backoff; satu
@@ -566,8 +566,9 @@ def _base_kwargs(
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
-        # Bawaannya NVIDIA_DEFAULT_MODEL, BUKAN config.CHAT_MODEL: CHAT_MODEL
-        # berisi ID internal bagas-ai ("nvidia/nemotron") yang tak dikenal
+        # Bawaannya NVIDIA_DEFAULT_MODEL (jalur legacy), BUKAN CHAT_MODEL:
+        # CHAT_MODEL berisi ID internal bagas-ai ("opencode/big-pickle") yang
+        # tak dikenal endpoint OpenAI-compatible
         # server. Pemanggil normal selalu mengirim ModelSpec.api_model.
         "model": model or config.NVIDIA_DEFAULT_MODEL,
         "messages": messages,
@@ -713,6 +714,9 @@ def _stream_opencode_cli(
     di sana dengan `--auto`), jadi fungsi ini:
       * mengirim riwayat sebagai prompt stdin (argv Windows ~32k — stdin aman);
       * menyiarkan potongan teks dari event `text` via on_content;
+      * menyiarkan potongan pikiran dari event `reasoning` via on_reasoning
+        (butuh flag `--thinking`; tanpa flag itu CLI tak memancarkan event
+        reasoning sama sekali — TERUKUR 2026-10-31);
       * menyalakan on_tool_pending saat event `tool_use` (umpan balik live);
       * menutup dengan teks akhir + tool_calls KOSONG — loop tool bagas-ai
         selesai satu giliran (hasil tool sudah diproses di dalam CLI).
@@ -729,7 +733,11 @@ def _stream_opencode_cli(
     if not prompt:
         raise EmptyResponseError("Prompt kosong untuk CLI OpenCode.")
     api_model = (model or "").strip() or "opencode/big-pickle"
-    cmd = [exe, "run", "-m", api_model, "--format", "json", "--auto"]
+    # --thinking WAJIB: tanpa flag ini `--format json` tidak memancarkan
+    # event reasoning sama sekali, sehingga fitur UI/UX "pikiran" (ThinkingBlock
+    # di TUI, blok 💭 di CLI) tak pernah terisi untuk model opencode/*.
+    cmd = [exe, "run", "-m", api_model, "--format", "json", "--auto",
+           "--thinking"]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         proc = subprocess.Popen(  # noqa: S603 — argumen di-build lokal, bukan shell

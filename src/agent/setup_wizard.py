@@ -2,20 +2,18 @@
 
 Dipanggil lewat `bagas-ai login` (atau `bagas-ai setup`).
 
-Sejak 2026-09-23 ada SATU kredensial yang SANGAT DISARANKAN, bukan lagi
-wajib-mutlak: seluruh model (web) masih ditunda, tapi model `opencode/*`
-kini jalan lewat CLI `opencode run` TANPA API key (cukup binary `opencode`
-di PATH — npm i -g opencode-ai). NVIDIA_API_KEY / OPENROUTER_API_KEY tetap
-dibutuhkan bila pengguna ingin jalur nvidia/* atau openrouter/*, dan
-OPENCODE_API_KEY hanya relevan sebagai cadangan HTTP bila CLI absen.
+Model yang tersedia sekarang HANYA `opencode/*` lewat CLI `opencode run` —
+GRATIS dan TANPA API key (cukup binary `opencode` di PATH; pasang dengan
+`npm i -g opencode-ai`). NVIDIA_API_KEY dan OPENROUTER_API_KEY sudah tidak
+ditanyakan karena model nvidia/* dan openrouter/* dihapus dari katalog.
+OPENCODE_API_KEY juga tak ditanyakan: jalur utama lewat CLI; bila diisi
+manual atau lewat `opencode auth login`, config membacanya sendiri
+(config._baca_key_opencode).
 
-Melewatinya TIDAK menggagalkan pemasangan — wizard tak pernah memaksa,
-ia hanya berhenti menawarkan model yang pasti ditolak. Kredensial yang SUDAH
-terisi di .env dilewati otomatis; menggantinya lewat pertanyaan "Ganti
-kredensial". Wizard dibuka DISCLAIMER yang wajib disetujui sebelum apa pun
-ditanya atau disimpan. (OPENCODE_API_KEY tak ditanyakan: jalur utama
-opencode/* lewat CLI tanpa key; bila kelak diisi manual atau lewat
-`opencode auth login`, config membacanya sendiri — config._baca_key_opencode.)
+Melewati kredensial TIDAK menggagalkan pemasangan — wizard tak pernah
+memaksa. Kredensial yang SUDAH terisi di .env dilewati otomatis;
+menggantinya lewat pertanyaan "Ganti kredensial". Wizard dibuka DISCLAIMER
+yang wajib disetujui sebelum apa pun ditanya atau disimpan.
 """
 from __future__ import annotations
 
@@ -33,8 +31,6 @@ from . import config
 # Urutan penulisan key di file .env (agar rapi & mudah dibaca manusia).
 _ENV_ORDER = [
     "CHAT_MODEL",
-    "NVIDIA_API_KEY",
-    "OPENROUTER_API_KEY",
     "OPENCODE_API_KEY",
     "CONNECTOR_BROWSER_CHANNEL",
     "VOICE_JANGKAUAN",
@@ -48,16 +44,6 @@ _ENV_ORDER = [
 # pernah muncul di berkasnya sama saja dengan setelan yang tak ada: pengguna
 # tak bisa mengganti apa yang tak ia ketahui keberadaannya.
 _ENV_KOMENTAR = {
-    "NVIDIA_API_KEY": [
-        "# Kunci untuk model (API) nvidia/* - OPSIONAL. Tanpa ini bagas-ai",
-        "# tetap jalan penuh dengan model (web) lewat browser.",
-        "# Key gratis: https://build.nvidia.com",
-    ],
-    "OPENROUTER_API_KEY": [
-        "# Kunci untuk model (API) openrouter/* (model :free, gratis dengan "
-        "batas kuota) - OPSIONAL.",
-        "# Ambil key: https://openrouter.ai/keys (awalan sk-or-...).",
-    ],
     "OPENCODE_API_KEY": [
         "# OPSIONAL — model opencode/* JALAN TANPA key ini lewat CLI",
         "# `opencode run` (binary di PATH; npm i -g opencode-ai).",
@@ -80,11 +66,10 @@ _ENV_KOMENTAR = {
 }
 
 _DEFAULTS = {
-    # Ikut models: bawaan TIDAK menunjuk model (web) yang ditunda. Bawaan
-    # jalur API NVIDIA — .env pemasangan baru lebih baik menanyakan
-    # NVIDIA_API_KEY-nya (model opencode/* tetap jalan tanpa key lewat CLI
-    # bila binary `opencode` ada di PATH).
-    "CHAT_MODEL": "nvidia/nemotron",
+    # Ikut models: bawaan TIDAK menunjuk model (web) yang ditunda. Model
+    # opencode/* jalan tanpa API key lewat CLI selama binary `opencode` ada
+    # di PATH.
+    "CHAT_MODEL": "opencode/big-pickle",
     # Ditulis TEGAS ke .env, bukan dibiarkan mengandalkan bawaan di config.py:
     # bawaannya pernah berubah (chrome -> brave) lewat pembaruan, dan pemasangan
     # yang tak menuliskannya ikut berpindah browser tanpa pernah diberitahu.
@@ -111,9 +96,8 @@ def _read_env(path: Path) -> dict[str, str]:
 def _write_env(path: Path, data: dict[str, str]) -> None:
     lines = [
         "# Konfigurasi bagas-ai — dibuat oleh 'bagas-ai login'.",
-        "# Yang praktis wajib cuma SATU: NVIDIA_API_KEY atau OPENROUTER_API_KEY.",
-        "# Sejak seluruh model (web) ditunda, jalur (API) inilah satu-satunya yang",
-        "# bisa dipilih — tanpa keynya, tiap model ditolak dengan keterangan.",
+        "# Model opencode/* GRATIS lewat CLI `opencode run`; cukup binary",
+        "# `opencode` di PATH (npm i -g opencode-ai). Tidak perlu API key.",
         "# TELEGRAM_BOT_TOKEN hanya perlu bila memakai bot. Berkas ini boleh",
         "# disunting tangan.",
         "",
@@ -128,70 +112,6 @@ def _write_env(path: Path, data: dict[str, str]) -> None:
             lines.append(f"{k}={v}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def validate_nvidia_key(key: str) -> tuple[bool, str]:
-    """Cek NVIDIA_API_KEY dengan SATU permintaan chat sungguhan (max_tokens=1).
-
-    SENGAJA bukan GET /v1/models, walau itu lebih murah dan lebih jelas
-    maksudnya. TERUKUR 2026-08-23 di integrate.api.nvidia.com: /v1/models
-    menjawab HTTP 200 dengan 102 model MESKI Authorization-nya key ngawur
-    ("nvapi-salah"), jadi memakainya berarti setiap key palsu dinyatakan
-    "valid" lalu gagal nanti di tengah giliran pengguna. Endpoint yang
-    benar-benar memeriksa kredensial adalah chat/completions: key benar -> 200
-    (±0,8 detik), key ngawur -> 403 "Authorization failed" (±0,5 detik).
-
-    Modelnya muse-glimmer, yang paling cepat memulai dari ketiganya; deepseek
-    butuh ratusan detik sampai token pertama, terlalu lama untuk sekadar
-    memeriksa kunci.
-    """
-    try:
-        r = requests.post(
-            f"{config.NVIDIA_BASE_URL.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {key}",
-                     "Content-Type": "application/json"},
-            json={"model": "meta/muse-glimmer-30b",
-                  "messages": [{"role": "user", "content": "hi"}],
-                  "max_tokens": 1, "stream": False},
-            timeout=60,
-        )
-    except requests.RequestException as e:
-        return False, f"koneksi gagal: {str(e)[:80]}"
-    if r.status_code == 200:
-        return True, "key valid"
-    if r.status_code in (401, 403):
-        return False, "key ditolak (Authorization failed)"
-    if r.status_code == 429:
-        # Ditolak karena RAMAI, bukan karena salah. Menyatakannya tidak valid
-        # akan menyuruh pengguna mengganti key yang sebenarnya benar.
-        return True, "key diterima (endpoint sedang penuh, kuota per menit)"
-    detail = ""
-    try:
-        detail = str(r.json().get("detail") or r.json().get("title") or "")[:80]
-    except ValueError:
-        detail = r.text[:80]
-    return False, f"HTTP {r.status_code} {detail}".strip()
-
-
-def validate_openrouter_key(key: str) -> tuple[bool, str]:
-    """Validasi kredensial tanpa inference berbayar atau ketergantungan model."""
-    try:
-        r = requests.get(
-            f"{config.OPENROUTER_BASE_URL.rstrip('/')}/key",
-            headers={"Authorization": f"Bearer {key}"}, timeout=20,
-        )
-    except requests.RequestException:
-        return False, "koneksi gagal; key belum dapat diverifikasi"
-    if r.status_code == 200:
-        try:
-            if isinstance(r.json().get("data"), dict):
-                return True, "key valid - model :free tersedia sesuai kuota akun"
-        except ValueError:
-            pass
-        return False, "respons validasi tidak dikenali"
-    if r.status_code in (401, 403):
-        return False, "key ditolak; periksa key OpenRouter"
-    return False, f"HTTP {r.status_code}; key belum dapat diverifikasi, coba lagi nanti"
 
 
 def validate_telegram(token: str) -> tuple[bool, str]:
@@ -246,17 +166,9 @@ _DISKLAIMER = (
 )
 
 # Kredensial yang ditangani wizard: nama env -> validator + prompt + info.
+# NVIDIA/OpenRouter sengaja tidak ada: model keduanya sudah dihapus dari
+# katalog, jadi menanyakan key-nya hanya menjanjikan fitur yang tak ada.
 _KREDENSIAL = {
-    "NVIDIA_API_KEY": {
-        "validator": validate_nvidia_key,
-        "prompt": "Tempel NVIDIA_API_KEY:",
-        "info": "Key gratis: https://build.nvidia.com",
-    },
-    "OPENROUTER_API_KEY": {
-        "validator": validate_openrouter_key,
-        "prompt": "Tempel OPENROUTER_API_KEY:",
-        "info": "Buat key: https://openrouter.ai/keys (awalan sk-or-...)",
-    },
     "TELEGRAM_BOT_TOKEN": {
         "validator": validate_telegram,
         "prompt": "Tempel token bot Telegram:",
@@ -268,15 +180,6 @@ _KREDENSIAL = {
 # (lihat docstring). Key tetap dihormati bila diisi manual di .env / lewat
 # `opencode auth login` — dipakai cadangan HTTP bila binary `opencode`
 # hilang dari PATH.
-
-# Dua kredensial yang menentukan ADA-TIDAKNYA model ber-key: jalur
-# (API) nvidia/* & openrouter/* butuh keduanya selama model (web) ditunda.
-# Model opencode/* TIDAK masuk daftar ini — ia jalan tanpa key lewat CLI
-# (bila binary `opencode` ada di PATH). Dipakai hanya untuk MEMILIH KALIMAT
-# pertanyaan — keduanya tetap boleh dilewati, sebab memasang tanpa key masih
-# sah; yang salah cuma menyebutnya "opsional" lalu membiarkan pengguna
-# menemukan sendiri bahwa /model menolak model ber-key tanpa kunci.
-_KEY_MODEL = ("NVIDIA_API_KEY", "OPENROUTER_API_KEY")
 
 
 def _tanya_ya_tidak(pesan: str, bawaan: bool = False) -> bool:
@@ -346,9 +249,9 @@ def run(console: Console | None = None) -> bool:
     yang SUDAH ADA di .env DILEWATI (tidak ditanya ulang); menggantinya tetap
     bisa lewat pertanyaan "Ganti kredensial". Tak ada pertanyaan yang MEMAKSA:
     menolak/menlewati semuanya tetap menghasilkan pemasangan yang sah, dan
-    menolak disclaimer membatalkan wizard tanpa menulis apa pun. Bedanya
-    sekarang, melewati key model berarti tak ada satu pun model yang bisa
-    dipilih — dan itu diberitahukan di akhir, bukan dibiarkan ditemukan sendiri.
+    menolak disclaimer membatalkan wizard tanpa menulis apa pun. Satu-satunya
+    syarat model adalah binary `opencode` di PATH — dan bila ia absen, itu
+    diberitahukan di akhir, bukan dibiarkan ditemukan sendiri.
     """
     console = console or Console()
     env = _read_env(config.ENV_FILE)
@@ -359,11 +262,11 @@ def run(console: Console | None = None) -> bool:
     title.append("  ·  setup", style="dim")
     console.print(Panel(title, border_style="magenta", padding=(0, 2)))
     console.print(
-        "  [dim]Yang praktis wajib:[/dim] [bold]NVIDIA_API_KEY[/bold] "
-        "[dim]atau[/dim] [bold]OPENROUTER_API_KEY[/bold]\n"
-        "  [dim]— seluruh model (web) sedang ditunda, jadi jalur (API) itu\n"
-        "  satu-satunya yang bisa dipilih sekarang. Key NVIDIA gratis di[/dim]\n"
-        "  [bold cyan]https://build.nvidia.com[/bold cyan][dim].[/dim]\n"
+        "  [dim]Yang praktis wajib: binary[/dim] [bold]opencode[/bold] "
+        "[dim]di PATH.\n"
+        "  Model opencode/* gratis & tanpa API key — pasang dengan[/dim]\n"
+        "  [bold cyan]npm i -g opencode-ai[/bold cyan][dim].\n"
+        "  Seluruh model (web) sedang ditunda.[/dim]\n"
     )
 
     # Installer sudah meminta persetujuan sebelum memasang apa pun dan menaruh
@@ -401,14 +304,7 @@ def run(console: Console | None = None) -> bool:
     console.print("")
 
     for nama in belum:
-        # Dua key model TIDAK dilabeli "(opsional)". Bukan karena wizard
-        # memaksa — ia tetap boleh dijawab tidak — tapi karena sejak seluruh
-        # model (web) ditunda, melewati KEDUANYA berarti tak ada satu pun model
-        # yang bisa dipilih. Menuliskannya "opsional" membuat pengguna baru
-        # melewatinya dengan tenang lalu menemukan /model yang menolak semua.
-        label = ("(salah satu dari dua ini harus ada)"
-                 if nama in _KEY_MODEL else "(opsional)")
-        if _tanya_ya_tidak(f"Isi {nama} sekarang? {label}"):
+        if _tanya_ya_tidak(f"Isi {nama} sekarang? (opsional)"):
             _isi_kredensial(console, env, nama)
 
     # --- Fitur ganti token yang sudah ada -----------------------------------
@@ -431,10 +327,6 @@ def run(console: Console | None = None) -> bool:
         if pilih:
             _isi_kredensial(console, env, pilih)
 
-    # Instalasi OpenRouter saja harus langsung memilih provider yang terisi.
-    if env.get("OPENROUTER_API_KEY") and not env.get("NVIDIA_API_KEY"):
-        if not env.get("CHAT_MODEL", "").startswith("openrouter/"):
-            env["CHAT_MODEL"] = "openrouter/or-nemotron-ultra"
     # --- Simpan ---
     _write_env(config.ENV_FILE, env)
     try:
@@ -450,32 +342,15 @@ def run(console: Console | None = None) -> bool:
         return False
     console.print(f"  [green]✔ Konfigurasi disimpan:[/green] [dim]{config.ENV_FILE}[/dim]")
     # Diperingatkan SETELAH simpan, bukan sebagai penghalang: pemasangan tetap
-    # sah. Tanpa NVIDIA/OPENROUTER key, model ber-key memang tak bisa dipilih —
-    # TAPI model opencode/* masih jalan lewat CLI `opencode run` bila binary
-    # `opencode` ada di PATH, jadi peringatan "belum ada model" hanya untuk
-    # keadaan CLI juga absen.
-    if not (env.get("NVIDIA_API_KEY") or env.get("OPENROUTER_API_KEY")):
-        if config.opencode_cli_tersedia():
-            console.print(
-                "  [yellow]Catatan:[/yellow] NVIDIA_API_KEY & OPENROUTER_API_KEY "
-                "sama-sama kosong,\n"
-                "  jadi model nvidia/* & openrouter/* belum bisa dipilih — "
-                "isi lewat [bold cyan]bagas-ai login[/bold cyan]\n"
-                "  (gratis di https://build.nvidia.com / "
-                "https://openrouter.ai/keys). Model opencode/* tetap jalan "
-                "lewat CLI."
-            )
-        else:
-            console.print(
-                "  [yellow]Catatan:[/yellow] NVIDIA_API_KEY dan OPENROUTER_API_KEY "
-                "sama-sama kosong,\n"
-                "  dan binary `opencode` tak ada di PATH, jadi BELUM ADA model "
-                "yang bisa dipilih —\n"
-                "  jalankan [bold cyan]bagas-ai login[/bold cyan] lagi untuk "
-                "mengisinya\n"
-                "  (gratis di https://build.nvidia.com), atau pasang CLI "
-                "[cyan]npm i -g opencode-ai[/cyan]."
-            )
+    # sah. Tanpa binary `opencode`, belum ada satu pun model yang bisa dipilih.
+    if not config.opencode_cli_tersedia():
+        console.print(
+            "  [yellow]Catatan:[/yellow] binary `opencode` tak ada di PATH, "
+            "jadi BELUM ADA model\n"
+            "  yang bisa dipilih. Pasang CLI dengan "
+            "[cyan]npm i -g opencode-ai[/cyan],\n"
+            "  lalu jalankan [bold cyan]bagas-ai login[/bold cyan] lagi."
+        )
     console.print(
         "\n  [bold]Selesai![/bold] Ketik [bold cyan]bagas-ai[/bold cyan] untuk mulai chat"
         " ·  [bold cyan]bagas-ai telegram[/bold cyan] untuk bot."

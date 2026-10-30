@@ -241,10 +241,14 @@ try:
     jalankan("gerbang", hasil is spec_oc, "_pastikan_aktif meloloskan opencode")
 except Exception as e:
     jalankan("gerbang", False, f"opencode ditolak padahal gratis: {e}")
-# model yang hilang dari CLI (hy3/mimo-v2.5) harus ditunda, bukan aktif
-for mati in ("hy3-free", "mimo-v2.5-free"):
-    sp = models.cari(mati)
-    jalankan("sinkron", sp.ditunda, f"{mati} ditunda (tak ada di CLI)")
+# TIDAK ADA model opencode yang boleh ditunda — termasuk entri statis yang
+# belum muncul di `opencode models` (permintaan pengguna 2026-10-31).
+for alias in ("hy3-free", "mimo-v2.5-free"):
+    sp = models.cari(alias)
+    jalankan("sinkron", sp.aktif, f"{alias} tetap aktif walau tak ada di CLI")
+jalankan("sinkron", all(
+    s.aktif for s in models.MODELS.values() if s.provider == "opencode"),
+    "seluruh model opencode aktif (tak ada yang ditunda)")
 # entri opencode hidup harus di katalog dan ber-label CLI
 for hidup in oc_aktif[:3]:
     jalankan("label", "CLI" in models.MODELS[hidup].label

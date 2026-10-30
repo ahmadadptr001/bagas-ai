@@ -66,10 +66,10 @@ bagas-ai adalah agent AI yang atas permintaanmu dapat:
   - membaca/menulis berkas di folder kerja,
   - mengakses internet (web & API model).
 
-Percakapan dan konteks dikirim ke layanan model pilihanmu (situs web-AI
-atau API NVIDIA/OpenRouter/OpenCode Zen). API key yang ditempel di wizard
-disimpan LOKAL di ~/.bagasai/.env dan hanya dikirim ke penyedianya saat
-autentikasi.
+Percakapan dan konteks dikirim ke layanan model pilihanmu (CLI OpenCode;
+model web sedang ditunda). Kredensial yang diisi di wizard (mis. token
+Telegram) disimpan LOKAL di ~/.bagasai/.env dan hanya dipakai untuk layanan
+terkait.
 
 Seluruh risiko pemakaian menjadi tanggungan pengguna. Periksa setiap
 perintah/berkas yang kamu setujui — bagas-ai bisa keliru."""

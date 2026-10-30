@@ -62,22 +62,21 @@ def _get_bool(name: str, default: bool) -> bool:
 
 
 # --- Model ---
-# bagas-ai mendukung EMPAT jalur model:
-#  1. Browser-based (web/...) — login sekali lewat Chrome, kredensial milik sendiri
-#  2. API NVIDIA (nvidia/...) — pakai NVIDIA_API_KEY ke integrate.api.nvidia.com/v1
-#  3. API OpenRouter (openrouter/...) — pakai OPENROUTER_API_KEY ke openrouter.ai/api/v1
-#  4. CLI OpenCode (opencode/...) — GRATIS lewat `opencode run` (butuh binary
-#     `opencode` di PATH; OPENCODE_API_KEY tidak disyaratkan — models.py)
+# bagas-ai mendukung DUA jalur model:
+#  1. Browser-based (web/...) — login sekali lewat Chrome, kredensial milik
+#     sendiri. Seluruh entrinya sedang DITUNDA (models._DITUNDA).
+#  2. CLI OpenCode (opencode/...) — GRATIS lewat `opencode run` (butuh binary
+#     `opencode` di PATH; OPENCODE_API_KEY tidak disyaratkan — models.py).
 #
-# Default: nvidia/nemotron (API). SELURUH model (web) sedang DITUNDA
-# (models._DITUNDA), jadi bawaan yang menunjuk ke sana berarti tiap sesi baru
-# dimulai pada model yang pengguna sendiri tak boleh memilihnya — dan
-# spec_for_id diam-diam memetakannya ke model lain. Pilih lewat /model;
-# pilihan terakhir otomatis tersimpan.
-# Konfigurasi NVIDIA API (opsional; hanya untuk model nvidia/*):
+# Model API NVIDIA dan OpenRouter sudah DIHAPUS dari katalog. Variabel di bawah
+# hanya dipertahankan sebagai jaring pengaman untuk sisa kode penyedia di
+# llm.py; jangan menganggapnya sebagai jalur yang didukung.
+#
+# Default: opencode/big-pickle (CLI, tanpa API key). Bawaan tidak boleh
+# menunjuk model yang ditunda/hilang, sebab spec_for_id akan memetakannya
+# diam-diam ke model lain. Pilih lewat /model; pilihan terakhir tersimpan.
 NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_BASE_URL: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
-# Konfigurasi OpenRouter API (opsional; hanya untuk model openrouter/*):
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL: str = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
@@ -136,8 +135,8 @@ def _baca_key_opencode() -> str:
 
 if not OPENCODE_API_KEY:
     OPENCODE_API_KEY = _baca_key_opencode()
-# Model default bila memakai jalur NVIDIA (hanya berlaku saat model nvidia/*
-# dipilih tanpa menyebut api_model-nya -- praktis cuma jaring pengaman).
+# Model default jalur HTTP lama (jaring pengaman bila api_model kosong).
+# Katalog nvidia/* sudah dihapus; nilai ini tak dipakai jalur CLI opencode.
 #
 # SENGAJA nemotron, bukan deepseek. TERUKUR 2026-08-23: deepseek-v4-flash butuh
 # 106-169 detik sebelum kata pertama keluar dan 4 dari 8 permintaan uji habis
@@ -146,9 +145,9 @@ if not OPENCODE_API_KEY:
 NVIDIA_DEFAULT_MODEL: str = os.getenv(
     "NVIDIA_DEFAULT_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip()
 
-CHAT_MODEL: str = os.getenv("CHAT_MODEL", "nvidia/nemotron").strip()
-if not CHAT_MODEL.startswith(("web/", "nvidia/", "openrouter/", "opencode/")):
-    CHAT_MODEL = "nvidia/nemotron"
+CHAT_MODEL: str = os.getenv("CHAT_MODEL", "opencode/big-pickle").strip()
+if not CHAT_MODEL.startswith(("web/", "opencode/")):
+    CHAT_MODEL = "opencode/big-pickle"
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -188,7 +187,7 @@ MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "8"))
 # tool & menyimpulkan. Mencegah AI mengulang-ulang pekerjaan tanpa henti.
 MAX_DUPLICATE_TOOL_CALLS: int = int(os.getenv("MAX_DUPLICATE_TOOL_CALLS", "3"))
 
-# --- Setelan khusus endpoint API (HANYA berlaku untuk model nvidia/*) ---
+# --- Setelan khusus endpoint API (cadangan HTTP; jalur CLI punya setelannya sendiri) ---
 # Jalur browser tak memakai satu pun dari ini: batas waktunya ada di
 # WebConnector (start_timeout/answer_timeout), penantian saat server penuh
 # ditangani WebBusyError, dan penjaga anti-mengoceh ada di _MAX_REPLY_CHARS.

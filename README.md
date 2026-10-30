@@ -72,44 +72,48 @@ bagas-ai login
 
 Wizard akan:
 
-1. Meminta **API key** lalu **memvalidasinya langsung** (menolak key yang salah).
-2. Menanyakan apakah mau **menghubungkan Telegram**; jika ya, minta token
+1. Menanyakan apakah mau **menghubungkan Telegram**; jika ya, minta token
    [@BotFather](https://t.me/BotFather) dan memvalidasinya juga.
-3. Menyimpan semuanya secara aman ke config global.
+2. Menyimpan semuanya secara aman ke config global.
 
-> API key gratis bisa diambil di penyedia model dan langsung ditempel saat login.
-> Config global tersimpan di `~/.bagasai/` (Windows: `C:\Users\<nama>\.bagasai\`).
+> Tidak ada API key yang diminta: model yang tersedia berjalan gratis lewat
+> CLI OpenCode. Config global tersimpan di `~/.bagasai/` (Windows:
+> `C:\Users\<nama>\.bagasai\`).
 
-### Model gratis lewat OpenCode Zen
+### Model gratis lewat CLI OpenCode
 
-Tujuh model **gratis TANPA API key** (akses anonim, kuota per-IP) tersedia
-lewat gateway [OpenCode Zen](https://opencode.ai/docs/zen) — semuanya berada
-di posisi teratas daftar `/model`: `opencode/big-pickle`, `opencode/hy3-free`,
-`opencode/ling-3.0-flash-fin-free`, `opencode/mimo-v2.5-free`,
-`opencode/muse-spark-1.2-contributor-free`, `opencode/nemotron-3-ultra-free`,
-`opencode/nemotron-3.5-lightning-free`.
+Seluruh model aktif **gratis TANPA API key** lewat CLI `opencode run`.
+Syaratnya cuma satu: binary `opencode` ada di PATH (`npm i -g opencode-ai`).
+Katalog `/model` disinkronkan otomatis dari `opencode models` — model baru
+muncul, dan seluruh entri statis tetap bisa dipilih walau belum muncul di CLI
+(tidak ada model opencode yang ditunda).
 
-Tidak perlu API key untuk mencoba — langsung:
+```bash
+npm i -g opencode-ai
+opencode models opencode    # lihat katalog yang tersedia
+bagas-ai                    # lalu pilih lewat /model
+```
 
-1. Pilih modelnya lewat `/model` (contoh: `/model big-pickle`).
-2. Selesai — tidak perlu login, tidak perlu key.
+Setiap giliran memakai `opencode run --format json --thinking`. Flag
+`--thinking` WAJIB: tanpa itu CLI tidak memancarkan event `reasoning`, dan
+blok **💭 pikiran** di TUI/CLI tidak akan pernah terisi. Dengan flag itu,
+pikiran model mengalir realtime ke `ThinkingBlock` (buka/tutup dengan klik di
+TUI atau Tab di CLI) sebelum jawaban final.
 
 Akses anonim tetap mempunyai kuota bersama/per-IP. Jika Zen membalas HTTP 429
 `FreeUsageLimitError`, itu berarti kuota gratis jaringan tersebut sedang habis,
 bukan kerusakan tool. Bagas-AI menampilkan penyebab ini secara spesifik dan
-tidak lagi mengulang request yang sama selama lima menit. Tunggu kuota tersedia,
-pakai kredensial akun, atau pilih model web lewat `/model`.
+tidak mengulang request yang sama terus-menerus. Tunggu kuota tersedia, atau
+pakai kredensial akun lewat `OPENCODE_API_KEY`.
 
 Ingin kuota pribadi alih-alih kuota anonim per-IP? `OPENCODE_API_KEY`
 opsional: ambil gratis di **https://opencode.ai/auth**, lalu tulis
 `OPENCODE_API_KEY=...` di `~/.bagasai/.env` — atau cukup jalankan
-`opencode auth login` bila CLI opencode terpasang (installer menawarkan
-memasangnya; bagas-ai membaca key-nya otomatis dari auth.json CLI itu).
+`opencode auth login` bila CLI opencode terpasang (bagas-ai membaca key-nya
+otomatis dari auth.json CLI itu).
 
-Opsi `/effort` tidak mengirim field `variant` ke API OpenCode Zen. `--variant`
-pada CLI OpenCode adalah konfigurasi sisi klien yang dipetakan ke opsi masing-
-masing provider/model, bukan parameter universal endpoint; karena itu Bagas-AI
-hanya menawarkan effort untuk model API yang parameternya sudah terverifikasi.
+Model API NVIDIA dan OpenRouter sudah dihapus dari katalog. Sisa kode
+penyedianya hanya jaring pengaman lama di `llm.py`/`config.py`.
 
 ---
 
@@ -240,38 +244,14 @@ resource `peta://proyek` (peta proyek) dan `peta://sasaran` (sasaran aktif).
 
 ## ⚙️ Konfigurasi
 
-Semua opsional kecuali API key (diisi otomatis lewat `bagas-ai login`).
-Disimpan di `~/.bagasai/.env`.
+Semua opsional — model aktif tidak membutuhkan API key. Disimpan di
+`~/.bagasai/.env`.
 
 | Variabel | Keterangan |
 |---|---|
-| `CHAT_MODEL` | Model chat default. Ganti kapan pun lewat `/model`. |
-| `OPENROUTER_API_KEY` | Key OpenRouter, diisi lewat `bagas-ai login`; pilihan `:free` tidak membutuhkan saldo inference. Tetap berlaku kuota akun/provider. |
-
-Pilihan OpenRouter gratis (kurasi 23 September 2026), berurutan menurut
-prioritas kemampuan coding/agent: `or-nemotron-ultra`, `laguna-s`, `nex-pro`,
-`qwen38`. Ini urutan rekomendasi, bukan peringkat universal: Nemotron Ultra
-memiliki AA Coding 49.3/Agentic 20.1, sedangkan Laguna S melaporkan
-Terminal-Bench 2.1 70.2%; benchmark tersebut tidak dapat dibandingkan langsung.
-Nex Pro menyediakan kemampuan agen visual, Qwen menjadi alternatif multimodal.
-
-Semua ID memakai akhiran `:free`, terdaftar mendukung tools dan harga token
-input/output nol di [katalog resmi](https://openrouter.ai/collections/free-models/).
-Request dibatasi harga prompt/completion/request/image nol; tidak ada fallback
-ke model berbayar. Gratis bukan tanpa batas: endpoint dapat membalas 429/503.
-Uji langsung Nemotron Ultra dan Nex Pro berhasil memanggil tools; Laguna S dan
-Qwen terkena rate limit upstream. Inkling disembunyikan karena akses BagasAI
-ditolak (403, hanya harness tertentu), dan Ox Alpha lama sudah tidak tersedia.
-Model ditunda tidak ditampilkan pada menu, tetapi profil connector tetap disimpan.
-
-Installer Windows/Linux menggunakan wizard yang sama. Wizard memvalidasi key
-lewat `/api/v1/key` tanpa mengirim chat; instalasi dengan key OpenRouter saja
-memilih `openrouter/or-nemotron-ultra`. Key milik pengguna tidak disertakan dalam
-installer/repository. Endpoint gratis dapat menyimpan input/output untuk
-peningkatan layanan sesuai kebijakan provider, termasuk NVIDIA dan Poolside;
-periksa kebijakan model sebelum mengirim data rahasia.
-| `NVIDIA_READ_TIMEOUT` | Batas menunggu data NVIDIA per operasi baca, termasuk saat streaming (default 900 detik). Pembatalan tetap responsif; timeout tidak mengirim ulang prompt. |
-| `BAGASAI_TTFT_TIMEOUT` | Batas baca streaming penyedia API lain (default 300 detik). |
+| `CHAT_MODEL` | Model chat default (`opencode/big-pickle`). Ganti kapan pun lewat `/model`. |
+| `OPENCODE_API_KEY` | Opsional — hanya untuk kuota akun/cadangan HTTP. Jalur utama lewat CLI `opencode run` tanpa key. |
+| `BAGASAI_TTFT_TIMEOUT` | Batas baca streaming penyedia API (default 300 detik). |
 | `CONNECTOR_BROWSER_CHANNEL` | Browser yang dipakai connector: `brave` (default), `chrome`, `chrome-beta`, `msedge`. Kalau yang diminta belum terpasang, browser asli lain dipakai otomatis. Tiap browser punya profil login sendiri, jadi berganti berarti login ulang. |
 | `VOICE_JANGKAUAN` | Seberapa jauh mikrofon `/voice` boleh mendengar: `jauh` (default — bisa dari kasur / ruangan sebelah), `normal`, `dekat`. Ukur dari tempat dudukmu sendiri lewat `/voice jangkau`. |
 | `VOICE_STT_MODEL` | Model Whisper untuk `/voice`: `tiny` (±75 MB, tercepat), `base`, `small` (default, ±460 MB), `medium` (±1,5 GB). |

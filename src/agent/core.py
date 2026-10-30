@@ -2434,8 +2434,9 @@ class Agent:
           - model `web/*`    — _run_connector: situs AI lewat Playwright
             (`on_status`/`on_token` untuk progres & teks), tool lewat protokol
             penanda [[TOOL]] karena situs chat tak punya function-calling.
-          - model `nvidia/*` — _run_api: endpoint OpenAI-compatible, tool
-            lewat function-calling ASLI, effort lewat extra_body.
+          - model `opencode/*` — _run_api: CLI `opencode run --thinking`
+            (jalur utama), tool dieksekusi OpenCode sendiri, dan pikiran
+            model mengalir lewat on_reasoning.
 
         Callback-nya sama untuk keduanya supaya UI tak perlu tahu jalur mana
         yang dipakai; yang tak punya padanan di jalur API disebutkan di
@@ -2517,7 +2518,7 @@ class Agent:
         except Exception as exc:  # noqa: BLE001
             return f"[btw] gagal menjawab: {exc}"
 
-    # --- jalur API NVIDIA (function-calling asli) --------------------------
+    # --- jalur CLI/API model (function-calling asli) ------------------------
     def _run_api(
         self,
         user_input: Any,
@@ -2534,7 +2535,7 @@ class Agent:
         attachments: list[str] | None = None,
         ambil_sisipan: Callable[[], list[str]] | None = None,
     ) -> str:
-        """Jalankan giliran lewat endpoint API NVIDIA sebagai AGENT penuh.
+        """Jalankan giliran lewat CLI/endpoint API model sebagai AGENT penuh.
 
         Bedanya dengan _run_connector, dan kenapa keduanya tak bisa disatukan:
         di sini KITA yang memegang konteks (seluruh riwayat dikirim ulang tiap
@@ -2557,7 +2558,7 @@ class Agent:
         if attachments:
             spec = self.model_spec
             if spec.multimodal:
-                # Model API ini penerima media (mis. ox-alpha via OpenRouter):
+                # Model API/CLI ini penerima media:
                 # gambar & video dikirim sebagai bagian pesan (image_url /
                 # video_url base64) lewat penanda di memori — konversinya
                 # terjadi per-request di _pesan_dengan_media. Berkas yang
@@ -2910,14 +2911,14 @@ class Agent:
                                         blokir_media=media_diblokir),
                     tools=active_tools,
                     # api_model, BUKAN spec.id: `id` adalah identitas internal
-                    # bagas-ai ("openrouter/ox-alpha") yang tak dikenal server.
+                    # bagas-ai yang bisa berbeda dari ID yang dikenal server.
                     model=spec.api_model,
                     extra_body=extra,
                     max_tokens=spec.max_tokens,
-                    # Penyedia endpoint menentukan klien (base_url + API key):
-                    # nvidia -> NVIDIA_API_KEY, openrouter -> OPENROUTER_API_KEY,
-                    # opencode -> CLI `opencode run` (tanpa key; OPENCODE_API_KEY
-                    # hanya cadangan HTTP bila CLI absen).
+                    # Penyedia menentukan klien: opencode -> CLI `opencode run`
+                    # (tanpa key; OPENCODE_API_KEY hanya cadangan HTTP bila
+                    # CLI absen). Provider nvidia/openrouter hanya sisa jalur
+                    # lama — modelnya sudah dihapus dari katalog.
                     # api_style memilih protokol endpoint: "responses" utk model
                     # Zen yang hanya dilayani di /responses (jalur cadangan).
                     provider=spec.provider,

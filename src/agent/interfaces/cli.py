@@ -428,8 +428,8 @@ _FASE_PIKIR = "berpikir"
 def _fase_status(msg: str) -> str:
     """Ringkas status jadi SATU kata fase untuk baris status.
 
-    Dipakai KEDUA jalur, karena itu namanya bukan lagi _web_phase: jalur API
-    (nvidia/*) mengirim statusnya lewat pintu yang sama, dan dulu status
+    Dipakai KEDUA jalur, karena itu namanya bukan lagi _web_phase: jalur CLI
+    (opencode/*) mengirim statusnya lewat pintu yang sama, dan dulu status
     "sedang memproses"-nya jatuh ke cabang terakhir lalu tampil sebagai
     "menyiapkan model" — keliru, dan keliru ke arah yang paling merugikan:
     permintaannya SUDAH terkirim dan model sudah bekerja, tapi pengguna

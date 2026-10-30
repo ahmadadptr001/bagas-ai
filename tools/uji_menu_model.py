@@ -4,8 +4,8 @@
 Jalankan: PYTHONIOENCODING=utf-8 python tools/uji_menu_model.py
 
 Yang dicek:
-1. pilihan_model_grup() mengembalikan kelompok berkategori: OpenRouter,
-   AI Web, API — urutan sesuai katalog.
+1. pilihan_model_grup() mengembalikan kelompok berkategori OpenCode CLI —
+   satu-satunya kelompok aktif; AI Web ditunda.
 2. Semua model opencode KECUALI nemotron-3.5-lightning-free berlabel
    " (rekomendasi)" pada tampilan; nilai aliasnya tetap murni.
 3. Menu /model di UI Textual: prompt INLINE (bukan modal), pemisah kategori
@@ -41,12 +41,10 @@ async def tunggu(pilot, kondisi, maks=100, jeda=0.05,
 def cek_grup():
     grup = models.pilihan_model_grup()
     kategori = [k for k, _ in grup]
-    assert kategori[0].startswith("OpenRouter"), kategori
-    assert kategori[-1].startswith("API"), kategori
-    assert len(kategori) >= 2, kategori
+    assert kategori == ["OpenCode CLI — gratis, tanpa API key"], kategori
     choices = [v for _, options in grup for _, v in options]
     assert choices == models.pilihan_model()
-    assert choices[0] == "or-nemotron-ultra"
+    assert choices[0] == "big-pickle", choices[:3]
     assert all(models.cari(v).aktif for v in choices)
     assert all(models.cari(str(i)) == spec for i, _, spec in models.catalog())
     assert "ditunda" not in models.list_text().lower()
@@ -167,8 +165,8 @@ async def main():
     cek_grup()
     await cek_menu()
     await cek_picker()
-    print("OK - menu /model: kategori terpisah, label (rekomendasi) "
-          "bold pada model NVIDIA, prompt INLINE + picker panah")
+    print("OK - menu /model: kategori OpenCode CLI, label (rekomendasi) "
+          "bold, prompt INLINE + picker panah")
 
 
 asyncio.run(main())

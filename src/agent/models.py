@@ -5,43 +5,23 @@ bagas-ai punya DUA jalur model yang cara kerjanya berbeda mendasar:
   1. CONNECTOR WEB (`web/...`) — antarmuka chat berbasis browser lewat
      Playwright memakai akun pengguna sendiri. Konteks dipegang SITUSNYA,
      tool dipanggil lewat protokol teks [[TOOL]], dan /effort berarti
-     MENGKLIK tombol mode berpikir di halamannya.
-  2. API (`nvidia/...`, `openrouter/...`) — endpoint OpenAI-compatible.
-     Konteks dipegang KITA (dikirim ulang tiap request), tool memakai
-     function-calling ASLI, dan /effort berarti mengirim parameter
-     `extra_body` hanya bila parameter modelnya memang terverifikasi.
-     Penyedianya dibedakan lewat ModelSpec.provider:
-       - "nvidia"      : integrate.api.nvidia.com (NVIDIA_API_KEY)
-       - "openrouter"  : openrouter.ai/api/v1     (OPENROUTER_API_KEY)
-       - "opencode"    : CLI `opencode run` (butuh binary di PATH;
-                          OPENCODE_API_KEY tidak disyaratkan — katalog
-                          disinkronkan dinamis lewat `opencode models`)
+     MENGKLIK tombol mode berpikir di halamannya. Seluruh entri web sedang
+     ditunda (lihat _DITUNDA).
+  2. CLI OPENCODE (`opencode/...`) — `opencode run --format json --thinking`.
+     Binary `opencode` di PATH adalah satu-satunya syarat; tanpa API key.
+     OpenCode memegang loop agennya sendiri (tool dieksekusi di sana dengan
+     --auto), dan peristiwa "reasoning" dari CLI diteruskan ke UI sebagai
+     aliran pikiran realtime (ThinkingBlock di TUI, blok 💭 di CLI).
+     Katalog disinkronkan dinamis lewat `opencode models` (hanya menambah;
+     tak ada entri opencode yang ditunda).
+
+Model API NVIDIA dan OpenRouter SENGAJA TIDAK ADA LAGI di katalog ini
+(dihapus atas permintaan pengguna). Sisa kode penyedia di llm.py/config.py
+hanya jaring pengaman lama; jangan mendaftarkannya kembali tanpa mengukur
+ulang perilakunya.
 
 Karena itu `ModelSpec.is_web` adalah satu-satunya titik percabangan; lihat
 core.Agent.run().
-
-# CATATAN PENTING soal effort di jalur NVIDIA (TERUKUR 2026-08-23, bukan dugaan)
-Gateway NVIDIA MENERIMA parameter yang tidak didukung modelnya TANPA protes:
-tanpa error, tanpa peringatan, dan tanpa efek apa pun pada keluaran. Jadi
-"apakah model ini punya effort" TIDAK BISA dideteksi saat jalan (coba-lalu-
-tangkap-error mustahil). Satu-satunya cara yang jujur adalah TABEL STATIS di
-bawah — karena itu tiap entri menyatakan sendiri kunci apa yang ia hormati
-(`reasoning_key`) dan tingkatan apa yang nyata (`effort_levels`).
-
-Hasil pengukuran yang mendasari tabel itu:
-  - muse-glimmer-30b : reasoning SELALU keluar, bahkan tanpa extra_body.
-    `thinking`, `enable_thinking`, dan `reasoning_effort` sama-sama diterima
-    tanpa efek -> TAK ADA saklar, TAK ADA tingkatan.
-  - nemotron-3-ultra : `enable_thinking` benar-benar bekerja DUA ARAH
-    (True -> ada reasoning, False -> tidak), bawaannya NYALA. `reasoning_effort`
-    diabaikan. `reasoning_budget` di level atas sekarang membalas HTTP 500 --
-    parameter itu DIBUANG, jangan dihidupkan lagi.
-  - deepseek-v4-flash : `thinking` bekerja, bawaannya MATI (kebalikan
-    nemotron). `reasoning_effort` low/medium/high diterima, tapi panjang
-    reasoning yang terukur JUSTRU TERBALIK (low 1280 char > medium 1014) dan
-    nilai ngawur ("ngaco") ikut diterima tanpa error -- jadi pengaruhnya tak
-    terbukti. Tetap dikirim (sesuai contoh resmi & tak berbiaya), tapi menu
-    /effort menyebut apa adanya supaya pengguna tak dijanjikan yang belum tentu.
 """
 from __future__ import annotations
 
@@ -67,7 +47,7 @@ _EFFORT_API: dict[str, str] = {
 
 @dataclass(frozen=True)
 class ModelSpec:
-    id: str  # ID internal: "web/<service>" (browser) atau "nvidia/<slug>" (API)
+    id: str  # ID internal: "web/<service>" (browser) atau "opencode/<slug>" (CLI)
     label: str  # nama tampilan
     # Nama service connector ("kimi", "qwen", "gemini") -> agent/connectors.
     # KOSONG untuk model API — inilah penanda jalur mana yang dipakai.
@@ -79,10 +59,11 @@ class ModelSpec:
     ditunda: bool = False
 
     # --- khusus jalur API (kosong/nol untuk model web) ----------------------
-    # Penyedia endpoint: "nvidia" (integrate.api.nvidia.com), "openrouter"
-    # (openrouter.ai/api/v1), atau "opencode" (CLI `opencode run`; kunci
-    # OPENCODE_API_KEY hanya untuk jalur cadangan HTTP Zen). Menentukan
-    # klien, API key, dan pesan galat mana yang dipakai.
+    # Penyedia endpoint: "opencode" (CLI `opencode run`; kunci
+    # OPENCODE_API_KEY hanya untuk jalur cadangan HTTP Zen). Nilai "nvidia"
+    # dan "openrouter" tinggal sebagai bawaan/legacy untuk spec sintetis;
+    # katalog keduanya sudah dihapus. Menentukan klien, API key, dan pesan
+    # galat mana yang dipakai.
     provider: str = "nvidia"
     # Gaya protokol endpoint: "chat" (/chat/completions — bawaan) atau
     # "responses" (/responses, protokol OpenAI Responses API). Sebagian model
@@ -191,14 +172,14 @@ class ModelSpec:
 
 
 # MODEL YANG SEDANG DITUNDA — atas permintaan pengguna (2026-09-21).
-# Dua sebab, dan keduanya harus disebut supaya tak ada yang menebak-nebak:
-#   (1) SELURUH jalur browser dimatikan: tiap model (web) butuh jendela Chrome,
-#       login, dan detik-detik menunggu situsnya — sementara jalur API menjawab
-#       tanpa browser sama sekali.
-#   (2) SELURUH jalur OpenCode Zen dimatikan juga, karena strukturnya akan
-#       diubah besar-besaran.
-# Yang boleh dipakai sekarang: model (API) nvidia/* dan openrouter/* — asalkan
-# kunci penyedianya sudah terisi.
+# Sebabnya satu: SELURUH jalur browser dimatikan. Tiap model (web) butuh
+# jendela Chrome, login, dan detik-detik menunggu situsnya — sementara jalur
+# CLI menjawab tanpa browser sama sekali.
+#
+# Model `opencode/*` TIDAK PERNAH ditunda (permintaan pengguna 2026-10-31):
+# seluruh entri statis maupun yang dilaporkan `opencode models` boleh dipilih,
+# termasuk yang belum muncul di CLI. Katalog tetap disinkronkan dinamis untuk
+# MENAMBAH model baru, bukan untuk menyembunyikan yang lama.
 #
 # Entri yang ditunda SENGAJA TIDAK DIHAPUS: connector-nya utuh, ujinya utuh,
 # profil login-nya utuh, dan /web tetap bisa mengurus profilnya. Yang berubah
@@ -208,16 +189,10 @@ class ModelSpec:
 # Sengaja daftar ALIAS yang ditunda, bukan daftar yang aktif: menambah model
 # baru kelak tak boleh diam-diam ikut terkunci hanya karena lupa didaftarkan.
 _DITUNDA = {
-    # (1) Seluruh jalur browser — atas permintaan pengguna (2026-09-21). Tiap
-    #     model (web) butuh jendela Chrome, login, dan detik-detik menunggu
-    #     situsnya, sementara jalur API menjawab tanpa browser sama sekali.
+    # Seluruh jalur browser — atas permintaan pengguna (2026-09-21). Tiap
+    # model (web) butuh jendela Chrome, login, dan detik-detik menunggu
+    # situsnya, sementara jalur CLI menjawab tanpa browser sama sekali.
     "chatgpt-web", "kimi-web", "gemini-web", "qwen-web", "glm-web", "dola-web",
-    # (2) Jalur OpenCode Zen HTTP DITUTTUP penyedianya (TERUKUR 2026-09-21:
-    #     HTTP 403 FreeTierError "only from within OpenCode"). Entri lama yang
-    #     TIDAK muncul lagi di `opencode models` ikut ditunda di sini sebagai
-    #     fallback statis; entri yang MASIH hidup di CLI justru dikeluarkan dari
-    #     himpunan ini oleh sinkron_model_opencode() di bawah.
-    "hy3-free", "mimo-v2.5-free",
 }
 
 # Penanda tampilan untuk model yang ditunda di menu SelectScreen (UI Textual).
@@ -373,192 +348,6 @@ MODELS: dict[str, ModelSpec] = {
               "pilih ini untuk kerja visual, bukan untuk ngoding. Kuota "
               "gratisnya terbatas, jadi pakai seperlunya"),
     ),
-
-    # --- jalur API (butuh API key penyedia, tanpa browser) ------------------
-    # Entri di bawah TIDAK memakai connector, jadi is_web-nya False dan
-    # core mengarahkannya ke _run_api. Nilai reasoning_key/effort_levels di
-    # sini adalah hasil PENGUKURAN (lihat docstring modul), bukan salinan
-    # dokumentasi — beberapa parameter yang ada di contoh resmi terbukti tak
-    # berpengaruh, dan itu dinyatakan apa adanya di sini.
-    "nemotron": ModelSpec(
-        id="nvidia/nemotron",
-        label="Nemotron 3 Ultra (API)",
-        api_model="nvidia/nemotron-3-ultra-550b-a55b",
-        multimodal=False,  # endpoint teks; lampiran gambar tak dikirim
-        note=("Via API NVIDIA — 550B, mode berpikir bisa dimatikan; "
-              "TERUKUR 2,3 dtk sampai jawaban utuh, cocok untuk kerja tool "
-              "bertubi-tubi"),
-        reasoning_key="enable_thinking",
-        # HANYA dua tingkat, dan itu memang seluruh yang model ini punya:
-        # enable_thinking terbukti bekerja dua arah, sedangkan reasoning_effort
-        # di dalam chat_template_kwargs terukur DIABAIKAN (panjang reasoning
-        # identik). Menawarkan "ringkas/seimbang/mendalam" di sini berarti
-        # menjanjikan tiga hal yang menghasilkan keluaran sama persis.
-        effort_levels=("langsung", "mendalam"),
-        effort_default="mendalam",  # bawaan server memang NYALA
-        kirim_reasoning_effort=False,
-        max_tokens=16384,
-        rekomendasi=True,
-    ),
-    "muse": ModelSpec(
-        id="nvidia/muse",
-        label="Muse Glimmer 30B (API)",
-        api_model="meta/muse-glimmer-30b",
-        multimodal=False,
-        # Dulu tertulis "paling ringan & paling GESIT" — klaim itu TERBANTAH
-        # saat diukur 2026-09-21: muse butuh 26,7 dtk sampai jawaban utuh,
-        # sementara Nemotron Ultra 2,3 dtk dan GPT-OSS-20B 0,6 dtk. Yang benar
-        # cuma "paling ringan" (30B); banyak model di bawah justru lebih gesit,
-        # jadi entri ini sengaja TIDAK berlabel rekomendasi.
-        note=("Via API NVIDIA — 30B, paling ringan; mode berpikirnya selalu "
-              "nyala dan tak bisa diatur (TERUKUR 26,7 dtk, tak gesit)"),
-        # Kosong SEMUA, sesuai pengukuran: tanpa extra_body pun reasoning tetap
-        # keluar, dan ketiga kunci saklar diterima tanpa mengubah apa pun.
-        reasoning_key="",
-        effort_levels=(),
-        max_tokens=8192,  # contoh resminya 8192, bukan 16384
-        effort_catatan=("model ini tak punya saklar mode berpikir — nalarnya "
-                        "selalu aktif dan tak ada tingkatan yang bisa dipilih"),
-    ),
-
-    # --- ditambahkan 2026-09-21, setelah mengukur ulang NVIDIA --------------
-    # Daftar /v1/models MENIPU: ia menjawab HTTP 200 dengan 82 nama, tapi saat
-    # tiap nama benar-benar dipanggil dengan key ini, 60+ di antaranya membalas
-    # HTTP 404 "Function '<uuid>': Not found for account" — TERDAFTAR bukan
-    # berarti MELAYANI. Empat entri berikut adalah yang benar-benar menjawab
-    # DAN cepat mulai. Yang pintar tapi lambat sengaja tak dimasukkan; angka di
-    # note adalah hasil uji satu-kata, dan ujinya bisa diulang kapan saja:
-    #     python tools/uji_nvidia_models.py
-    "gpt-oss": ModelSpec(
-        id="nvidia/gpt-oss",
-        label="GPT-OSS 20B (API)",
-        api_model="openai/gpt-oss-20b",
-        multimodal=False,
-        note=("Via API NVIDIA — 20B, TERUKUR 0,6 dtk: paling gesit dari semua "
-              "model di katalog ini"),
-        # Kosong SEMUA: saklar mode berpikirnya belum diukur untuk entri ini.
-        # Menebak nama kuncinya berarti mengirim parameter yang mungkin
-        # diabaikan diam-diam — persis yang dihindari seluruh berkas ini.
-        reasoning_key="",
-        effort_levels=(),
-        effort_catatan=("saklar mode berpikir model ini belum diukur — "
-                        "tak ada tingkatan yang bisa ditawarkan"),
-        max_tokens=16384,
-        rekomendasi=True,
-    ),
-    "nemotron-super": ModelSpec(
-        id="nvidia/nemotron-super",
-        label="Nemotron 3 Super 120B (API)",
-        api_model="nvidia/nemotron-3-super-120b-a12b",
-        multimodal=False,
-        note=("Via API NVIDIA — 120B, TERUKUR 1,5 dtk; yang paling besar di "
-              "antara yang gesit"),
-        reasoning_key="",
-        effort_levels=(),
-        effort_catatan=("saklar mode berpikir model ini belum diukur — "
-                        "tak ada tingkatan yang bisa ditawarkan"),
-        max_tokens=16384,
-        rekomendasi=True,
-    ),
-    "nemotron-lightning": ModelSpec(
-        id="nvidia/nemotron-lightning",
-        label="Nemotron 3.5 Lightning 30B (API)",
-        api_model="nvidia/nemotron-3.5-lightning-30b-a3b",
-        multimodal=False,
-        note=("Via API NVIDIA — 30B, TERUKUR 3,8 dtk; nalarnya keluar sebagai "
-              "teks biasa, jadi jawabannya perlu dibaca sampai tuntas"),
-        reasoning_key="",
-        effort_levels=(),
-        effort_catatan=("saklar mode berpikir model ini belum diukur — "
-                        "tak ada tingkatan yang bisa ditawarkan"),
-        max_tokens=16384,
-        rekomendasi=True,
-    ),
-    "nemotron-nano": ModelSpec(
-        id="nvidia/nemotron-nano",
-        label="Nemotron 3 Nano Omni 30B (API)",
-        api_model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-        multimodal=False,
-        note=("Via API NVIDIA — 30B dengan penalaran nyala, TERUKUR 4,2 dtk"),
-        reasoning_key="",
-        effort_levels=(),
-        effort_catatan=("saklar mode berpikir model ini belum diukur — "
-                        "tak ada tingkatan yang bisa ditawarkan"),
-        max_tokens=16384,
-        rekomendasi=True,
-    ),
-    "glm-flash": ModelSpec(
-        id="nvidia/glm-flash",
-        label="GLM 5.3 Flash (API)",
-        # build.nvidia.com memakai glm-5-3-flash di URL, tapi ID API-nya
-        # z-ai/glm-5.3-flash (titik) — bentuk yang sama dipakai docs.api.nvidia.com
-        # dan tools/uji_nvidia_models.py.
-        api_model="z-ai/glm-5.3-flash",
-        multimodal=True,  # multimodal native: teks + gambar
-        note=("Via API NVIDIA — 320B MoE / 18B aktif, multimodal & tool calling; "
-              "ringan untuk throughput tinggi"),
-        # Saklar mode berpikir BELUM diukur untuk entri ini (lihat docstring
-        # modul): asumsi kuncinya berarti mengirim parameter yang mungkin
-        # diabaikan diam-diam.
-        reasoning_key="",
-        effort_levels=(),
-        effort_catatan=("saklar mode berpikir model ini belum diukur — "
-                        "tak ada tingkatan yang bisa ditawarkan"),
-        max_tokens=16384,
-    ),
-    # Dihapus 2026-08-25: deepseek-v4-flash (nvidia/deepseek) — paling lambat
-    # memulai dari semuanya (TERUKUR 106-169 dtk sampai kata pertama, 4 dari 8
-    # permintaan uji habis waktu). Digantikan ox-alpha via OpenRouter.
-    "oxalpha": ModelSpec(
-        ditunda=True,
-        id="openrouter/ox-alpha",
-        label="Ox Alpha (API)",
-        provider="openrouter",
-        api_model="stealth/ox-alpha",
-        # Penerima GAMBAR & VIDEO lewat konten multimodal OpenRouter
-        # (image_url / video_url base64) — lihat core._pesan_dengan_media.
-        multimodal=True,
-        note=("Via API OpenRouter — paham gambar & video; nalarnya selalu "
-              "nyala dan tak bisa dimatikan (syarat endpoint)"),
-        # Saklar gaya OpenRouter DITOLAK server untuk model ini — TERUKUR
-        # 2026-08-25: {"reasoning":{"enabled":false}} dibalas HTTP 400 "Reasoning
-        # is mandatory for this endpoint". Jadi TIDAK ada saklar yang jujur untuk
-        # ditawarkan; nalar selalu menyala tanpa tingkatan yang bisa dijamin.
-        reasoning_param="",
-        reasoning_key="",
-        effort_levels=(),
-        effort_default="",
-        kirim_reasoning_effort=False,
-        max_tokens=16384,
-        effort_catatan=("model ini SELALU bernalar — endpointnya menolak "
-                        "mode tanpa-reasoning (HTTP 400), jadi tak ada "
-                        "saklar/tingkatan yang bisa dipilih"),
-    ),
-}
-
-
-# Kurasi 2026-09-23: endpoint :free, harga input/output nol, mendukung tools.
-# Urutan prioritas coding/agent; bukan peringkat universal lintas benchmark.
-_OPENROUTER_FREE = [
-    ("inkling", "thinkingmachines/inkling:free", "Inkling", True,
-     "1M konteks; AA Coding 52.1 / Agentic 22.5"),
-    ("or-nemotron-ultra", "nvidia/nemotron-3-ultra-550b-a55b:free",
-     "Nemotron 3 Ultra", False, "1M konteks; AA Coding 49.3 / Agentic 20.1"),
-    ("laguna-s", "poolside/laguna-s-2.1:free", "Laguna S 2.1", False,
-     "262K konteks; spesialis coding, Terminal-Bench 2.1 70.2%"),
-    ("nex-pro", "nex-agi/nex-n2.5-pro:free", "Nex N2.5 Pro", True,
-     "262K konteks; coding dan agen visual"),
-    ("qwen38", "qwen/qwen3.8-27b:free", "Qwen 3.8 27B", True,
-     "262K konteks; alternatif multimodal"),
-]
-MODELS = {
-    **{alias: ModelSpec(
-        id="openrouter/" + alias, label=label + " (gratis)",
-        provider="openrouter", api_model=remote, multimodal=vision,
-        ditunda=(alias == "inkling"),  # HTTP 403: harness BagasAI belum diizinkan.
-        note=note + "; gratis dengan batas kuota", max_tokens=16384,
-    ) for alias, remote, label, vision, note in _OPENROUTER_FREE},
-    **MODELS,
 }
 
 MODELS = {k: (v if k not in _DITUNDA else
@@ -598,7 +387,6 @@ DEFAULT_ID = MODELS[_AKTIF[0]].id
 # mengetik nama yang dulu benar tak berujung "model tak dikenal" — kegagalan
 # yang menyesatkan, sebab situsnya sendiri masih mengalihkan cici.com ke Dola.
 _ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web"}
-_TIDAK_DIDUKUNG = {"opencode/hy3-free"}
 
 
 def _hitung_ulang_katalog() -> None:
@@ -629,6 +417,10 @@ def sinkron_model_opencode(*, refresh: bool = False) -> list[str]:
     Mengembalikan daftar alias yang terlihat di CLI. Gagal total (binary tak
     ada, perintah error, timeout) -> kembalikan [] dan biarkan daftar statis
     dipakai apa adanya — import tidak boleh meledak hanya karena CLI absen.
+
+    Sinkron ini HANYA MENAMBAH model baru. Entri statis yang tak lagi muncul
+    di CLI TIDAK ditunda (permintaan pengguna 2026-10-31): semua model
+    opencode/* tetap boleh dipilih.
 
     `refresh=True` menambah flag --refresh (paksa update cache models.dev);
     bawaan memakai cache CLI supaya startup tetap cepat.
@@ -663,7 +455,6 @@ def sinkron_model_opencode(*, refresh: bool = False) -> list[str]:
         alias_hidup.append(alias)
     if not alias_hidup:
         return []
-    hidup = set(alias_hidup)
     for alias in alias_hidup:
         if alias not in MODELS:
             MODELS[alias] = ModelSpec(
@@ -675,10 +466,6 @@ def sinkron_model_opencode(*, refresh: bool = False) -> list[str]:
                 note="Via CLI opencode run — gratis tanpa API key",
                 max_tokens=16384,
             )
-    for k, spec in list(MODELS.items()):
-        if (spec.provider == "opencode" and k not in hidup
-                and not spec.ditunda):
-            MODELS[k] = replace(spec, ditunda=True)
     for alias in alias_hidup:
         if alias in _DITUNDA:
             _DITUNDA.discard(alias)
@@ -702,14 +489,14 @@ def _sebut_yang_bisa_dipakai() -> str:
 
     Dua bentuk, sesuai apa yang benar-benar ada:
       * ada yang siap -> sebutkan namanya (pengguna tinggal menyalin);
-      * belum ada key -> sebut SEBABNYA, sebab tak ada satu nama pun yang jujur
-        bisa disebut "bisa dipakai sekarang"."""
+      * CLI tak tersedia -> sebut SEBABNYA, sebab tak ada satu nama pun yang
+        jujur bisa disebut "bisa dipakai sekarang"."""
     if _SIAP:
         return ("Yang bisa dipakai sekarang: "
                 + ", ".join(MODELS[k].label for k in _SIAP) + ".")
-    return ("Belum ada satu pun model yang bisa dipakai: NVIDIA_API_KEY & "
-            "OPENROUTER_API_KEY masih kosong (jalur (web) sedang ditunda). "
-            "Isi salah satunya lewat `bagas-ai login`.")
+    return ("Belum ada satu pun model yang bisa dipakai: binary `opencode` "
+            "tidak ditemukan di PATH dan OPENCODE_API_KEY kosong (jalur web "
+            "sedang ditunda). Pasang CLI dengan `npm i -g opencode-ai`.")
 
 
 def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
@@ -722,10 +509,10 @@ def _pastikan_aktif(spec: ModelSpec) -> ModelSpec:
     baris perintah, tombol Telegram, preferensi tersimpan): kalau tiap
     antarmuka menyaring sendiri-sendiri, cepat atau lambat ada satu yang lupa."""
     # DITUNDA diperiksa LEBIH DULU, dan urutannya penting. Menaruh pemeriksaan
-    # kunci di depan berarti model opencode/* — yang kini ditunda — dijawab
-    # "butuh OPENCODE_API_KEY": pengguna lalu pergi mencari kunci yang, setelah
-    # didapat, tetap tak membuka apa pun karena sebabnya bukan itu. Sebab yang
-    # lebih menentukan disebut lebih dulu.
+    # kunci di depan berarti model yang ditunda dijawab "butuh kunci":
+    # pengguna lalu pergi mencari kunci yang, setelah didapat, tetap tak
+    # membuka apa pun karena sebabnya bukan itu. Sebab yang lebih menentukan
+    # disebut lebih dulu.
     if not spec.aktif:
         raise ValueError(
             f"Model {spec.label} sedang DITUNDA. "
@@ -802,15 +589,15 @@ def cari(name: str) -> ModelSpec:
             return spec
 
     # Dulu ID tak dikenal yang memuat "/" diterima apa adanya supaya pengguna
-    # bebas memakai model mana pun dari katalog NVIDIA. Kini tak ada katalog:
+    # bebas memakai model mana pun dari katalog API. Kini tak ada katalog:
     # menerima ID sembarangan hanya akan membuat giliran gagal saat dijalankan,
     # jadi lebih baik ditolak di sini dengan daftar yang jelas.
     #
-    # Daftarnya diambil dari _SIAP, BUKAN _ORDER: menyebut ketiga belas entri
-    # yang ditunda berarti menawarkan tiga belas nama yang pasti ditolak
-    # langkah berikutnya — pengguna mengetiknya, lalu dapat penolakan yang
-    # seharusnya bisa ia hindari sejak awal. Yang ditunda tetap disebut, tapi
-    # sebagai keterangan, bukan sebagai pilihan.
+    # Daftarnya diambil dari _SIAP, BUKAN _ORDER: menyebut entri web yang
+    # ditunda berarti menawarkan nama yang pasti ditolak langkah berikutnya —
+    # pengguna mengetiknya, lalu dapat penolakan yang seharusnya bisa ia
+    # hindari sejak awal. Yang ditunda tetap disebut, tapi sebagai keterangan,
+    # bukan sebagai pilihan.
     #
     # _SIAP yang kosong (belum ada satu pun key) diperlakukan sebagai cabang
     # tersendiri: di keadaan itulah tak ada nama yang jujur bisa disebut
@@ -827,15 +614,6 @@ def resolve(name: str) -> ModelSpec:
     dijawab "tidak dikenal", yang akan membuat pengguna mengira model itu
     hilang lalu mencari-cari nama yang sebenarnya masih ada."""
     spec = cari(name)
-    # Pesan khusus hy3-free hanya berlaku SELAMA modelnya masih boleh dipilih.
-    # Sejak jalur opencode ditunda, model ini ditolak lewat _pastikan_aktif
-    # seperti saudara-saudaranya; menyebut big-pickle/muse-spark sebagai
-    # gantinya justru menunjuk dua model yang ikut ditunda.
-    if spec.id in _TIDAK_DIDUKUNG and spec.aktif:
-        raise ValueError(
-            "Model Hy3 Free sedang tidak didukung OpenCode (401 ModelError). "
-            + _sebut_yang_bisa_dipakai()
-        )
     return _pastikan_aktif(spec)
 
 
@@ -850,12 +628,6 @@ def spec_for_id(model_id: str) -> ModelSpec:
     dialihkan ke bawaan. Kalau tidak, sesi berikutnya dimulai dengan model yang
     tak boleh dipilih, dan tiap /model justru menolak mengembalikannya.
     """
-    if model_id in _TIDAK_DIDUKUNG:
-        # Dulu di sini tertulis MODELS["big-pickle"] secara HARFIAH. Itu jadi
-        # jebakan begitu jalur opencode ditunda: pemetaannya mendarat di model
-        # yang tak boleh dipilih, dan tiap kali dijalankan peringatan yang sama
-        # muncul lagi. Bawaannya diambil dari _AKTIF, seperti cabang di bawah.
-        return MODELS[_AKTIF[0]]
     for spec in MODELS.values():
         if spec.id == model_id and spec.aktif:
             return spec
@@ -868,8 +640,8 @@ def is_known_id(model_id: str) -> bool:
     Model yang ditunda sengaja dijawab False: pemanggilnya (Agent.__init__)
     memakai ini untuk MENYIMPAN ULANG preferensi ke model hasil pemetaan —
     tanpa itu, peringatan yang sama muncul tiap kali bagas-ai dijalankan."""
-    return model_id not in _TIDAK_DIDUKUNG and any(
-        spec.id == model_id and spec.aktif for spec in MODELS.values())
+    return any(spec.id == model_id and spec.aktif
+               for spec in MODELS.values())
 
 
 # --- varian model SITUS (rombak /model & /effort) ---------------------------
@@ -909,11 +681,9 @@ def _varian_layanan() -> dict[str, list[tuple[str, str]]]:
 def kategori_model(spec: ModelSpec) -> str:
     """Nama kategori model di menu /model — PEMISAH antar kelompok.
 
-    Tiga kelompok: OpenCode CLI (gratis, tanpa API key), AI web (browser),
-    dan API ber-key. Urutan kemunculannya mengikuti urutan MODELS, jadi
-    kategori tak perlu didaftarkan terpisah."""
-    if spec.provider == "openrouter":
-        return "OpenRouter - gratis, dengan batas kuota"
+    Dua kelompok: OpenCode CLI (gratis, tanpa API key) dan AI web (browser).
+    Urutan kemunculannya mengikuti urutan MODELS, jadi kategori tak perlu
+    didaftarkan terpisah."""
     if spec.provider == "opencode":
         return "OpenCode CLI — gratis, tanpa API key"
     if spec.is_web:
@@ -1006,7 +776,7 @@ def catalog_aktif() -> list[tuple[int, str, ModelSpec]]:
 
 def list_text(current_id: str | None = None) -> str:
     """Daftar model siap tampil untuk perintah /model."""
-    lines = ["Model tersedia - OpenRouter gratis dan NVIDIA:"]
+    lines = ["Model tersedia — OpenCode CLI (gratis, tanpa API key):"]
     for i, key in enumerate(_ORDER, start=1):
         spec = MODELS[key]
         tag = f"  [{spec.note}]" if spec.note else ""
