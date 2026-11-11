@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bagasai"
-version = "1.1.153"
+version = "1.1.154"
 description = "bagas-ai — AI agent serbaguna, dipanggil dari terminal mana pun."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,6 +19,8 @@ dependencies = [
     # terpasang sejak awal.
     "openai>=1.30.0",
     "rich>=13.0.0",
+    "Pygments>=2.17.0",
+    "PyMuPDF>=1.24.0",
     # WAJIB: framework TUI untuk antarmuka chat baru (textual_app.py).
     # Menggantikan prompt_toolkit sebagai motor UI utama — prompt_toolkit
     # tetap dibutuhkan sebagai fallback untuk menu setup_wizard.
@@ -29,20 +31,31 @@ dependencies = [
     # mesin bersih impornya bisa gagal saat startup.
     "prompt_toolkit>=3.0.39",
     "pyfiglet>=1.0.0",
-    # /live dan tool take_screenshot: tangkap layar lintas monitor lalu
-    # kecilkan PNG sebelum dikirim ke model vision.
+    # Capture layar dan pratinjau lokal; /video menjaga detail asli untuk OCR.
     "Pillow>=10.0.0",
+    # Versi ini diverifikasi dengan perbaikan ownership COM di desktop_capture.py.
+    "dxcam==0.3.0; sys_platform == 'win32'",
+    "comtypes>=1.4.0; sys_platform == 'win32'",
+    # BLIP-base INT8, memakai CPU tanpa mengimpor PyTorch/Transformers.
+    "onnxruntime>=1.20.0",
+    "numpy>=1.26.0",
+    "tokenizers>=0.20.0",
+    "huggingface-hub>=0.24.0",
     # Suara kabar berbahasa Indonesia yang natural (lihat suara.py). BUKAN
     # syarat mati: tanpa paket ini — atau saat laptop sedang luring — fitur
     # suaranya turun sendiri ke System.Speech bawaan Windows. Tetap didaftarkan
     # karena hasilnya jauh lebih enak didengar, dan satu-satunya suara
     # berbahasa Indonesia yang tersedia tanpa memasang paket bahasa Windows.
-    "edge-tts>=6.1.0",
+    "edge-tts>=7.3.1",
+    "av>=11.0.0",
     # /voice — mikrofon jadi cara memberi perintah (lihat dengar.py).
     # Sama seperti edge-tts: BUKAN syarat mati. Tanpa keduanya /voice
     # menolak menyala dan menyebutkan paket mana yang kurang, sedangkan
     # sisa bagas-ai jalan seperti biasa.
     "sounddevice>=0.4.6",
+    # Resampling mikrofon kontinu dengan filter anti-alias dan fase terjaga.
+    "soxr>=0.5.0",
+    "PyAudioWPatch>=0.2.12.9; sys_platform == 'win32'",
     # Mesin STT utama luring. Installer/updater juga mengunduh dan benar-benar
     # memuat model small agar /voice siap sebelum mikrofon dibuka.
     "faster-whisper>=1.0.0",

@@ -10,16 +10,19 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from ...ui import tema
+
 
 class VoiceOrb(Static):
     """Orb terminal yang bergerak menurut fase dan level suara."""
 
     _PALET = {
-        "menyiapkan": ("#7868ff", "#50b8ff", "#d9e8ff"),
+        "menyiapkan": ("#344467", "#6488c8", "#bdd1f2"),
         "mendengar": ("#5877ff", "#57d5ff", "#d9f6ff"),
-        "menangkap": ("#43bfff", "#53f0c0", "#e4fff7"),
-        "berpikir": ("#8a62ff", "#d063ff", "#f4dcff"),
-        "berbicara": ("#e45dff", "#ff7e9f", "#fff0b8"),
+        "menangkap": ("#4472c4", "#67acff", "#c3e0ff"),
+        "berpikir": ("#62589b", "#9c91d4", "#d7d2ef"),
+        "berbicara": ("#416b98", "#78b0df", "#d0e9ff"),
+        "berbicara-aman": ("#416b98", "#78b0df", "#d0e9ff"),
         "mengenali": ("#5877ff", "#57d5ff", "#d9f6ff"),
         "kurang-jelas": ("#b49155", "#e7c684", "#fff0c8"),
     }
@@ -69,6 +72,13 @@ class VoiceOrb(Static):
                 if jarak > radius:
                     hasil.append(" ")
                     continue
+                # Kontur ringan dengan pusat kosong; intensitas mengikuti mic.
+                if jarak < radius - 0.18:
+                    if abs(ny) < 0.08 and abs(nx) < 0.5:
+                        hasil.append("─", style=utama)
+                    else:
+                        hasil.append(" ")
+                    continue
                 isi = max(0.0, min(1.0, 1.0 - jarak / max(radius, 0.01)))
                 kilau = math.sin(nx * 2.4 - ny * 1.7 + t) * 0.10
                 nilai = max(0.0, min(1.0, isi + kilau + level * 0.10))
@@ -92,23 +102,38 @@ class VoiceScreen(ModalScreen[None]):
     DEFAULT_CSS = """
     VoiceScreen {
         align: center middle;
-        background: #080a12;
+        background: #050610 82%;
     }
 
     VoiceScreen #voice-stage {
-        width: 64;
+        width: 76;
         max-width: 100%;
-        height: 100%;
+        height: 92%;
         align: center middle;
-        background: #080a12;
-        padding: 1 2;
+        background: $t-gema_bg;
+        border: round $t-tepi;
+        padding: 0 1;
+    }
+
+    VoiceScreen #voice-titlebar {
+        width: 100%; height: 3; align-vertical: middle;
+        border-bottom: solid $t-tepi_redup; background: $t-menu_bg;
+        padding: 0 1;
+    }
+    VoiceScreen #voice-lights { width: 8; height: 1; }
+    VoiceScreen #voice-title { width: 1fr; height: 1; color: $t-teks; }
+    VoiceScreen #voice-caption {
+        display: none;
+        width: 100%; height: 1; color: $t-redup; text-align: center;
+        margin-top: 1;
     }
 
     VoiceScreen #voice-orb {
         width: 100%;
+        max-width: 64;
         height: 1fr;
-        max-height: 17;
-        min-height: 5;
+        max-height: 14;
+        min-height: 4;
         content-align: center middle;
         text-align: center;
         background: transparent;
@@ -117,32 +142,40 @@ class VoiceScreen(ModalScreen[None]):
     VoiceScreen #voice-close {
         width: 18;
         min-width: 18;
-        height: 3;
+        height: 1;
+        min-height: 1;
         margin: 0;
         border: none;
-        background: #171b29;
-        color: #e8ecff;
-        text-style: bold;
+        background: $t-menu_bg;
+        color: $t-teks;
     }
 
     VoiceScreen #voice-close:hover,
     VoiceScreen #voice-close:focus {
-        background: #252b40;
-        color: white;
+        background: $t-menu_hover;
+        color: $t-teks;
     }
-    VoiceScreen #voice-title, VoiceScreen #voice-status,
+    VoiceScreen #voice-status,
     VoiceScreen #voice-hint, VoiceScreen #voice-meter {
         width: 100%;
-        height: auto;
+        height: 1;
         text-align: center;
-        color: #d9e8ff;
+        color: $t-teks;
     }
-    VoiceScreen #voice-title { text-style: bold; margin-bottom: 1; }
-    VoiceScreen #voice-hint { color: #a5b1c8; margin-top: 1; }
-    VoiceScreen #voice-meter { color: #57d5ff; height: 1; }
+    VoiceScreen #voice-hint { color: $t-redup; margin-top: 1; height: 2; }
+    VoiceScreen #voice-meter { color: $t-aksen; height: 1; }
     VoiceScreen #voice-controls {
         width: 100%; height: 3; margin-top: 1; align: center middle;
     }
+    VoiceScreen #voice-footer {
+        display: none;
+        width: 100%; height: 1; text-align: center; color: $t-redup;
+    }
+    VoiceScreen.-compact #voice-stage { height: 100%; }
+    VoiceScreen.-compact #voice-lights { display: none; }
+    VoiceScreen.-compact #voice-caption { margin: 0; }
+    VoiceScreen.-compact #voice-hint { margin: 0; }
+    VoiceScreen.-compact #voice-controls { margin: 0; height: 2; }
     """
 
     BINDINGS = [Binding("escape", "close", show=False, priority=True)]
@@ -160,13 +193,21 @@ class VoiceScreen(ModalScreen[None]):
 
     def compose(self):
         with Vertical(id="voice-stage"):
-            yield Static("Percakapan suara", id="voice-title")
+            with Horizontal(id="voice-titlebar"):
+                lights = Text()
+                for color in ("#ff5f57", "#febc2e", "#28c840"):
+                    lights.append("● ", style=color)
+                yield Static(lights, id="voice-lights")
+                yield Static("Percakapan suara", id="voice-title")
+            yield Static("Bicara langsung, tanpa kata pemicu", id="voice-caption")
             yield VoiceOrb(id="voice-orb")
             yield Static("Menyiapkan mikrofon…", id="voice-status")
             yield Static("", id="voice-meter")
-            yield Static("Bicara seperti biasa · Esc untuk menutup", id="voice-hint")
+            yield Static("Beri jeda singkat untuk mengirim ucapan", id="voice-hint")
             with Horizontal(id="voice-controls"):
-                yield Button("Tutup voice", id="voice-close", variant="default")
+                yield Button("Tutup", id="voice-close", variant="default", compact=True,
+                             tooltip="Esc / F4")
+            yield Static("F4 / Esc untuk kembali ke chat", id="voice-footer")
 
     def on_mount(self) -> None:
         self._timer = self.set_interval(0.08, self._tick)
@@ -174,6 +215,9 @@ class VoiceScreen(ModalScreen[None]):
 
     def on_unmount(self) -> None:
         self._stop_animation()
+
+    def on_resize(self, event) -> None:
+        self.set_class(event.size.height < 30 or event.size.width < 70, "-compact")
 
     def _stop_animation(self) -> None:
         if self._timer is not None:
@@ -194,11 +238,24 @@ class VoiceScreen(ModalScreen[None]):
                 "mengenali": "Mengenali ucapan…",
                 "berpikir": "Menyiapkan jawaban…",
                 "berbicara": "Sedang menjawab",
+                "berbicara-aman": "Sedang menjawab · mikrofon dijeda",
                 "kurang-jelas": "Ucapan belum jelas, silakan ulangi",
             }
             self.query_one("#voice-status", Static).update(labels.get(fase, "Mendengarkan"))
             bars = round(max(0.0, min(1.0, level)) * 12)
-            self.query_one("#voice-meter", Static).update("▰" * bars + "▱" * (12 - bars))
+            meter = Text()
+            meter.append("━" * bars, style=tema.p("aksen"))
+            meter.append("─" * (12 - bars), style=tema.p("tepi_redup"))
+            self.query_one("#voice-meter", Static).update(meter)
+            hint = {
+                "menyiapkan": "Mikrofon dan pengenal suara sedang disiapkan",
+                "menangkap": "Beri jeda singkat untuk mengirim ucapan",
+                "mengenali": "Ucapan sedang diproses di perangkat ini",
+                "berbicara": "Bicara untuk menyela jawaban",
+                "berbicara-aman": "Mikrofon aktif kembali setelah suara selesai",
+                "kurang-jelas": "Ulangi ucapan atau dekatkan mikrofon",
+            }.get(fase, "Jeda untuk mengirim ucapan")
+            self.query_one("#voice-hint", Static).update(hint)
         except Exception:
             # Animasi bersifat dekoratif; kegagalannya tak boleh menghentikan
             # sesi mikrofon yang masih menyimpan percakapan di layar utama.

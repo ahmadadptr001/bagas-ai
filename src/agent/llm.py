@@ -26,6 +26,7 @@ import queue
 import shutil
 import subprocess
 import threading
+from collections import deque
 from typing import Any, Callable
 
 from . import config
@@ -56,6 +57,10 @@ class EmptyResponseError(Exception):
     Diperlakukan sebagai kondisi sementara supaya di-retry dengan backoff,
     bukan dilaporkan ke pengguna sebagai "model tak menjawab".
     """
+
+
+class IncompleteResponseError(Exception):
+    """Proses berakhir tanpa penyelesaian yang sah; teks parsial dipertahankan."""
 
 
 class Cancelled(Exception):
@@ -426,10 +431,8 @@ def _busy_error(provider: str, percobaan: int, exc: Exception) -> ProviderBusyEr
              "opencode": "OpenCode"}.get(provider or "nvidia", provider)
     return ProviderBusyError(
         f"Layanan {label} sedang sibuk atau sementara tidak tersedia. "
-        f"Sudah dicoba ulang {percobaan} kali berturut-turut tanpa hasil. "
-        "Percakapan dan jawaban parsial tetap dipertahankan. "
-        "Tunggu sebentar lalu lanjutkan, atau pilih model lain lewat /model. "
-        "Menaikkan timeout tidak mengatasi penolakan dari server ini."
+        f"{percobaan} percobaan gagal. "
+        "Coba lagi nanti atau ganti model lewat /model."
     )
 
 
@@ -674,7 +677,10 @@ class _UsageCLI:
     def __init__(self, step: dict[str, Any]) -> None:
         part = step.get("part") if isinstance(step.get("part"), dict) else {}
         src = part or step
+        self.session_id = str(step.get("sessionID") or part.get("sessionID") or "")
+        self.finish_reason = str(src.get("reason") or src.get("finish") or "")
         tok = src.get("tokens") or step.get("tokens") or {}
+        self.has_usage = bool(tok)
         self.prompt_tokens = int(tok.get("input") or 0)
         self.completion_tokens = int(tok.get("output") or 0)
         try:
@@ -699,10 +705,29 @@ class _UsageCLI:
         self.completion_tokens_details = cdet
 
 
+def _opencode_variant_args(exe: str, model: str, variant: str | None) -> list[str]:
+    """Gunakan sintaks yang didukung CLI terpasang (V1 atau V2)."""
+    if not variant:
+        return ["-m", model]
+    help_result = subprocess.run(
+        [exe, "run", "--help"], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=5,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    help_text = help_result.stdout or ""
+    if help_result.returncode == 0 and "#variant" in help_text:
+        return ["-m", model.split("#", 1)[0] + "#" + variant]
+    if help_result.returncode == 0 and "--variant" in help_text:
+        return ["-m", model, "--variant", variant]
+    raise ValueError("CLI OpenCode ini tidak menyediakan pilihan varian effort.")
+
+
 def _stream_opencode_cli(
     messages: list[dict[str, Any]],
     *,
     model: str | None = None,
+    variant: str | None = None,
+    session_id: str | None = None,
     on_content: Any = None,
     on_tool_pending: Callable[..., None] | None = None,
     on_reasoning: Any = None,
@@ -729,15 +754,20 @@ def _stream_opencode_cli(
             "(npm i -g opencode-ai), atau isi OPENCODE_API_KEY untuk "
             "jalur cadangan HTTP."
         )
-    prompt = _prompt_dari_messages(messages)
+    request = messages
+    if session_id and messages:
+        request = [next((msg for msg in reversed(messages) if msg.get("role") == "user"), messages[-1])]
+    prompt = _prompt_dari_messages(request)
     if not prompt:
         raise EmptyResponseError("Prompt kosong untuk CLI OpenCode.")
     api_model = (model or "").strip() or "opencode/big-pickle"
     # --thinking WAJIB: tanpa flag ini `--format json` tidak memancarkan
     # event reasoning sama sekali, sehingga fitur UI/UX "pikiran" (ThinkingBlock
     # di TUI, blok 💭 di CLI) tak pernah terisi untuk model opencode/*.
-    cmd = [exe, "run", "-m", api_model, "--format", "json", "--auto",
+    cmd = [exe, "run", *_opencode_variant_args(exe, api_model, variant), "--format", "json", "--auto",
            "--thinking"]
+    if session_id:
+        cmd.extend(["--session", session_id])
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         proc = subprocess.Popen(  # noqa: S603 — argumen di-build lokal, bukan shell
@@ -749,7 +779,7 @@ def _stream_opencode_cli(
             encoding="utf-8",
             errors="replace",
             creationflags=flags if subprocess.CREATE_NO_WINDOW else 0,
-            cwd=None,
+            cwd=str(config.PROJECT_ROOT),
         )
     except OSError as exc:
         raise ProviderBusyError(
@@ -758,6 +788,20 @@ def _stream_opencode_cli(
 
     antre: queue.Queue[Any] = queue.Queue()
     selesai = threading.Event()
+    stderr_parts: deque[str] = deque(maxlen=64)
+
+    def _baca_stderr() -> None:
+        try:
+            if proc.stderr is not None:
+                for chunk in iter(lambda: proc.stderr.read(1024), ""):
+                    if not isinstance(chunk, str):
+                        break
+                    stderr_parts.append(chunk)
+        except (OSError, ValueError):
+            pass
+
+    stderr_thread = threading.Thread(target=_baca_stderr, daemon=True, name="opencode-stderr")
+    stderr_thread.start()
 
     def _baca() -> None:
         try:
@@ -766,11 +810,11 @@ def _stream_opencode_cli(
                 antre.put(baris)
             try:
                 proc.wait(timeout=15)
-            except Exception:  # noqa: BLE001 — timeout menunggu: biarkan
-                pass
-            sisa = ""
-            if proc.stderr is not None:
-                sisa = proc.stderr.read() or ""
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+            stderr_thread.join(timeout=1)
+            sisa = "".join(stderr_parts)
             if sisa.strip():
                 antre.put(("__stderr__", sisa.strip()))
         except Exception as exc:  # noqa: BLE001
@@ -798,9 +842,11 @@ def _stream_opencode_cli(
     potongan: list[str] = []
     usage: Any = None
     tool_pending_seen = False
+    completed_tools: set[str] = set()
     teks_part: dict[str, int] = {}  # id part -> panjang teks yang sudah dikirim
     last_exc: Exception | None = None
     stderr_teks = ""
+    active_session = session_id or ""
     while True:
         if cancel_event is not None and cancel_event.is_set():
             _matikan()
@@ -828,6 +874,7 @@ def _stream_opencode_cli(
             continue
         if not isinstance(ev, dict):
             continue
+        active_session = str(ev.get("sessionID") or active_session)
         # Beberapa build membalas {type:"error"/"message", error:...}
         if ev.get("type") in ("error", "message_error") or "error" in ev and (
             ev.get("type") in ("error",)
@@ -865,8 +912,17 @@ def _stream_opencode_cli(
                     except Exception:  # noqa: BLE001
                         pass
         elif tipe == "tool_use":
-            tool_pending_seen = True
             part_state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            tool_id = str(part.get("id") or part.get("callID") or "")
+            status = str(part_state.get("status") or "")
+            if tool_id and status in ("completed", "error"):
+                if tool_id in completed_tools:
+                    continue
+                completed_tools.add(tool_id)
+            tool_pending_seen = True
+            # Teks sebelum tool adalah narasi langkah yang sudah disiarkan.
+            # Jawaban akhir hanya berisi teks setelah langkah tool terakhir.
+            potongan.clear()
             nama = str(
                 part.get("tool") or part.get("name")
                 or ev.get("tool") or ev.get("name") or "tool"
@@ -882,7 +938,7 @@ def _stream_opencode_cli(
                     part_state.get("input")
                     if isinstance(part_state.get("input"), dict) else {}
                 ),
-                "output": str(part_state.get("output") or ""),
+                "output": str(part_state.get("output") or part_state.get("error") or ""),
                 "metadata": (
                     part_state.get("metadata")
                     if isinstance(part_state.get("metadata"), dict) else {}
@@ -909,12 +965,24 @@ def _stream_opencode_cli(
                 # tool sudah digambar UI lewat on_tool + on_tool_result.
         elif tipe == "step_finish":
             usage = _UsageCLI(ev)
+            if usage.finish_reason in ("stop", "end_turn") and potongan:
+                # CLI dapat pulih dari error sementara di dalam sesi sendiri.
+                # Penyelesaian eksplisit sesudahnya menjadi status terbaru.
+                last_exc = None
 
     if cancel_event is not None and cancel_event.is_set():
         _matikan()
         raise Cancelled()
-    if last_exc is not None and not potongan:
+    if last_exc is not None:
         raise last_exc
+    if isinstance(proc.returncode, int) and proc.returncode != 0:
+        raise IncompleteResponseError(
+            f"OpenCode terputus (kode {proc.returncode}). Jawaban parsial tetap tersimpan.")
+
+    if active_session:
+        if usage is None:
+            usage = _UsageCLI({})
+        usage.session_id = active_session
 
     content = "".join(potongan)
     # OpenCode sudah mengeksekusi tool-nya; teks yang berisi penanda tool
@@ -951,6 +1019,8 @@ def stream_completion(
     max_tokens: int | None = None,
     provider: str = "",
     api_style: str = "chat",
+    variant: str | None = None,
+    session_id: str | None = None,
     on_content: Any = None,
     on_tool_pending: Callable[..., None] | None = None,
     on_reasoning: Any = None,
@@ -977,10 +1047,12 @@ def stream_completion(
         # tools/temperature/extra_body/max_tokens diabaikan — protokolnya
         # milik `opencode run`, bukan Chat Completions.
         return _stream_opencode_cli(
-            messages, model=model, on_content=on_content,
+            messages, model=model, variant=variant, session_id=session_id, on_content=on_content,
             on_tool_pending=on_tool_pending, on_reasoning=on_reasoning,
             cancel_event=cancel_event,
         )
+    if provider == "opencode" and variant:
+        raise ProviderBusyError("Effort OpenCode memerlukan CLI OpenCode; varian tidak dikirim ke API HTTP.")
     if provider == "openrouter" and model and model.endswith(":free"):
         extra_body = dict(extra_body or {})
         routing = dict(extra_body.get("provider") or {})

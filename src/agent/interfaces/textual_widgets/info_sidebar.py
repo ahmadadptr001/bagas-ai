@@ -114,9 +114,11 @@ class InfoSidebar(Widget):
         width: 34;
         height: 100%;
         display: none;
-        background: $t-gema_bg;
-        border-left: tall $t-tepi_redup;
-        padding: 0 1 0 0;
+        /* Inspector, bukan kanvas kedua: satu tingkat lebih terang dari
+           riwayat supaya batas panel terbaca tanpa garis tebal. */
+        background: $t-menu_bg;
+        border-left: solid $t-tepi_redup;
+        padding: 1 1 0 0;
         overflow: hidden;
     }
     InfoSidebar #sidebar-resize {
@@ -223,32 +225,18 @@ class InfoSidebar(Widget):
     # --- Footer path + tree --------------------------------------------
 
     def _gambar_path(self) -> None:
-        """Path LENGKAP project — di-wrap di batas folder (bukan dipotong
-        "…"): baris lanjutan menjorok, path panjang pun terbaca utuh."""
+        """Nama proyek ringkas; path lengkap tersedia saat diarahkan."""
         if self._path is None:
             return
-        isi = self.lebar_isi
-        t = Text()
-        t.append("─" * isi + "\n", style=tema.p("tepi_redup"))
-        t.append("📁 ", style=tema.p("redup"))
-        # Ikon toggle: ▸ tree tertutup, ▾ tree terbuka.
         terbuka = self._tree is not None and self._tree.display
-        t.append(("▾" if terbuka else "▸") + " ",
-                 style=f"bold {tema.p('aksen')}")
-        sisa = isi - 5  # dipakai "📁 " + "▾ "
-        path = str(config.PROJECT_ROOT).replace("\\", "/")
-        # Wrap di batas "/" — jangan belah nama folder di tengah.
-        while len(path) > sisa:
-            potong = path.rfind("/", 0, sisa + 1)
-            if potong <= 0:
-                potong = sisa
-            t.append(path[:potong] + "\n   ", style=tema.p("redup"))
-            path = path[potong:].lstrip("/")
-        t.append(path, style=tema.p("teks"))
-        t.append("\n  klik path: tree · klik file: edit",
-                 style=f"dim {tema.p('redup')}")
-        self.terakhir_path = t.plain
-        self._path.update(t)
+        path = config.PROJECT_ROOT
+        text = Text("▾ " if terbuka else "▸ ", style=tema.p("aksen"))
+        text.append("📁 ", style=tema.p("ubah_footer"))
+        text.append(path.name or str(path), style=f"bold {tema.p('teks')}")
+        text.truncate(max(10, self.lebar_isi - 4), overflow="ellipsis")
+        self.terakhir_path = text.plain
+        self._path.tooltip = str(path)
+        self._path.update(text)
 
     # --- Klik kontrol ---------------------------------------------------
 

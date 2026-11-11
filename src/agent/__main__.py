@@ -74,6 +74,20 @@ Config  : {config.CONFIG_HOME}
 Project : {config.PROJECT_ROOT}   (folder terminal aktif = root project)
 """
 
+try:
+    from . import termux as _termux
+
+    if _termux.IS_TERMUX:
+        HELP += """
+Termux/Android:
+  Browser otomasi, vision lokal (Ollama/Gemma), dan Whisper tidak tersedia.
+  Model berjalan lewat CLI OpenCode Android (aarch64). Dikte memakai mesin STT
+  Android; suara memakai TTS Android; screenshot memakai screencap.
+  Pasang ulang/perbarui runtime: bash install-termux.sh
+"""
+except Exception:  # noqa: BLE001 - bantuan tetap tampil walau deteksi gagal
+    pass
+
 
 def _cmd_login() -> None:
     """Wizard setup interaktif (bot Telegram opsional; tak ada API key)."""

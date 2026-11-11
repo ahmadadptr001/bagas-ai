@@ -1,75 +1,27 @@
-"""ThinkingBlock widget — blok penalaran yang bisa dibuka/tutup.
+"""Penalaran aktif: satu baris header dan viewport kecil yang bisa digulir.
 
-Menampilkan pikiran model (reasoning tokens):
-
-- Tertutup: ``▸ 💭 berpikir... 382 karakter``
-- Terbuka:  ``▾ 💭 berpikir... 382 karakter`` + beberapa baris terakhir
-
-Buka/tutup dengan KLIK pada barisnya (tanda ▸/▾ penanda keadaan).
-
-CATATAN BUG YANG SUDAH DIPERBAIKI (jangan diulang):
-
-1. ``hide()`` dulu MENGHAPUS ``self._text``. Karena Tab (``toggle``) pada
-   keadaan tertentu memanggilnya, isi pikiran hilang dan blok tak bisa
-   dibuka lagi. Sekarang ``hide()`` hanya menyembunyikan; hanya ``clear()``
-   yang menghapus isi.
-2. Tak ada metode ``toggle()`` padahal aplikasi memanggilnya (Tab) — dulu
-   itu ``AttributeError`` yang tertelan.
-3. ``_gambar()`` (dulu bernama ``_render()`` — JANGAN pakai nama itu lagi:
-   ia menimpa API internal Textual ``Widget._render()`` yang wajib
-   mengembalikan Visual, sehingga Textual crash dengan
-   "'NoneType' object has no attribute 'render_strips'"). Dijalankan pada
-   SETIAP token penalaran dan membungkus teks pada lebar tetap 72.
-   Sekarang render dijadwalkan berkala (throttle) dan lebarnya mengikuti
-   lebar widget.
-4. Header dulu berbunyi "💭 pikiran 382 huruf · tab buka/tutup" (2026-09-22).
-   Dua-tiganya keliru: **Tab TIDAK PERNAH terikat** di aplikasi TUI (Tab
-   milik ChatBox untuk melengkapi otomatis — lihat BINDINGS textual_app),
-   jadi kalimat itu janji palsu yang membuat pengguna menekan tombol yang
-   salah; "huruf" bukan istilah yang dipakai di tempat lain (cli.py memakai
-   "karakter" + pemisah ribuan titik); dan kata "pikiran" tetap terpampang
-   setelah penalaran selesai. Sekarang: tanpa hint tombol sama sekali,
-   hitungan berformat ``1.234 karakter``, dan kata "berpikir..." hanya
-   muncul selagi token penalaran benar-benar mengalir.
-   Ambang "berhenti mengalir" SENGAJA lama (``_JEDA_DIAM``), bukan jeda
-   render: model sering tersendat ratusan milidetik di tengah penalaran,
-   dan ambang sependek jeda render membuat header berkedip
-   "berpikir.../pikiran" puluhan kali per giliran.
-5. Tinggi blok dulu dipagari ``max-height`` di CSS (8/4/3 baris menurut
-   lebar & tinggi layar). Batas itu memotong dari BAWAH — justru baris
-   TERBARU yang paling ingin dibaca yang hilang, dan angkanya tak tahu
-   berapa baris isi sebenarnya. Sekarang jumlah baris isi dihitung di
-   Python (``_baris_maks``), jadi hanya ada satu sumber kebenaran.
+Isi lengkap disimpan untuk riwayat; footer tidak ikut memanjang saat model
+mengirim penalaran panjang. Tinggi viewport mengikuti ukuran terminal.
 """
 from __future__ import annotations
 
-import textwrap
 import time
 
 from rich.text import Text
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Static, RichLog
 
 from ...ui import tema
+from .animasi import tampilkan_halus
 
 # Jarak minimal antar render saat token penalaran mengalir (detik).
 _JEDA_RENDER = 0.12
-# Lama tanpa token sebelum header berhenti mengaku "berpikir..." (detik).
-# Jauh lebih panjang dari _JEDA_RENDER: ini soal MAKNA, bukan soal beban
-# render — model lazim tersendat sepersekian detik di tengah penalaran.
+# Batas tenang agar jeda antar-token tidak membuat render berkedip.
 _JEDA_DIAM = 1.2
 # Baris isi maksimum saat blok dibuka (batas atas, sebelum disesuaikan
 # dengan tinggi terminal). Sejalan dengan _PIKIR_BARIS di cli.py.
-_PIKIR_BARIS = 8
-# Perkiraan tinggi bagian lain layar (riwayat + kotak input + status bar).
-# Blok berpikir adalah pelengkap: di terminal pendek ia harus mengalah.
-_SISA_LAYAR = 15
-
-
-def _fmt(n: int) -> str:
-    """1234 -> "1.234" — pemisah ribuan gaya Indonesia (sama dengan cli.py)."""
-    return f"{n:,}".replace(",", ".")
+_PIKIR_BARIS = 3
 
 
 class ThinkingBlock(Widget):
@@ -81,6 +33,16 @@ class ThinkingBlock(Widget):
         padding: 0 1;
         display: none;
     }
+    ThinkingBlock #thinking-content { height: 1; width: 100%; }
+    ThinkingBlock #thinking-body {
+        display: none; height: 3; min-height: 1; width: 100%;
+        padding: 0 1; border-left: solid $t-tepi_redup;
+        background: transparent; color: $t-redup;
+        scrollbar-size-vertical: 1; scrollbar-size-horizontal: 1;
+        scrollbar-background: $t-menu_bg; scrollbar-color: $t-tepi_redup;
+        scrollbar-color-hover: $t-tepi; scrollbar-gutter: stable;
+        overflow-x: hidden; overflow-y: auto;
+    }
     """
 
     collapsed: reactive[bool] = reactive(True)
@@ -88,6 +50,7 @@ class ThinkingBlock(Widget):
     def __init__(self, max_lines: int = _PIKIR_BARIS, **kwargs):
         super().__init__(**kwargs)
         self._content: Static | None = None
+        self._body: RichLog | None = None
         self._text = ""
         self._max_lines = max_lines
         self._timer = None
@@ -97,19 +60,25 @@ class ThinkingBlock(Widget):
 
     def compose(self):
         yield Static("", id="thinking-content")
+        yield RichLog(id="thinking-body", min_width=1, wrap=True,
+                      auto_scroll=False, max_lines=12000)
 
     def on_mount(self):
         self._content = self.query_one("#thinking-content", Static)
+        self._content.tooltip = "Buka/tutup penalaran"
+        self._body = self.query_one("#thinking-body", RichLog)
+        self._body.can_focus = False
 
     def on_click(self, event) -> None:
         """Buka/tutup saat diklik."""
-        event.stop()
-        self.toggle()
+        if event.widget is self._content:
+            event.stop()
+            self.toggle()
 
     def on_resize(self, event) -> None:
         """Bungkus ulang teks pada lebar baru."""
         if self.display and not self.collapsed:
-            self._gambar()
+            self.call_after_refresh(self._gambar)
 
     # --- API publik ----------------------------------------------------
 
@@ -118,7 +87,7 @@ class ThinkingBlock(Widget):
         if not self._text:
             return
         self.collapsed = not self.collapsed
-        self.display = True
+        tampilkan_halus(self)
         self._gambar()
 
     def update_thinking(self, text: str) -> None:
@@ -129,18 +98,19 @@ class ThinkingBlock(Widget):
         self._text = text
         self._mengalir = True
         self._waktu_token = time.monotonic()
-        self.display = True
+        tampilkan_halus(self)
         self._jadwalkan()
 
-    def append_thinking(self, piece: str) -> None:
+    def append_thinking(self, piece: str, *, reveal: bool = True) -> None:
         """Tambah sepotong teks penalaran (dari thread utama)."""
         if not piece:
             return
         self._text += piece
         self._mengalir = True
         self._waktu_token = time.monotonic()
-        self.display = True
-        self._jadwalkan()
+        if reveal:
+            tampilkan_halus(self)
+            self._jadwalkan()
 
     def hide(self) -> None:
         """Sembunyikan blok TANPA menghapus isinya."""
@@ -155,6 +125,9 @@ class ThinkingBlock(Widget):
         self.display = False
         if self._content:
             self._content.update("")
+        if self._body:
+            self._body.clear()
+            self._body.display = False
 
     # --- Render --------------------------------------------------------
 
@@ -197,7 +170,7 @@ class ThinkingBlock(Widget):
             except Exception:  # noqa: BLE001 — belum ter-mount
                 self._timer = None
             return
-        # Benar-benar diam: header tak boleh terus mengaku "berpikir...".
+        # Akhiri pembaruan berkala setelah aliran tenang.
         self._mengalir = False
         self._gambar()
 
@@ -207,7 +180,7 @@ class ThinkingBlock(Widget):
             tinggi = self.app.size.height
         except Exception:  # noqa: BLE001 — di luar konteks app
             tinggi = 24
-        return max(3, min(self._max_lines, tinggi - _SISA_LAYAR))
+        return max(1, min(self._max_lines, tinggi // 8))
 
     def _gambar(self) -> None:
         """Gambar blok sesuai keadaan buka/tutup."""
@@ -219,29 +192,26 @@ class ThinkingBlock(Widget):
             return
 
         header = Text(no_wrap=True, overflow="ellipsis")
-        header.append(f"  {'▸' if self.collapsed else '▾'} ",
-                      style=f"bold {tema.p('aksen_terang')}")
-        # "berpikir…" hanya selama token benar-benar mengalir; sesudahnya
-        # "pikiran" — supaya header tidak menjanjikan sesuatu yang berhenti.
-        kata = "berpikir..." if self._mengalir else "pikiran"
-        header.append(f"💭 {kata} {_fmt(jumlah)} karakter",
-                      style=tema.p("aksen"))
+        header.append(f"{'▸' if self.collapsed else '▾'} ", style=tema.p('aksen'))
+        header.append("💭 ", style=tema.p("redup"))
+        header.append("Penalaran", style=tema.p("teks"))
+        self._content.update(header)
+        if self._body is None:
+            return
+        self._body.display = not self.collapsed
 
         if self.collapsed:
-            self._content.update(header)
             return
-
-        batas = self._baris_maks()
-        lebar = max(20, (self.size.width or 80) - 8)
-        baris = textwrap.wrap(" ".join(self._text.split()), lebar)
-        ekor = baris[-batas:]
-
-        hasil = Text()
-        hasil.append_text(header)
-        hasil.append("\n")
-        if len(baris) > batas:
-            hasil.append(f"    ⋮ ({len(baris) - batas} baris sebelumnya)\n",
-                         style=f"dim {tema.p('redup')}")
-        for b in ekor:
-            hasil.append(f"    {b}\n", style=f"dim italic {tema.p('redup')}")
-        self._content.update(hasil)
+        body = self._body
+        follow = not body.lines or body.is_vertical_scroll_end
+        position = body.scroll_y
+        width = max(1, (body.content_region.width or self.content_size.width - 3) - 1)
+        text = Text(" ".join(self._text.split()), style=tema.p("redup"))
+        lines = text.wrap(self.app.console, max(1, width), overflow="fold")
+        body.styles.height = min(self._baris_maks(), max(1, len(lines)))
+        body.clear()
+        body.write(text, width=width)
+        if follow:
+            body.call_after_refresh(lambda: body.scroll_end(animate=False))
+        else:
+            body.call_after_refresh(lambda: body.scroll_to(y=position, animate=False, force=True))

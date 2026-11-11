@@ -31,6 +31,21 @@ import textwrap
 import time
 from pathlib import Path
 
+# Modul ini dijalankan langsung sebelum dependensi terpasang, jadi impornya
+# harus tahan dua cara pemanggilan: `python src/agent/sistem.py` (relatif
+# gagal, absolut berhasil) dan `from .sistem import ...` (sebaliknya).
+try:
+    from . import termux as _termux
+except ImportError:  # pragma: no cover - jalur skrip installer
+    try:
+        import termux as _termux
+    except ImportError:
+        _termux = None
+
+
+def _di_termux() -> bool:
+    return bool(_termux is not None and _termux.aktif())
+
 # --- perkiraan ukuran (MB) --------------------------------------------------
 # TERUKUR di mesin nyata (pip install bagasai penuh + playwright install
 # chromium + Tesseract UB-Mannheim + model faster-whisper), lalu dibulatkan
@@ -54,6 +69,10 @@ _TOLERANSI = 1.15  # pip cache sementara, berkas sementara unduhan, dsb.
 
 def total_mb() -> int:
     """Total perkiraan ruang disk (MB), termasuk toleransi."""
+    if _di_termux():
+        # Tanpa Playwright/Whisper/PyMuPDF, jejaknya jauh lebih kecil:
+        # TUI + dependensi murni-Python + Pillow/numpy dari paket Termux.
+        return round((260 + 90 + 70) * _TOLERANSI)
     return round(sum(n for _, n in PERKIRAAN_MB) * _TOLERANSI)
 
 
@@ -113,7 +132,15 @@ def _ram_total_gb() -> float:
         return (os.sysconf("SC_PAGE_SIZE")
                 * os.sysconf("SC_PHYS_PAGES")) / (1024 ** 3)
     except (ValueError, OSError, AttributeError):
-        return 0.0
+        pass
+    # Android/Termux kadang tidak mengekspos SC_PHYS_PAGES lewat sysconf.
+    try:
+        for line in Path("/proc/meminfo").read_text(errors="ignore").splitlines():
+            if line.startswith("MemTotal"):
+                return int(line.split()[1]) / (1024 ** 2)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
 
 
 def _internet() -> bool:
@@ -135,6 +162,10 @@ def data_sistem() -> dict:
             os_versi = f"{v.major}.{v.minor} (build {v.build})"
         except Exception:  # noqa: BLE001
             pass
+    elif _di_termux():
+        versi = _termux.versi_android() if _termux else ""
+        os_nama = "Termux"
+        os_versi = f"(Android {versi})" if versi else "(Android)"
     disk = shutil.disk_usage(Path.home())
     return {
         "os": f"{os_nama} {os_versi}".strip(),
@@ -171,26 +202,50 @@ def cek_sistem() -> list[tuple[str | None, str]]:
 
     # Arsitektur: 64-bit. ctranslate2/faster-whisper tak punya wheel 32-bit.
     bit = struct.calcsize("P") * 8
-    hasil.append((True if bit >= 64 else False,
-                  d["arsitektur"]
-                  + ("" if bit >= 64 else "  — butuh 64-bit")))
+    arsitektur = d["arsitektur"]
+    status_arsitektur: bool | None = True if bit >= 64 else False
+    if _di_termux() and "aarch64" not in platform.machine().lower():
+        # OpenCode Termux resmi hanya dibangun untuk aarch64. Di arsitektur
+        # lain bagas-ai tetap jalan, tetapi runtime modelnya belum tersedia.
+        status_arsitektur = None
+        arsitektur += "  (OpenCode Termux resmi butuh aarch64)"
+    hasil.append((status_arsitektur,
+                  arsitektur + ("" if bit >= 64 else "  — butuh 64-bit")))
 
-    # RAM: Whisper small + Chromium + Python nyaman di 8 GB.
+    # RAM: di desktop, Whisper small + Chromium + Python nyaman di 8 GB.
+    # Termux tidak menjalankan keduanya, jadi ambangnya jauh lebih rendah.
     ram = d["ram_gb"]
-    hasil.append((True if ram >= 8 else None if ram >= 4 else False,
-                  f"RAM {ram:.0f} GB"
-                  + ("" if ram >= 8
-                     else "  (cukup, tapi sesak untuk pengenalan suara)"
-                     if ram >= 4 else "  — butuh minimal 4 GB")))
+    if _di_termux():
+        status_ram = (True if ram >= 3
+                      else None if ram >= 2 or ram <= 0 else False)
+        catatan_ram = ("" if status_ram is True or ram <= 0
+                       else "  (bagas-ai tetap bisa jalan, tapi TUI terasa sesak)"
+                       if status_ram is None else "  — butuh minimal 2 GB")
+        hasil.append((status_ram,
+                      (f"RAM {ram:.0f} GB" if ram > 0 else "RAM tak terbaca")
+                      + catatan_ram))
+    else:
+        hasil.append((True if ram >= 8 else None if ram >= 4 else False,
+                      f"RAM {ram:.0f} GB"
+                      + ("" if ram >= 8
+                         else "  (cukup, tapi sesak untuk pengenalan suara)"
+                         if ram >= 4 else "  — butuh minimal 4 GB")))
 
     # Ruang disk: dibandingkan total perkiraan (lihat PERKIRAAN_MB).
     butuh = total_mb() / 1024
     bebas = d["disk_bebas_gb"]
-    hasil.append((True if bebas >= 10 else None if bebas >= butuh else False,
-                  f"ruang disk bebas {bebas:.0f} GB"
-                  + ("" if bebas >= 10
-                     else "  (data sesi & profil browser akan terus bertambah)"
-                     if bebas >= butuh else "  — tidak cukup")))
+    if _di_termux():
+        hasil.append((True if bebas >= 3 else None if bebas >= butuh else False,
+                      f"ruang disk bebas {bebas:.0f} GB"
+                      + ("" if bebas >= 3
+                         else "  (sesi & unduhan model bisa menambah)"
+                         if bebas >= butuh else "  — tidak cukup")))
+    else:
+        hasil.append((True if bebas >= 10 else None if bebas >= butuh else False,
+                      f"ruang disk bebas {bebas:.0f} GB"
+                      + ("" if bebas >= 10
+                         else "  (data sesi & profil browser akan terus bertambah)"
+                         if bebas >= butuh else "  — tidak cukup")))
 
     # Python: 3.10+ (installer juga mengeceknya; cek lagi di sini supaya
     # modul ini benar berdiri sendiri).
@@ -305,6 +360,17 @@ def tampilkan() -> bool:
         print(f"  {_tanda(status)}  {ket}")
         if status is False:
             gagal = True
+
+    if _di_termux():
+        print()
+        print(_gaya("  Termux/Android: yang dilewati", _KUNING, _TEBAL))
+        for baris in (
+            "browser otomasi (Playwright/Chromium) — model lewat CLI OpenCode",
+            "vision lokal (Ollama/Gemma) dan Whisper/sounddevice",
+            "screenshot memakai screencap; dikte memakai STT Android",
+            "suara memakai TTS Android (termux-tts-speak)",
+        ):
+            print("  " + _gaya("• " + baris, _REDUP))
 
     _judul_bagian("Disclaimer · Ketentuan dan Kebijakan")
     for baris in _baris_disclaimer():

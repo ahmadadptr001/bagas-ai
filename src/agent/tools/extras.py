@@ -26,6 +26,7 @@ import zipfile
 from pathlib import Path
 
 from .. import config
+from .. import termux
 from .base import tool
 from .files import _display, _safe_path
 from .screen import IMAGE_MARK
@@ -254,6 +255,11 @@ def notify(message: str, title: str = "bagas-ai") -> str:
     msg = (message or "").strip()
     if not msg:
         return "[error] pesan kosong."
+    if termux.IS_TERMUX:
+        if termux.notifikasi(title, msg):
+            return f"Notifikasi Android dikirim: {title} — {msg}"
+        return (f"[info] notifikasi Android tak tersedia (paket termux-api "
+                f"dan aplikasi Termux:API belum ada); pesan: {msg}")
     try:
         if os.name == "nt":
             ps = (
@@ -292,6 +298,11 @@ def clipboard_write(text: str) -> str:
     """Salin teks ke CLIPBOARD pengguna, siap ditempel ke aplikasi lain."""
     if not text:
         return "[error] teks kosong."
+    if termux.IS_TERMUX:
+        if termux.salin(text):
+            return f"Disalin ke clipboard Android ({len(text)} karakter)."
+        return ("[info] clipboard Android tak tersedia (paket termux-api dan "
+                "aplikasi Termux:API belum ada).")
     try:
         if os.name == "nt":
             p = subprocess.run(["clip"], input=text.encode("utf-16-le"),
@@ -315,6 +326,15 @@ def clipboard_write(text: str) -> str:
 @tool
 def clipboard_read(max_chars: int = 4000) -> str:
     """Baca isi CLIPBOARD pengguna — mis. saat ia bilang 'ini yang barusan aku salin'."""
+    if termux.IS_TERMUX:
+        teks = termux.tempel()
+        if not teks:
+            return ("Clipboard kosong atau tak tersedia (butuh paket termux-api "
+                    "dan aplikasi Termux:API).")
+        teks = teks.strip()
+        if len(teks) > max_chars:
+            teks = teks[:max_chars] + f"\n… dipotong di {max_chars} karakter"
+        return teks
     try:
         if os.name == "nt":
             p = subprocess.run(
@@ -356,7 +376,11 @@ def open_path(path: str) -> str:
             return f"[error] tidak ditemukan: {_display(p)}"
         sasaran = str(p)
     try:
-        if os.name == "nt":
+        if termux.IS_TERMUX:
+            if not termux.buka(sasaran):
+                return ("[error] tak bisa membuka di Android (paket termux-api "
+                        "dan aplikasi Termux:API diperlukan).")
+        elif os.name == "nt":
             os.startfile(sasaran)  # noqa: S606 - memang perilaku yang diminta
         elif sys.platform == "darwin":
             subprocess.run(["open", sasaran], capture_output=True, timeout=20)

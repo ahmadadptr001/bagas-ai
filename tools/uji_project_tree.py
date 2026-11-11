@@ -91,7 +91,7 @@ async def main():
             footer.region.x + footer.region.width == sb.region.x,
             f"footer={footer.region}, sidebar={sb.region}")
         cek("box chat tidak menutupi sidebar",
-            input_row.region.x + input_row.region.width == sb.region.x,
+            input_row.region.right <= sb.region.x,
             f"chat={input_row.region}, sidebar={sb.region}")
         # Panel footer mana pun harus berhenti di tepi sidebar, bukan
         # menabrak dividernya. Blok berpikir dipakai sebagai wakilnya —
@@ -119,11 +119,10 @@ async def main():
         # ── 1. footer path LENGKAP ────────────────────────────────────
         path_asli = str(Path(_TMP)).replace("\\", "/")
         tampil = sb.terakhir_path.replace("\\", "/")
-        # Semua potongan path harus ada di footer (di-wrap, bukan "…").
-        bersih = "\n".join(b.strip("📁▾▸ ") for b in tampil.split("\n"))
-        utuh = all(bag in bersih for bag in path_asli.split("/"))
-        cek("footer path tampil lengkap (tanpa '…')",
-            utuh and "…" not in bersih, f"footer={bersih!r}")
+        cek("nama proyek ringkas, path lengkap pada tooltip",
+            Path(_TMP).name in tampil
+            and sb.query_one("#path-footer").tooltip.replace("\\", "/") == path_asli,
+            f"footer={tampil!r}")
         cek("tree tertutup di awal", tree.display is False)
 
         # ── 2. tarik tepi kiri untuk resize seluruh sidebar ───────────

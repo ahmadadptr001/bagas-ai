@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -51,10 +52,13 @@ def uji_pilihan_dan_frontend() -> None:
     assert len(turun) == 1024 and turun.dtype == np.int16
 
     depan = dengar._AudioFrontEnd(48000)
-    bersih, mentah, _suara = depan.proses(x)
+    hasil = [depan.proses(x) for _ in range(4)]
     assert depan.vad_tersedia
-    assert len(bersih) == len(mentah) == 960  # enam bingkai WebRTC 10 ms
-    print("  WASAPI + resample + WebRTC NS/AGC/VAD: OK")
+    assert depan.vad_handal, (
+        "Silero harus ikut siap — VAD WebRTC pada paket ini mati")
+    assert any(len(b) for b, _, _ in hasil), "resampler tidak mengeluarkan sampel"
+    assert all(len(b) == len(m) and len(b) % 160 == 0 for b, m, _ in hasil)
+    print("  WASAPI + resample + WebRTC NS/AGC + VAD Silero: OK")
 
 
 def uji_model_tidak_dimuat_ganda() -> None:
@@ -67,7 +71,8 @@ def uji_model_tidak_dimuat_ganda() -> None:
     modul = SimpleNamespace(WhisperModel=ModelPalsu)
     p = dengar._Pengenal()
     hasil: list[tuple[bool, str]] = []
-    with patch.dict(sys.modules, {"faster_whisper": modul}):
+    with (patch.dict(sys.modules, {"faster_whisper": modul}),
+          patch.object(dengar, "_lokasi_model_whisper", return_value="cache-uji")):
         threads = [threading.Thread(target=lambda: hasil.append(p.pastikan()))
                    for _ in range(4)]
         for t in threads:
@@ -76,6 +81,7 @@ def uji_model_tidak_dimuat_ganda() -> None:
             t.join()
     assert len(dibuat) == 1
     assert len(hasil) == 4 and all(ok for ok, _ in hasil)
+    assert dibuat[0][1]["local_files_only"] is True
     print("  pemuatan Whisper terkunci (satu salinan): OK")
 
 
@@ -159,6 +165,7 @@ def uji_dikte_tanpa_wake_word() -> None:
 
     class FrontendPalsu:
         vad_tersedia = True
+        vad_handal = True
 
         def __init__(self, _rate):
             pass
@@ -243,6 +250,7 @@ def uji_jeda_alami_tetap_satu_prompt() -> None:
 
     class FrontendPalsu:
         vad_tersedia = True
+        vad_handal = True
 
         def __init__(self, _rate):
             pass
@@ -280,20 +288,13 @@ def uji_jeda_alami_tetap_satu_prompt() -> None:
 
 
 def uji_penyela_memotong_tts() -> None:
-    """Menyela di tengah TTS: bacaan dipotong & ucapan penyela jadi prompt.
-
-    Dulu semua blok dibuang selama speaker bersuara — mikrofon tuli total dan
-    pengguna yang menanggapi di tengah bacaan lenyap. Kini kebocoran speaker
-    jadi baseline; lonjakan energi DI ATASNYA (plus VAD) memotong bacaan dan
-    memulai rekaman ucapan penyela, lengkap dengan pre-roll sebelum
-    lonjakannya."""
+    """Ucapan setelah AEC memotong TTS dengan pre-roll tetap tersimpan."""
     blok_bocor = np.full((1024,), 100, dtype=np.int16)   # gema pengeras suara
     blok_ucap = np.full((1024,), 3000, dtype=np.int16)   # suara penyela
     blok_sunyi = np.full((1024,), 20, dtype=np.int16)
     jeda_akhir = int((dengar._DIAM_SELESAI_LANGSUNG + 0.2)
                      / dengar._DETIK_BLOK)
-    # 8 blok kebocoran membangun baseline; 5 blok lonjakan beruntun memicu
-    # penyela; sisanya ucapan penyela + sunyi sampai endpoint.
+    # VAD setelah AEC mengabaikan sisa gema, tetapi menerima ucapan eksternal.
     blok = ([blok_bocor] * 8 + [blok_ucap] * 10
             + [blok_sunyi] * jeda_akhir + [blok_sunyi] * 2)
 
@@ -311,7 +312,9 @@ def uji_penyela_memotong_tts() -> None:
             return nilai.reshape(-1, 1), False
 
     class FrontendPalsu:
+        echo_enabled = True
         vad_tersedia = True
+        vad_handal = True
 
         def __init__(self, _rate):
             pass
@@ -384,6 +387,189 @@ def uji_potong_kalimat_tts() -> None:
     print("  TTS per kalimat + antrean sambung: OK")
 
 
+def uji_ambang_diukur_dari_audio_bersih() -> None:
+    """Ambang dibentuk dari audio BERSIH, bukan dari mentah.
+
+    Ini akar kegagalan /voice. Kalibrasi dulu mengukur derau MENTAH yang
+    masih tenang (AGC belum mengunci gain); sesudah itu derau mentah
+    melonjak ±8x, melewati ambang lama, dan dianggap ucapan sepanjang
+    sesi — potongan tak pernah ditutup, nol prompt terkirim. Derau
+    mentah juga bisa jatuh ke 10 (kalibrasi) padahal derau bersih stabil,
+    sehingga ambangnya salah sejak awal.
+
+    Semua pengukuran kini memakai audio bersih (NS+AGC) — audio yang
+    benar-benar dipanggilkan ke pengenal suara.
+    """
+    blok_derau_tenang = np.full((1024,), 10, dtype=np.int16)    # prakalibrasi
+    blok_derau = np.full((1024,), 80, dtype=np.int16)           # AGC terkunci
+    blok_ucap = np.full((1024,), 4000, dtype=np.int16)
+    blok_sunyi = np.full((1024,), 80, dtype=np.int16)
+    jeda_akhir = int((dengar._DIAM_SELESAI_LANGSUNG + 0.3)
+                     / dengar._DETIK_BLOK)
+    blok = ([blok_derau_tenang] * 6 + [blok_derau] * 8
+            + [blok_ucap] * 10 + [blok_sunyi] * jeda_akhir
+            + [blok_sunyi] * 4)
+
+    class StreamPalsu:
+        def __init__(self, pendengar, kalibrasi):
+            self.pendengar = pendengar
+            self.kalibrasi = kalibrasi
+            self.index = 0
+            self.mulai = time.time()
+
+        def read(self, _n):
+            # Blok kalibrasi disajikan lambat supaya batas waktu kalibrasi
+            # yang benar-benar dipakai — mesin uji bisa jauh lebih cepat
+            # daripada mikrofon sungguhan dan menghabiskan seluruh blok.
+            if self.index >= len(blok):
+                self.pendengar._stop.set()
+                return blok_sunyi.reshape(-1, 1), False
+            nilai = blok[self.index]
+            self.index += 1
+            if time.time() - self.mulai < self.kalibrasi:
+                time.sleep(0.04)
+            return nilai.reshape(-1, 1), False
+
+    class FrontendPalsu:
+        vad_tersedia = True
+        vad_handal = True
+
+        def __init__(self, _rate):
+            pass
+
+        def proses(self, data):
+            x = np.asarray(data, dtype=np.int16).reshape(-1)
+            # NS+AGC menahan derau pada satu tingkat walau AGC membuat
+            # perekam mentah melonjak dari 10 ke 80.
+            bersih = np.full_like(x, 600 if x[0] >= 1000 else 50)
+            return bersih, x, bool(x[0] >= 1000)
+
+        def reset(self):
+            pass
+
+    kenal = MagicMock()
+    kenal.kenali.return_value = ("buka berkas utama", "whisper")
+    terkirim: list[str] = []
+    with (patch.object(dengar, "pengenal", return_value=kenal),
+          patch.object(dengar, "_AudioFrontEnd", FrontendPalsu),
+          patch.object(dengar, "_KALIBRASI", 0.1)):
+        p = dengar.Pendengar(terkirim.append, jangkauan="jauh")
+        p._gelung(StreamPalsu(p, 0.1), np)
+
+    # Derau bersih 50 -> ambang 50 x 1,65 = 82,5 (dengan rumus jauh).
+    # Dari audio mentah ambangnya jadi 10 x 1,65 = 16,5 dan derau mentah 80
+    # melewatinya: rekaman tak pernah selesai dan tidak ada yang terantre.
+    assert abs(p.ambang - 82.5) < 0.01, (
+        f"ambang harus dibentuk dari audio bersih, dapatnya {p.ambang:.2f}")
+    assert p._antre.qsize() == 1, (
+        "derau harus menutup potongan setelah ucapan berakhir")
+    p._stop.clear()
+    print("  ambang dari audio bersih (bukan mentah): OK")
+
+
+def uji_galat_vad_web_tidak_membuang_ns() -> None:
+    """VAD WebRTC yang melempar tidak boleh menjatuhkan NS/AGC.
+
+    aec-audio-processing 1.0.1 tak pernah mengisi vad_enabled_, jadi
+    has_voice() kadang melempar. Galat itu dulu terdampar di try yang sama
+    dengan process_stream, sehingga _apm dibuang dan seluruh sesi kehilangan
+    penekan derau — audio yang dikirim ke pengenal suara jadi mentah.
+    """
+    class ApmPalsu:
+        def get_frame_size(self):
+            return 960
+
+        def process_stream(self, data):
+            return bytes(len(data))    # penanda: NS memang mengeluarkan ini
+
+        def has_voice(self):
+            raise RuntimeError("VAD is not enabled. "
+                               "Call set_vad_enabled() first.")
+
+    depan = dengar._AudioFrontEnd(16000)
+    depan._apm = ApmPalsu()
+    depan._silero = None                 # isolasi: hanya jalur WebRTC
+    x = np.full((960,), 500, dtype=np.int16)
+    bersih, _mentah, suara = depan.proses(x)
+    assert depan._apm is not None, "galat VAD membuang NS/AGC seluruh sesi"
+    assert np.all(bersih == 0), "audio harus keluar dari NS, bukan mentah"
+    assert suara is False
+    assert depan._vad_web is False, "VAD WebRTC yang rusak harus dimatikan"
+    # Sesudah dimatikan, NS tetap dipakai dan has_voice() tak dipanggil lagi.
+    bersih2, _, _ = depan.proses(x)
+    assert depan._apm is not None and np.all(bersih2 == 0)
+    print("  galat has_voice() tak menjatuhkan NS/AGC: OK")
+
+
+def uji_vad_silero_tak_menangkap_senyap() -> None:
+    """Silero — VAD pengganti WebRTC yang mati — tak menangkap senyap."""
+    depan = dengar._AudioFrontEnd(16000)
+    if depan._silero is None:
+        print("  Silero VAD tak tersedia di mesin ini: dilewati")
+        return
+    assert depan.vad_handal and depan.vad_tersedia
+    senyap = np.zeros((1024,), dtype=np.int16)
+    for _ in range(40):                 # 2,56 dtk: jendela penuh + berjalan
+        _b, _m, suara = depan.proses(senyap)
+        assert suara is False, "senyap tak boleh dianggap ucapan"
+    assert depan._silero._jendela.size >= dengar._VadSilero._PANJANG, (
+        "model Silero belum sempat berjalan — uji ini tak membuktikan apa-apa")
+    print("  Silero VAD menolak senyap setelah jendela penuh: OK")
+
+
+def uji_derau_tak_membuka_rekaman() -> None:
+    """Energi TIDAK memulai ucapan selama VAD-nya andal.
+
+    p90 derau ruangan bisa kebetulan melewati ambang selama dua blok, dan tanpa
+    syarat VAD itu membuka potongan pada bunyi yang sama sekali bukan ucapan.
+    Blob semacam itu berakhir jadi prompt kosong — persis yang dilihat pada
+    uji mikrofon sungguhan (derau p90 49 vs ambang 51: rekaman terbuka di
+    tengah ruangan yang diam). Energi tetap dipakai untuk MENERUSKAN ucapan;
+    lihat uji_voice_pendek untuk jalur itu.
+    """
+    tenang = np.full((1024,), 1, dtype=np.int16)
+    derau = np.full((1024,), 200, dtype=np.int16)   # di atas ambang, bukan suara
+    jeda_akhir = int((dengar._DIAM_SELESAI_LANGSUNG + 0.3)
+                     / dengar._DETIK_BLOK)
+    blok = [derau] * 5 + [tenang] * jeda_akhir + [tenang] * 4
+
+    class StreamPalsu:
+        def __init__(self, pendengar):
+            self.pendengar = pendengar
+            self.index = 0
+
+        def read(self, _n):
+            if self.index >= len(blok):
+                self.pendengar._stop.set()
+                return tenang.reshape(-1, 1), False
+            nilai = blok[self.index]
+            self.index += 1
+            return nilai.reshape(-1, 1), False
+
+    class FrontendPalsu:
+        vad_tersedia = True
+        vad_handal = True
+
+        def __init__(self, _rate):
+            pass
+
+        def proses(self, data):
+            x = np.asarray(data, dtype=np.int16).reshape(-1)
+            return x, x, False            # energi tinggi, VAD bilang bukan suara
+
+        def reset(self):
+            pass
+
+    with (patch.object(dengar, "pengenal", return_value=MagicMock()),
+          patch.object(dengar, "_AudioFrontEnd", FrontendPalsu),
+          patch.object(dengar, "_KALIBRASI", 0.0)):
+        p = dengar.Pendengar(lambda _t: None, jangkauan="jauh")
+        p._gelung(StreamPalsu(p), np)
+    assert p._antre.qsize() == 0, (
+        "derau di atas ambang membuka rekaman walau VAD menolaknya")
+    print("  derau tak membuka rekaman selama VAD andal: OK")
+
+
 def uji_kontrak_instalasi() -> None:
     root = Path(__file__).resolve().parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
@@ -409,5 +595,9 @@ if __name__ == "__main__":
     uji_jeda_alami_tetap_satu_prompt()
     uji_penyela_memotong_tts()
     uji_potong_kalimat_tts()
+    uji_ambang_diukur_dari_audio_bersih()
+    uji_derau_tak_membuka_rekaman()
+    uji_galat_vad_web_tidak_membuang_ns()
+    uji_vad_silero_tak_menangkap_senyap()
     uji_kontrak_instalasi()
     print("OK - seluruh pipeline audio lokal lulus")

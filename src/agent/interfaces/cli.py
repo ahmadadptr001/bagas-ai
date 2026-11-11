@@ -117,6 +117,8 @@ from ..session import Session  # noqa: E402
 # Prompt interaktif MILIK SENDIRI (dulu InquirerPy) — lihat ui/menu.py.
 from ..ui.menu import Choice, inquirer  # noqa: E402
 from ..ui import tema  # noqa: E402
+from ..ui.icons import footer_icon  # noqa: E402
+from ..ui.commands import QUICK_COMMANDS  # noqa: E402
 
 
 def _TM(markup: str) -> Text:
@@ -279,41 +281,7 @@ _LPAD = 2
 
 # Perintah slash + deskripsi singkat (dipakai autocomplete "/..." & bantuan).
 SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("menu", "menu interaktif"),
-    ("model", "pilih model + saran"),
-    ("effort", "mode berpikir"),
-    ("mode", "mode kerja situs: buat gambar/video, dll"),
-    ("theme", "tema warna antarmuka"),
-    ("tim", "24 spesialis yang meninjau pekerjaan secara pasif"),
-    ("mic", "suara: kabar AI dibacakan pengeras suara (on/off/tes)"),
-    ("voice", "percakapan mikrofon langsung tanpa kata pemicu "
-              "(off/tes/jangkau/dekat|normal|jauh)"),
-    ("image", "baca gambar lokal via Python tanpa upload"),
-    ("export", "ekspor riwayat chat ke Markdown/JSON"),
-    ("btw", "ngobrol santai tanpa mengganggu tugas"),
-    ("compact", "simpan riwayat percakapan ke berkas memory"),
-    ("send-compact", "kirim berkas memory terakhir ke percakapan sekarang"),
-    ("add-dir", "tambah folder konteks"),
-    ("dirs", "folder konteks aktif"),
-    ("rm-dir", "hapus folder konteks"),
-    ("new", "mulai sesi baru"),
-    ("delete", "hapus sesi"),
-    ("reset", "kosongkan riwayat"),
-    ("clear", "bersihkan layar"),
-    ("web", "kelola sesi AI web (hapus chat menumpuk / logout)"),
-    ("browser", "ganti browser (brave/chrome/dll)"),
-    ("bot", "hidup/matikan bot Telegram di sesi ini"),
-    ("permissions-bot", "atur izin siapa yang boleh kontrol via Telegram"),
-    ("review", "cari bug & kesalahan sistem di seluruh proyek"),
-    ("scan", "pindai ulang & segarkan peta proyek"),
-    ("live", "alat pembaca layar (on/off/status)"),
-    ("video", "alias alat layar /live"),
-    ("stream", "hidup/matikan tampilan mengalir dengan footer status"),
-    ("memory", "memory jangka panjang"),
-    ("scripts", "script memory"),
-    ("update", "cek pembaruan"),
-    ("help", "bantuan"),
-    ("exit", "keluar"),
+    (command[1:], description) for command, description, _args in QUICK_COMMANDS
 ]
 
 # Instruksi untuk /review — audit bug & kesalahan sistem menyeluruh.
@@ -1320,7 +1288,7 @@ _MENU_MAKS = 8
 #
 # Maka hasilnya ditampilkan saja SEKARANG, di tempatnya — dibatasi beberapa
 # baris supaya keluaran 400 baris tak menenggelamkan riwayat.
-_PRATINJAU_BARIS = 8
+_PRATINJAU_BARIS = 3
 
 
 def _pratinjau_hasil(lines: list[str], *, gagal: bool = False) -> list:
@@ -1706,39 +1674,40 @@ def _bar_status(agent: Agent, total: int) -> Text:
     spec = agent.model_spec
     SEP = "  │  "
     teks = {
-        "merek": " ⬢ bagas-ai",
-        "model": (f"{SEP}{'🌐' if spec.is_web else '🤖'} {spec.label}"
-                  + (f"{SEP}📹 layar" if getattr(
+        "merek": f" {footer_icon('brand')} bagas-ai",
+        "model": (f"{SEP}{footer_icon('web' if spec.is_web else 'model')} {spec.label}"
+                  + (f"{SEP}{footer_icon('live')} layar" if getattr(
                       agent, "live_screen_active", False) else "")),
         "perintah": "/menu · /exit",
         "ctrlc": " atau ctrl+c",
         "exit": "/exit",
     }
     git_branch, git_changed = _git_info()
-    teks["git"] = f"{SEP}🌿 {git_branch}" if git_branch else ""
-    teks["ubah"] = f"{SEP}📝 {git_changed}" if git_changed else ""
+    teks["git"] = f"{SEP}{footer_icon('git')} {git_branch}" if git_branch else ""
+    teks["ubah"] = f"{SEP}{footer_icon('changed')} {git_changed}" if git_changed else ""
     ada = _bagian_bar(_lebar_kotak(), lambda b: Text(teks[b]).cell_len + 1)
 
     bar = Text(style=f"on {_BG_BAR()}")
     if "merek" in ada:
-        bar.append(" ⬢ bagas-ai", style=f"bold {tema.p('merek_footer')}")
+        bar.append(f" {footer_icon('brand')} bagas-ai", style=f"bold {tema.p('merek_footer')}")
     if "model" in ada:
         if "merek" in ada:
             bar.append(SEP, style=tema.p("sep_footer"))
         else:
             bar.append(" ")
-        bar.append(f"{'🌐' if spec.is_web else '🤖'} ")
+        bar.append(f"{footer_icon('web' if spec.is_web else 'model')} ",
+                   style=tema.p("model_footer"))
         bar.append(spec.label, style=f"bold {tema.p('model_footer')}")
         if getattr(agent, "live_screen_active", False):
             bar.append(SEP, style=tema.p("sep_footer"))
-            bar.append("📹 layar", style=f"bold {tema.p('aksen')}")
+            bar.append(f"{footer_icon('live')} layar", style=f"bold {tema.p('aksen')}")
     if "git" in ada and git_branch:
         bar.append(SEP, style=tema.p("sep_footer"))
-        bar.append("🌿 ", style=tema.p("git_footer"))
+        bar.append(f"{footer_icon('git')} ", style=tema.p("git_footer"))
         bar.append(git_branch, style=tema.p("git_footer"))
     if "ubah" in ada and git_changed:
         bar.append(SEP, style=tema.p("sep_footer"))
-        bar.append(f"📝 {git_changed}", style=tema.p("ubah_footer"))
+        bar.append(f"{footer_icon('changed')} {git_changed}", style=tema.p("ubah_footer"))
     # Segmen "sesi" DIHAPUS atas permintaan pengguna: token sesi sudah
     # ditampilkan di baris status live (⚡ X sesi), tak perlu duplikat di footer.
 
@@ -2408,7 +2377,7 @@ _PHASE = {
 #
 # Tingginya DIBATASI _PIKIR_BARIS: region hidup tak boleh melebihi layar, dan
 # aturan itu tak boleh ditawar cuma karena bloknya sedang terbuka.
-_PIKIR_BARIS = 8
+_PIKIR_BARIS = 3
 
 
 def _tinggi_pikir() -> int:
@@ -2420,7 +2389,7 @@ def _tinggi_pikir() -> int:
     layar: begitu kotaknya lenyap, orang menyangka ketikannya hilang — mahal
     sekali untuk sesuatu yang cuma keterangan tambahan. Di layar pendek
     bloknya menyusut, bukan region yang melebar."""
-    return max(3, min(_PIKIR_BARIS, console.height - 15))
+    return max(1, min(_PIKIR_BARIS, console.height // 8))
 
 
 def _blok_pikir(teks: str, buka: bool, *, bisa_buka: bool = True) -> list:
@@ -2442,18 +2411,18 @@ def _blok_pikir(teks: str, buka: bool, *, bisa_buka: bool = True) -> list:
     # Petunjuk tombolnya DITULIS: dulu blok ini cuma memasang tanda ▸ yang
     # menyerupai bisa-diklik, dan tak satu pun teks di layar menyebut Tab —
     # pengguna menekan/mengklik apa saja lalu menyimpulkan fiturnya rusak.
-    petunjuk = "" if (buka or not bisa_buka) else " · Tab buka/tutup"
+    petunjuk = "" if (buka or not bisa_buka) else " · Tab buka"
     kepala = _oneline(_TM(
-        f"  [dim]{tanda}💭 pikiran {_fmt(len(teks))} karakter{petunjuk}[/]"))
+        f"  [dim]{tanda}💭 Penalaran{petunjuk}[/]"))
     if not buka:
         return [kepala]
     # Isinya menjorok ke kolom 4 — kolom yang SAMA dengan tulisan fase di baris
     # status, sementara tanda ▾ menggantung di kolom 2 bersama gasing. Jadi
     # tanda itu membuka blok yang duduk persis di bawah keterangannya.
-    lebar = max(24, console.size.width - 8)
-    baris = textwrap.wrap(" ".join(teks.split()), lebar)[-_tinggi_pikir():]
-    return [kepala] + [_oneline(Text(f"    {b}", style="dim italic"))
-                       for b in baris]
+    lebar = max(1, console.size.width - 8)
+    baris = Text(" ".join(teks.split()), style=tema.p("redup")).wrap(
+        console, lebar, overflow="fold")[-_tinggi_pikir():]
+    return [kepala] + [_oneline(Text("    ").append_text(b)) for b in baris]
 
 
 class Status:
@@ -3215,6 +3184,10 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         if not aktif:
             try:
                 from ..tools.screen import clear_live_capture
+                from ..desktop_capture import release_capture
+                from ..screen_observer import observer
+                release_capture()
+                observer.reset()
                 clear_live_capture()
             except Exception:  # noqa: BLE001 — cleanup best-effort
                 pass
@@ -3232,49 +3205,42 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 f"alat dihentikan karena pengambilan gambar gagal: {exc}"
             ) from exc
 
-    def _live_pertanyaan(teks: str, attachments: list[str]) -> str:
-        """Tambahkan OCR lokal tanpa menjalankan model vision."""
+    def _pilih_live_source() -> bool:
+        from ..desktop_capture import list_windows, select_target
+        from ..screen_observer import observer
+        from ..ui import inquirer
+        try:
+            windows = list_windows()
+        except (OSError, RuntimeError):
+            windows = []
+        choices = [{"name": item.title, "value": str(item.hwnd)} for item in windows]
+        choices.append({"name": "Monitor utama", "value": "0"})
+        try:
+            selected = inquirer.select(message="Pilih sumber layar", choices=choices).execute() if len(choices) > 1 else "0"
+            if selected is None:
+                return False
+            select_target(int(selected))
+            observer.reset()
+            return True
+        except (KeyboardInterrupt, EOFError):
+            return False
+        except (OSError, RuntimeError, ValueError) as exc:
+            console.print(f"  [red]{_esc(str(exc))}[/]")
+            return False
+
+    def _live_pertanyaan(teks: str, attachments: list[str], cancel_event=None) -> str:
+        """Siapkan observasi sebelum agent menyusun satu jawaban akhir."""
         if not attachments:
             return teks
-        from ..tools.image_local import read_image_local
-        with console.status("[dim]membaca teks…[/]", spinner="dots"):
-            laporan_ocr = read_image_local(
-                attachments[0], ocr=True, vision=False,
-            )
-        return (
-            teks + "\n\n[SISTEM] Data OCR dan pembacaan lokal dari layar "
-            "tersedia di bawah. Jawab dari data ini. Jika datanya tidak cukup "
-            "untuk menjawab, katakan persis 'tidak dapat menganalisis gambar'.\n"
-            + laporan_ocr
-        )
-
-    def _live_fallback(
-        teks: str, jawaban: str, attachments: list[str],
-    ) -> str:
-        """Gunakan vision lokal hanya bila model utama menolak gambar."""
-        if not attachments:
-            return jawaban
-        from ..tools.vision_local import (
-            VisionLocalError, describe_image, response_needs_vision,
-        )
-        if not response_needs_vision(jawaban):
-            return jawaban
+        from ..screen_observer import observer
         try:
-            with console.status("[dim]sedang menganalisis…[/]", spinner="dots"):
-                hasil = describe_image(
-                    Path(attachments[0]),
-                    prompt=(
-                        "Jawab pertanyaan pengguna tentang gambar ini secara "
-                        f"faktual: {teks[:1200]}"
-                    ),
-                    strict=True,
-                )
-        except VisionLocalError as exc:
+            with console.status("[dim]membaca layar…[/]", spinner="dots"):
+                return observer.prepare(teks, Path(attachments[0]), cancel_event=cancel_event)
+        except InterruptedError:
+            raise
+        except Exception:
             _set_live_screen(False)
-            raise RuntimeError(f"analisis lanjutan gagal: {exc}") from exc
-        agent.replace_last_answer(hasil)
-        console.print("  [#9fc93c]✓ analisis selesai.[/]")
-        return hasil
+            raise
 
     def _step_label(name: str, args: dict) -> str:
         a = args if isinstance(args, dict) else {}
@@ -3923,7 +3889,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             attachments: list[str] = []
             try:
                 attachments = _live_attachments()
-                pertanyaan = _live_pertanyaan(text, attachments)
+                pertanyaan = _live_pertanyaan(text, attachments, cancel_event)
                 jawaban = agent.run(
                     pertanyaan, on_tool=_on_tool, on_message=_on_msg,
                     on_retry=_on_retry, cancel_event=cancel_event,
@@ -3947,16 +3913,14 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                     # mengulang berarti mencetak jawaban dua kali). Tanpa
                     # aliran, pemulihan itu selalu aman.
                 )
-                result["answer"] = _live_fallback(
-                    text, jawaban, attachments,
-                )
+                result["answer"] = jawaban
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
             finally:
                 if attachments:
                     try:
                         from ..tools.screen import clear_live_capture
-                        clear_live_capture()
+                        clear_live_capture(attachments)
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -4414,7 +4378,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             attachments: list[str] = []
             try:
                 attachments = _live_attachments()
-                pertanyaan = _live_pertanyaan(text, attachments)
+                pertanyaan = _live_pertanyaan(text, attachments, cancel_event)
                 jawaban = agent.run(
                     pertanyaan, on_tool=on_tool, on_message=say,
                     on_retry=on_retry, cancel_event=cancel_event,
@@ -4425,16 +4389,14 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                     # Hanya OCR yang menjadi konteks awal; gambar tidak diunggah.
                     attachments=[],
                 )
-                result["answer"] = _live_fallback(
-                    text, jawaban, attachments,
-                )
+                result["answer"] = jawaban
             except BaseException as exc:  # noqa: BLE001
                 result["error"] = exc
             finally:
                 if attachments:
                     try:
                         from ..tools.screen import clear_live_capture
-                        clear_live_capture()
+                        clear_live_capture(attachments)
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -4556,6 +4518,12 @@ def main(resume: bool = False, resume_id: str = "") -> None:
     def pick_model() -> str | None:
         """Menu pilih model. Return ID model SEBELUMNYA bila yang dipilih adalah
         connector web (pemanggil lalu menjalankan _connect_web), selain itu None."""
+        # Daftar opencode/* mengikuti CLI, bukan snapshot saat import.
+        try:
+            models.sinkron_model_opencode()
+        except Exception:  # noqa: BLE001 — CLI absen/gagal: pakai katalog lama
+            pass
+
         def _describe(spec) -> str:
             # Satu baris: nama (rata) + badge JALUR + SARAN "cocok untuk apa".
             # Lencananya menandai JALUR, bukan kemampuan: 🌐 = lewat browser
@@ -5155,7 +5123,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             return
 
         if pilihan in ("tes", "test", "coba"):
-            ok, alasan = _dengar.siap()
+            ok, alasan = _dengar.siap(kontinu=False)
             if not ok:
                 console.print(f"  [yellow]⚠ {_esc(alasan)}[/yellow]\n")
                 return
@@ -5176,15 +5144,20 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             # suaranya tak pernah lewat — dan tak ada satu angka pun di layar
             # yang bisa menunjukkannya.
             lantai = _dengar.profil(voice_state.get("jangkauan")).lantai
-            console.print(
-                f"  [dim]tingkat suara tertinggi: {puncak:.0f}   "
-                f"ambang bicara: ≥{lantai:.0f} (mengikuti derau ruangan — "
-                f"ukur dari tempat dudukmu dengan[/dim] [{tema.p('aksen')}]/voice "
-                f"jangkau[/][dim])[/dim]"
-                + ("\n  [yellow]mikrofonnya nyaris tak menangkap apa-apa[/]"
-                   "[dim] — periksa mikrofon yang dipilih Windows, atau "
-                   "naikkan volumenya di Pengaturan Suara.[/dim]"
-                   if puncak < lantai else ""))
+            if puncak < 0:
+                console.print(
+                    "  [dim]dikenali oleh mesin STT Android — tingkat suara "
+                    "tidak diukur di Termux.[/dim]")
+            else:
+                console.print(
+                    f"  [dim]tingkat suara tertinggi: {puncak:.0f}   "
+                    f"ambang bicara: ≥{lantai:.0f} (mengikuti derau ruangan — "
+                    f"ukur dari tempat dudukmu dengan[/dim] [{tema.p('aksen')}]/voice "
+                    f"jangkau[/][dim])[/dim]"
+                    + ("\n  [yellow]mikrofonnya nyaris tak menangkap apa-apa[/]"
+                       "[dim] — periksa mikrofon yang dipilih Windows, atau "
+                       "naikkan volumenya di Pengaturan Suara.[/dim]"
+                       if puncak < lantai else ""))
             if teks:
                 console.print(f"  [#9fc93c]✓ terdengar:[/] "
                               f"[{tema.p('teks')}]{_esc(teks)}[/]\n")
@@ -5643,25 +5616,9 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         # Satu sesi terminal = satu percakapan browser -> ikut dihapus.
         _delete_web_chats_of(removed)
 
-    def show_help() -> None:
-        c = tema.p("aksen_terang")
-        pout(Panel(
-            "[dim]ketik pesan biasa untuk mengobrol dengan bagas-ai[/dim]\n\n"
-            f"[{c}]/menu[/]     menu interaktif        [{c}]/model[/]    pilih model + saran\n"
-            f"[{c}]/effort[/]   mode berpikir          [{c}]/new[/]      sesi baru\n"
-            f"[{c}]/add-dir[/]  tambah folder konteks  [{c}]/dirs[/]     folder konteks aktif\n"
-            f"[{c}]/rm-dir[/]   lepas folder konteks   [{c}]/delete[/]   hapus sesi\n"
-            f"[{c}]/memory[/]   memori jangka panjang  [{c}]/scripts[/]  skrip tersimpan\n"
-            f"[{c}]/reset[/]    kosongkan riwayat      [{c}]/clear[/]    bersihkan layar\n"
-            f"[{c}]/review[/]   cari bug seluruh proyek [{c}]/scan[/]     segarkan peta proyek\n"
-            f"[{c}]/bot[/]      bot Telegram on/off    [{c}]/permissions-bot[/] izin bot\n"
-            f"[{c}]/mode[/]     mode kerja situs       [{c}]/scripts[/]  script memory\n"
-            f"[{c}]/live[/]     konteks layar          [{c}]/image[/]    baca gambar lokal\n"
-            f"[{c}]/export[/]   ekspor riwayat chat      [{c}]/btw[/]      ngobrol sampingan\n"
-            f"[{c}]/mic[/]      suara keluaran         [{c}]/voice[/]    input mikrofon\n"
-            f"[{c}]/update[/]   cek pembaruan          [#f0603c]/exit[/]     keluar",
-            title=tema.terjemah("[bold #fcc048]❔ Bantuan[/]"), title_align="left",
-            border_style=tema.p("aksen"), box=box.ROUNDED, padding=(1, 2)))
+    def show_help(full: bool = False) -> None:
+        from ..ui.help import HelpContent
+        pout(HelpContent(cli=True, full=full))
 
     def _baris_versi() -> None:
         """Versi dari SEMUA sumber, bukan cuma GitHub — yang menentukan apa yang
@@ -5953,8 +5910,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             pout(Panel(txt, title=tema.terjemah("[bold #fc9018]📜 Script memory[/]"),
                        title_align="left", border_style=tema.p("aksen2"),
                        box=box.ROUNDED, padding=(1, 2)))
-        elif action == "help":
-            show_help()
+        elif action in ("help", "help semua", "help all", "help lengkap"):
+            show_help(full=action != "help")
         elif action == "update":
             _with_console(do_update)
         elif action == "scan":
@@ -6459,8 +6416,7 @@ def main(resume: bool = False, resume_id: str = "") -> None:
     # Status bar PERMANEN di paling bawah (selalu terlihat & rapi).
     def status_bar():
         spec = agent.model_spec
-        # Seluruh model berbasis browser -> penanda selalu sama.
-        kind = "🌐" if spec.is_web else "🤖"
+        kind = footer_icon("web" if spec.is_web else "model")
         eff = ""
         sep = " <sep>│</sep> "
         # PEMAKAIAN TOKEN TOTAL sengaja tak ditampilkan lagi. Penghitungan &
@@ -6476,12 +6432,12 @@ def main(resume: bool = False, resume_id: str = "") -> None:
         if _p is not None and _p.aktif:
             # DUA keadaan yang sangat berbeda: "mendengarkan" (menunggu
             # ucapan) dan "merekam" (ucapan sedang berjalan).
-            mik = (f"{sep}<sesi>● merekam</sesi>" if _p.merekam
-                   else f"{sep}<sesi>🎙 dengar</sesi>")
-        layar = (f"{sep}<sesi>📹 layar</sesi>"
+            mik = (f"{sep}<sesi>{footer_icon('ready')} merekam</sesi>" if _p.merekam
+                   else f"{sep}<sesi>{footer_icon('voice')} dengar</sesi>")
+        layar = (f"{sep}<sesi>{footer_icon('live')} layar</sesi>"
                  if live_screen["on"] else "")
         bagian = {
-            "merek": " <brand>⬢ bagas-ai</brand>",
+            "merek": f" <brand>{footer_icon('brand')} bagas-ai</brand>",
             "model": (f"{sep}{kind} <model>{spec.label}</model>"
                       f"{eff}{mik}{layar}"),
             "perintah": "<cmd>/menu</cmd> <muted>·</muted> ",
@@ -6489,8 +6445,8 @@ def main(resume: bool = False, resume_id: str = "") -> None:
             "exit": "<exit>/exit</exit>",
         }
         git_branch, git_changed = _git_info()
-        bagian["git"] = f"{sep}<git>🌿 {git_branch}</git>" if git_branch else ""
-        bagian["ubah"] = f"{sep}<ubah>📝 {git_changed}</ubah>" if git_changed else ""
+        bagian["git"] = f"{sep}<git>{footer_icon('git')} {git_branch}</git>" if git_branch else ""
+        bagian["ubah"] = f"{sep}<ubah>{footer_icon('changed')} {git_changed}</ubah>" if git_changed else ""
         lebar = _lebar_kotak()
         # Aturan penyusutan dipakai BERSAMA dengan bar versi rich (_bar_status),
         # supaya bentuknya tak berubah saat giliran mulai/selesai.
@@ -6705,14 +6661,19 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                 arg = bagian[1].strip().lower() if len(bagian) == 2 else "toggle"
                 hidup = {"on", "aktif", "hidup", "start", "mulai"}
                 mati = {"off", "mati", "stop", "berhenti"}
-                if arg in {"status", "cek"}:
+                if arg in {"pilih", "window", "jendela"} and not live_screen["on"]:
+                    arg = "on"
+                if arg in {"pilih", "window", "jendela"}:
+                    _pilih_live_source()
+                elif arg in {"status", "cek"}:
+                    from ..desktop_capture import source_label
                     keadaan = ("alat aktif"
                                if live_screen["on"] else "alat tidak aktif")
                     console.print(
-                        f"  [dim]Status live: {keadaan}.[/dim]\n")
+                        f"  [dim]Status live: {keadaan} · {_esc(source_label())}.[/dim]\n")
                 elif arg not in hidup | mati | {"toggle"}:
                     console.print(
-                        "  [yellow]Pakai: /live [on|off|status] "
+                        "  [yellow]Pakai: /live [on|off|pilih|status] "
                         "(alias: /video)[/yellow]\n")
                 else:
                     ingin_aktif = (not live_screen["on"] if arg == "toggle"
@@ -6734,19 +6695,19 @@ def main(resume: bool = False, resume_id: str = "") -> None:
                                 f"  [#f0603c]✗ alat tidak dapat diaktifkan: "
                                 f"{_esc(alasan)}[/]\n")
                         else:
-                            from ..tools.vision_local import ensure_vision_available
+                            from ..screen_observer import ensure_live_vision_available
                             with console.status(
                                 "[#fcc048]mengaktifkan alat…[/]",
                                 spinner="dots",
                             ):
-                                siap, alasan_vision = ensure_vision_available()
+                                siap, alasan_vision = ensure_live_vision_available()
                             if not siap:
                                 _set_live_screen(False)
                                 console.print(
                                     "  [#f0603c]✗ alat gagal diaktifkan:[/] "
                                     f"{_esc(alasan_vision)}\n"
                                 )
-                            else:
+                            elif _pilih_live_source():
                                 clear_live_capture()
                                 _set_live_screen(True)
                                 console.print(

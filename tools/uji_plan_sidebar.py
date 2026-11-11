@@ -64,7 +64,7 @@ async def uji_plan(app, pilot):
     await tunggu(pilot, lambda: sidebar.display,
                  pesan="sidebar harus tampil di layar lebar walau tanpa rencana")
     assert seksi.display, "seksi planning wajib tampil di sidebar"
-    assert "Belum ada rencana aktif" in seksi.terakhir, seksi.terakhir
+    assert "Belum ada rencana" in seksi.terakhir, seksi.terakhir
     assert "CPU" in sistem.terakhir, sistem.terakhir
     assert "RAM" in sistem.terakhir, sistem.terakhir
 
@@ -111,7 +111,7 @@ async def uji_plan(app, pilot):
     # dan SIDEBAR tetap tampil.
     plan_tool.reset()
     await tunggu(pilot, lambda: (seksi.display and not plan.display and
-                                 "Belum ada rencana aktif" in seksi.terakhir),
+                                 "Belum ada rencana" in seksi.terakhir),
                  pesan="reset: planning sidebar harus kembali ke empty-state")
     assert sidebar.display, "sidebar sistem harus tetap tampil setelah reset"
 
@@ -135,7 +135,7 @@ async def uji_semput_tuntas(app, pilot):
     # Planning dan sidebar tetap ada. maks 250 x 0.05 dtk = 12.5 dtk.
     await tunggu(pilot,
                  lambda: (seksi.display and
-                          "Belum ada rencana aktif" in seksi.terakhir),
+                          "Belum ada rencana" in seksi.terakhir),
                  maks=260,
                  pesan="rencana tuntas harus kembali ke empty-state")
     assert sidebar.display, "sidebar sistem harus TETAP tampil"
@@ -144,7 +144,7 @@ async def uji_semput_tuntas(app, pilot):
     # dikosongkan -> poll menganggap rencana baru -> muncul lagi tiap 8 dtk).
     for _ in range(60):
         await pilot.pause(0.05)
-    assert "Belum ada rencana aktif" in seksi.terakhir, \
+    assert "Belum ada rencana" in seksi.terakhir, \
         "rencana tuntas tak boleh berkedip muncul lagi"
     # State plan_tool tak dilupakan: masih utuh sampai giliran baru.
     snap = plan_tool.get_state()
@@ -157,7 +157,7 @@ async def uji_semput_tuntas(app, pilot):
     plan_tool.reset()
     await tunggu(pilot,
                  lambda: (seksi.display and
-                          "Belum ada rencana aktif" in seksi.terakhir),
+                          "Belum ada rencana" in seksi.terakhir),
                  pesan="reset akhir: planning harus kembali ke empty-state")
 
 

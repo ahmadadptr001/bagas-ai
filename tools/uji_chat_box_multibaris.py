@@ -53,11 +53,11 @@ async def main() -> int:
         await pilot.pause()
         cek("teks pendek tinggi 1", inp.region.height == 1)
 
-        # 3. Teks 225 karakter ~ 4 baris layar (lebar kotak 74).
+        # 3. Teks membungkus sesuai lebar aktual setelah kontrol composer.
         inp.insert("kata " * 45)
         await pilot.pause()
-        cek(f"teks 225 kar -> tinggi 4 (dapat {inp.region.height})",
-            inp.region.height == 4)
+        cek(f"teks 225 kar membungkus (tinggi {inp.region.height})",
+            2 <= inp.region.height <= 5 and inp.virtual_size.width <= inp.size.width)
 
         # 4. Lebih panjang lagi: MENTOK di 5, tapi virtual lebih tinggi.
         inp.insert("huruf " * 200)  # ~22 baris layar
@@ -87,10 +87,10 @@ async def main() -> int:
         cek(f"tab melengkapi ke /model (dapat {inp.text!r})",
             inp.text == "/model ")
 
-        # 8. Escape mengosongkan.
+        # 8. Escape menutup menu tanpa menghapus draf.
         await pilot.press("escape")
         await pilot.pause()
-        cek("escape mengosongkan", inp.text == "")
+        cek("escape mempertahankan draf", inp.text == "/model ")
 
         # 9. Hapus kata sebelum kursor.
         box.set_text("satu dua tiga")
@@ -105,6 +105,18 @@ async def main() -> int:
         await pilot.press("up")
         await pilot.pause()
         cek("panah-atas jadi Recall", app.recall == [False])
+
+        # Tombol mouse memakai jalur kirim yang sama dengan Enter.
+        box.set_text("kirim lewat tombol")
+        await pilot.pause()
+        await pilot.click("#input-send")
+        await pilot.pause()
+        cek("tombol mengirim teks utuh", app.terkirim[-1] == "kirim lewat tombol")
+        cek("fokus kembali ke input", inp.has_focus and inp.text == "")
+        jumlah = len(app.terkirim)
+        await pilot.click("#input-send")
+        await pilot.pause()
+        cek("tombol kosong tidak mengirim", len(app.terkirim) == jumlah)
 
     print()
     return 1 if gagal else 0

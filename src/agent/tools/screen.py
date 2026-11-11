@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .base import tool
 from .files import _display, _safe_path
+from .. import termux
 
 # Folder default penyimpanan (relatif root project) & batas sisi terpanjang
 # gambar. Layar 4K menghasilkan PNG belasan MB — terlalu berat untuk diunggah
@@ -37,6 +38,11 @@ class ScreenCaptureError(RuntimeError):
 
 def screen_capture_available() -> tuple[bool, str]:
     """Periksa dependensi screenshot tanpa mengambil gambar."""
+    if termux.IS_TERMUX:
+        if termux.screencap_tersedia():
+            return True, ""
+        return False, ("screencap Android tidak ditemukan — tangkapan layar "
+                       "tidak tersedia di perangkat ini.")
     try:
         from PIL import ImageGrab  # noqa: F401
     except ImportError:
@@ -63,6 +69,32 @@ def capture_screen(path: str = LIVE_SCREEN_PATH) -> Path:
         target = _safe_path(rel)
     except ValueError as exc:
         raise ScreenCaptureError(str(exc)) from exc
+
+    if termux.IS_TERMUX:
+        if not termux.screenshot(target):
+            raise ScreenCaptureError(
+                "screencap Android gagal mengambil layar. Pastikan perangkat "
+                "tidak terkunci dan folder tujuan bisa ditulis."
+            )
+        try:
+            from PIL import Image
+            with Image.open(target) as img:
+                diperkecil = max(img.size) > _MAX_EDGE
+                if diperkecil:
+                    img.thumbnail((_MAX_EDGE, _MAX_EDGE))
+                img.load()
+                if target.suffix.lower() in (".jpg", ".jpeg"):
+                    img.convert("RGB").save(target, "JPEG", quality=95,
+                                            optimize=True)
+                elif diperkecil:
+                    img.save(target, "PNG", optimize=True)
+        except ImportError:
+            # Tanpa Pillow, PNG asli dari screencap tetap sah dipakai.
+            pass
+        except OSError as exc:
+            raise ScreenCaptureError(
+                f"tak bisa menyimpan {_display(target)}: {exc}") from exc
+        return target
 
     try:
         # all_screens: ikutkan semua monitor (hanya didukung di Windows).
@@ -94,14 +126,29 @@ def capture_screen(path: str = LIVE_SCREEN_PATH) -> Path:
 
 def capture_live_screen() -> Path:
     """Ambil screenshot unik untuk satu giliran /live."""
-    return capture_screen(
-        f"{_SC_DIR}/{_LIVE_PREFIX}{time.time_ns()}.png")
+    from ..desktop_capture import capture
+    try:
+        image, _info = capture()
+        target = _safe_path(f"{_SC_DIR}/{_LIVE_PREFIX}{time.time_ns()}.png")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # OCR tetap membaca piksel asli. Kompresi cepat menghemat CPU pada
+        # screenshot sementara, tanpa menghilangkan detail teks kecil.
+        image.save(target, "PNG", compress_level=1)
+        return target
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ScreenCaptureError(str(exc)) from exc
 
 
-def clear_live_capture() -> None:
+def clear_live_capture(paths=None) -> None:
     """Hapus hanya screenshot sementara yang dibuat oleh /live."""
     try:
         folder = _safe_path(_SC_DIR)
+        if paths is not None:
+            for path in paths:
+                target = Path(path).resolve()
+                if target.parent == folder and target.name.startswith(_LIVE_PREFIX) and target.suffix == ".png":
+                    target.unlink(missing_ok=True)
+            return
         _safe_path(LIVE_SCREEN_PATH).unlink(missing_ok=True)
         if folder.is_dir():
             for target in folder.glob(f"{_LIVE_PREFIX}*.png"):
@@ -144,6 +191,15 @@ def active_window() -> str:
     """
     import ctypes
 
+    if termux.IS_TERMUX:
+        perangkat = termux.model_perangkat() or "perangkat Android"
+        return (
+            f"[info] Di Android, window/aplikasi aktif tidak bisa dibaca tanpa "
+            f"izin khusus. Perangkat: {perangkat} "
+            f"(Android {termux.versi_android() or '?'}). "
+            "Gunakan take_screenshot untuk melihat tampilan yang sedang "
+            "terbuka."
+        )
     if sys.platform == "win32":
         hwnd = ctypes.windll.user32.GetForegroundWindow()
         if not hwnd:

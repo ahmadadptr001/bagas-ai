@@ -16,6 +16,8 @@ from .system_panel import SystemPanel
 from .info_sidebar import InfoSidebar
 from .project_tree import BukaBerkas, ProjectTree
 from .file_editor import FileEditorScreen
+from .file_preview import FilePreviewScreen
+from .source_picker import SourcePickerScreen
 from .voice_screen import VoiceScreen, VoiceOrb
 from .image_preview import ImagePreview
 from .progress_bar import TurnProgressBar
@@ -36,6 +38,8 @@ __all__ = [
     "ProjectTree",
     "BukaBerkas",
     "FileEditorScreen",
+    "FilePreviewScreen",
+    "SourcePickerScreen",
     "VoiceScreen",
     "VoiceOrb",
     "ImagePreview",

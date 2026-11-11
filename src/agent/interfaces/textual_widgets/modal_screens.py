@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 from textual.screen import ModalScreen
 from textual.binding import Binding
-from textual.widgets import Static, OptionList, Input, RichLog
+from textual.widgets import Static, OptionList, Input, RichLog, Button
 from textual.widgets.option_list import Option
 from textual.widget import Widget
 from textual.containers import Vertical, Horizontal
@@ -18,6 +18,8 @@ from rich.text import Text
 
 from ...models import _TANDA_DITUNDA
 from ...ui import tema
+from ...ui.clipboard import copy_text
+from .message_list import MessageList
 
 # Penanda baris PEMISAH kategori di SelectScreen.options: opsi berbentuk
 # (_SEP, "Nama Kategori") dirender sebagai judul kategori (bukan pilihan).
@@ -586,16 +588,55 @@ class BtwScreen(ModalScreen[None]):
     """Jalur obrolan sampingan yang sepenuhnya terpisah dari terminal chat."""
 
     DEFAULT_CSS = """
-    BtwScreen { align: center middle; background: $background 80%; }
-    BtwScreen #btw-container { width: 84%; height: 82%; max-width: 100; background: $surface; border: tall $accent; padding: 1 2; }
-    BtwScreen #btw-head { width: 100%; height: 1; }
-    BtwScreen #btw-title { width: 1fr; text-style: bold; }
-    BtwScreen #btw-hint { dock: right; width: auto; color: $text-muted; }
-    BtwScreen #btw-loading { dock: right; width: 4; color: $accent; text-align: right; display: none; }
-    BtwScreen #btw-log { height: 1fr; border: round $border; padding: 0 1; }
-    BtwScreen #btw-input { width: 1fr; margin-top: 1; }
+    BtwScreen { align: center middle; background: #050610 82%; }
+    BtwScreen #btw-container {
+        width: 86%; height: 84%; max-width: 104;
+        background: $t-gema_bg; border: round $t-tepi; padding: 0;
+    }
+    BtwScreen #btw-head {
+        width: 100%; height: 3; padding: 1 1;
+        background: $t-menu_bg; color: $t-teks;
+    }
+    BtwScreen #btw-lights { width: 8; height: 1; }
+    BtwScreen #btw-title { width: 1fr; height: 1; text-style: bold; }
+    BtwScreen #btw-loading {
+        display: none; width: 1fr; height: 1;
+        color: $t-redup; margin: 0 2 1 2;
+    }
+    BtwScreen #btw-close {
+        width: 3; min-width: 3; height: 1; min-height: 1;
+        border: none; padding: 0; margin: 0;
+        background: $t-menu_hover; color: $t-teks;
+    }
+    BtwScreen #btw-close:hover,
+    BtwScreen #btw-close:focus { background: $t-menu_aktif_bg; color: $t-menu_aktif_teks; }
+    BtwScreen #btw-log {
+        height: 1fr; border: none; padding: 1 2; background: transparent;
+        scrollbar-size-vertical: 1; scrollbar-size-horizontal: 1;
+        scrollbar-background: $t-gema_bg; scrollbar-color: $t-tepi_redup;
+        scrollbar-color-hover: $t-tepi; scrollbar-color-active: $t-aksen;
+        overflow-x: hidden; overflow-y: auto;
+    }
+    BtwScreen #btw-compose {
+        width: 1fr; height: 3; min-height: 3; margin: 0 1 1 1;
+        border: round $t-tepi_redup; background: $t-menu_bg;
+    }
+    BtwScreen #btw-compose:focus-within { border: round $t-tepi; }
+    BtwScreen #btw-input {
+        width: 1fr; height: 1; min-height: 1; margin: 0; padding: 0 1;
+        border: none; background: transparent; color: $t-teks;
+    }
+    BtwScreen #btw-send {
+        width: 3; min-width: 3; height: 1; min-height: 1;
+        border: none; margin: 0 1 0 0; padding: 0;
+        color: $t-menu_aktif_teks; background: $t-menu_aktif_bg;
+    }
+    BtwScreen.-compact #btw-container { width: 100%; height: 100%; max-width: 100%; }
+    BtwScreen.-compact #btw-lights { display: none; }
+    BtwScreen.-compact #btw-log { padding: 0 1; }
     """
-    BINDINGS = [Binding("escape", "cancel", show=False, priority=True)]
+    BINDINGS = [Binding("escape", "cancel", show=False, priority=True),
+                Binding("ctrl+c", "copy_selection", show=False, priority=True)]
 
     def __init__(self, answer: Callable[[str], str], initial: str = "", **kwargs):
         super().__init__(**kwargs)
@@ -603,58 +644,112 @@ class BtwScreen(ModalScreen[None]):
         self._initial = initial
         self._busy = False
         self._spinner = 0
+        self._btw_dismissed = False
+        self._btw_timer = None
 
     def compose(self):
         with Vertical(id="btw-container"):
             with Horizontal(id="btw-head"):
-                yield Static("/btw · obrolan sampingan", id="btw-title")
-                yield Static("esc tutup", id="btw-hint")
-                yield Static("", id="btw-loading")
-            yield RichLog(id="btw-log", markup=False, wrap=True, auto_scroll=True)
-            with Horizontal():
-                yield Input(value=self._initial, placeholder="Ngobrol santai…", id="btw-input")
+                lights = Text()
+                for color in ("#ff5f57", "#febc2e", "#28c840"):
+                    lights.append("● ", style=color)
+                yield Static(lights, id="btw-lights")
+                yield Static("Obrolan sampingan", id="btw-title")
+                yield Button("×", id="btw-close", compact=True, tooltip="Tutup (Esc)")
+            yield MessageList(id="btw-log")
+            yield Static("", id="btw-loading")
+            with Horizontal(id="btw-compose"):
+                yield Input(value=self._initial, placeholder="Tulis pesan…", id="btw-input")
+                yield Button("↑", id="btw-send", compact=True, tooltip="Kirim (Enter)")
 
     def on_mount(self):
         self.query_one("#btw-input", Input).focus()
-        self.set_interval(0.18, self._tick)
+        self._btw_timer = self.set_interval(0.18, self._tick)
         if self._initial:
             self._kirim(self._initial)
 
     def on_input_submitted(self, event: Input.Submitted):
+        event.stop()
         self._kirim(event.value)
+
+    def on_button_pressed(self, event: Button.Pressed):
+        event.stop()
+        if event.button.id == "btw-close":
+            self.action_cancel()
+        elif event.button.id == "btw-send":
+            self._kirim(self.query_one("#btw-input", Input).value)
+
+    def on_resize(self, event):
+        self.set_class(event.size.width < 70 or event.size.height < 28, "-compact")
 
     def _kirim(self, value: str):
         pertanyaan = value.strip()
-        if not pertanyaan:
+        if not pertanyaan or self._busy or self._btw_dismissed:
             return
-        log = self.query_one("#btw-log", RichLog)
-        log.write(Text(f"kamu: {pertanyaan}"))
+        log = self.query_one("#btw-log", MessageList)
+        log.append_user_message(pertanyaan)
+        log.begin_stream()
         inp = self.query_one("#btw-input", Input)
         inp.value = ""
         self._busy = True
-        self.query_one("#btw-loading", Static).display = True
+        self.query_one("#btw-send", Button).disabled = True
+        self._tick()
+        app = self.app
 
         def worker():
             try:
                 jawaban = self._answer(pertanyaan)
+                error = False
             except Exception as exc:  # noqa: BLE001
                 jawaban = f"Gagal: {exc}"
+                error = True
+            if self._btw_dismissed:
+                return
             try:
-                self.app.call_from_thread(log.write, Text(f"bagas: {jawaban}"))
-                self.app.call_from_thread(self._selesai)
+                app.call_from_thread(self._selesai, jawaban, error)
             except Exception:
                 pass
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="bagasai-btw").start()
 
     def _tick(self):
-        if self._busy:
+        if self._busy and not self._btw_dismissed:
             self._spinner = (self._spinner + 1) % 4
-            self.query_one("#btw-loading", Static).update("·" * (self._spinner + 1))
+            frame = "⠋⠙⠹⠸"[self._spinner]
+            loading = self.query_one("#btw-loading", Static)
+            loading.display = True
+            loading.update(frame + " Menjawab")
 
-    def _selesai(self):
+    def _selesai(self, jawaban: str, error: bool = False):
+        if self._btw_dismissed:
+            return
         self._busy = False
-        self.query_one("#btw-loading", Static).display = False
+        loading = self.query_one("#btw-loading", Static)
+        loading.update("")
+        loading.display = False
+        self.query_one("#btw-send", Button).disabled = False
+        log = self.query_one("#btw-log", MessageList)
+        if error:
+            log.append_notice(jawaban, style=tema.p("exit_footer"))
+        else:
+            log.append_ai_message(jawaban or "Tidak ada jawaban")
+        self.query_one("#btw-input", Input).focus()
+
+    def action_copy_selection(self):
+        inp = self.query_one("#btw-input", Input)
+        text = inp.selected_text
+        if not text:
+            log = self.query_one("#btw-log", MessageList)
+            if log._salin_lo is not None and log._salin_hi is not None:
+                text = log._teks_salin(log._salin_lo, log._salin_hi)
+        if text:
+            copy_text(self.app, text)
+
+    def on_unmount(self):
+        self._btw_dismissed = True
+        if self._btw_timer is not None:
+            self._btw_timer.stop()
 
     def action_cancel(self):
+        self._btw_dismissed = True
         self.dismiss(None)

@@ -2,15 +2,27 @@
 playwright>=1.40.0
 openai>=1.30.0
 rich>=13.0.0
+Pygments>=2.17.0
+PyMuPDF>=1.24.0
 textual>=1.0.0
 prompt_toolkit>=3.0.39
 pyfiglet>=1.0.0
 # /live dan tool take_screenshot.
 Pillow>=10.0.0
+dxcam==0.3.0; sys_platform == 'win32'
+comtypes>=1.4.0; sys_platform == 'win32'
+# BLIP-base INT8: inferensi CPU lokal tanpa PyTorch.
+onnxruntime>=1.20.0
+numpy>=1.26.0
+tokenizers>=0.20.0
+huggingface-hub>=0.24.0
 # Suara kabar berbahasa Indonesia (opsional runtime: fallback System.Speech).
-edge-tts>=6.1.0
+edge-tts>=7.3.1
+av>=11.0.0
 # /voice — mikrofon dan pengenal lokal.
 sounddevice>=0.4.6
+soxr>=0.5.0
+PyAudioWPatch>=0.2.12.9; sys_platform == 'win32'
 # Mesin pengenal: Whisper lokal (faster-whisper), luring, tanpa API key.
 faster-whisper>=1.0.0
 # WebRTC lokal: noise suppression, AGC, VAD sebelum Whisper.

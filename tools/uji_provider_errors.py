@@ -31,7 +31,8 @@ def bad_request(message: str = "Provider returned error"):
 def cek_opencode_tanpa_variant() -> None:
     specs = [s for s in models.MODELS.values() if s.provider == "opencode"]
     assert specs
-    assert all(not s.effort_param and not s.effort_levels for s in specs)
+    assert all(not s.effort_param for s in specs)
+    assert all(not s.effort_levels or s.effort_cli for s in specs)
     assert all(s.extra_body_for("medium") is None for s in specs)
     print("  OpenCode tidak lagi mengirim field API `variant`: OK")
 

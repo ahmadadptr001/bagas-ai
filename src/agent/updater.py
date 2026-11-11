@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 from . import config
+from . import termux
 
 
 def _run(args: list[str], cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -786,6 +787,9 @@ def _kabar_browser() -> str:
     Sengaja TIDAK memasang apa pun. Memasang browser di tengah `update` adalah
     perubahan sistem yang tak diminta; yang pantas dilakukan di sini cuma
     mengatakannya, lengkap dengan perintahnya."""
+    if termux.IS_TERMUX:
+        return ("Termux/Android: otomasi browser tidak tersedia — model berjalan "
+                "lewat CLI OpenCode.")
     try:
         from . import config as _cfg
         from .connectors.browser import _pilih_exe
@@ -826,6 +830,26 @@ def _pasang_tesseract() -> str:
             return ""
     except Exception:  # noqa: BLE001 - kabar tambahan, jangan gagalkan update
         return ""
+    if termux.IS_TERMUX:
+        pkg = shutil.which("pkg")
+        if not pkg:
+            return ("Tesseract OCR belum terpasang - OCR lokal (/image) "
+                    "nonaktif. Pasang: pkg install tesseract tesseract-data-ind")
+        try:
+            subprocess.run([pkg, "install", "-y", "tesseract",
+                            "tesseract-data-ind"], capture_output=True,
+                           text=True, timeout=900)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return (f"Gagal memasang Tesseract di Termux: {exc}. Pasang manual: "
+                    "pkg install tesseract tesseract-data-ind")
+        try:
+            if _cari_tesseract():
+                return ("Tesseract OCR terpasang otomatis - OCR lokal (/image) "
+                        "siap dipakai.")
+        except Exception:  # noqa: BLE001
+            return ""
+        return ("Tesseract OCR belum terpasang - OCR lokal (/image) nonaktif. "
+                "Pasang: pkg install tesseract tesseract-data-ind")
     if os.name != "nt":
         return ("Tesseract OCR belum terpasang - OCR lokal (/image) nonaktif. "
                 "Pasang: sudo apt install tesseract-ocr (Debian/Ubuntu) atau "
@@ -866,6 +890,13 @@ def _pasang_tesseract() -> str:
 
 def _pasang_vision_gemma() -> str:
     """Tarik Gemma multimodal dan buktikan ia benar-benar menjawab gambar."""
+    if termux.IS_TERMUX:
+        return ("Vision lokal (Ollama + Gemma) dilewati di Termux/Android — "
+                "Android tidak menjalankan Ollama.")
+    from .blip_local import ensure_blip_available
+    ready, why = ensure_blip_available()
+    if not ready:
+        return "GAGAL: " + why
     from .tools.vision_local import MODEL_DEFAULT, ensure_vision_ready
 
     ollama = shutil.which("ollama")
@@ -910,10 +941,15 @@ def _reinstall(repo: Path) -> dict:
     editable = _is_editable(repo)
     base = [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade"]
     flags: list[str] = []
-    if not editable and _is_user_install():
+    if not editable and not termux.IS_TERMUX and _is_user_install():
         flags.append("--user")
     if editable:
+        # Termux: dependensi desktop (Playwright, Whisper, …) sengaja tak
+        # dipasang. Tanpa --no-deps, `pip install -e` akan mencoba semuanya
+        # dan gagal di tengah jalan.
         target = ["-e", str(repo)]
+        if termux.IS_TERMUX:
+            target += ["--no-deps"]
     else:
         # KUNCI (penyebab "update tak ngefek"): instalasi non-editable DILEWATI
         # pip bila versi paket sama ("Requirement already satisfied"). Nomor versi
@@ -1002,6 +1038,27 @@ def _reinstall(repo: Path) -> dict:
     }
 
 
+def _dependensi_termux_hilang() -> list[str]:
+    """Requirement Termux (requirements-termux.txt) yang belum terpenuhi."""
+    kandidat = []
+    repo = find_repo() or config.ROOT_DIR
+    kandidat.append(repo / "requirements-termux.txt")
+    kandidat.append(config.CONFIG_HOME / "src" / "requirements-termux.txt")
+    path = next((p for p in kandidat if p.is_file()), None)
+    if path is None:
+        # Checkout non-editable bisa tak membawa berkas requirements. Jangan
+        # memaksa pip memasang daftar desktop yang memang tak ada di Android.
+        return []
+    try:
+        from .install_support import missing_requirements
+        baris = [line.split("#", 1)[0].strip()
+                 for line in path.read_text(encoding="utf-8").splitlines()]
+        return missing_requirements([b for b in baris if b])
+    except Exception:  # noqa: BLE001
+        log.debug("pemeriksaan requirement Termux gagal", exc_info=True)
+        return []
+
+
 def _dependensi_python_hilang() -> list[str]:
     """Requirement bagasai yang hilang/tidak cocok, tanpa menilai paket lain.
 
@@ -1009,6 +1066,8 @@ def _dependensi_python_hilang() -> list[str]:
     lain yang saling konflik (mis. facenet vs numpy) tetapi tidak ada kaitannya
     dengan runtime bagas-ai.
     """
+    if termux.IS_TERMUX:
+        return _dependensi_termux_hilang()
     try:
         from importlib.metadata import PackageNotFoundError, requires, version
         from packaging.requirements import Requirement
@@ -1040,6 +1099,18 @@ def _dependensi_python_hilang() -> list[str]:
 
 def _sinkron_dependensi_runtime(repo: Path) -> str:
     """Pastikan dependensi Python dan browser tanpa reinstall paket aktif."""
+    if termux.IS_TERMUX:
+        print("  … memverifikasi dependensi Termux", flush=True)
+        kurang = _dependensi_python_hilang()
+        if kurang:
+            r = _run([sys.executable, "-m", "pip", "install", "--quiet",
+                      "--upgrade", *kurang], repo, timeout=900)
+            if r.returncode != 0:
+                detail = (r.stderr or r.stdout or "").strip()[-240:]
+                return ("GAGAL: dependensi Termux bagas-ai tidak tersinkron."
+                        + (f" ({detail})" if detail else ""))
+        return ("Dependensi Termux terverifikasi (browser Playwright & "
+                "Whisper sengaja dilewati di Android).")
     print("  … memverifikasi dependensi Python", flush=True)
     kurang = _dependensi_python_hilang()
     if kurang:
@@ -1051,10 +1122,12 @@ def _sinkron_dependensi_runtime(repo: Path) -> str:
             return ("GAGAL: dependensi Python bagas-ai tidak tersinkron."
                     + (f" ({detail})" if detail else ""))
     try:
-        pw_rc = _run_progress([sys.executable, "-m", "playwright", "install", "chromium"],
-                              repo, timeout=900, label="memastikan Chromium Playwright")
-        if pw_rc != 0:
-            return "GAGAL: browser Playwright Chromium tidak tersinkron."
+        from .install_support import chromium_ready
+        if not chromium_ready():
+            pw_rc = _run_progress([sys.executable, "-m", "playwright", "install", "chromium"],
+                                  repo, timeout=900, label="menyiapkan Chromium Playwright")
+            if pw_rc != 0 or not chromium_ready():
+                return "GAGAL: browser Playwright Chromium tidak tersinkron."
     except Exception:  # noqa: BLE001
         return "GAGAL: browser Playwright Chromium tidak tersinkron."
     try:

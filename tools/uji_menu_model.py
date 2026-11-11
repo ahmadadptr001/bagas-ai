@@ -6,8 +6,8 @@ Jalankan: PYTHONIOENCODING=utf-8 python tools/uji_menu_model.py
 Yang dicek:
 1. pilihan_model_grup() mengembalikan kelompok berkategori OpenCode CLI —
    satu-satunya kelompok aktif; AI Web ditunda.
-2. Semua model opencode KECUALI nemotron-3.5-lightning-free berlabel
-   " (rekomendasi)" pada tampilan; nilai aliasnya tetap murni.
+2. Isi menu sama dengan daftar hidup `opencode models` (hanya
+   opencode/*), dan nilai aliasnya tetap murni.
 3. Menu /model di UI Textual: prompt INLINE (bukan modal), pemisah kategori
    dirender di baris, opsi rekomendasi bold, memilih opsi mengirim ALIAS
    MURNI (tanpa label) ke set_model.
@@ -49,6 +49,14 @@ def cek_grup():
     assert all(models.cari(str(i)) == spec for i, _, spec in models.catalog())
     assert "ditunda" not in models.list_text().lower()
     assert "oxalpha" not in choices
+    # Bila CLI tersedia, isi menu harus SAMA PERSIS dengan `opencode models`
+    # (hanya provider opencode/*), bukan snapshot statis.
+    hidup = models.sinkron_model_opencode()
+    if hidup:
+        assert set(choices) == set(hidup), (choices, hidup)
+        assert not ({"hy3-free", "mimo-v2.5-free"} & set(choices))
+        assert not any(v.startswith(("apinex/", "ollama/"))
+                       for v in choices)
     print("  kategori, filter model, nomor pilihan: OK")
 
 

@@ -40,8 +40,11 @@ import time
 from collections import deque
 from typing import TYPE_CHECKING
 
+from rich import box
 from rich.console import RenderableType
 from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.segment import Segment
 from rich.text import Text
 from textual.events import Resize
 from rich.style import Style as RichStyle
@@ -49,6 +52,8 @@ from textual.strip import Strip
 from textual.widgets import RichLog
 
 from ...ui import tema
+from ...ui.clipboard import copy_text
+from ...ui.diff_view import DiffView
 
 if TYPE_CHECKING:
     from ...core import Agent
@@ -63,6 +68,10 @@ _JEDA_RESIZE = 0.2
 # Token datang puluhan per detik; merender markdown seluruh jawaban sesering
 # itu murni boros CPU tanpa bedanya bagi mata.
 _JEDA_ALIRAN = 0.12
+# Kursor hidup di ujung jawaban yang sedang mengalir. Kedipnya lambat
+# (0.55 dtk) supaya tidak terasa seperti kedipan error; glyph selebar 1 sel.
+_JEDA_KURSOR = 0.55
+_KURSOR = "▍"
 
 
 def _bersih_kendali(text: str) -> str:
@@ -177,12 +186,13 @@ class _BlokTulis:
     """
 
     def __init__(self, path: str, kode: str, is_new: bool = False,
-                 muat: int = 7, sintaks=None):
+                 muat: int = 4, sintaks=None):
         self.path = path
         self.kode = (kode or "").rstrip("\n")
         self.is_new = is_new
         self.muat = muat
         self.terbuka = False
+        self.baris_judul: int | None = None  # diisi _catat_blok
         self._sintaks = sintaks  # list[Text] per baris (opsional)
 
     def __rich__(self, console=None, options=None) -> Text:
@@ -190,10 +200,9 @@ class _BlokTulis:
         t = Text()
         t.append(f"\n  {'▾' if self.terbuka else '▸'} ",
                  style=f"bold {tema.p('aksen')}")
-        t.append(f"write({self.path})", style=f"bold {tema.p('aksen2')}")
+        t.append("▤ " + self.path, style=tema.p('teks'))
         if self.is_new:
-            t.append(" (baru)", style=tema.p("aksen_terang"))
-        t.append(f" — {len(baris)} baris", style=tema.p("redup"))
+            t.append(" · baru", style=tema.p("redup"))
         t.append("\n")
 
         tampil = baris if self.terbuka else baris[:self.muat]
@@ -223,6 +232,100 @@ class _BlokTulis:
         return t
 
 
+class _BlokDetail:
+    """Satu baris ringkasan; klik untuk membaca detail yang tersimpan."""
+
+    def __init__(self, title: Text, body: Text, *, preview: int = 0,
+                 max_expanded_lines: int | None = None):
+        self.title = title
+        self.body = body
+        self.preview = preview
+        self.max_expanded_lines = max_expanded_lines
+        self.line_offset = 0
+        self._line_count = 0
+        self.terbuka = False
+        self.baris_judul: int | None = None
+
+    @property
+    def plain(self) -> str:
+        return self.title.plain + "\n" + self.body.plain
+
+    def __rich_console__(self, console, options):
+        header = Text("  " + ("▾" if self.terbuka else "▸") + " ", style=tema.p("redup"))
+        header.append_text(self.title)
+        if not self.terbuka and not self.preview:
+            header.truncate(options.max_width, overflow="ellipsis")
+            yield header
+            return
+        body = (Text(" ".join(self.body.plain.split()), style=self.body.style)
+                if self.max_expanded_lines is not None else self.body)
+        lines = body.wrap(console, max(1, options.max_width - 4), overflow="fold", no_wrap=False)
+        self._line_count = len(lines)
+        if self.terbuka and self.max_expanded_lines is not None:
+            self.line_offset = min(self.line_offset, max(0, len(lines) - self.max_expanded_lines))
+            shown = lines[self.line_offset:self.line_offset + self.max_expanded_lines]
+            if len(lines) > self.max_expanded_lines:
+                header.append(" ↕", style=tema.p("redup"))
+        else:
+            shown = lines if self.terbuka else lines[:self.preview]
+        header.truncate(options.max_width, overflow="ellipsis")
+        yield header
+        for line in shown:
+            text = Text("    ")
+            text.append_text(line)
+            yield text
+
+    def scroll_lines(self, delta: int) -> bool:
+        if not self.terbuka or self.max_expanded_lines is None:
+            return False
+        offset = max(0, min(self.line_offset + delta,
+                            self._line_count - self.max_expanded_lines))
+        if offset == self.line_offset:
+            return False
+        self.line_offset = offset
+        return True
+
+
+class _PesanPengguna:
+    """Gema prompt pengguna sebagai kartu membulat ala aplikasi chat.
+
+    Renderable, bukan widget: RichLog hanya menerima renderable. ``expand``
+    sengaja False supaya pesan pendek menjadi gelembung ringkas, sementara
+    pesan panjang membungkus di lebar area percakapan. ``plain`` disediakan
+    untuk harness/replay yang membaca isi ``MessageList._items``.
+    """
+
+    def __init__(self, teks: str, prefix: str = "❯ ", spasi: bool = True):
+        self.teks = teks
+        self.prefix = prefix
+        self.spasi = spasi
+
+    @property
+    def plain(self) -> str:
+        return self.teks
+
+    def __rich_console__(self, console, options):
+        if self.spasi:
+            yield Text("\n")
+        isi = Text()
+        for i, baris in enumerate(self.teks.split("\n")):
+            if i:
+                isi.append("\n")
+            if i == 0:
+                isi.append(self.prefix, style=f"bold {tema.p('aksen')}")
+            else:
+                isi.append("  ", style=tema.p("redup"))
+            isi.append(baris, style=f"bold {tema.p('teks')}")
+        yield Panel(
+            isi,
+            box=box.ROUNDED,
+            border_style=tema.p("tepi_redup"),
+            style=f"on {tema.p('menu_bg')}",
+            padding=(0, 1),
+            expand=False,
+        )
+
+
 class MessageList(RichLog, can_focus=False):
     """Riwayat percakapan yang bisa digulir; mengisi ruang sisa layar."""
 
@@ -240,6 +343,7 @@ class MessageList(RichLog, can_focus=False):
         self._agent = agent
         self._items: deque[RenderableType] = deque(maxlen=_MAKS_RIWAYAT)
         self._lebar_terakhir = 0
+        self._tinggi_terminal_terakhir = 0
         self._timer_resize = None
         self._menggambar_ulang = False
         # Keadaan aliran token (lihat "Aliran jawaban" di bawah).
@@ -251,6 +355,12 @@ class MessageList(RichLog, can_focus=False):
         self._aliran_teks = ""                 # isi yang SEDANG tampil
         self._aliran_item: RenderableType | None = None  # renderable-nya
         self._aliran_waktu = 0.0               # waktu gambar-ulang terakhir
+        # Kursor "▍" yang berkedip di ujung jawaban hidup. Glyph-nya HANYA
+        # ditambahkan saat menggambar, tidak pernah masuk _aliran_teks /
+        # _items, jadi jawaban final & riwayat tetap bersih.
+        self._kursor_timer = None
+        self._kursor_tampil = False
+        self._kursor_tergambar = False
         # Seleksi salin-otomatis (lihat "Salin otomatis" di bawah).
         # Seleksi adalah rentang karakter: jangkar & ujung berupa
         # (baris_konten, indeks_karakter). _salin_mode menentukan
@@ -266,7 +376,12 @@ class MessageList(RichLog, can_focus=False):
         self._klik_terakhir: tuple[float, int, int] | None = None
         # Baris area blok write() (judul + isi) -> toggle buka/tutup.
         # Dibangun ulang tiap gambar ulang (lihat _catat_blok).
-        self._blok_klik: dict[int, _BlokTulis] = {}
+        self._blok_klik: dict[int, _BlokTulis | _BlokDetail | DiffView] = {}
+        # Klik POLOS di ISI blok ditunda selama jendela klik-ganda. Bila
+        # klik kedua datang, timer dibatalkan dan klik itu menjadi seleksi
+        # kata/baris — jadi double/triple-click tak sempat menutup blok.
+        self._timer_blok = None
+        self._blok_tunda: _BlokTulis | _BlokDetail | DiffView | None = None
         # Header "🤖 bagas-ai" ditulis sekali di awal giliran aliran.
         self._tulis_header_ai = True
 
@@ -314,7 +429,8 @@ class MessageList(RichLog, can_focus=False):
         ditunda RichLog (ukuran belum diketahui) tak menambah
         ``self.lines`` — pemetaannya nanti dibangun ulang oleh _gambar_ulang.
         """
-        if isinstance(item, _BlokTulis) and awal_baris < len(self.lines):
+        if isinstance(item, (_BlokTulis, _BlokDetail, DiffView)) and awal_baris < len(self.lines):
+            item.baris_judul = awal_baris
             for baris in range(awal_baris, len(self.lines)):
                 self._blok_klik[baris] = item
 
@@ -333,6 +449,12 @@ class MessageList(RichLog, can_focus=False):
             if self._lebar_terakhir:
                 self._jadwalkan_gambar_ulang()
             self._lebar_terakhir = lebar
+        tinggi = self.app.size.height
+        if tinggi != self._tinggi_terminal_terakhir:
+            self._tinggi_terminal_terakhir = tinggi
+            if any(isinstance(item, _BlokDetail) and item.max_expanded_lines is not None
+                   for item in self._items):
+                self._jadwalkan_gambar_ulang()
 
     def _jadwalkan_gambar_ulang(self) -> None:
         """Tunda gambar ulang sampai resize berhenti (hemat saat drag)."""
@@ -350,6 +472,7 @@ class MessageList(RichLog, can_focus=False):
     def _gambar_ulang(self) -> None:
         """Bersihkan lalu tulis ulang riwayat pada lebar baru."""
         self._timer_resize = None
+        self._batalkan_toggle_blok()
         # Nomor baris berubah setelah dibungkus ulang di lebar baru — sorotan
         # lama bisa menunjuk baris yang keliru, lebih baik lenyap.
         self._salin_jangkar = None
@@ -369,6 +492,8 @@ class MessageList(RichLog, can_focus=False):
             lebar = self._lebar()
             for it in items:
                 try:
+                    if isinstance(it, _BlokDetail) and it.max_expanded_lines is not None:
+                        it.max_expanded_lines = max(1, min(3, self.app.size.height // 8))
                     awal = len(self.lines)
                     self.write(it, width=lebar)
                     self._catat_blok(it, awal)
@@ -417,7 +542,7 @@ class MessageList(RichLog, can_focus=False):
             geser = int(self.scroll_offset.y)
         except Exception:  # noqa: BLE001 — belum ter-mount
             geser = 0
-        n = max(0, int(y) + geser)
+        n = max(0, int(y) - self.gutter.top + geser)
         return min(n, max(0, len(self.lines) - 1))
 
     def _strip(self, baris: int) -> Strip | None:
@@ -462,7 +587,7 @@ class MessageList(RichLog, can_focus=False):
             return baris, 0
         # Kolom widget + scroll horizontal — RichLog bisa digeser ke samping.
         try:
-            kolom = int(event.x) + int(self.scroll_offset.x)
+            kolom = max(0, int(event.x) - self.gutter.left) + int(self.scroll_offset.x)
         except Exception:  # noqa: BLE001
             kolom = int(event.x)
         return baris, self._posisi_sel(s.text, kolom)
@@ -491,27 +616,77 @@ class MessageList(RichLog, can_focus=False):
             akhir += 1
         return awal, akhir
 
+    def _batalkan_toggle_blok(self) -> None:
+        """Batalkan toggle blok yang menunggu jendela klik-ganda."""
+        if self._timer_blok is not None:
+            try:
+                self._timer_blok.stop()
+            except Exception:  # noqa: BLE001 — timer sudah mati
+                pass
+            self._timer_blok = None
+        self._blok_tunda = None
+
+    def _toggle_blok(self, blok: _BlokTulis | _BlokDetail | DiffView) -> None:
+        blok.terbuka = not blok.terbuka
+        self._redraw_block(blok)
+
+    def _redraw_block(self, blok) -> None:
+        offset = (blok.baris_judul or 0) - self.scroll_y
+        self._gambar_ulang()
+        self.call_after_refresh(lambda: self.scroll_to(
+            y=max(0, (blok.baris_judul or 0) - offset), animate=False, force=True))
+
+    def _scroll_reasoning(self, event, delta: int) -> None:
+        blok = self._blok_klik.get(self._baris_konten(event.y))
+        if isinstance(blok, _BlokDetail) and blok.scroll_lines(delta):
+            self._batalkan_toggle_blok()
+            event.stop()
+            event.prevent_default()
+            self._redraw_block(blok)
+
+    def on_mouse_scroll_up(self, event) -> None:
+        self._scroll_reasoning(event, -1)
+
+    def on_mouse_scroll_down(self, event) -> None:
+        self._scroll_reasoning(event, 1)
+
+    def _toggle_blok_tunda(self) -> None:
+        """Timer habis: klik polos di isi blok baru boleh menutup/membuka."""
+        self._timer_blok = None
+        blok, self._blok_tunda = self._blok_tunda, None
+        if blok is None or not any(b is blok for b in self._blok_klik.values()):
+            return
+        self._toggle_blok(blok)
+
     def on_mouse_down(self, event) -> None:
         if getattr(event, "button", -1) != 1:
             return
         import time as _waktu
 
+        # Klik baru membatalkan toggle blok yang masih menunggu. Kalau klik
+        # ini ternyata klik kedua/ketiga, blok TIDAK boleh sempat tertutup.
+        self._batalkan_toggle_blok()
         titik = self._titik_mouse(event)
         sekarang = _waktu.monotonic()
         ganda = False
-        # Area blok write() (judul + isi) -> toggle buka/tutup tanpa
-        # memulai seleksi kata: klik ganda/tiga di sana diperlakukan
-        # sebagai klik polos biasa.
-        if self._blok_klik.get(titik[0]) is None:
-            if self._klik_terakhir is not None:
-                t_lama, x_lama, y_lama = self._klik_terakhir
-                # Posisi dibandingkan longgar (±1 sel): klik ganda manusia tak
-                # pernah jatuh di piksel yang persis sama.
-                if (sekarang - t_lama <= self._JEDA_KLIK_GANDA
-                        and abs(event.x - x_lama) <= 1
-                        and abs(event.y - y_lama) <= 1):
-                    ganda = True
+        # Klik ganda/tiga di area blok write() tetap menyeleksi kata/baris.
+        # Klik POLOS (bukan ganda) baru membuka/menutup blok di mouse_up,
+        # jadi isi tool pun bisa diblok dan disalin seperti teks lain.
+        if self._klik_terakhir is not None:
+            t_lama, x_lama, y_lama = self._klik_terakhir
+            # Posisi dibandingkan longgar (±1 sel): klik ganda manusia tak
+            # pernah jatuh di piksel yang persis sama.
+            if (sekarang - t_lama <= self._JEDA_KLIK_GANDA
+                    and abs(event.x - x_lama) <= 1
+                    and abs(event.y - y_lama) <= 1):
+                ganda = True
         self._klik_terakhir = (sekarang, event.x, event.y)
+        blok = self._blok_klik.get(titik[0])
+        if (blok is not None and titik[0] == blok.baris_judul
+                and 0 <= event.x - self.gutter.left <= 4):
+            # Chevron berfungsi sebagai kontrol, termasuk dua klik cepat.
+            ganda = False
+            self._klik_terakhir = None
 
         if ganda:
             baris, pos = titik
@@ -542,13 +717,19 @@ class MessageList(RichLog, can_focus=False):
         self._salin_mode = "huruf"
         self._salin_jangkar = titik
         self._salin_lo = self._salin_hi = titik
+        self.capture_mouse()
         self.refresh()
 
     def on_mouse_move(self, event) -> None:
-        if getattr(event, "button", -1) != 1 or self._salin_jangkar is None:
+        blok = self._blok_klik.get(self._baris_konten(event.y))
+        self.tooltip = ("Gulir untuk membaca penalaran" if isinstance(blok, _BlokDetail)
+                        and blok.terbuka and blok.max_expanded_lines is not None else None)
+        if self._salin_jangkar is None:
             return
         titik = self._titik_mouse(event)
         mode = self._salin_mode
+        if mode == "huruf" and titik != self._salin_jangkar:
+            self._klik_terakhir = None
         if mode == "huruf":
             ujung = titik
         elif mode == "kata":
@@ -575,6 +756,7 @@ class MessageList(RichLog, can_focus=False):
         if getattr(event, "button", -1) != 1 or self._salin_jangkar is None:
             return
         jangkar, self._salin_jangkar = self._salin_jangkar, None
+        self.release_mouse()
         if self._salin_mode in ("kata", "baris"):
             # Klik ganda/tiga kali: seleksi sudah terbentuk di mouse_down;
             # langsung salin.
@@ -589,10 +771,22 @@ class MessageList(RichLog, can_focus=False):
             # Klik polos: kalau jatuh di AREA blok write() (judul atau
             # isi), buka/tutup isinya (RichLog tak bisa menampung widget
             # interaktif, jadi toggle-nya gambar ulang seluruh riwayat).
+            # Klik di JUDUL langsung; klik di ISI ditunda selama jendela
+            # klik-ganda supaya klik kedua/ketiga bisa menyeleksi kata/baris
+            # tanpa blok sempat tertutup.
             blok = self._blok_klik.get(lo[0])
             if blok is not None:
-                blok.terbuka = not blok.terbuka
-                self._gambar_ulang()
+                self._salin_lo = self._salin_hi = None
+                self.refresh()
+                if lo[0] == blok.baris_judul:
+                    self._toggle_blok(blok)
+                elif isinstance(blok, _BlokDetail) and blok.max_expanded_lines is not None:
+                    return
+                else:
+                    self._blok_tunda = blok
+                    self._timer_blok = self.set_timer(
+                        self._JEDA_KLIK_GANDA + 0.02,
+                        self._toggle_blok_tunda)
                 return
             # Selain itu: tak ada yang disalin; sorotan (yang memang cuma
             # satu titik tadi) dibersihkan.
@@ -624,47 +818,57 @@ class MessageList(RichLog, can_focus=False):
         if not (lo[0] <= baris <= hi[0]):
             return strip
         teks = strip.text
+        # ``strip`` sudah dipadding selebar widget; batas baris memakai
+        # isi asli (``self.lines``) supaya seleksi tak menyeret spasi
+        # perapihan di ujung kanan.
+        isi = self._strip(baris)
+        panjang = len(isi.text) if isi is not None else len(teks.rstrip())
         if baris == lo[0] and baris == hi[0]:
-            bagian = (lo[1], hi[1])
+            awal, akhir = lo[1], min(hi[1], panjang)
         elif baris == lo[0]:
-            bagian = (lo[1], len(teks))
+            awal, akhir = lo[1], panjang
         elif baris == hi[0]:
-            bagian = (0, hi[1])
+            awal, akhir = 0, min(hi[1], panjang)
         else:
-            return strip.apply_style(RichStyle(reverse=True))
+            awal, akhir = 0, panjang
         try:
-            return self._potong_strip(strip, teks, *bagian) \
-                .apply_style(RichStyle(reverse=True))
-        except Exception:  # noqa: BLE001 — pemotongan gagal: sorot penuh
-            return strip.apply_style(RichStyle(reverse=True))
+            return self._sorot_strip(strip, teks, awal, akhir)
+        except Exception:  # noqa: BLE001 — sorotan tak boleh mematikan render
+            return strip
 
-    def _potong_strip(self, strip: Strip, teks: str,
-                      awal: int, akhir: int) -> Strip:
-        """Strip utuh dengan gaya asli, disiapkan agar hanya rentang
-        teks[awal:akhir] yang terbalik — pemanggilnya yang memasang style.
+    def _sorot_strip(self, strip: Strip, teks: str,
+                     awal: int, akhir: int) -> Strip:
+        """Sorot HANYA rentang teks[awal:akhir] dengan warna tema.
 
-        Cara kerjanya membelah strip jadi tiga bagian pada batas SEL
-        (kiri-tengah-kanan) lalu menyatukannya kembali: gaya segmen aslinya
-        utuh, dan apply_style(reverse) pada hasilnya membalik persis
-        rentang tengah karena bagian kiri/kanan diganti blank."""
+        Jangan memakai ``reverse=True``: inverse menukar warna teks/latar
+        sehingga blok seleksi keluar dari palet tema (dan sel kosong di
+        kiri ikut terwarnai). Bagian tengah strip diberi latar
+        ``menu_aktif_bg`` + teks ``menu_aktif_teks``; bagian kiri/kanan
+        dibiarkan utuh supaya seleksi satu baris tak melebar ke seluruh
+        lebar terminal.
+        """
         if awal >= akhir or awal >= len(teks):
-            return Strip.blank(strip.cell_length)
+            return strip
         akhir = min(akhir, len(teks))
         awal_sel = self._kolom_sel(teks, awal)
         akhir_sel = self._kolom_sel(teks, akhir)
         if akhir_sel <= awal_sel:
-            return Strip.blank(strip.cell_length)
-        potongan = strip.divide([awal_sel, akhir_sel])
-        if len(potongan) == 3:
-            kiri, tengah, kanan = potongan
-            return Strip.join([
-                Strip.blank(awal_sel), tengah,
-                Strip.blank(max(0, strip.cell_length - akhir_sel))])
-        if len(potongan) == 2:
-            kiri, tengah = potongan
-            return Strip.join([
-                Strip.blank(awal_sel), tengah])
-        return strip
+            return strip
+        gaya = RichStyle(
+            bgcolor=tema.p("menu_aktif_bg"),
+            color=tema.p("menu_aktif_teks"),
+        )
+        kiri = strip.crop(0, awal_sel)
+        tengah = strip.crop(awal_sel, akhir_sel)
+        kanan = strip.crop(akhir_sel)
+        # post_style: warna seleksi HARUS menang atas warna teks asli
+        # (apply_style biasa menaruh style lama di atas, jadi warnanya
+        # tetap warna teks dan latar seleksi tak pernah terlihat).
+        tengah = Strip(
+            list(Segment.apply_style(tengah._segments, post_style=gaya)),
+            tengah.cell_length,
+        )
+        return Strip.join([kiri, tengah, kanan])
 
     def _teks_salin(self, lo: tuple[int, int], hi: tuple[int, int]) -> str:
         """Teks polos rentang lo..hi; baris penuh dirapikan (rstrip).
@@ -699,66 +903,26 @@ class MessageList(RichLog, can_focus=False):
         OSC 52 hanya dijawab terminal yang mendukungnya; clip.exe pasti ada
         di Windows tapi tak berguna di terminal jarak jauh. Keduanya dijalani
         berurutan: yang mana pun berhasil, clipboard pengguna terisi."""
-        tersalin = False
-        try:
-            self.app.copy_to_clipboard(teks)
-            tersalin = True
-        except Exception:  # noqa: BLE001 — driver belum siap / tak dukung
-            pass
-        if sys.platform == "win32":
-            try:
-                # UTF-16 + BOM: clip.exe mengenalinya, jadi karakter non-ASCII
-                # (termasuk emoji) tak berubah jadi '?'.
-                subprocess.run(
-                    ["clip.exe"], input=teks.encode("utf-16"),
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    timeout=5, check=False)
-                tersalin = True
-            except Exception:  # noqa: BLE001 — clipboard gagal: cukup diam
-                pass
-        if not tersalin:
+        if not copy_text(self.app, teks):
             return
         try:
             self.app.notify(
-                f"{jumlah} baris tersalin — tempel dengan klik-kanan / "
-                "Ctrl+Shift+V", timeout=4)
+                "Disalin", timeout=1.5)
         except Exception:  # noqa: BLE001 — notify opsional
             pass
 
     # --- Pesan ---------------------------------------------------------
 
     def append_user_message(self, text: str, prefix: str = "❯ ") -> None:
-        """Gema pesan pengguna.
+        """Gema pesan pengguna sebagai gelembung membulat.
 
-        Prompt tampil sebagai BLOK bergaris vertikal + latar — jelas
-        dibedakan dari jawaban AI dan teks lain. (Prompt yang sedang
-        mengantre TIDAK lewat sini; ia tampil di QueueStrip dulu,
-        diredupkan, sampai benar-benar dijalankan.)
+        Prompt = manusia, jadi ia mendapat permukaan sendiri (``menu_bg``)
+        dengan sudut membulat dan panah aksen. Blok tool tetap tanpa kartu —
+        hanya mesin yang boleh terlihat seperti keluaran terminal. Prompt
+        yang sedang mengantre TIDAK lewat sini; ia tampil di QueueStrip.
         """
-        from ...ui.textual_theme import campur
-
-        gema = tema.p("gema_bg")
-        garis_st = f"bold {tema.p('aksen')}"
-        isi_st = f"bold {tema.p('teks')}"
-        bg = campur(gema, tema.p("aksen"), 0.10)
-
-        t = Text()
         # Jarak kecil dari jawaban sebelumnya (bukan pesan pertama).
-        if self._items:
-            t.append("\n")
-        for i, baris in enumerate(text.split("\n")):
-            if i:
-                t.append("\n")
-            # Garis vertikal aksen di tiap baris — baris lanjutan tetap
-            # sejajar, blok multi-baris tampak sebagai satu kartu utuh.
-            t.append("▌", style=f"{garis_st} on {bg}")
-            t.append(" ", style=f"on {bg}")
-            isi = f"{prefix}{baris}" if i == 0 else f"  {baris}"
-            t.append(isi, style=f"{isi_st} on {bg}")
-            t.append(" ", style=f"on {bg}")  # rapian tepi kanan
-        # Jarak kecil ke jawaban/tool yang menyusul di bawahnya.
-        t.append("\n")
-        self._emit(t)
+        self._emit(_PesanPengguna(text, prefix, spasi=bool(self._items)))
 
     def append_ai_message(self, text: str, paksa_header: bool = False) -> None:
         """Jawaban AI, dirender sebagai markdown + header chip.
@@ -769,8 +933,22 @@ class MessageList(RichLog, can_focus=False):
         self._chip_header_ai(paksa=paksa_header)
         self._emit(self._markdown(text))
 
+    def _teks_header_ai(self) -> Text:
+        """Chip ``✦ bagas-ai`` — satu sumber untuk jalur biasa & aliran."""
+        t = Text()
+        if self._items:
+            t.append("\n")
+        bg = tema.p("menu_bg")
+        # Spasi kiri/kanan ikut berlatarbelakang: hasilnya pill tipis,
+        # bukan teks yang mengambang seperti header CLI.
+        t.append(" ", style=f"on {bg}")
+        t.append("✦", style=f"bold {tema.p('aksen')} on {bg}")
+        t.append(" bagas-ai ", style=f"bold {tema.p('aksen2')} on {bg}")
+        t.append("\n")
+        return t
+
     def _chip_header_ai(self, paksa: bool = False) -> None:
-        """Chip ``🤖 bagas-ai`` di atas jawaban — paritas dengan CLI.
+        """Chip ``✦ bagas-ai`` di atas jawaban — paritas dengan CLI.
 
         Ditulis lewat ``_emit`` supaya ikut ``_gambar_ulang`` saat lebar
         berubah. Jalur aliran memakai salinan sebaris di ``_gambar_aliran``
@@ -782,14 +960,7 @@ class MessageList(RichLog, can_focus=False):
         if not paksa and not self._tulis_header_ai:
             return
         self._tulis_header_ai = False
-        t = Text()
-        if self._items:
-            t.append("\n")
-        # Kolom 0 — selaras dengan markdown jawaban di bawahnya (dulu "  🤖"
-        # diam dua kolom, sementara isi jawaban mulai di tepi kiri).
-        t.append("🤖 ", style=f"bold {tema.p('aksen2')}")
-        t.append("bagas-ai", style=f"bold {tema.p('aksen2')}")
-        self._emit(t, simpan=True)
+        self._emit(self._teks_header_ai(), simpan=True)
 
     @staticmethod
     def _markdown(teks: str) -> RenderableType:
@@ -806,10 +977,37 @@ class MessageList(RichLog, can_focus=False):
         except Exception:  # noqa: BLE001 — markdown cacat
             return Text(bersih)
 
+    def append_welcome(self, model: str, is_web: bool) -> None:
+        """Kartu sambutan; tetap tersimpan di riwayat render saat resize."""
+        text = Text()
+        text.append("✦  ", style=f"bold {tema.p('aksen')}")
+        text.append("Selamat datang di Bagas-AI! Ketik pesan atau ",
+                    style=tema.p("teks"))
+        text.append("/help", style=f"bold {tema.p('aksen')}")
+        text.append(" untuk bantuan.\n", style=tema.p("teks"))
+        text.append(f"   Model: {model}  ·  {'🌐 web' if is_web else '🤖 api'}",
+                    style=tema.p("redup"))
+        self._emit(Panel(text, box=box.ROUNDED, padding=(0, 1), expand=False,
+                         style=f"on {tema.p('menu_bg')}",
+                         border_style=tema.p("tepi_redup")))
+
+    def append_help(self, *, full: bool = False) -> None:
+        from ...ui.help import HelpContent
+        start = len(self.lines)
+        self._emit(HelpContent(full=full))
+        # Keluaran panjang dibuka dari judul, tanpa menghapus percakapan lama.
+        self.call_after_refresh(lambda: self.scroll_to(y=start, animate=False, force=True))
+
     def append_notice(self, text: str, style: str | None = None) -> None:
         """Pemberitahuan sistem (info, peringatan, keluaran /help, dll)."""
         s = style or f"italic {tema.p('aksen_terang')}"
-        self._emit(Text(_indent(str(text)), style=s, no_wrap=False))
+        clean = _bersih_kendali(str(text)).strip()
+        if len(clean) > 280 or len(clean.splitlines()) > 4:
+            title = Text(clean.splitlines()[0], style=s)
+            title.truncate(90, overflow="ellipsis")
+            self._emit(_BlokDetail(title, Text(clean, style=s)))
+        else:
+            self._emit(Text(_indent(clean), style=s, no_wrap=False))
 
     def append_prompt(self, title: str, lines: list[str] | None = None,
                       hint: str = "", echo: str | None = None) -> None:
@@ -834,34 +1032,32 @@ class MessageList(RichLog, can_focus=False):
     def append_tool_step(self, name: str, args: dict, result: str | None = None,
                          duration: float | None = None,
                          success: bool = True) -> None:
-        """Satu langkah tool: nama, durasi, dan cuplikan hasil."""
+        """Ringkasan satu baris; keluaran lengkap dibuka dengan klik."""
+        from ...ui.activity import activity_label
         icon = "✓" if success else "✗"
-        color = tema.p("aksen") if success else tema.p("exit_footer")
-        t = Text()
-        t.append(f"  {icon} ", style=f"bold {color}")
-        t.append(name, style=f"bold {tema.p('aksen2')}")
-        if duration is not None:
-            if duration < 1.0:
-                t.append(f" ({duration * 1000:.0f}ms)", style=tema.p("redup"))
-            else:
-                t.append(f" ({duration:.1f}s)", style=tema.p("redup"))
-        self._emit(t)
-
+        title = Text(icon + " ", style=tema.p("redup") if success else tema.p("exit_footer"))
+        title.append(activity_label(name, args), style=tema.p("teks"))
         if result:
-            batas = 200
-            datar = result.replace("\n", " ").rstrip()
-            if len(datar) > batas:
-                t2 = Text(f"    ↳ {datar[:batas]}", style=tema.p("redup"))
-                t2.append(f" … (+{len(datar) - batas} huruf)",
-                          style=f"dim {tema.p('redup')}")
-                self._emit(t2)
-            elif datar:
-                self._emit(Text(f"    ↳ {datar}", style=tema.p("redup")))
+            body = Text(_bersih_kendali(str(result)), style=tema.p("redup"))
+            self._emit(_BlokDetail(title, body, preview=2))
+        else:
+            self._emit(title)
 
-    def append_reasoning(self, text: str) -> None:
-        """Isi penalaran (diredupkan)."""
-        self._emit(Text(_indent(f"💭 {text}"),
-                        style=f"dim italic {tema.p('redup')}"))
+    def append_reasoning(self, text: str) -> _BlokDetail:
+        if self._items:
+            self._emit(Text(""))
+        item = _BlokDetail(Text("💭 Penalaran", style=tema.p("redup")),
+                           Text(_bersih_kendali(text), style=tema.p("redup")),
+                           max_expanded_lines=max(1, min(3, self.app.size.height // 8)))
+        self._emit(item)
+        return item
+
+    def update_reasoning(self, item: _BlokDetail, text: str) -> None:
+        clean = _bersih_kendali(text)
+        if item.body.plain != clean:
+            item.body = Text(clean, style=tema.p("redup"))
+            if item.terbuka:
+                self._redraw_block(item)
 
     # --- Diff ----------------------------------------------------------
 
@@ -877,82 +1073,20 @@ class MessageList(RichLog, can_focus=False):
         if not diff:
             return
 
-        syntax_lines = self._syntax_highlight(path, new) if new else None
-        add_style, del_style, ctx_style, gut_add, gut_del = _gaya_diff()
-
-        header = Text()
-        header.append(f"  📝 {path}", style=f"bold {tema.p('aksen2')}")
-        if is_new:
-            header.append(" (baru)", style=tema.p("aksen_terang"))
-        self._emit(header)
-
-        lineno_old = lineno_new = new_idx = 0
-        for line in diff[:limit]:
-            if line.startswith(("+++", "---")):
-                continue
-            if line.startswith("@@"):
-                self._emit(Text(f"  {line.rstrip()}", style="bold #888888"))
-                continue
-            if line.startswith("+"):
-                lineno_new += 1
-                t = Text(f"  {lineno_new:>4} + ", style=gut_add)
-                if syntax_lines and new_idx < len(syntax_lines):
-                    body = syntax_lines[new_idx].copy()
-                    body.style = add_style
-                    t.append_text(body)
-                    new_idx += 1
-                else:
-                    t.append(line[1:], style=add_style)
-                self._emit(t)
-            elif line.startswith("-"):
-                lineno_old += 1
-                t = Text(f"  {lineno_old:>4} - ", style=gut_del)
-                t.append(line[1:], style=del_style)
-                self._emit(t)
-            else:
-                lineno_old += 1
-                lineno_new += 1
-                new_idx += 1
-                t = Text(f"  {lineno_new:>4}   ", style=ctx_style)
-                t.append(line[1:] if line.startswith(" ") else line,
-                         style=ctx_style)
-                self._emit(t)
-
-        if len(diff) > limit:
-            self._emit(Text(f"  … (diff dipotong: {len(diff)} baris)",
-                            style=tema.p("redup")))
+        self._emit(DiffView(path, "\n".join(line.rstrip("\n") for line in diff),
+                            is_new=is_new,
+                            syntax=self._syntax_highlight(path, new),
+                            max_lines=max(1500, limit)))
 
     def append_delete(self, path: str, content: str, limit: int = 80) -> None:
-        """Pratinjau ``delete_file`` — selaras ``cli._print_delete``.
-
-        Tanpa ini, hapus berkas di TUI hanya menampilkan baris jejak tool
-        tanpa jejak isi yang hilang — beda dengan CLI yang mencetak seluruh
-        isi bergaris merah.
-        """
-        header = Text()
-        header.append("  🗑 ", style=f"bold {tema.p('exit_footer')}")
-        header.append(path, style=f"bold {tema.p('aksen2')}")
-        header.append(" (dihapus)", style=tema.p("redup"))
-        self._emit(header)
-
-        _, del_style, _, _, gut_del = _gaya_diff()
-        syntax_lines = self._syntax_highlight(path, content) if content else None
-        for i, line in enumerate(content.splitlines(), start=1):
-            if i > limit:
-                self._emit(Text(f"  … (dipotong: {limit} baris pertama)",
-                                style=tema.p("redup")))
-                break
-            t = Text(f"  {i:>4} - ", style=gut_del)
-            if syntax_lines and i - 1 < len(syntax_lines):
-                body = syntax_lines[i - 1].copy()
-                body.style = del_style
-                t.append_text(body)
-            else:
-                t.append(line, style=del_style)
-            self._emit(t)
+        """Pratinjau penghapusan tetap terlihat sebagai diff merah."""
+        import difflib
+        diff = "\n".join(difflib.unified_diff(content.splitlines(), [],
+                          fromfile=f"a/{path}", tofile="/dev/null", lineterm=""))
+        self._emit(DiffView(path, diff, deleted=True, max_lines=max(1500, limit)))
 
     def append_write_block(self, path: str, kode: str, is_new: bool = False,
-                           muat: int = 7) -> "_BlokTulis":
+                           muat: int = 4) -> "_BlokTulis":
         """Blok "write(nama_file)" — isi kode maks. ``muat`` baris dulu,
         klik di manapun area blok untuk membuka/menutup penuh.
 
@@ -967,54 +1101,11 @@ class MessageList(RichLog, can_focus=False):
         return blok
 
     def append_diff_replay(self, rec: dict) -> None:
-        """Render ulang record diff TERSIMPAN (role 'diff') — transkrip --resume.
-
-        Kembaran cli._replay_diff: isi lengkap file lamanya memang tak
-        disimpan (cuma teks unified yang sudah terpangkas), tapi pita
-        hijau/merah, nomor baris, dan header statusnya sama seperti saat
-        diff itu pertama tampil — potongan kode tak lenyap saat sesi
-        dibuka kembali.
-        """
-        import re
-
+        """Kartu yang sama untuk diff OpenCode dan sesi yang dilanjutkan."""
         path = str(rec.get("path") or "?")
-        if rec.get("deleted"):
-            icon, label = "🗑", "dihapus"
-        else:
-            icon, label = ("✨", "dibuat") if rec.get("is_new") else ("📝", "diubah")
-        header = Text(f"\n  {icon} ")
-        header.append(path, style=f"bold {tema.p('aksen2')}")
-        header.append(f" ({label})", style=tema.p("redup"))
-        self._emit(header)
-
-        add_style, del_style, ctx_style, gut_add, gut_del = _gaya_diff()
-
-        ln_old = ln_new = 0
-        ada_baris = False
-        for line in str(rec.get("diff") or "").split("\n"):
-            if line.startswith("@@"):
-                m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)", line)
-                if m:
-                    ln_old, ln_new = int(m.group(1)), int(m.group(2))
-                if ada_baris:
-                    self._emit(Text("  ⋮", style=tema.p("redup")))
-                continue
-            tag, isi = line[:1], line[1:]
-            if rec.get("deleted") or tag == "-":
-                ln_old += 1
-                t = Text(f"  {ln_old:>4} - ", style=gut_del)
-                t.append(isi, style=del_style)
-            elif tag == "+":
-                ln_new += 1
-                t = Text(f"  {ln_new:>4} + ", style=gut_add)
-                t.append(isi, style=add_style)
-            else:
-                ln_old += 1
-                ln_new += 1
-                t = Text(f"  {ln_new:>4}   ", style=ctx_style)
-                t.append(isi, style=ctx_style)
-            self._emit(t)
-            ada_baris = True
+        self._emit(DiffView(path, str(rec.get("diff") or ""),
+                            is_new=bool(rec.get("is_new")),
+                            deleted=bool(rec.get("deleted"))))
 
     def _syntax_highlight(self, path: str, code: str):
         """Kembalikan daftar ``Text`` per baris berwarna, atau None."""
@@ -1130,6 +1221,41 @@ class MessageList(RichLog, can_focus=False):
     # dua kali setiap kali lebar jendela berubah. Penandanya ``_aliran_awal``:
     # indeks baris pertama item hidup di dalam ``self.lines``.
 
+    def _mulai_kursor(self) -> None:
+        """Nyalakan timer kedip kursor (idempoten)."""
+        if self._kursor_timer is not None:
+            return
+        self._kursor_tampil = True
+        try:
+            self._kursor_timer = self.set_interval(_JEDA_KURSOR,
+                                                   self._kedip_kursor)
+        except Exception:  # noqa: BLE001 — belum ter-mount
+            self._kursor_timer = None
+
+    def _hentikan_kursor(self) -> None:
+        """Matikan timer kedip; dipanggil saat aliran ditutup/dibersihkan."""
+        if self._kursor_timer is not None:
+            try:
+                self._kursor_timer.stop()
+            except Exception:  # noqa: BLE001 — timer sudah mati
+                pass
+            self._kursor_timer = None
+        self._kursor_tampil = False
+
+    def _kedip_kursor(self) -> None:
+        """Balik keadaan kursor lalu gambar ulang jawaban hidup."""
+        if self._aliran_awal is None:
+            self._hentikan_kursor()
+            return
+        self._kursor_tampil = not self._kursor_tampil
+        if not self._aliran_teks:
+            return
+        try:
+            self._gambar_aliran(self._aliran_teks,
+                                kursor=self._kursor_tampil)
+        except Exception:  # noqa: BLE001 — kedip tak boleh mematikan UI
+            pass
+
     def begin_stream(self) -> None:
         """Mulai sesi aliran untuk satu jawaban AI (thread UI)."""
         # Jawaban sebelumnya (kalau ada) disegel ke riwayat dulu; buffer
@@ -1137,6 +1263,7 @@ class MessageList(RichLog, can_focus=False):
         self._tutup_aliran()
         self._aliran_waktu = 0.0
         self._tulis_header_ai = True
+        self._mulai_kursor()
 
     def append_token(self, piece: str) -> None:
         """Kumpulkan satu token. Dipanggil dari thread pekerja.
@@ -1177,10 +1304,17 @@ class MessageList(RichLog, can_focus=False):
                 and sekarang - self._aliran_waktu < _JEDA_ALIRAN):
             return
         self._aliran_waktu = sekarang
+        self._mulai_kursor()
         self._gambar_aliran(teks)
 
-    def _gambar_aliran(self, teks: str) -> None:
-        """Tulis — atau gambar ulang di tempatnya — item jawaban hidup."""
+    def _gambar_aliran(self, teks: str, kursor: bool | None = None) -> None:
+        """Tulis — atau gambar ulang di tempatnya — item jawaban hidup.
+
+        ``kursor`` memaksa glyph kursor tampil/sembunyi; ``None`` mengikuti
+        keadaan kedip saat ini. Glyph hanya masuk ke renderable layar —
+        ``_aliran_teks`` tetap teks bersih supaya perbandingan di
+        ``end_stream`` dan riwayat ``_items`` tak pernah tercemar.
+        """
         if not self._size_known:
             return
         try:
@@ -1189,11 +1323,7 @@ class MessageList(RichLog, can_focus=False):
             # ulang (panggilan _emit akan menutup aliran; write langsung aman).
             if self._tulis_header_ai:
                 self._tulis_header_ai = False
-                hdr = Text()
-                if self._items:
-                    hdr.append("\n")
-                hdr.append("  🤖 ", style=f"bold {tema.p('aksen2')}")
-                hdr.append("bagas-ai", style=f"bold {tema.p('aksen2')}")
+                hdr = self._teks_header_ai()
                 self._items.append(hdr)
                 try:
                     self.write(hdr, width=self._lebar())
@@ -1207,12 +1337,16 @@ class MessageList(RichLog, can_focus=False):
                 del self.lines[awal:]
                 self._line_cache.clear()
             posisi = len(self.lines)
-            item = self._markdown(teks)
+            tampil_kursor = (self._kursor_tampil if kursor is None
+                             else bool(kursor))
+            isi = teks + (" " + _KURSOR if tampil_kursor else "")
+            item = self._markdown(isi)
             self.write(item, width=self._lebar())
             if len(self.lines) > posisi:
                 self._aliran_awal = posisi
                 self._aliran_teks = teks
                 self._aliran_item = item
+                self._kursor_tergambar = tampil_kursor
         except Exception:  # noqa: BLE001 — render tak boleh mematikan UI
             self._tutup_aliran()
 
@@ -1228,11 +1362,24 @@ class MessageList(RichLog, can_focus=False):
         Buffer token ikut dikosongkan: teks yang sudah tampil tak boleh
         dikirim ulang sebagai segmen berikutnya.
         """
+        self._hentikan_kursor()
+        # Kursor hanya glyph LAYAR. Sebelum item disegel ke _items (sumber
+        # gambar ulang), gambar ulang tanpa kursor supaya riwayat bersih —
+        # kalau tidak, "▍" ikut tersimpan dan muncul lagi saat resize.
+        if self._kursor_tergambar:
+            teks = self._aliran_teks
+            self._kursor_tergambar = False
+            if simpan and teks:
+                try:
+                    self._gambar_aliran(teks, kursor=False)
+                except Exception:  # noqa: BLE001 — jangan kehilangan jawaban
+                    pass
         if simpan and self._aliran_item is not None:
             self._items.append(self._aliran_item)
         self._aliran_awal = None
         self._aliran_teks = ""
         self._aliran_item = None
+        self._kursor_tergambar = False
         with self._stream_lock:
             self._stream_buf = ""
 
@@ -1271,7 +1418,8 @@ class MessageList(RichLog, can_focus=False):
             # Isi final berbeda: gambar ulang di posisi yang sama supaya
             # tidak ada dua versi jawaban di layar. Dibandingkan dalam bentuk
             # yang sudah dirapikan — sama seperti yang digambar flush_stream.
-            self._gambar_aliran(bersih)
+            # kursor=False: ini teks final, glyph hidup tak boleh ikut.
+            self._gambar_aliran(bersih, kursor=False)
         # Item hidup kini selesai. Pindahkan kepemilikannya ke riwayat —
         # tanpa menggambar ulang, jadi tampilannya tak berubah sedetik pun.
         self._tutup_aliran()

@@ -14,7 +14,11 @@ def rekam(blok, pakai_vad=True, menyela=False):
     audio = [np.full(1024, value, dtype=np.int16) for value in blok]
     audio += [silent] * 24
     class Front:
+        echo_enabled = True
         vad_tersedia = True
+        # VAD di mesin tiruan ini sengaja TIDAK diandalkan — itu yang membuat
+        # jalur energi (suara pelan yang dilewatkan VAD) masih diuji di sini.
+        vad_handal = False
         def __init__(self, *args):
             pass
         def proses(self, data):
@@ -51,7 +55,7 @@ def main():
     # Suara pelan yang dilewatkan VAD tetap masuk lewat jalur energi.
     soft = rekam([50] * 5, pakai_vad=False)
     assert soft._antre.qsize() == 1
-    # Jawaban singkat saat TTS aktif: baseline speaker lalu ucapan 192 ms.
+    # Jawaban singkat saat TTS aktif: ucapan 192 ms setelah pembatalan gema.
     assert rekam([2] * 15 + [2000] * 3, menyela=True)._antre.qsize() == 1
     assert rekam([2] * 15 + [2000], menyela=True)._antre.empty()
     # Pengenal menerima amplitudo yang terangkat, tetapi sunyi tetap nol.

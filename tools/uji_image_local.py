@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 ROOT_UJI = Path(tempfile.mkdtemp(prefix="uji_image_local_"))
 os.environ["BAGASAI_PROJECT_ROOT"] = str(ROOT_UJI)
+os.environ["BAGASAI_HOME"] = str(ROOT_UJI / "home")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PIL import Image
@@ -29,7 +30,8 @@ def cek_tool(path: Path) -> None:
     from agent.tools.image_local import read_image_local
 
     assert "read_image_local" in REGISTRY
-    hasil = execute("read_image_local", {"path": str(path), "ocr": False})
+    with patch("agent.tools.vision_local.describe_image", return_value="Analisis fixture lokal uji"):
+        hasil = execute("read_image_local", {"path": str(path), "ocr": False})
     assert "PEMBACAAN GAMBAR LOKAL" in hasil
     assert "12×8 px" in hasil
     assert "PNG" in hasil and "Transparansi: ya" in hasil
@@ -48,12 +50,13 @@ def cek_tool(path: Path) -> None:
 
 
 async def cek_textual(path: Path) -> None:
-    from agent import models
+    from agent import models, prefs
     from agent.interfaces.textual_app import BagasAIApp
     from agent.interfaces.textual_widgets import ChatBox
     from agent.interfaces.textual_widgets.chat_box import _SLASH_COMMANDS
 
     assert "/image" in {nama for nama, _, _ in _SLASH_COMMANDS}
+    prefs.save(suara=False)
     agent = MagicMock()
     agent.model_spec = models.ModelSpec(
         id="uji/vision", label="Vision Uji", multimodal=True)
@@ -66,7 +69,7 @@ async def cek_textual(path: Path) -> None:
         chatbox.handle_paste(str(path))
         await pilot.pause(0.2)
         assert app._pending_gambar.get("path") == str(path.resolve())
-        assert app.query_one("#chat-input").text == "[foto]"
+        assert app.query_one("#chat-input").text.strip() == "[foto]"
 
         await pilot.press("enter")
         for _ in range(80):
@@ -77,6 +80,43 @@ async def cek_textual(path: Path) -> None:
         prompt = agent.run.call_args.args[0]
         assert "[GAMBAR]" in prompt and str(path.resolve()) in prompt
         assert not app._pending_gambar
+
+        # Drop di tengah draf tidak mengganti kata atau pilihan yang sudah ada.
+        draft = "Periksa warna tombol dan tata letaknya"
+        chatbox.set_text(draft)
+        chatbox._input.move_cursor((0, 14))
+        chatbox.handle_paste(path.as_uri())
+        await pilot.pause()
+        assert chatbox.current_text.startswith(draft[:14])
+        assert chatbox.current_text.endswith(draft[14:])
+        assert "[foto]" in chatbox.current_text
+        preview = app.query_one("#image-preview")
+        assert preview.display and not preview.query_one("#image-content").display
+        await pilot.click("#image-toggle")
+        await pilot.pause()
+        assert preview.query_one("#image-content").display
+        await pilot.click("#image-remove")
+        await pilot.pause()
+        assert not app._pending_gambar and not preview.display
+        assert "Periksa warna" in chatbox.current_text and "tata letaknya" in chatbox.current_text
+
+        other = path.with_name("gambar kedua.png")
+        Image.new("RGB", (16, 12), (20, 100, 240)).save(other)
+        chatbox.set_text("Bandingkan kedua gambar")
+        chatbox.handle_paste(f'"{path}" "{other}"')
+        await pilot.pause()
+        assert len(app._pending_gambar["items"]) == 2
+        assert chatbox.current_text.startswith("Bandingkan kedua gambar")
+        agent.run.reset_mock()
+        await pilot.press("enter")
+        for _ in range(80):
+            await pilot.pause(0.05)
+            if agent.run.called and not app.is_turn_active:
+                break
+        prompt = agent.run.call_args.args[0]
+        assert str(path.resolve()) in prompt and str(other.resolve()) in prompt
+        assert "Bandingkan kedua gambar" in prompt
+        assert prompt.count("[GAMBAR]") == 2
 
         with patch("agent.tools.image_local.read_image_local",
                    return_value="LAPORAN LOKAL UJI") as baca:

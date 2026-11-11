@@ -8,7 +8,7 @@
 # Langkah: cek Python 3.10+ -> dapatkan sumber (folder ini / git / ZIP) ->
 # cek kecocokan sistem (sistem.py) -> pip install -> unduh Chromium untuk
 # Playwright -> cek Brave -> pasang Tesseract OCR (OCR lokal /image) ->
-# rapikan PATH (registry) -> cek/pasang opencode CLI (opsional) -> wizard
+# rapikan PATH (registry) -> cek/pasang opencode CLI -> wizard
 # login (opsional; tanpa API key).
 #
 # Variabel lingkungan (opsional):
@@ -20,13 +20,24 @@
 # tanpa BOM sebagai ANSI, jadi karakter non-ASCII akan tampil mojibake.
 # ============================================================================
 $ErrorActionPreference = "Stop"
+$InstallHome = if ($env:BAGASAI_HOME) { $env:BAGASAI_HOME } else { Join-Path $HOME ".bagasai" }
+$InstallHome = [IO.Path]::GetFullPath($InstallHome)
+$LogDir = Join-Path $InstallHome "logs"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$InstallLog = Join-Path $LogDir ("install-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+$env:BAGASAI_INSTALL_LOG = $InstallLog
+$StepIndex = 0
 
 # PS 5.1: unduhan dari GitHub butuh TLS 1.2 (di PS lama belum jadi default).
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {}
 
-function Step($m) { Write-Host ""; Write-Host "> $m" -ForegroundColor Magenta }
+function Step($m) {
+    $script:StepIndex += 1
+    Write-Host ""
+    Write-Host ("  {0:00}  {1}" -f $script:StepIndex, $m) -ForegroundColor Cyan
+}
 function Ok($m)   { Write-Host "  [ok] $m" -ForegroundColor Green }
 function Note($m) { Write-Host "        $m" -ForegroundColor DarkGray }
 function Warn($m) { Write-Host "  [!]  $m" -ForegroundColor Yellow }
@@ -40,8 +51,9 @@ function Err($m)  { Write-Host "  [x]  $m" -ForegroundColor Red }
 function Invoke-Quiet([string]$Exe, [string[]]$Arguments) {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    try { & $Exe @Arguments 2>$null } finally { $ErrorActionPreference = $prev }
-    return $LASTEXITCODE
+    try { & $Exe @Arguments >> $InstallLog 2>&1; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    return $rc
 }
 
 # Sama seperti Invoke-Quiet, tapi mengembalikan stdout (bukan exit code).
@@ -61,7 +73,8 @@ function Invoke-Live([string]$Exe, [string[]]$Arguments) {
     # fungsi ditampung ke `$SistemRc`; pemanggilan `&` biasa membuat stdout
     # Python ikut tertangkap dan prompt baru terlihat sesudah proses selesai.
     try {
-        $p = Start-Process -FilePath $Exe -ArgumentList $Arguments `
+        $quoted = @($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ })
+        $p = Start-Process -FilePath $Exe -ArgumentList $quoted `
             -NoNewWindow -Wait -PassThru
         return $p.ExitCode
     } catch {
@@ -70,17 +83,33 @@ function Invoke-Live([string]$Exe, [string[]]$Arguments) {
     }
 }
 
+function ConvertTo-NativeArgument([string]$Value) {
+    if ($Value -and $Value -notmatch '[\s"]') { return $Value }
+    $Value = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    $Value = [regex]::Replace($Value, '(\\+)$', '$1$1')
+    return '"' + $Value + '"'
+}
+
+function Assert-CachePath([string]$Path) {
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $root = $InstallHome.TrimEnd('\') + '\'
+    if (-not $resolved.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Lokasi cache di luar direktori instalasi: $resolved"
+    }
+    return $resolved
+}
+
 $RepoUrl = if ($env:BAGASAI_REPO) { $env:BAGASAI_REPO } else { "https://github.com/ahmadadptr001/bagas-ai" }
 $RepoUrl = "$RepoUrl".TrimEnd('/')
 $RepoBranch = if ($env:BAGASAI_BRANCH) { $env:BAGASAI_BRANCH } else { "master" }
 
 Write-Host ""
-Write-Host "bagas-ai " -ForegroundColor Magenta -NoNewline
-Write-Host "- installer" -ForegroundColor DarkGray
+Write-Host "  bagas-ai" -ForegroundColor Cyan
+Write-Host "  Pemasangan | komponen yang tersedia dipakai kembali" -ForegroundColor DarkGray
 Write-Host ""
 
 # --- 1. Python 3.10+ ---
-Step "Memeriksa Python"
+Step "Python"
 $Py = $null
 $PyCheck = "import sys; raise SystemExit(0 if sys.version_info>=(3,10) else 1)"
 foreach ($c in @("python", "py", "python3")) {
@@ -93,54 +122,86 @@ if (-not $Py) {
     Err "(centang 'Add to PATH' saat memasang) lalu ulangi."
     exit 1
 }
-Ok "Python: $(& $Py --version)"
+Ok "$(& $Py --version)"
 
 # --- 2. Dapatkan sumber kode ---
 $Src = $null
+Step "Kode sumber"
 if ((Test-Path "pyproject.toml") -and (Select-String -Path "pyproject.toml" -Pattern "bagasai" -Quiet)) {
     $Src = (Get-Location).Path
     Ok "Sumber: folder saat ini"
 } else {
-    Step "Mengunduh bagas-ai"
-    $Dest = Join-Path $HOME ".bagasai\src"
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
-        New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-        & git clone --depth 1 --branch $RepoBranch $RepoUrl $Dest
-        if ($LASTEXITCODE -ne 0) { Err "git clone gagal - periksa koneksi internet."; exit 1 }
-        $Src = $Dest
+    $Dest = Assert-CachePath (Join-Path $InstallHome "src")
+    $SourceId = "$RepoUrl#$RepoBranch"
+    $Candidates = @($Dest)
+    if (Test-Path -LiteralPath $Dest) {
+        $Candidates += @(Get-ChildItem -LiteralPath $Dest -Directory | Select-Object -ExpandProperty FullName)
+    }
+    foreach ($candidate in $Candidates) {
+        if (-not (Test-Path -LiteralPath (Join-Path $candidate "pyproject.toml"))) { continue }
+        if (-not (Test-Path -LiteralPath (Join-Path $candidate "src\agent\install_support.py"))) { continue }
+        $marker = Join-Path $candidate ".bagasai-source-id"
+        if (Test-Path -LiteralPath $marker) {
+            if ((Get-Content -LiteralPath $marker -Raw).Trim() -ne $SourceId) { continue }
+        } elseif ($env:BAGASAI_REPO -or $env:BAGASAI_BRANCH) { continue }
+        $Src = $candidate
+        break
+    }
+    if ($Src) {
+        Ok "Kode sumber sudah tersedia"
     } else {
+      if (Test-Path -LiteralPath $Dest) {
+        # Pertahankan cache lama; jangan menghapus checkout/aset pengguna.
+        $SavedSource = Assert-CachePath (Join-Path $InstallHome ("src-lama-" + [guid]::NewGuid().ToString("N")))
+        Move-Item -LiteralPath $Dest -Destination $SavedSource
+      }
+      if (Get-Command git -ErrorAction SilentlyContinue) {
+        $rc = Invoke-Quiet git @("clone", "--depth", "1", "--branch", $RepoBranch, $RepoUrl, $Dest)
+        if ($rc -ne 0) { Err "Kode sumber gagal diunduh. Log: $InstallLog"; exit 1 }
+        $Src = $Dest
+      } else {
         # Tanpa git: unduh ZIP cabang dari GitHub lalu ekstrak.
         Note "git tidak ada - memakai unduhan ZIP"
         $ZipUrl = "$RepoUrl/archive/$RepoBranch.zip"
-        $Tmp = Join-Path ([IO.Path]::GetTempPath()) ("bagasai_" + [guid]::NewGuid().ToString("N"))
-        $ZipFile = Join-Path $Tmp "src.zip"
+        $Downloads = Assert-CachePath (Join-Path $InstallHome "downloads")
+        New-Item -ItemType Directory -Force -Path $Downloads | Out-Null
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $CacheKey = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($SourceId)))).Replace("-", "").Substring(0, 12)
+        $sha.Dispose()
+        $ZipFile = Join-Path $Downloads ("source-" + $CacheKey + ".zip")
         try {
-            New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
-            Invoke-WebRequest -UseBasicParsing -Uri $ZipUrl -OutFile $ZipFile
-            if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
-            Expand-Archive -LiteralPath $ZipFile -DestinationPath $Dest -Force
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $ZipReady = $false
+            if (Test-Path -LiteralPath $ZipFile) {
+                try { $archive = [IO.Compression.ZipFile]::OpenRead($ZipFile); $archive.Dispose(); $ZipReady = $true } catch {}
+            }
+            if (-not $ZipReady) {
+                Invoke-WebRequest -UseBasicParsing -Uri $ZipUrl -OutFile ($ZipFile + ".part")
+                Move-Item -LiteralPath ($ZipFile + ".part") -Destination $ZipFile -Force
+            }
+            Expand-Archive -LiteralPath $ZipFile -DestinationPath $Dest
         } catch {
             Err "Unduhan/ekstraksi gagal: $($_.Exception.Message)"
             Err "URL: $ZipUrl"
             exit 1
-        } finally {
-            Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
         }
         # GitHub mengekstrak ke <repo>-<cabang>; ambil folder pertama.
         $dir = Get-ChildItem -LiteralPath $Dest -Directory | Select-Object -First 1
         if (-not $dir) { Err "Isi ZIP tidak terduga."; exit 1 }
         $Src = $dir.FullName
+      }
+      Set-Content -LiteralPath (Join-Path $Src ".bagasai-source-id") -Value $SourceId -Encoding UTF8
+      Ok "Kode sumber siap"
     }
-    Ok "Kode sumber: $Src"
 }
+$Support = Join-Path $Src "src\agent\install_support.py"
 
 # --- 2b. Cek kecocokan sistem (sebelum apa pun dipasang) ---
 # sistem.py: OS/arsitektur/RAM/disk/Python/internet + Ketentuan & Kebijakan,
 # lalu konfirmasi lanjut/batal. Sengaja dijalankan sebelum pip install agar
 # pengguna bisa membatalkan sebelum proses unduhan dimulai. Prompt Y/n-nya
 # interaktif; Invoke-Live menjaga output dan prompt tetap tampil di console.
-Step "Cek kecocokan sistem"
+Step "Pemeriksaan perangkat"
 $SistemRc = Invoke-Live $Py @((Join-Path $Src "src\agent\sistem.py"))
 switch ($SistemRc) {
     0 { }
@@ -148,56 +209,37 @@ switch ($SistemRc) {
     default { Err "Sistem ini belum didukung - pemasangan dihentikan."; exit 1 }
 }
 # --- 3. Pasang sebagai perintah global ---
-Step "Memasang bagas-ai (pip install)"
-# Pastikan pip ada dulu (sebagian Python Store/venv memicu 'No module named pip').
-if ((Invoke-Quiet $Py @("-m", "pip", "--version")) -ne 0) {
-    Note "pip belum ada - memasang via ensurepip..."
-    Invoke-Quiet $Py @("-m", "ensurepip", "--upgrade", "--default-pip") | Out-Null
-}
+Step "Paket aplikasi"
 # --user ditolak di dalam venv ("user site-packages are not visible").
 $UserFlags = @("--user")
 if ($env:VIRTUAL_ENV) { $UserFlags = @() }
 
-& $Py -m pip install @UserFlags --upgrade $Src
-if ($LASTEXITCODE -ne 0) {
-    # Coba sekali lagi setelah memastikan pip, lalu tanpa --user (venv/edge).
-    Invoke-Quiet $Py @("-m", "ensurepip", "--upgrade", "--default-pip") | Out-Null
-    & $Py -m pip install @UserFlags --upgrade $Src
-    if ($LASTEXITCODE -ne 0 -and $UserFlags.Count -gt 0) {
-        & $Py -m pip install --upgrade $Src
-    }
-    if ($LASTEXITCODE -ne 0) { Err "pip install gagal."; exit 1 }
-}
-Ok "Terpasang"
+$PackageRc = Invoke-Live $Py (@($Support, "python", "--source", $Src) + $UserFlags)
+if ($PackageRc -ne 0) { Err "Paket aplikasi belum siap. Log: $InstallLog"; exit 1 }
 
 # --- 3b. Pengenal suara lokal ---
-Step "Menyiapkan pengenal suara lokal Whisper"
-$VoiceRc = Invoke-Live $Py @("-m", "agent.dengar", "--prepare-model")
+Step "Pengenal suara"
+# Helper tetap menjalankan --prepare-model; cache lengkap dimuat tanpa unduhan.
+$VoiceRc = Invoke-Live $Py @($Support, "voice")
 if ($VoiceRc -ne 0) {
     Err "Whisper lokal gagal dipasang atau dimuat. Instalasi dibatalkan."
     exit 1
 }
-Ok "Pengenal suara lokal aktif dan teruji"
 
 # --- 3c. Browser Chromium untuk Playwright ---
 # WAJIB: seluruh model bagas-ai berjalan lewat browser. Paket pip `playwright`
 # hanya membawa pustakanya; binari browsernya harus diunduh terpisah. Tanpa
 # langkah ini, model pertama yang dipilih akan gagal dengan pesan teknis.
-Step "Mengunduh browser Chromium (sekali saja, ~120 MB)"
-& $Py -m playwright install chromium
-if ($LASTEXITCODE -eq 0) {
-    Ok "Browser siap"
-} else {
-    Warn "Gagal mengunduh Chromium - jalankan nanti:"
-    Note "$Py -m playwright install chromium"
-}
+Step "Browser Chromium"
+$BrowserRc = Invoke-Live $Py @($Support, "browser")
+if ($BrowserRc -ne 0) { Warn "Browser belum siap. Log: $InstallLog" }
 
 # --- 3c. Brave: browser yang DIPAKAI sehari-hari ---
 # Chromium di atas cuma jaring pengaman terakhir. Yang dijalankan connector
 # adalah browser ASLI yang terpasang di mesin ini, dan bawaannya Brave
 # (CONNECTOR_BROWSER_CHANNEL). Chromium bundel Playwright paling sering
 # diblok situs, jadi ia tak boleh jadi pilihan sehari-hari.
-Step "Memeriksa browser Brave"
+Step "Browser sistem"
 $BravePaths = @(
     (Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\Application\brave.exe'),
     (Join-Path $env:ProgramFiles 'BraveSoftware\Brave-Browser\Application\brave.exe'),
@@ -210,8 +252,7 @@ if ($Brave) {
     $Winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($Winget) {
         Note "memasang Brave lewat winget..."
-        & winget install --id Brave.Brave -e --silent `
-            --accept-package-agreements --accept-source-agreements
+        Invoke-Quiet winget @("install", "--id", "Brave.Brave", "-e", "--silent", "--accept-package-agreements", "--accept-source-agreements") | Out-Null
         $Brave = $BravePaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
         if ($Brave) { Ok "Brave terpasang" }
     }
@@ -239,7 +280,7 @@ if ($Brave) {
 # hanya bagian "OCR lokal" yang kosong. Dipasang otomatis bila winget ada.
 # Jangan memanggil winget tanpa Invoke-Quiet: stderr-nya mematikan installer
 # (lihat catatan di helper itu).
-Step "Memeriksa Tesseract OCR (untuk OCR lokal /image)"
+Step "OCR lokal"
 $Winget = Get-Command winget -ErrorAction SilentlyContinue
 $TessPaths = @(
     (Join-Path $env:ProgramFiles 'Tesseract-OCR\tesseract.exe'),
@@ -255,7 +296,7 @@ if (-not $Tess) {
     $Tess = $TessPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 }
 if ($Tess) {
-    Ok "Tesseract sudah ada ($Tess)"
+    Ok "Tesseract sudah tersedia"
 } elseif ($Winget) {
     Note "memasang Tesseract lewat winget..."
     # Satu percobaan; retry --scope user TIDAK berguna (diam2 gagal: paket ini
@@ -268,7 +309,7 @@ if ($Tess) {
     if (-not $Tess) {
         $Tess = $TessPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
     }
-    if ($Tess) { Ok "Tesseract terpasang ($Tess)" }
+    if ($Tess) { Ok "Tesseract siap" }
 }
 if (-not $Tess) {
     # TIDAK menggagalkan pemasangan: /image tetap jalan, hanya teksnya kosong.
@@ -277,34 +318,28 @@ if (-not $Tess) {
 }
 
 # --- 3e. Ollama + Gemma 3 4B (WAJIB untuk vision lokal) ---
-Step "Memeriksa Ollama (wajib untuk vision lokal Gemma 3 4B)"
-$Ollama = Get-Command ollama -ErrorAction SilentlyContinue
+Step "Model gambar lokal"
+$Ollama = Invoke-Captured $Py @($Support, "find-ollama") | Select-Object -Last 1
 if (-not $Ollama) {
     $Winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($Winget) {
         Note "memasang Ollama lewat winget..."
         Invoke-Quiet winget @("install", "--id", "Ollama.Ollama", "-e", "--silent",
                               "--accept-package-agreements", "--accept-source-agreements") | Out-Null
-        $Ollama = Get-Command ollama -ErrorAction SilentlyContinue
+        $Ollama = Invoke-Captured $Py @($Support, "find-ollama") | Select-Object -Last 1
     }
 }
 if (-not $Ollama) {
     Err "Ollama wajib tetapi gagal dipasang. Pasang dari https://ollama.com/download/windows lalu jalankan installer lagi."
     exit 1
 }
-Ok "Ollama tersedia ($($Ollama.Source))"
-Note "mengunduh model vision Gemma 3 4B (sekitar 3.3 GB)..."
-$rc = Invoke-Quiet ollama @("pull", "gemma3:4b")
-if ($rc -ne 0) { Err "Gagal mengunduh gemma3:4b (exit $rc). Instalasi dibatalkan."; exit 1 }
-$VisionProbe = "from agent.tools.vision_local import ensure_vision_ready; ok, why = ensure_vision_ready(force_probe=True); print(why); raise SystemExit(0 if ok else 1)"
-$rc = Invoke-Quiet $Py @("-c", $VisionProbe)
+$rc = Invoke-Live $Py @($Support, "vision")
 if ($rc -ne 0) { Err "Gemma 3 4B terpasang tetapi gagal merespons gambar. Instalasi dibatalkan."; exit 1 }
-Ok "Ollama + Gemma 3 4B aktif dan teruji untuk read_image_local serta /live"
 
 # --- 4. Pastikan folder Scripts ada di PATH (User) ---
 # Cari lokasi .exe yang BENAR-BENAR terpasang (penting untuk Python Store yang
 # menaruh script di folder tak terduga), bukan sekadar menebak dari getuserbase.
-Step "Memeriksa PATH"
+Step "Perintah terminal"
 # Skrip locator ditulis ke file temporer lalu dijalankan. JANGAN dioper via
 # `python -c "<multi-baris>"`: PowerShell 5.1 menghapus tanda kutip di dalam
 # argumen multi-baris untuk program native -> Python jadi 'invalid syntax'.
@@ -412,19 +447,11 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     Note "Tutup lalu buka terminal BARU bila 'bagas-ai' belum dikenali."
 }
 
-# --- 4b. opencode CLI (opsional) ---
-# Model opencode/* di bagas-ai memakai API OpenCode Zen secara LANGSUNG dan
-# GRATIS TANPA key (akses anonim per-IP), jadi CLI ini murni OPSIONAL -
-# dipasang hanya bila kamu memakai opencode sendiri. Satu manfaat sampingnya:
-# "opencode auth login" menyimpan key yang dibaca bagas-ai otomatis (kuota
-# pribadi alih-alih kuota anonim).
-# Ke gagal pun TIDAK menggagalkan pemasangan bagas-ai.
-Step "Memeriksa opencode CLI (opsional)"
+# --- 4b. OpenCode CLI: runtime model AI ---
+Step "OpenCode"
 $OpenCode = Get-Command opencode -ErrorAction SilentlyContinue
 if ($OpenCode) {
-    Ok "opencode sudah terpasang ($($OpenCode.Source))"
-    Note "model opencode/* di bagas-ai gratis tanpa key; opencode auth login"
-    Note "hanya untuk kuota pribadi di CLI-nya sendiri"
+    Ok "OpenCode sudah tersedia"
 } else {
     $Npm = Get-Command npm -ErrorAction SilentlyContinue
     if ($Npm) {
@@ -432,15 +459,13 @@ if ($OpenCode) {
         $rc = Invoke-Quiet npm @("install", "-g", "opencode-ai")
         if ($rc -eq 0) {
             Ok "opencode terpasang"
-            Note "opsional: opencode auth login untuk kuota pribadi"
         } else {
             Warn "npm install opencode gagal (exit $rc) - bagas-ai tetap terpasang."
             Note "pasang manual nanti: npm install -g opencode-ai"
-            Note "atau: scoop install opencode / choco install opencode"
         }
     } else {
-        Note "opencode belum terpasang - bagas-ai (dan model opencode/*)"
-        Note "tetap jalan tanpanya; pasang via npm/scoop/choco bila mau."
+        Warn "OpenCode belum tersedia untuk model AI."
+        Note "Pasang dengan: npm install -g opencode-ai"
     }
 }
 
@@ -470,6 +495,5 @@ Write-Host "Selesai. " -ForegroundColor Green -NoNewline
 Write-Host "Ketik " -NoNewline
 Write-Host "bagas-ai" -ForegroundColor Cyan -NoNewline
 Write-Host " di terminal mana pun untuk mulai."
-Write-Host "  sumber  : $Src" -ForegroundColor DarkGray
-Write-Host "  bantuan : bagas-ai help" -ForegroundColor DarkGray
+Write-Host "  Log: $InstallLog" -ForegroundColor DarkGray
 Write-Host ""

@@ -12,8 +12,8 @@ bagas-ai punya DUA jalur model yang cara kerjanya berbeda mendasar:
      OpenCode memegang loop agennya sendiri (tool dieksekusi di sana dengan
      --auto), dan peristiwa "reasoning" dari CLI diteruskan ke UI sebagai
      aliran pikiran realtime (ThinkingBlock di TUI, blok 💭 di CLI).
-     Katalog disinkronkan dinamis lewat `opencode models` (hanya menambah;
-     tak ada entri opencode yang ditunda).
+     Katalog mengikuti daftar hidup `opencode models` (hanya provider
+     opencode/*; provider lain diabaikan).
 
 Model API NVIDIA dan OpenRouter SENGAJA TIDAK ADA LAGI di katalog ini
 (dihapus atas permintaan pengguna). Sisa kode penyedia di llm.py/config.py
@@ -33,6 +33,14 @@ from . import config
 # Dipakai menu /effort. "langsung" berarti mode berpikir DIMATIKAN; sisanya
 # menyalakannya dengan nilai reasoning_effort yang berbeda.
 EFFORT_INFO: dict[str, tuple[str, str, str]] = {
+    "default": ("Bawaan", "ikuti pengaturan bawaan OpenCode", "ϟ"),
+    "none": ("none", "tanpa penalaran tambahan", "ϟ"),
+    "minimal": ("minimal", "usaha paling ringan", "ϟ"),
+    "low": ("low", "penalaran ringan", "ϟ"),
+    "medium": ("medium", "penalaran seimbang", "ϟ"),
+    "high": ("high", "penalaran mendalam", "ϟ"),
+    "xhigh": ("xhigh", "penalaran lebih mendalam", "ϟ"),
+    "max": ("max", "usaha maksimum yang tersedia", "ϟ"),
     "langsung": ("Langsung", "tanpa mode berpikir — jawaban paling cepat", "⚡"),
     "ringkas": ("Ringkas", "berpikir singkat — gesit & hemat token", "🌤"),
     "seimbang": ("Seimbang", "nalar secukupnya — pas untuk kebanyakan tugas", "⚖"),
@@ -91,6 +99,8 @@ class ModelSpec:
     # menu akan mengatakannya terus-terang alih-alih memberi pilihan palsu.
     effort_levels: tuple[str, ...] = ()
     effort_default: str = ""
+    # Varian CLI berbeda dari parameter body HTTP; jangan kirim ke API Zen.
+    effort_cli: bool = False
     # Kirim juga chat_template_kwargs.reasoning_effort? Hanya untuk model yang
     # setidaknya MENERIMA-nya sesuai contoh resmi. Untuk nemotron sengaja
     # False: terukur diabaikan, jadi mengirimnya cuma menyesatkan pembaca kode.
@@ -143,7 +153,7 @@ class ModelSpec:
         HTTP 500 di nemotron-3-ultra, jadi menghidupkannya membuat SETIAP
         setelan effort gagal.
         """
-        if self.is_web:
+        if self.is_web or self.effort_cli:
             return None
         lvl = effort if effort in self.effort_levels else self.effort_default
         if not lvl:
@@ -170,16 +180,19 @@ class ModelSpec:
                 ctk["reasoning_effort"] = nilai
         return {"chat_template_kwargs": ctk}
 
+    def cli_variant_for(self, effort: str | None) -> str | None:
+        if self.effort_cli and effort in self.effort_levels and effort != "default":
+            return effort
+        return None
+
 
 # MODEL YANG SEDANG DITUNDA — atas permintaan pengguna (2026-09-21).
 # Sebabnya satu: SELURUH jalur browser dimatikan. Tiap model (web) butuh
 # jendela Chrome, login, dan detik-detik menunggu situsnya — sementara jalur
 # CLI menjawab tanpa browser sama sekali.
 #
-# Model `opencode/*` TIDAK PERNAH ditunda (permintaan pengguna 2026-10-31):
-# seluruh entri statis maupun yang dilaporkan `opencode models` boleh dipilih,
-# termasuk yang belum muncul di CLI. Katalog tetap disinkronkan dinamis untuk
-# MENAMBAH model baru, bukan untuk menyembunyikan yang lama.
+# Model `opencode/*` TIDAK PERNAH ditunda. Katalognya mengikuti daftar hidup
+# `opencode models`; entri statis hanya cadangan saat CLI tak tersedia.
 #
 # Entri yang ditunda SENGAJA TIDAK DIHAPUS: connector-nya utuh, ujinya utuh,
 # profil login-nya utuh, dan /web tetap bisa mengurus profilnya. Yang berubah
@@ -213,10 +226,10 @@ MODELS: dict[str, ModelSpec] = {
     # jalur cadangan HTTP), bukan menuntut key.
     #
     # Katalog di bawah adalah FALLBACK statis. Saat import, sinkron_model_
-    # opencode() mencoba `opencode models` (CLI) dan MENAMBAH/MEMPERBARUI
-    # entri sesuai daftar hidup penyedia — model baru muncul, model yang
-    # hilang ditandai ditunda. Bila CLI tak ada / perintah gagal, daftar
-    # statis ini dipakai apa adanya.
+    # opencode() mencoba `opencode models` (CLI) dan MENGGANTI daftar
+    # opencode/* dengan daftar hidup penyedia — persis yang tersedia di CLI,
+    # tanpa entri statis yang sudah tak muncul lagi. Bila CLI tak ada /
+    # perintah gagal, daftar statis ini dipakai apa adanya.
     #
     # api_style "responses" hanya dipertahankan untuk jalur CADANGAN HTTP;
     # jalur CLI mengabaikannya (opencode run yang memegang protokolnya).
@@ -358,6 +371,12 @@ MODELS = {k: (v if k not in _DITUNDA else
               replace(v, ditunda=True))
           for k, v in MODELS.items()}
 
+# Salinan katalog bawaan SEBELUM sinkron CLI. Dipakai untuk dua hal:
+#   1. cadangan bila `opencode models` tak bisa dijalankan (MODELS dibiarkan);
+#   2. mempertahankan label/catatan model yang sudah kita kenal saat daftar
+#      hidup dipakai — mis. big-pickle tetap punya catatan aslinya.
+_MODEL_STATIS = dict(MODELS)
+
 _ORDER = [k for k, spec in MODELS.items() if spec.aktif]
 # "Siap" berarti BENAR-BENAR bisa dipilih sekarang, bukan sekadar tak ditunda:
 # model (API) yang kunci penyedianya kosong sama tak bisanya dipakai, dan
@@ -392,6 +411,7 @@ _ALIAS_LAMA = {"cici": "dola-web", "cici-web": "dola-web", "web/cici": "dola-web
 def _hitung_ulang_katalog() -> None:
     """Hitung ulang _ORDER/_SIAP/_AKTIF/DEFAULT_ID setelah MODELS berubah."""
     global _ORDER, _SIAP, _AKTIF, DEFAULT_ID
+    default_lama = DEFAULT_ID
     for k in list(MODELS):
         spec = MODELS[k]
         if k in _DITUNDA and not spec.ditunda:
@@ -408,19 +428,24 @@ def _hitung_ulang_katalog() -> None:
         and (not MODELS[k].is_api or config.has_api_key(MODELS[k].provider))
     ]
     _AKTIF = _SIAP or [k for k in _ORDER if MODELS[k].aktif] or _ORDER
-    DEFAULT_ID = MODELS[_AKTIF[0]].id
+    # Pertahankan model bawaan yang sedang dipakai selama ia masih ada di
+    # katalog hidup. Tanpa ini, sinkron CLI yang kebetulan mengurutkan model
+    # lain lebih dulu akan diam-diam memindahkan pengguna ke model baru.
+    if default_lama and any(MODELS[k].id == default_lama for k in _AKTIF):
+        DEFAULT_ID = default_lama
+    else:
+        DEFAULT_ID = MODELS[_AKTIF[0]].id
 
 
 def sinkron_model_opencode(*, refresh: bool = False) -> list[str]:
-    """Sinkron katalog opencode/* dari CLI `opencode models` (dinamis).
+    """Sinkron katalog opencode/* dari daftar hidup CLI `opencode models`.
 
-    Mengembalikan daftar alias yang terlihat di CLI. Gagal total (binary tak
-    ada, perintah error, timeout) -> kembalikan [] dan biarkan daftar statis
-    dipakai apa adanya — import tidak boleh meledak hanya karena CLI absen.
-
-    Sinkron ini HANYA MENAMBAH model baru. Entri statis yang tak lagi muncul
-    di CLI TIDAK ditunda (permintaan pengguna 2026-10-31): semua model
-    opencode/* tetap boleh dipilih.
+    Hanya baris `opencode/*` yang dipakai; provider lain (apinex, ollama,
+    dst.) sengaja diabaikan. Bila CLI berhasil, daftar opencode/* di MODELS
+    DIGANTI dengan daftar hidup itu — entri statis yang tak muncul lagi tidak
+    ikut ditampilkan. Bila CLI tak ada / perintah gagal, daftar statis
+    dibiarkan apa adanya supaya import tidak meledak dan aplikasi tetap bisa
+    dibuka.
 
     `refresh=True` menambah flag --refresh (paksa update cache models.dev);
     bawaan memakai cache CLI supaya startup tetap cepat.
@@ -431,7 +456,7 @@ def sinkron_model_opencode(*, refresh: bool = False) -> list[str]:
     exe = shutil.which("opencode")
     if not exe:
         return []
-    cmd = [exe, "models", "opencode"]
+    cmd = [exe, "models"]
     if refresh:
         cmd.append("--refresh")
     try:
@@ -452,23 +477,52 @@ def sinkron_model_opencode(*, refresh: bool = False) -> list[str]:
         alias = baris[len("opencode/"):].strip()
         if not alias or "/" in alias:
             continue
-        alias_hidup.append(alias)
+        if alias not in alias_hidup:
+            alias_hidup.append(alias)
     if not alias_hidup:
         return []
+
+    # Urutan: model statis yang MASIH hidup dulu (mempertahankan big-pickle
+    # sebagai pilihan pertama), lalu model baru dari CLI, lalu entri web yang
+    # tetap ditunda. Label/catatan model yang sudah dikenal dipertahankan.
+    baru: dict[str, ModelSpec] = {}
     for alias in alias_hidup:
-        if alias not in MODELS:
-            MODELS[alias] = ModelSpec(
-                id=f"opencode/{alias}",
-                label=f"{alias} (CLI)",
-                provider="opencode",
-                api_model=f"opencode/{alias}",
-                multimodal=False,
-                note="Via CLI opencode run — gratis tanpa API key",
-                max_tokens=16384,
+        dasar = _MODEL_STATIS.get(alias)
+        if dasar is not None and dasar.provider == "opencode":
+            baru[alias] = replace(dasar, ditunda=False)
+    for alias in alias_hidup:
+        if alias in baru:
+            continue
+        baru[alias] = ModelSpec(
+            id=f"opencode/{alias}",
+            label=f"{alias} (CLI)",
+            provider="opencode",
+            api_model=f"opencode/{alias}",
+            multimodal=False,
+            note="Via CLI opencode run — gratis tanpa API key",
+            max_tokens=16384,
+        )
+    for k, spec in _MODEL_STATIS.items():
+        if spec.provider != "opencode":
+            baru[k] = replace(spec, ditunda=(k in _DITUNDA))
+
+    for alias in alias_hidup:
+        _DITUNDA.discard(alias)
+    from .opencode_catalog import model_variants
+    variants = model_variants(config.PROJECT_ROOT)
+    for alias, levels in variants.items():
+        if alias in baru and levels:
+            baru[alias] = replace(
+                baru[alias], effort_cli=True,
+                effort_levels=("default", *levels), effort_default="default",
+                effort_catatan="Varian dari katalog OpenCode untuk project ini.",
             )
-    for alias in alias_hidup:
-        if alias in _DITUNDA:
-            _DITUNDA.discard(alias)
+        elif alias in baru:
+            baru[alias] = replace(baru[alias], effort_catatan=(
+                "OpenCode tidak menyediakan varian effort untuk model ini; "
+                "mode penalaran mengikuti bawaan model."))
+    MODELS.clear()
+    MODELS.update(baru)
     _hitung_ulang_katalog()
     return alias_hidup
 

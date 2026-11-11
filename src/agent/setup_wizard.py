@@ -27,6 +27,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from . import config
+from . import termux
 
 # Urutan penulisan key di file .env (agar rapi & mudah dibaca manusia).
 _ENV_ORDER = [
@@ -261,13 +262,22 @@ def run(console: Console | None = None) -> bool:
     title = Text("bagas-ai", style="bold magenta")
     title.append("  ·  setup", style="dim")
     console.print(Panel(title, border_style="magenta", padding=(0, 2)))
-    console.print(
-        "  [dim]Yang praktis wajib: binary[/dim] [bold]opencode[/bold] "
-        "[dim]di PATH.\n"
-        "  Model opencode/* gratis & tanpa API key — pasang dengan[/dim]\n"
-        "  [bold cyan]npm i -g opencode-ai[/bold cyan][dim].\n"
-        "  Seluruh model (web) sedang ditunda.[/dim]\n"
-    )
+    if termux.IS_TERMUX:
+        console.print(
+            "  [dim]Termux/Android: yang praktis wajib adalah binary[/dim] "
+            "[bold]opencode[/bold] [dim]Android aarch64.\n"
+            "  Pasang lewat install-termux.sh atau unduh rilis\n"
+            "  guysoft/opencode-termux. Model opencode/* gratis & tanpa API key.\n"
+            "  Browser, vision lokal, dan Whisper tidak tersedia di Android.[/dim]\n"
+        )
+    else:
+        console.print(
+            "  [dim]Yang praktis wajib: binary[/dim] [bold]opencode[/bold] "
+            "[dim]di PATH.\n"
+            "  Model opencode/* gratis & tanpa API key — pasang dengan[/dim]\n"
+            "  [bold cyan]npm i -g opencode-ai[/bold cyan][dim].\n"
+            "  Seluruh model (web) sedang ditunda.[/dim]\n"
+        )
 
     # Installer sudah meminta persetujuan sebelum memasang apa pun dan menaruh
     # penanda hanya untuk proses wizard anak ini. ``bagas-ai login`` yang
@@ -329,28 +339,43 @@ def run(console: Console | None = None) -> bool:
 
     # --- Simpan ---
     _write_env(config.ENV_FILE, env)
-    try:
-        from .updater import _pasang_vision_gemma
-        console.print("  [dim]Memastikan Ollama + Gemma 3 4B vision (wajib)...[/dim]")
-        hasil_vision = _pasang_vision_gemma()
-        console.print("  " + hasil_vision)
-        if hasil_vision.startswith("GAGAL:"):
-            console.print("  [red]Setup dihentikan: vision lokal wajib tersedia.[/red]")
+    if termux.IS_TERMUX:
+        console.print(
+            "  [dim]Vision lokal (Ollama + Gemma) dilewati di Termux/Android — "
+            "Android tak menjalankan Ollama.[/dim]")
+    else:
+        try:
+            from .updater import _pasang_vision_gemma
+            console.print("  [dim]Memastikan Ollama + Gemma 3 4B vision (wajib)...[/dim]")
+            hasil_vision = _pasang_vision_gemma()
+            console.print("  " + hasil_vision)
+            if hasil_vision.startswith("GAGAL:"):
+                console.print("  [red]Setup dihentikan: vision lokal wajib tersedia.[/red]")
+                return False
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]Setup dihentikan: Ollama wajib ({exc})[/red]")
             return False
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"  [red]Setup dihentikan: Ollama wajib ({exc})[/red]")
-        return False
     console.print(f"  [green]✔ Konfigurasi disimpan:[/green] [dim]{config.ENV_FILE}[/dim]")
     # Diperingatkan SETELAH simpan, bukan sebagai penghalang: pemasangan tetap
     # sah. Tanpa binary `opencode`, belum ada satu pun model yang bisa dipilih.
     if not config.opencode_cli_tersedia():
-        console.print(
-            "  [yellow]Catatan:[/yellow] binary `opencode` tak ada di PATH, "
-            "jadi BELUM ADA model\n"
-            "  yang bisa dipilih. Pasang CLI dengan "
-            "[cyan]npm i -g opencode-ai[/cyan],\n"
-            "  lalu jalankan [bold cyan]bagas-ai login[/bold cyan] lagi."
-        )
+        if termux.IS_TERMUX:
+            console.print(
+                "  [yellow]Catatan:[/yellow] binary `opencode` tak ada di PATH, "
+                "jadi BELUM ADA model\n"
+                "  yang bisa dipilih. Pasang OpenCode Termux (Android aarch64) "
+                "lewat\n  [cyan]bash install-termux.sh[/cyan] atau rilis "
+                "guysoft/opencode-termux, lalu jalankan\n"
+                "  [bold cyan]bagas-ai login[/bold cyan] lagi."
+            )
+        else:
+            console.print(
+                "  [yellow]Catatan:[/yellow] binary `opencode` tak ada di PATH, "
+                "jadi BELUM ADA model\n"
+                "  yang bisa dipilih. Pasang CLI dengan "
+                "[cyan]npm i -g opencode-ai[/cyan],\n"
+                "  lalu jalankan [bold cyan]bagas-ai login[/bold cyan] lagi."
+            )
     console.print(
         "\n  [bold]Selesai![/bold] Ketik [bold cyan]bagas-ai[/bold cyan] untuk mulai chat"
         " ·  [bold cyan]bagas-ai telegram[/bold cyan] untuk bot."

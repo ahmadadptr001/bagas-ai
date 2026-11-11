@@ -65,6 +65,29 @@ TEMA: dict[str, dict] = {
         "menu_aktif_bg": "#58a6ff", "menu_aktif_teks": "#0d1b2a",
         "menu_meta_bg": "#0d1b2a", "menu_meta_teks": "#7d8ba1",
     },
+    # "macos" — biru sistem Apple (dark mode), permukaan netral berlapis,
+    # tepi setipis mungkin. Footer ikut gelap supaya seluruh chrome menyatu
+    # (tema gelap lain masih memakai footer terang warisan CLI). Pasangan
+    # menu_aktif sengaja biru tenang + teks putih: kontras >= 4.5 dan terasa
+    # seperti seleksi macOS, bukan biru neon.
+    "macos": {
+        "label": "MacBook",
+        "desc": "biru sistem — tenang, membulat, ala macOS",
+        "aksen": "#528bff", "aksen2": "#aa7bee",
+        "aksen_terang": "#9bc9ff", "tepi": "#46577f",
+        "tepi_redup": "#292c3d", "redup": "#a1a5bb", "teks": "#ececf5",
+        "grad": ["#e8f4ff", "#cfe8ff", "#9bc9ff", "#64a8ff",
+                 "#0a84ff", "#0066d6", "#003f8a"],
+        "gema_bg": "#0e101c", "gema_garis": "#46577f", "gema_teks": "#ffffff",
+        "bg_footer": "#11131f", "merek_footer": "#64a8ff",
+        "model_footer": "#e5e5ea", "sep_footer": "#4a4a4f",
+        "muted_footer": "#98989d", "cmd_footer": "#64a8ff",
+        "exit_footer": "#ff6b6b", "git_footer": "#7ee787",
+        "ubah_footer": "#f0a02f",
+        "menu_bg": "#1a1d2b", "menu_teks": "#f2f2f7",
+        "menu_aktif_bg": "#2864dc", "menu_aktif_teks": "#ffffff",
+        "menu_meta_bg": "#121522", "menu_meta_teks": "#a1a5bb",
+    },
     "mono": {
         "label": "Hitam-Putih",
         "desc": "monokrom — kontras murni tanpa warna",
@@ -179,16 +202,16 @@ _PETA_WARISAN: dict[str, str] = {
     "#f2e3cc": "teks", "#241a10": "menu_bg", "#1a120b": "menu_meta_bg",
 }
 
-# Bawaan pabrik: Lautan (id "biru") — bukan "default"/Ember. Kunci "default"
-# tetap ada di TEMA semata demi prefs lama yang menunjuknya secara eksplisit.
-_aktif: dict = TEMA["biru"]
-_nama: str = "biru"
+# Bawaan pabrik: MacBook (id "macos") — permukaan netral, biru sistem, tepi
+# hairline. Kunci "default"/"biru" tetap ada demi prefs lama yang menunjuknya.
+_aktif: dict = TEMA["macos"]
+_nama: str = "macos"
 
 
 def _muat() -> None:
     """Pasang tema tersimpan di prefs (dipanggil sekali saat impor)."""
     global _aktif, _nama
-    nama = (prefs.load().get("tema") or "biru")
+    nama = (prefs.load().get("tema") or "macos")
     if nama in TEMA:
         _nama, _aktif = nama, TEMA[nama]
 

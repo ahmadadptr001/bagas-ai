@@ -93,7 +93,7 @@ def _model_ada() -> bool:
         return False
 
 
-def _gambar_jpeg(path: Path | None = None) -> str:
+def _gambar_jpeg(path: Path | None = None, *, max_edge: int = 768) -> str:
     from PIL import Image
     if path is None:
         # Probe benar-benar multimodal, bukan sekadar prompt teks.
@@ -101,7 +101,8 @@ def _gambar_jpeg(path: Path | None = None) -> str:
     else:
         with Image.open(path) as sumber:
             img = sumber.convert("RGB")
-            img.thumbnail((768, 768))
+            edge = max(256, min(int(max_edge), 2048))
+            img.thumbnail((edge, edge))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=78, optimize=True)
     return base64.b64encode(buf.getvalue()).decode("ascii")
@@ -116,7 +117,7 @@ def _inferensi(
         "prompt": prompt,
         "images": [gambar],
         "stream": False,
-        "keep_alive": "30m",
+        "keep_alive": os.environ.get("BAGASAI_VISION_KEEP_ALIVE", "2m") or "2m",
         "options": {
             "temperature": 0.1,
             "num_predict": num_predict,
@@ -229,6 +230,7 @@ def describe_image(
     ),
     *,
     strict: bool = False,
+    max_edge: int = 768,
 ) -> str:
     """Analisis gambar dengan Gemma; mode strict tidak boleh fallback diam-diam."""
     hidup, alasan = _mulai_ollama()
@@ -238,7 +240,7 @@ def describe_image(
         return ""
     try:
         return _inferensi(
-            _gambar_jpeg(path), prompt, timeout=240, num_predict=350
+            _gambar_jpeg(path, max_edge=max_edge), prompt, timeout=240, num_predict=350
         )
     except (VisionLocalError, OSError) as exc:
         if strict:

@@ -20,19 +20,22 @@ from typing import TYPE_CHECKING
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual import events
-from textual.containers import Vertical, Horizontal
+from textual.containers import Vertical, Horizontal, Container
 from textual.reactive import reactive
-from textual.widgets import Button
+from textual.screen import ModalScreen
+from textual.widgets import Button, Static, TextArea
 
 from .textual_widgets import (
     StatusBar, ChatBox, MessageList, PlanPanel, PlanSidebar, InfoSidebar,
     SystemPanel, ImagePreview, TurnProgressBar, LogoWidget,
     ThinkingBlock, QueueStrip,
-    BukaBerkas, FileEditorScreen, VoiceScreen,
+    BukaBerkas, FileEditorScreen, FilePreviewScreen, SourcePickerScreen, VoiceScreen,
     BtwScreen,
 )
 from ..ui.textual_theme import generate_css, variabel as variabel_tema
 from ..ui import tema
+from ..ui.clipboard import copy_text
+from .textual_widgets.logo import BrandMark
 from .. import interaction
 from .. import session as session_mod
 from ..session import Session
@@ -51,6 +54,17 @@ if TYPE_CHECKING:
 _OPSI_TULIS = "✎ Tulis jawaban sendiri…"
 
 
+class _HistoryPane(Container):
+    """Tempatkan emblem di tengah area riwayat yang tersisa."""
+
+    def on_resize(self, event: events.Resize) -> None:
+        try:
+            self.query_one("#empty-state").styles.offset = (
+                0, max(0, (event.size.height - min(8, event.size.height)) // 2))
+        except Exception:  # widget anak belum terpasang
+            pass
+
+
 def _format_multi(terpilih: list[str]) -> str:
     """Gabungkan jawaban majemuk — dinomori seperti cli._tanya_pilihan
     supaya AI tak salah membaca jawaban majemuk sebagai satu kalimat."""
@@ -66,13 +80,13 @@ class BagasAIApp(App):
 
     Layout:
     ┌─────────────────────────────────┐
-    │        LogoWidget (top)         │  ← welcome screen
+    │        LogoWidget (top)         │  ← title bar permanen
     │       MessageList (fill)        │  ← scrollable messages
     │       PlanPanel (collapsible)   │  ← step plan (layar sempit)
     │       ImagePreview (optional)   │  ← pixel blocks
-    │       TurnProgressBar (during)  │  ← animasi logo bunga
+    │       TurnProgressBar (during)  │  ← status satu baris
     │       ChatBox (input)           │  ← user input
-    │       StatusBar (footer)        │  ← always visible
+    │       StatusBar (full width)    │  ← always visible
     └─────────────────────────────────┘
     Layar LEBAR (≥ _LEBAR_MIN kolom, "dashboard"): InfoSidebar di-dock di
     KANAN — kesehatan sistem real time (CPU/RAM/disk/GPU) selalu tampil,
@@ -97,6 +111,7 @@ class BagasAIApp(App):
     VERTICAL_BREAKPOINTS = [(0, "-pendek"), (24, "-tinggi")]
 
     BINDINGS = [
+        Binding("escape", "dismiss_popup", show=False, priority=True),
         Binding("ctrl+c", "cancel", show=False, priority=True),
         Binding("ctrl+d", "eof", show=False, priority=True),
         Binding("ctrl+l", "clear", show=False),
@@ -154,6 +169,7 @@ class BagasAIApp(App):
         self._pending_gambar: dict = {}
         self._image_task_active = False
         self._tui_mode = True
+        self._reasoning_item = None
         # Prompt INLINE (ask_user / menu / konfirmasi) — tanpa modal overlay.
         # None = tidak sedang menunggu jawaban. Lihat _mulai_prompt_inline.
         self._prompt_inline: dict | None = None
@@ -166,7 +182,6 @@ class BagasAIApp(App):
         self._worker_thread: threading.Thread | None = None
         self._turn_id = 0
         self._pending_tool_args: dict[str, list[dict]] = {}
-        self._progress_timer = None
         # Snapshot rencana terakhir (lihat _poll_plan) — dipakai untuk
         # menggambar ulang panel saat layout berpindah sidebar <-> footer.
         self._plan_cache: list[dict] = []
@@ -247,27 +262,20 @@ class BagasAIApp(App):
 
     def compose(self) -> ComposeResult:
         yield LogoWidget(id="logo")
-        yield MessageList(agent=self.agent, id="messages")
-        # Sidebar info versi desktop: dock KANAN, aktif saat terminal
-        # cukup lebar (kelas -lebar). Isinya kesehatan sistem real time
-        # (selalu) + planning (selalu, dengan empty-state). Di bawah
-        # itu sidebar disembunyikan dan rencana tampil inline sebagai
-        # PlanPanel di footer — perilaku lama (lihat _perbarui_layout_plan).
-        yield InfoSidebar(id="sidebar")
-        # Strip antrean DI AREA TERMINAL — nempel di bawah jawaban
-        # terakhir, bukan di area box footer di atas kotak chat.
-        yield QueueStrip(id="queue-strip")
-        # SATU wadah yang di-dock (lihat catatan layout di textual_theme.py).
-        # Semua panel bawah mengalir vertikal di dalamnya, jadi tingginya
-        # menjumlah dan #messages menyusut tepat sebanyak tinggi footer —
-        # tidak ada lagi panel yang saling menimpa di baris terakhir.
-        with Vertical(id="footer"):
-            yield PlanPanel(id="plan")
-            yield ImagePreview(id="image-preview")
-            yield ThinkingBlock(id="thinking-block")
-            yield TurnProgressBar(id="progress")
-            yield ChatBox(id="chatbox")
-            yield StatusBar(agent=self.agent, id="statusbar")
+        yield StatusBar(agent=self.agent, id="statusbar")
+        with Horizontal(id="workspace"):
+            with Vertical(id="conversation"):
+                with _HistoryPane(id="history"):
+                    yield MessageList(agent=self.agent, id="messages")
+                    yield BrandMark(id="empty-state")
+                yield QueueStrip(id="queue-strip")
+                with Vertical(id="footer"):
+                    yield PlanPanel(id="plan")
+                    yield ImagePreview(id="image-preview")
+                    yield ThinkingBlock(id="thinking-block")
+                    yield TurnProgressBar(id="progress")
+                    yield ChatBox(id="chatbox")
+            yield InfoSidebar(id="sidebar")
 
     def on_mount(self):
         """Initialize app after mount."""
@@ -279,6 +287,7 @@ class BagasAIApp(App):
         # jeda dua detik membuat indikator privasi terlambat sepanjang satu
         # kalimat pendek. Render ini murah; pembacaan git tetap punya cache.
         self.set_interval(0.4, self._refresh_status)
+        self.set_interval(1.0, self._poll_speech_notice)
 
         # Tanpa ini, ask_user/ask_choice & permintaan izin permissions.py
         # mengembalikan "[tidak interaktif]" di UI Textual — handler default
@@ -346,6 +355,10 @@ class BagasAIApp(App):
         self._live_screen = False
         try:
             from ..tools.screen import clear_live_capture
+            from ..desktop_capture import release_capture
+            from ..screen_observer import observer
+            release_capture()
+            observer.reset()
             clear_live_capture()
         except Exception:  # noqa: BLE001 — pembersihan best-effort
             pass
@@ -507,22 +520,19 @@ class BagasAIApp(App):
             time.sleep(5.0)
 
     def _sinkron_footer_sidebar(self, lebar_layar: int | None = None) -> None:
-        """Batasi footer sampai tepi kiri sidebar saat dashboard aktif.
-
-        ``#footer`` dan ``#sidebar`` sama-sama dock di Screen. Footer dengan
-        ``width: 100%`` akan menutupi divider sidebar pada area pra-jawaban,
-        chat, dan status bar. Lebar eksplisit ini membuat keduanya bertemu
-        tepat di satu batas sehingga garis sidebar utuh sampai bawah.
-        """
+        """Footer mengikuti kolom percakapan; status bar milik seluruh layar."""
         try:
             footer = self.query_one("#footer", Vertical)
-            sidebar = self.query_one("#sidebar", InfoSidebar)
-            layar = int(lebar_layar if lebar_layar is not None
-                        else self.size.width)
         except Exception:  # noqa: BLE001 — widget/layout belum siap
             return
-        footer.styles.width = (max(1, layar - sidebar._lebar)
-                               if sidebar.display else "100%")
+        footer.styles.width = "100%"
+
+    def on_titlebar_command(self, event: LogoWidget.Command) -> None:
+        event.stop()
+        # Jangan menafsirkan klik menu sebagai jawaban atas pertanyaan aktif.
+        if self._prompt_inline is None:
+            self.on_chatbox_submitted(ChatBox.Submitted(event.text))
+        self.query_one("#chatbox", ChatBox).focus()
 
     def _perbarui_layout_plan(self, lebar: bool | None = None,
                               lebar_layar: int | None = None):
@@ -587,7 +597,9 @@ class BagasAIApp(App):
         sidebar = self.query_one("#sidebar", InfoSidebar)
         sidebar.display = self._sidebar_mobile_open
         try:
-            self.query_one("#statusbar-sidebar-toggle", Button).label = "▮" if self._sidebar_mobile_open else "▯"
+            from ..ui.icons import footer_icon
+            self.query_one("#statusbar-sidebar-toggle", Button).label = footer_icon(
+                "sidebar" if self._sidebar_mobile_open else "sidebar_closed")
         except Exception:
             pass
         self._sinkron_footer_sidebar()
@@ -599,10 +611,14 @@ class BagasAIApp(App):
         event.stop()
         # Satu aktivasi Tree dapat menghasilkan highlight lalu select sangat
         # berdekatan. Jangan menumpuk dua modal editor untuk file yang sama.
-        if isinstance(self.screen, FileEditorScreen):
+        if isinstance(self.screen, (FileEditorScreen, FilePreviewScreen)):
             return
         try:
             from ..editor import load_text_file
+            from ..file_viewer import file_kind
+            if file_kind(event.path) != "text":
+                self.push_screen(FilePreviewScreen(event.path))
+                return
             document = load_text_file(event.path)
         except Exception as exc:  # noqa: BLE001 — tampilkan alasan ke pengguna
             self.query_one("#messages", MessageList).append_notice(
@@ -685,8 +701,10 @@ class BagasAIApp(App):
             "tulis_nomor": tulis_nomor,
             "terpilih": [],
             "echo": [],
+            "draft": self.query_one("#chatbox", ChatBox).current_text,
         }
-        self._gambar_prompt_inline(hint or self._hint_prompt(mode))
+        self._gambar_prompt_inline("" if mode in ("pilihan", "confirm")
+                                   else hint or self._hint_prompt(mode))
 
         try:
             chatbox = self.query_one("#chatbox", ChatBox)
@@ -741,14 +759,14 @@ class BagasAIApp(App):
 
     def _hint_prompt(self, mode: str) -> str:
         if mode == "multi":
-            return "ketik nomor (boleh banyak: 1,3) · teks bebas = jawaban sendiri · ctrl+c batal"
+            return "nomor: 1,3 · teks bebas · Esc batal"
         if mode == "pilihan":
-            return "panah pilih · Enter konfirmasi · ketik nomor/filter · ctrl+c batal"
+            return "↑↓ pilih · Enter konfirmasi · Esc batal"
         if mode == "confirm":
-            return "panah pilih · Enter konfirmasi · y/n · ctrl+c batal"
+            return "↑↓ pilih · Enter konfirmasi · Esc batal"
         if mode == "tulis":
-            return "tulis jawabanmu · ctrl+c batal"
-        return "ketik lalu Enter · ctrl+c batal"
+            return "tulis jawaban · Enter kirim · Esc batal"
+        return "Enter kirim · Esc batal"
 
     def _gambar_prompt_inline(self, hint: str = "") -> None:
         """Gambar blok prompt (+ echo terakhir bila mode lanjutan).
@@ -802,7 +820,10 @@ class BagasAIApp(App):
         if batal:
             hasil = False if st["mode"] == "confirm" else None
         try:
-            self.query_one("#chatbox", ChatBox).set_prompt_mode(None)
+            chatbox = self.query_one("#chatbox", ChatBox)
+            chatbox.set_prompt_mode(None)
+            if batal:
+                chatbox.set_text(st.get("draft", ""))
         except Exception:  # noqa: BLE001 — UI ditutup
             pass
         cb = st.get("callback")
@@ -838,7 +859,7 @@ class BagasAIApp(App):
                 except Exception:  # noqa: BLE001
                     pass
                 self._gambar_prompt_inline(
-                    "Jawabanmu: teks bebas · ctrl+c batal")
+                    "Tulis jawaban · Enter kirim · Esc batal")
                 return
             if nilai in st["nilai"]:
                 self._selesaikan_prompt_inline(nilai)
@@ -899,7 +920,7 @@ class BagasAIApp(App):
                     st["mode"] = "tulis"
                     st["terpilih"] = []
                     self._ganti_placeholder_prompt("tulis")
-                    self._gambar_prompt_inline("Jawabanmu: teks bebas · ctrl+c batal")
+                    self._gambar_prompt_inline("Tulis jawaban · Enter kirim · Esc batal")
                     return
                 if 1 <= n <= len(st["nilai"]):
                     self._selesaikan_prompt_inline(st["nilai"][n - 1])
@@ -930,7 +951,7 @@ class BagasAIApp(App):
                     st["mode"] = "tulis"
                     self._ganti_placeholder_prompt("tulis")
                     self._gambar_prompt_inline(
-                        "Jawaban tambahanmu: teks bebas · ctrl+c batal")
+                        "Tulis jawaban tambahan · Enter kirim · Esc batal")
                     return
                 hasil = [st["nilai"][n - 1] for n in nums
                          if st["nilai"][n - 1] != _OPSI_TULIS]
@@ -1063,15 +1084,7 @@ class BagasAIApp(App):
         # tanpa ini sesi lanjutan terlihat kosong, seolah baru dimulai
         # (cli.py memang punya replay ini; UI Textual dulunya tidak).
         self._replay_riwayat(msg_list)
-        msg_list.append_notice(
-            "Selamat datang di bagas-ai! Ketik pesan atau /help untuk bantuan.",
-            style=f"italic {tema.p('aksen_terang')}"
-        )
-        msg_list.append_notice(
-            f"Model: {self.agent.model_spec.label} "
-            f"({'🌐 web' if self.agent.model_spec.is_web else '🤖 api'})",
-            style=tema.p("redup")
-        )
+        self.query_one("#empty-state", Static).display = not bool(msg_list._items)
 
     def _replay_riwayat(self, msg_list: MessageList):
         """Gema pesan & diff tersimpan dari sesi yang dilanjutkan (--resume).
@@ -1089,8 +1102,6 @@ class BagasAIApp(App):
                   if m.get("role") in ("user", "assistant", "diff")]
         if not replay:
             return
-        msg_list.append_notice("── percakapan sebelumnya ──",
-                               style=tema.p("tepi_redup"))
         for m in replay:
             role, content = m.get("role"), (m.get("content") or "")
             if role == "user":
@@ -1099,7 +1110,7 @@ class BagasAIApp(App):
                 msg_list.append_diff_replay(m)
             elif content:
                 msg_list.append_ai_message(content, paksa_header=True)
-        msg_list.append_notice("── lanjut di bawah ──",
+        msg_list.append_notice("Sesi dilanjutkan",
                                style=tema.p("tepi_redup"))
 
     def _refresh_status(self):
@@ -1116,7 +1127,19 @@ class BagasAIApp(App):
                                       or getattr(pendengar, "merekam", False))
                        else "dengar")
         bar.update_voice_state(keadaan)
+        spec = self.agent.model_spec
+        if isinstance(spec, models.ModelSpec):
+            effort = getattr(self.agent, "effort", None)
+            label = models.EFFORT_INFO.get(effort, (effort or "",))[0]
+            self.query_one("#chatbox", ChatBox).set_effort_state(
+                spec.punya_effort, label, spec.effort_catatan)
         bar.refresh()
+
+    def _poll_speech_notice(self) -> None:
+        from .. import suara
+        message = suara.catatan_baru()
+        if message:
+            self._audio_notice(f"Suara: {message}", error=True)
 
     # ─── Message Handling ──────────────────────────────────────────────
 
@@ -1137,14 +1160,7 @@ class BagasAIApp(App):
 
         # Echo user message
         msg_list = self.query_one("#messages", MessageList)
-        # Logo banner hanya untuk layar sambutan; begitu percakapan
-        # dimulai ia hanya memakan ruang vertikal berharga.
-        try:
-            logo = self.query_one("#logo", LogoWidget)
-            if logo.display:
-                logo.display = False
-        except Exception:  # noqa: BLE001 — logo opsional
-            pass
+        self.query_one("#empty-state", Static).display = False
 
         # Handle slash commands
         if text.startswith("/"):
@@ -1167,29 +1183,21 @@ class BagasAIApp(App):
         # core memerlukan [GAMBAR] <path> agar benar-benar menjadi attachment.
         # Dulu Textual tidak pernah menyimpan path ini sehingga model cuma
         # menerima teks literal "[foto]".
-        if "[foto]" in text:
-            path_gambar = self._pending_gambar.get("path")
-            if not path_gambar:
-                msg_list.append_notice(
-                    "Gambar tempelan sudah tidak tersedia — tempel ulang file.",
-                    style=f"bold {tema.p('exit_footer')}",
-                )
+        import re as _re
+        markers = _re.findall(r"\[foto(?: \d+)?\]", text)
+        if markers:
+            pending = (event.attachments if event.attachments is not None
+                       else self._pending_gambar.get("items", {}))
+            if any(marker not in pending for marker in markers):
+                msg_list.append_notice("Lampiran tidak tersedia. Tambahkan kembali gambarnya.",
+                                       style=tema.p("exit_footer"))
                 return
             from ..tools.screen import IMAGE_MARK
-            text = text.replace("[foto]", f"\n{IMAGE_MARK} {path_gambar}\n")
+            for marker in dict.fromkeys(markers):
+                text = text.replace(marker, f"\n{IMAGE_MARK} {pending[marker]}\n")
+        if self._pending_gambar:
             self._pending_gambar.clear()
-            try:
-                self.hide_image_preview()
-            except Exception:  # noqa: BLE001 — preview opsional
-                pass
-        elif self._pending_gambar:
-            # Pengguna menghapus marker [foto]; jangan menempelkan gambar lama
-            # secara diam-diam ke pesan berikutnya.
-            self._pending_gambar.clear()
-            try:
-                self.hide_image_preview()
-            except Exception:  # noqa: BLE001
-                pass
+            self.hide_image_preview()
 
         # Catat ke riwayat masukan (panah-atas). Perintah "/" tak masuk —
         # riwayat ini untuk teks yang mau diedit-ulang, bukan menu.
@@ -1232,6 +1240,12 @@ class BagasAIApp(App):
             self._stop_turn()
         else:
             self.exit()
+
+    def on_chatbox_popup_cancelled(self, event: ChatBox.PopupCancelled) -> None:
+        event.stop()
+        if self._prompt_inline is not None:
+            self._batalkan_prompt_inline()
+        self.query_one("#chatbox", ChatBox).focus()
 
     def on_chatbox_recall(self, event: ChatBox.Recall):
         """Panah-atas/-bawah — dua makna (prioritas dari atas):
@@ -1284,25 +1298,68 @@ class BagasAIApp(App):
         chatbox.focus()
 
     def on_chatbox_pasted(self, event: ChatBox.Pasted):
-        """Handle paste event — show image preview if media detected."""
+        """Tambahkan lampiran tanpa menulis path panjang ke riwayat."""
         if event.is_media:
+            if event.text not in self.query_one("#chatbox", ChatBox).current_text:
+                return
+            items = self._pending_gambar.setdefault("items", {})
+            items[event.text] = event.media_path
             self._pending_gambar["path"] = event.media_path
-            msg_list = self.query_one("#messages", MessageList)
-            msg_list.append_notice(
-                f"  🖼 Gambar: {event.media_path}",
-                style=f"bold {tema.p('aksen')}"
-            )
-            try:
-                from ..ui.ascii_art import image_to_blocks_pixels
-                hasil = image_to_blocks_pixels(event.media_path)
-                if hasil:
-                    pixel_data, (ow, oh) = hasil
-                    self.show_image_preview(
-                        pixel_data,
-                        f"{Path(event.media_path).name} ({ow}x{oh})",
-                    )
-            except Exception:  # noqa: BLE001 — dekode gambar gagal
-                pass
+            self._show_pending_image()
+
+    def on_chatbox_draft_changed(self, event: ChatBox.DraftChanged) -> None:
+        event.stop()
+        if self._prompt_inline is not None:
+            return
+        items = self._pending_gambar.get("items", {})
+        text = self.query_one("#chatbox", ChatBox).current_text
+        removed = [marker for marker in items if marker not in text]
+        if not removed:
+            return
+        for marker in removed:
+            del items[marker]
+        if items:
+            self._pending_gambar["path"] = next(reversed(items.values()))
+        else:
+            self._pending_gambar.clear()
+        self._show_pending_image()
+
+    def _show_pending_image(self) -> None:
+        items = self._pending_gambar.get("items", {})
+        if not items:
+            self.hide_image_preview()
+            return
+        path = next(reversed(items.values()))
+        title = Path(path).name
+        meta = Path(path).suffix.lstrip(".").upper()
+        pixels = None
+        try:
+            from ..ui.ascii_art import image_to_blocks_pixels
+            result = image_to_blocks_pixels(path)
+            if result:
+                pixels, (width, height) = result
+                meta += f" \u00b7 {width}\u00d7{height}"
+        except Exception:
+            pass
+        preview = self.query_one("#image-preview", ImagePreview)
+        preview.show_attachment(title, pixels, meta=meta, count=len(items), key=path)
+        preview.tooltip = "\n".join(items.values())
+
+    def on_image_preview_removed(self, _event: ImagePreview.Removed) -> None:
+        items = self._pending_gambar.get("items", {})
+        if not items:
+            self.hide_image_preview()
+            return
+        marker = next(reversed(items))
+        del items[marker]
+        chat = self.query_one("#chatbox", ChatBox)
+        chat.set_text(chat.current_text.replace(marker, "", 1))
+        if items:
+            self._pending_gambar["path"] = next(reversed(items.values()))
+        else:
+            self._pending_gambar.clear()
+        self._show_pending_image()
+        chat.focus()
 
     # ─── Slash Commands ────────────────────────────────────────────────
 
@@ -1326,8 +1383,8 @@ class BagasAIApp(App):
                                   style=f"bold {tema.p('aksen')}")
 
         # ── Help ───────────────────────────────────────────────────────
-        elif cmd == "help":
-            msg_list.append_notice(self._help_text())
+        elif cmd in ("help", "help semua", "help all", "help lengkap"):
+            msg_list.append_help(full=cmd != "help")
         elif cmd == "export" or cmd.startswith("export "):
             self._cmd_export(text)
         elif cmd == "btw" or cmd.startswith("btw "):
@@ -1506,6 +1563,10 @@ class BagasAIApp(App):
         if not aktif:
             try:
                 from ..tools.screen import clear_live_capture
+                from ..desktop_capture import release_capture
+                from ..screen_observer import observer
+                release_capture()
+                observer.reset()
                 clear_live_capture()
             except Exception:  # noqa: BLE001 — cleanup tak boleh matikan UI
                 pass
@@ -1527,9 +1588,20 @@ class BagasAIApp(App):
         hidup = {"on", "aktif", "hidup", "start", "mulai"}
         mati = {"off", "mati", "stop", "berhenti"}
 
+        if arg in {"pilih", "window", "jendela"}:
+            if self.is_turn_active:
+                msg_list.append_notice("Tunggu tugas selesai sebelum mengganti jendela.", style=tema.p("redup"))
+                return
+            if self._live_screen:
+                self._select_live_target()
+                return
+            # Memilih sumber dari mode mati juga harus mengaktifkan pembacaan.
+            arg = "on"
+
         if arg in {"status", "cek"}:
             if self._live_screen:
-                detail = "alat aktif"
+                from ..desktop_capture import source_label
+                detail = "alat aktif · " + source_label()
             elif self._live_starting:
                 detail = "sedang mengaktifkan alat"
             else:
@@ -1542,7 +1614,7 @@ class BagasAIApp(App):
             return
         if arg not in hidup | mati | {"toggle"}:
             msg_list.append_notice(
-                "Pemakaian: /live [on|off|status] (alias: /video)",
+                "Pemakaian: /video [on|off|pilih|status] · /live tetap tersedia",
                 style=f"bold {tema.p('exit_footer')}",
             )
             return
@@ -1588,8 +1660,8 @@ class BagasAIApp(App):
 
         def worker() -> None:
             try:
-                from ..tools.vision_local import ensure_vision_available
-                siap, alasan_vision = ensure_vision_available()
+                from ..screen_observer import ensure_live_vision_available
+                siap, alasan_vision = ensure_live_vision_available()
             except Exception as exc:  # noqa: BLE001
                 siap, alasan_vision = False, str(exc)
             self._safe_call(
@@ -1616,11 +1688,40 @@ class BagasAIApp(App):
             return
         from ..tools.screen import clear_live_capture
         clear_live_capture()
-        self._set_live_screen(True)
-        msg_list.append_notice(
-            "✓ alat aktif.",
-            style=f"bold {tema.p('aksen')}",
-        )
+        self._select_live_target(activate=True)
+
+    def _select_live_target(self, activate: bool = False) -> None:
+        from ..desktop_capture import list_windows, select_target, source_label, selected_target_id
+        from ..screen_observer import observer
+        try:
+            windows = list_windows()
+        except Exception:
+            windows = []
+        token = self._live_start_token
+        if activate:
+            self._live_starting = True
+
+        def selected(result):
+            if token != self._live_start_token:
+                return
+            self._live_starting = False
+            if result is None:
+                self._set_live_vision_state("ready" if self._live_screen else "")
+                return
+            try:
+                select_target(int(result))
+                observer.reset()
+            except (OSError, RuntimeError, ValueError) as exc:
+                self._set_live_vision_state("ready" if self._live_screen else "error")
+                self.query_one("#messages", MessageList).append_notice(str(exc), style=tema.p("exit_footer"))
+                return
+            if activate:
+                self._set_live_screen(True)
+            self.query_one("#messages", MessageList).append_notice(
+                "✓ Layar · " + source_label(), style=tema.p("aksen"))
+
+        current = selected_target_id() if self._live_screen else None
+        self.push_screen(SourcePickerScreen(windows, current=current), selected)
 
     def _capture_live_attachment(self) -> list[str]:
         """Ambil screenshot just-in-time; live tidak boleh fallback diam-diam."""
@@ -1834,6 +1935,9 @@ class BagasAIApp(App):
         try:
             from .. import suara
             if suara.sibuk():
+                listener = self._voice_state.get("pendengar")
+                if listener is not None and getattr(listener, "echo_aktif", None) is False:
+                    return "berbicara-aman", level
                 return "berbicara", level
         except Exception:  # noqa: BLE001 - TTS opsional
             pass
@@ -2027,15 +2131,19 @@ class BagasAIApp(App):
                 return
             def tes_voice():
                 from .. import dengar
-                ok, alasan = dengar.siap()
+                ok, alasan = dengar.siap(kontinu=False)
                 if not ok:
                     return False, alasan
                 teks_dengar, puncak = dengar.dengar_sekali(5.0)
                 if not teks_dengar:
+                    if puncak < 0:
+                        return False, "Tidak ada ucapan yang dikenali mesin STT Android."
                     return False, (f"Tidak ada ucapan yang dikenali "
                                    f"(puncak suara {puncak:.0f}).")
+                ukuran = (f"puncak {puncak:.0f}" if puncak >= 0
+                          else "mesin STT Android")
                 return True, (f"Terdengar: “{teks_dengar}” "
-                              f"(puncak {puncak:.0f}).")
+                              f"({ukuran}).")
             self._start_audio_task(
                 "🎙 Merekam tes selama 5 detik; bicaralah sekarang…",
                 tes_voice,
@@ -2155,6 +2263,13 @@ class BagasAIApp(App):
 
     def _cmd_model(self, text: str):
         """Handle /model command — show model list or set model."""
+        # Segarkan katalog dari CLI setiap /model dibuka: model yang baru
+        # ditambahkan/di-login di OpenCode langsung ikut tanpa restart.
+        try:
+            from .. import models as models_mod
+            models_mod.sinkron_model_opencode()
+        except Exception:  # noqa: BLE001 — CLI absen/gagal: pakai katalog lama
+            pass
         parts = text.split(maxsplit=1)
         if len(parts) == 2:
             # Direct set: /model gemini-2.5-flash
@@ -2183,17 +2298,13 @@ class BagasAIApp(App):
             options = []
         if not options:
             options = [self.agent.model_spec.label]
-        current = self.agent.model_spec.label
-        if getattr(self.agent, "_web_varian", None):
-            current += f" · {self.agent._web_varian}"
-
         baris, nilai, _tulis = self._baris_pilihan_inline(options)
 
         def on_select(result: str | None):
             self._setelah_ganti_model(result)
 
         self._mulai_prompt_inline(
-            judul=f"Model (saat ini: {current})",
+            judul="Pilih model",
             mode="pilihan", callback=on_select,
             baris=baris, nilai=nilai)
 
@@ -2291,11 +2402,13 @@ class BagasAIApp(App):
         try:
             result = self.agent.set_effort(nilai)
             if result:
-                msg_list.append_notice(f"✓ Effort: {result}",
+                label = models.EFFORT_INFO.get(result, (result,))[0]
+                msg_list.append_notice(f"✓ Effort: {label} · berlaku mulai pesan berikutnya",
                                       style=f"bold {tema.p('aksen')}")
+                self._refresh_status()
             else:
                 msg_list.append_notice(
-                    "Model API ini tak punya tingkat effort.",
+                    self.agent.model_spec.effort_catatan or "Model ini tidak menyediakan pilihan effort.",
                     style=tema.p("redup"))
         except ValueError as e:
             msg_list.append_notice(f"✗ {e}",
@@ -2333,7 +2446,7 @@ class BagasAIApp(App):
             baris=[f"{i}) {label}" for i, (label, _d) in enumerate(opts, 1)],
             nilai=[label for label, _d in opts],
             hint="; ".join(f"{l} = {d}" for l, d in opts)[:200]
-            or "ketik nomor lalu Enter · ctrl+c batal")
+            or "Enter konfirmasi · Esc batal")
 
     def _klik_web_option(self, conn, label: str) -> None:
         """Klik tombol UI web dari thread pekerja + tampilkan hasilnya."""
@@ -2374,24 +2487,25 @@ class BagasAIApp(App):
             msg_list = self.query_one("#messages", MessageList)
             msg_list.append_notice(
                 spec.effort_catatan
-                or "Model API ini tak punya tingkat effort.",
+                or "Model ini tidak menyediakan pilihan effort.",
                 style=tema.p("redup"))
             return
         options = list(spec.effort_levels)
+        current = self.agent.effort or spec.effort_default
+
+        def label(value: str) -> str:
+            info = models.EFFORT_INFO.get(value, (value, "", ""))
+            return info[0] + ("  · aktif" if value == current else "")
 
         def on_select(result: str | None):
             if result:
                 self._effort_api_set(result)
 
         self._mulai_prompt_inline(
-            judul=f"Effort {spec.label}",
+            judul="Effort",
             mode="pilihan", callback=on_select,
-            baris=[f"{i}) {l}" for i, l in enumerate(options, 1)],
-            nilai=options,
-            hint=" · ".join(
-                f"{l} = {models.EFFORT_INFO[l][1]}" if l in models.EFFORT_INFO
-                else l for l in options)
-            or "ketik nomor lalu Enter · ctrl+c batal")
+            baris=[f"{i}) {label(l)}" for i, l in enumerate(options, 1)],
+            nilai=options)
 
     # ─── Theme Command ─────────────────────────────────────────────────
 
@@ -2453,6 +2567,7 @@ class BagasAIApp(App):
         try:
             self.query_one("#chatbox", ChatBox).refresh_theme()
             self.query_one("#logo", LogoWidget).refresh_theme()
+            self.query_one("#empty-state", BrandMark).refresh()
             self.query_one("#statusbar", StatusBar).refresh_theme()
             # Riwayat digambar ulang supaya markdown ikut warna baru.
             # (Teks bergaya manual dari giliran lama tetap pakai warna
@@ -2631,7 +2746,7 @@ class BagasAIApp(App):
                 judul="Path folder yang mau ditambahkan:",
                 mode="teks", callback=on_input,
                 baris=["/path/to/folder"],
-                hint="path folder absolut · ctrl+c batal")
+                hint="path folder absolut · Esc batal")
 
     # ─── Dirs Command ──────────────────────────────────────────────────
 
@@ -2690,8 +2805,6 @@ class BagasAIApp(App):
     def _cmd_scan(self):
         """Refresh project map."""
         msg_list = self.query_one("#messages", MessageList)
-        msg_list.append_notice("🔍 Menyegarkan peta proyek...",
-                              style=tema.p("redup"))
         progress = self.query_one("#progress", TurnProgressBar)
         progress.show(0.0, "memindai proyek...")
 
@@ -2736,8 +2849,6 @@ class BagasAIApp(App):
                 style=tema.p("redup"))
             return
         msg_list = self.query_one("#messages", MessageList)
-        msg_list.append_notice("🔎 Mereview proyek untuk bug & kesalahan sistem...",
-                              style=tema.p("redup"))
         # Start a turn with the review prompt
         self._start_turn(
             "Lakukan audit bug dan kesalahan sistem menyeluruh pada proyek ini. "
@@ -2796,56 +2907,10 @@ class BagasAIApp(App):
     # ─── Help Text ─────────────────────────────────────────────────────
 
     def _help_text(self) -> str:
-        return """\
-╔══════════════════════════════════════════════════╗
-║           bagas-ai — Perintah                   ║
-╠══════════════════════════════════════════════════╣
-║ /model [nama]   Ganti model/varian              ║
-║ /effort [level] Usaha berpikir (web & API)      ║
-║ /theme [nama]   Ganti/lihat tema                ║
-║ /live [on|off]  Screenshot layar tiap pertanyaan║
-║ /video          Alias /live                     ║
-║ /stream         Toggle tampilan mengalir        ║
-║ /mic [on|off]   Bacakan kabar dan jawaban       ║
-║ /voice [off]     Percakapan suara + layar orb    ║
-║ /image <path>   Baca gambar lokal via Python     ║
-║ /export [path]   Ekspor riwayat chat              ║
-║ /btw <pesan>     Ngobrol tanpa ganggu tugas       ║
-║ /compact        Compact context                 ║
-║ /send-compact   Kirim memory ke percakapan      ║
-║ /new            Sesi baru                       ║
-║ /delete         Hapus sesi                      ║
-║ /reset          Reset sesi                      ║
-║ /memory [args]  Kelola memory                   ║
-║ /add-dir [path] Tambah folder konteks           ║
-║ /dirs           Lihat folder konteks            ║
-║ /rm-dir <path>  Lepas folder konteks            ║
-║ /scan           Segarkan peta proyek            ║
-║ /review         Review proyek untuk bug         ║
-║ /web [args]     Kelola sesi web                 ║
-║ /bot [args]     Kelola bot Telegram             ║
-║ /permissions-bot Kelola izin bot                ║
-║ /tim            Tim review                      ║
-║ /clear          Bersihkan layar                 ║
-║ /version        Lihat versi                     ║
-║ /help           Bantuan ini                     ║
-║ /exit           Keluar                          ║
-╚══════════════════════════════════════════════════╝"""
+        from ..ui.help import HelpContent
+        return HelpContent(full=True).plain
 
     # ─── AI Turn ───────────────────────────────────────────────────────
-
-    def _animate_progress(self):
-        """Animate progress bar during turn."""
-        try:
-            progress = self.query_one("#progress", TurnProgressBar)
-            # ``phase`` adalah penghitung animasi yang TERUS berputar dan
-            # tidak pernah mencapai 0.95 — memeriksa ``phase`` membuat
-            # animasi berhenti setelah beberapa detik. Yang dimaksud di sini
-            # adalah KEMAJUAN (``fraction``).
-            if progress.display and progress.fraction < 0.95:
-                progress.tick()
-        except Exception:
-            pass
 
     def _start_turn(self, text: str):
         """Start an AI turn in a worker thread."""
@@ -2861,15 +2926,13 @@ class BagasAIApp(App):
 
         self.query_one("#chatbox", ChatBox).set_busy(True)
         progress = self.query_one("#progress", TurnProgressBar)
-        progress.show(0.0, "menyiapkan model...")
-
-        # Start progress bar animation
-        self._progress_timer = self.set_interval(0.15, self._animate_progress)
+        progress.show(0.0, "Menyiapkan respons")
 
         # Counter untuk progress tool steps
         self._tool_count = 0
         self._tool_total = 0
         self._pikiran_sudah_simpan = False
+        self._reasoning_item = None
 
         # Reset thinking block
         thinking = self.query_one("#thinking-block", ThinkingBlock)
@@ -2886,20 +2949,15 @@ class BagasAIApp(App):
                 attachments = self._capture_live_attachment()
                 pertanyaan = text
                 if attachments:
-                    # Jalur murah lebih dulu: OCR/CV lokal tanpa inferensi LLM.
-                    # Model vision lokal baru dipakai bila jawaban model utama
-                    # secara eksplisit menyatakan tidak mampu membaca gambar.
-                    from ..tools.image_local import read_image_local
-                    self.agent_on_status("membaca teks…")
-                    laporan_ocr = read_image_local(
-                        attachments[0], ocr=True, vision=False,
-                    )
-                    pertanyaan += (
-                        "\n\n[SISTEM] Data OCR dan pembacaan lokal dari layar "
-                        "tersedia di bawah. Jawab dari data ini. Jika datanya "
-                        "tidak cukup untuk menjawab, katakan persis 'tidak "
-                        "dapat menganalisis gambar'.\n" + laporan_ocr
-                    )
+                    from ..screen_observer import observer
+                    try:
+                        pertanyaan = observer.prepare(text, Path(attachments[0]),
+                            status=self.agent_on_status, cancel_event=cancel_event)
+                    except InterruptedError:
+                        raise
+                    except Exception:
+                        self._safe_call(self._set_live_screen, False)
+                        raise
                 result = self.agent.run(
                     pertanyaan,
                     on_tool=self.agent_on_tool,
@@ -2918,29 +2976,6 @@ class BagasAIApp(App):
                     # tidak diunggah dan vision lokal belum dijalankan di sini.
                     attachments=[],
                 )
-                if attachments:
-                    from ..tools.vision_local import (
-                        VisionLocalError, describe_image,
-                        response_needs_vision,
-                    )
-                    if response_needs_vision(result):
-                        self.agent_on_status("sedang menganalisis…")
-                        try:
-                            result = describe_image(
-                                Path(attachments[0]),
-                                prompt=(
-                                    "Jawab pertanyaan pengguna tentang gambar "
-                                    f"ini secara faktual: {text[:1200]}"
-                                ),
-                                strict=True,
-                            )
-                        except VisionLocalError as exc:
-                            self._safe_call(self._set_live_screen, False)
-                            raise RuntimeError(
-                                f"analisis lanjutan gagal: {exc}"
-                            ) from exc
-                        self.agent.replace_last_answer(result)
-                        self.agent_on_notice("✓ analisis selesai.")
                 self._safe_call(self._turn_complete, result, turn_id)
             except BaseException as exc:
                 self._safe_call(self._turn_error, exc, turn_id)
@@ -2948,7 +2983,7 @@ class BagasAIApp(App):
                 if attachments:
                     try:
                         from ..tools.screen import clear_live_capture
-                        clear_live_capture()
+                        clear_live_capture(attachments)
                     except Exception:  # noqa: BLE001 — cleanup best-effort
                         pass
 
@@ -3016,36 +3051,15 @@ class BagasAIApp(App):
 
         threading.Thread(target=tunggu_lalu_maju, daemon=True).start()
 
-    def _stop_progress_timer(self):
-        """Hentikan timer animasi progress bila masih hidup.
-
-        Dulu ``_turn_error`` TIDAK menghentikan timer — setiap error
-        meninggalkan satu interval 0.15 dtk yang terus berjalan sampai
-        aplikasi ditutup (bocor timer).
-        """
-        if self._progress_timer is not None:
-            try:
-                self._progress_timer.stop()
-            except Exception:  # noqa: BLE001 — timer sudah mati
-                pass
-            self._progress_timer = None
-
     def _bersihkan_turn_ui(self):
         """Kembalikan UI ke keadaan idle setelah giliran selesai/gagal."""
         self.is_turn_active = False
         self._worker_thread = None
-        self._stop_progress_timer()
-        # Simpan isi pikiran ke riwayat SEBELUM blok disembunyikan — dulu
-        # reasoning hanya hidup di widget temporary dan lenyap tiap giliran.
-        # Bila sudah di-snapshoot di _forward_token (potongan pertama jawaban),
-        # jangan simpan ulang di sini.
+        self.query_one("#statusbar", StatusBar).refresh()
+        # Perbarui satu entri penalaran milik giliran ini, termasuk tahap
+        # setelah tool. Jangan menyegel jawaban yang masih mengalir dua kali.
         try:
-            if not getattr(self, "_pikiran_sudah_simpan", False):
-                thinking = self.query_one("#thinking-block", ThinkingBlock)
-                isi = (thinking._text or "").strip()
-                if isi and len(isi) > 8:
-                    self.query_one("#messages", MessageList).append_reasoning(isi)
-                    self._pikiran_sudah_simpan = True
+            self._archive_reasoning()
         except Exception:  # noqa: BLE001 — widget sedang dibongkar
             pass
         try:
@@ -3080,7 +3094,7 @@ class BagasAIApp(App):
                 except Exception:  # noqa: BLE001 — TTS tak boleh rusak giliran
                     pass
         else:
-            msg_list.append_notice("(no response)", style=tema.p("redup"))
+            msg_list.append_notice("Model tidak mengirim jawaban", style=tema.p("redup"))
 
         # Process queued commands that were sent during turn
         self._process_queue()
@@ -3168,9 +3182,9 @@ class BagasAIApp(App):
                                   style=f"bold {tema.p('exit_footer')}")
         else:
             try:
-                from ..llm import ProviderBusyError, ProviderQuotaError, ProviderReadTimeout
+                from ..llm import ProviderBusyError, ProviderQuotaError, ProviderReadTimeout, IncompleteResponseError
                 pesan = (str(exc) if isinstance(exc, (
-                    ProviderBusyError, ProviderQuotaError, ProviderReadTimeout))
+                    ProviderBusyError, ProviderQuotaError, ProviderReadTimeout, IncompleteResponseError))
                          else f"{type(exc).__name__}: {exc}")
             except Exception:  # noqa: BLE001 — formatter tak boleh tutup UI
                 pesan = f"{type(exc).__name__}: {exc}"
@@ -3188,31 +3202,33 @@ class BagasAIApp(App):
         if self._tui_mode:
             self._safe_call(self._forward_token, piece)
 
-    def _forward_token(self, piece: str):
-        """Teruskan sepotong jawaban ke area percakapan (thread UI).
+    def _archive_reasoning(self) -> None:
+        thinking = self.query_one("#thinking-block", ThinkingBlock)
+        text = thinking._text.strip()
+        if not text:
+            return
+        messages = self.query_one("#messages", MessageList)
+        item = self._reasoning_item
+        if item is None or item not in messages._items:
+            self._reasoning_item = messages.append_reasoning(text)
+        else:
+            messages.update_reasoning(item, text)
+        self._pikiran_sudah_simpan = True
 
-        Dulu tiap token juga menulis panel pratinjau terpisah di bawah blok
-        berpikir, dan menggeser progress bar dengan ``min(0.9, n/500)``.
-        Panel itu dibuang — isinya tak berlabel, diredupkan, dan selalu
-        tampak seperti blok "berpikir" kedua; jawabannya kini tumbuh di
-        area percakapan lewat ``flush_stream``. Pecahan progress itu pun
-        keliru: logo hanya berputar selama ``fraction < 0.95``, jadi
-        mendorongnya ke 0.9 justru MEMBEKUKAN animasinya di tengah jawaban.
-        """
+    def _forward_token(self, piece: str):
+        """Alirkan jawaban ke riwayat dengan satu indikator status di footer."""
         # Potongan pertama jawaban = penalaran selesai. Snapshoot ke riwayat
         # SEBELUM token masuk aliran, supaya urutannya pikiran -> jawaban
         # (bukan pikiran yang disimpan di akhir giliran setelah jawaban).
         thinking = self.query_one("#thinking-block", ThinkingBlock)
-        isi_pikir = (thinking._text or "").strip()
-        if isi_pikir and len(isi_pikir) > 8 and not self._pikiran_sudah_simpan:
-            self._pikiran_sudah_simpan = True
-            self.query_one("#messages", MessageList).append_reasoning(isi_pikir)
+        self._archive_reasoning()
+        thinking.hide()
         msg_list = self.query_one("#messages", MessageList)
         msg_list.append_token(piece)
         msg_list.flush_stream()
         if self.is_turn_active:
             progress = self.query_one("#progress", TurnProgressBar)
-            progress.update_progress(0.0, "menjawab...")
+            progress.show(0.0, "menjawab...")
 
     def agent_on_reasoning(self, piece: str):
         """Reasoning token from API model — show in thinking block."""
@@ -3223,11 +3239,18 @@ class BagasAIApp(App):
         if not piece or not piece.strip():
             return
         thinking = self.query_one("#thinking-block", ThinkingBlock)
-        thinking.append_thinking(piece)  # Use public method
-        # Update progress
+        messages = self.query_one("#messages", MessageList)
+        item = self._reasoning_item
+        archived = item is not None and item in messages._items
+        thinking.append_thinking(piece, reveal=not archived)
+        if archived:
+            messages.update_reasoning(item, thinking._text.strip())
         if self.is_turn_active:
             progress = self.query_one("#progress", TurnProgressBar)
-            progress.update_progress(0.0, "berpikir...")
+            if archived:
+                progress.show(0.0, "berpikir...")
+            else:
+                progress.hide()
 
     # Tool tulis/ubah yang pratinjaunya berupa diff/blok (selaras
     # _TOOL_DIFF di cli.py).
@@ -3246,8 +3269,11 @@ class BagasAIApp(App):
         self._safe_call(self._show_tool_start, name, args)
 
     def _show_tool_start(self, name: str, args: dict):
+        from ..ui.activity import activity_label
+        self._archive_reasoning()
+        self.query_one("#thinking-block", ThinkingBlock).hide()
         progress = self.query_one("#progress", TurnProgressBar)
-        progress.update_progress(0.0, f"⚙ {name}")
+        progress.show(0.0, activity_label(name, args))
         # Pratinjau perubahan file ditampilkan SEBELUM aksi — persis pola
         # cli.py.on_tool: write_file => blok write() ringkas; edit_file/
         # edit_files => diff berwarna; delete_file => isi yang akan hilang.
@@ -3255,7 +3281,8 @@ class BagasAIApp(App):
         # masih bisa dibaca untuk di-diff.
         # Kecuali OpenCode CLI: tool SUDAH dieksekusi di subprocess sebelum
         # callback ini — ditandai _oc_selesai di args (lihat proses()).
-        self._pratinjau_file(name, args)
+        if not args.get("_tool_failed"):
+            self._pratinjau_file(name, args)
 
     def _pratinjau_file(self, name: str, args: dict) -> None:
         """Diff / blok write() sebelum tool mengubah isi disk.
@@ -3284,8 +3311,24 @@ class BagasAIApp(App):
             # harus DILEWATI — file sudah berisi konten baru, jadi old==new
             # secara harfiah, padahal diff-nya justru yang ingin ditampilkan.
             sudah = bool(sub_args.get("_oc_selesai"))
+            oc_diff = str(sub_args.get("_oc_diff") or "")
+            if sudah and oc_diff:
+                msg_list.append_diff_replay({
+                    "path": path, "diff": oc_diff,
+                    "is_new": bool(sub_args.get("_oc_baru")),
+                    "deleted": bool(sub_args.get("_oc_deleted")),
+                })
+                try:
+                    self.agent.memory.add_diff(path, oc_diff,
+                        is_new=bool(sub_args.get("_oc_baru")),
+                        deleted=bool(sub_args.get("_oc_deleted")))
+                except Exception:
+                    pass
+                return
             try:
-                target = _safe_path(path)
+                # OpenCode sudah selesai; target absolutnya dapat berada di
+                # luar root UI. Ini hanya pembacaan untuk pratinjau.
+                target = Path(path) if sudah and Path(path).is_absolute() else _safe_path(path)
                 ada = target.is_file()
                 lama = (target.read_text(encoding="utf-8",
                                          errors="replace") if ada else "")
@@ -3302,11 +3345,16 @@ class BagasAIApp(App):
                     baru = bool(sub_args.get("_oc_baru"))
                 else:
                     baru = not ada
-                msg_list.append_write_block(
-                    path, sub_args.get("content") or "", is_new=baru)
-                self._catat_diff_memory(path, lama,
-                                        sub_args.get("content") or "",
-                                        baru)
+                sesudah = lama if sudah and ada else sub_args.get("content") or ""
+                sebelum = sub_args.get("_oc_before") if sudah else lama
+                if sebelum is not None:
+                    msg_list.append_diff(path, sebelum, sesudah, is_new=baru)
+                    self._catat_diff_memory(path, sebelum, sesudah, baru)
+                elif baru:
+                    msg_list.append_diff(path, "", sesudah, is_new=True)
+                    self._catat_diff_memory(path, "", sesudah, True)
+                else:
+                    msg_list.append_write_block(path, sesudah, is_new=False)
                 return
             # append_file SETELAH OpenCode: file sudah memuat konten yang
             # barusan ditambahkan. `_hitung_sesudah` akan menghitung
@@ -3444,7 +3492,9 @@ class BagasAIApp(App):
         # Pratinjau diff/blok write() sudah ditampilkan di _show_tool_start
         # (sebelum file tersentuh); hasil langkah cukup baris jejak ringkas.
         msg_list = self.query_one("#messages", MessageList)
-        msg_list.append_tool_step(name, args or {}, result[:200])
+        failed = bool((args or {}).get("_tool_failed")) or result.strip().startswith(
+            ("[GAGAL", "[error]", "Error:", "Error executing"))
+        msg_list.append_tool_step(name, args or {}, result, success=not failed)
         progress = self.query_one("#progress", TurnProgressBar)
         progress.tick()
 
@@ -3464,7 +3514,12 @@ class BagasAIApp(App):
 
     def _show_narration(self, content: str):
         msg_list = self.query_one("#messages", MessageList)
-        msg_list.append_notice(content, style=tema.p("aksen_terang"))
+        if msg_list.teks_aliran().strip():
+            # Jalur API sudah mengalirkan narasi lewat on_token. Segel atau
+            # rapikan segmen itu; jangan mencetak salinannya lewat on_message.
+            msg_list.end_stream(content)
+        else:
+            msg_list.append_notice(content, style=tema.p("teks"))
 
     def agent_on_status(self, msg: str):
         """Phase status update — process through _fase_status."""
@@ -3473,6 +3528,9 @@ class BagasAIApp(App):
     def _show_status(self, msg: str):
         progress = self.query_one("#progress", TurnProgressBar)
         if self.is_turn_active:
+            if self.query_one("#thinking-block", ThinkingBlock).display:
+                progress.hide()
+                return
             # Simplify verbose status messages
             clean = self._fase_status(msg)
             progress.show(progress.fraction, clean)
@@ -3482,11 +3540,12 @@ class BagasAIApp(App):
         """Map verbose status strings to clean phase labels."""
         lower = msg.lower()
         if lower.startswith(("menerima instruksi tool:", "menjalankan tool:")):
-            return msg[:100]
+            from ..ui.activity import activity_label
+            return activity_label(msg.partition(":")[2].strip())
         if "menyiapkan" in lower or "prepare" in lower:
-            return "menyiapkan model..."
+            return "Menyiapkan respons"
         if "menunggu" in lower or "waiting" in lower:
-            return "menunggu model..."
+            return "Menunggu respons"
         if "berpikir" in lower or "think" in lower or "pikir" in lower:
             return "berpikir..."
         if "menjawab" in lower or "answer" in lower or "jawab" in lower:
@@ -3494,12 +3553,12 @@ class BagasAIApp(App):
         if "tool" in lower or "langkah" in lower:
             return "menjalankan tool..."
         if "retry" in lower or "ulang" in lower:
-            return "🔄 retry..."
+            return "Mencoba kembali"
         if "quota" in lower:
-            return "⚠ quota habis..."
+            return "Kuota habis"
         if "busy" in lower or "sibuk" in lower:
             return "model sibuk..."
-        return msg[:40] + ("..." if len(msg) > 40 else "")
+        return " ".join(msg.split())
 
     def agent_on_notice(self, msg: str):
         """System notice."""
@@ -3572,8 +3631,47 @@ class BagasAIApp(App):
 
     # ─── Key Bindings ──────────────────────────────────────────────────
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "dismiss_popup":
+            # Modal menangani Esc sendiri, termasuk rollback tema, cleanup
+            # mikrofon, dan konfirmasi perubahan editor yang belum disimpan.
+            return not isinstance(self.screen, ModalScreen)
+        return super().check_action(action, parameters)
+
+    def action_dismiss_popup(self) -> None:
+        """Esc menutup menu teratas tanpa membatalkan pekerjaan agen."""
+        chatbox = self.query_one("#chatbox", ChatBox)
+        if self._prompt_inline is not None:
+            self._batalkan_prompt_inline()
+        elif chatbox.dismiss_popup():
+            pass
+        elif self._sidebar_mobile_open:
+            self.on_button_pressed(Button.Pressed(self.query_one("#sidebar-close", Button)))
+        chatbox.focus()
+
     def action_cancel(self):
         """Handle Ctrl+C globally."""
+        if isinstance(self.screen, SourcePickerScreen):
+            self.screen.action_cancel()
+            return
+        if isinstance(self.screen, FilePreviewScreen):
+            self.screen.action_copy_selection()
+            return
+        if isinstance(self.screen, BtwScreen):
+            self.screen.action_copy_selection()
+            return
+        focused = self.focused
+        if isinstance(focused, TextArea) and focused.selected_text:
+            copy_text(self, focused.selected_text)
+            return
+        if isinstance(self.screen, FileEditorScreen):
+            # Ctrl+C di editor tidak boleh membatalkan tugas atau keluar app.
+            return
+        messages = self.query_one("#messages", MessageList)
+        lo, hi = messages._salin_lo, messages._salin_hi
+        if lo is not None and hi is not None and lo != hi:
+            copy_text(self, messages._teks_salin(lo, hi))
+            return
         # Prompt inline terbuka? Batalkan prompt-nya, jangan giliran AI.
         if self._prompt_inline is not None:
             self._batalkan_prompt_inline()
@@ -3600,6 +3698,11 @@ class BagasAIApp(App):
 
     def action_clear(self):
         """Handle Ctrl+L — clear messages."""
+        if isinstance(self.screen, (FilePreviewScreen, SourcePickerScreen)):
+            return
+        if isinstance(self.screen, BtwScreen):
+            self.screen.query_one("#btw-log", MessageList).clear_messages()
+            return
         self.query_one("#messages", MessageList).clear_messages()
 
     def action_delete_word(self):

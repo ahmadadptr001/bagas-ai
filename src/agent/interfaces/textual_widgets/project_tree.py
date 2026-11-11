@@ -63,6 +63,13 @@ class ProjectTree(Tree):
         padding: 0;
         border: none;
         scrollbar-size-vertical: 1;
+        /* Warna dibaca dari parent (ProjectTree), bukan dari Screen. */
+        scrollbar-background: transparent;
+        scrollbar-background-hover: transparent;
+        scrollbar-background-active: transparent;
+        scrollbar-color: $t-tepi_redup;
+        scrollbar-color-hover: $t-tepi;
+        scrollbar-color-active: $t-tepi;
     }
     ProjectTree > .project-tree--folder {
         color: $t-teks;

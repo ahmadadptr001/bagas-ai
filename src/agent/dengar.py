@@ -15,13 +15,10 @@ kalau kalimat diteruskan sebelum jeda habis, hitungannya diulang dari nol.
 Teks pengguna dan jawaban AI tetap masuk ke terminal utama; layar khusus
 hanya menampilkan animasi yang bereaksi terhadap audio.
 
-PENYELA (barge-in). Dulu mikrofon DIBUANG total selama bagas-ai membacakan
-jawaban, dan pengguna yang menanggapi di tengahnya lenyap tanpa jejak —
-persis keluhan "voice on tapi semua yang kubilang diabaikan". Kini blok
-audio selama bacaan tetap DIUKUR: yang keluar dari pengeras suara memang
-ikut terekam (AEC tak tersedia), jadi kebocorannya dijadikan BASELINE, dan
-hanya lonjakan energi DI ATASNYA yang dianggap pengguna menyela — itulah
-yang memotong bacaan (suara.diam()) dan memulai rekaman ucapan penyela.
+PENYELA (barge-in). Di Windows, referensi keluaran WASAPI masuk ke WebRTC
+AEC native untuk mengurangi suara speaker dalam rekaman mikrofon fisik.
+Ucapan pengguna setelah AEC dapat memotong bacaan. Bila referensi tidak
+tersedia, mikrofon dijeda selama TTS dan ekor gema, kemudian aktif kembali.
 
 PENGENALAN SUARANYA TIDAK SEMPURNA, DAN ITU DIPERHITUNGKAN
 ----------------------------------------------------------
@@ -41,9 +38,27 @@ import sys
 import threading
 import time
 from collections import deque
+from contextlib import ExitStack
+from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
 log = logging.getLogger(__name__)
+
+try:
+    from . import termux
+except ImportError:  # pragma: no cover - dimuat langsung oleh uji installer
+    class _TermuxMati:
+        IS_TERMUX = False
+
+        @staticmethod
+        def stt_tersedia() -> bool:
+            return False
+
+        @staticmethod
+        def dengar_teks(*_args, **_kwargs):
+            return False, ""
+
+    termux = _TermuxMati()
 
 # --- batas rekaman ------------------------------------------------------------
 # Batas satu dikte (tombol/F4): 30 detik sejak suara pertama terdeteksi.
@@ -176,26 +191,32 @@ def hitung_ambang(contoh: list[float],
     return derau, ramai, mulai, lanjut
 
 
-# UCAPAN TIDAK DIKERASKAN — dan itu keputusan yang DIUKUR, bukan kelalaian.
-#
-# Menaikkan volume sebelum mengirim ke pengenal terdengar masuk akal untuk
-# mikrofon ber-gain rendah, dan sempat dipasang. Percobaan dengan kalimat yang
-# sama pada beberapa tingkat volume menunjukkan sebaliknya:
-#
-#   puncak 384  -> tanpa penguatan BENAR, dengan penguatan BENAR
-#   puncak 192  -> tanpa penguatan BENAR, dengan penguatan "tak terdengar jelas"
-#
-# Pengenalnya sudah menormalkan sendiri; yang ikut dibesarkan oleh penguatan
-# justru derau kuantisasi, dan di suara paling pelan itulah yang mematikannya.
-# Jadi yang membuat mikrofon terasa "tuli" bukan volumenya, melainkan AMBANG
-# di atas — dan itu yang diperbaiki.
+# Audio melewati NS/AGC sebelum pengenal. Penguatan tambahan dibatasi pada
+# potongan ucapan yang pelan; sunyi tidak dinaikkan menjadi derau keras.
 
 
-def siap() -> tuple[bool, str]:
+def siap(kontinu: bool = True) -> tuple[bool, str]:
     """(bisa dipakai?, alasan bila tidak) — diperiksa SEBELUM /voice on.
+
+    ``kontinu=False`` dipakai perintah sekali-jalan seperti ``/voice tes``:
+    di Termux keduanya beda nasib — dikte Android tersedia, mode kontinu tidak.
 
     Diperiksa satu per satu supaya pesannya menyebut yang mana yang kurang,
     bukan "fitur suara tidak tersedia" yang tak bisa ditindaklanjuti."""
+    if termux.IS_TERMUX:
+        # Mikrofon kontinu butuh sounddevice + Whisper, yang tak ada di
+        # Android. Dikte sekali-jalan TETAP tersedia lewat STT Android —
+        # dengar_dikte() memakai jalur itu sebelum memeriksa fungsi ini.
+        if termux.stt_tersedia():
+            if not kontinu:
+                return True, ""
+            return False, ("Termux/Android: mode /voice kontinu dan pengukuran "
+                           "jangkauan tidak tersedia. Gunakan dikte (F4 atau "
+                           "/voice tekan) — Android STT yang akan merekam dan "
+                           "mengenali suaramu.")
+        return False, ("Termux/Android: dikte butuh paket `termux-api` dan "
+                       "aplikasi Termux:API dari F-Droid. Pasang keduanya, lalu "
+                       "coba lagi.")
     try:
         import sounddevice  # noqa: F401
     except Exception:  # noqa: BLE001
@@ -206,6 +227,14 @@ def siap() -> tuple[bool, str]:
     except Exception:  # noqa: BLE001
         return False, ("pengenal lokal `faster-whisper` belum ada. Pasang "
                        "ulang bagas-ai agar fitur suara tersinkron.")
+    # Impor faster-whisper + membangun sesi ONNX Silero dimuat DI SINI, bukan
+    # di thread mikrofon: impornya belasan detik, dan di thread itu jadinya
+    # kalibrasi mikrofon ikut tertunda sebelum satu blok pun terbaca.
+    try:
+        from faster_whisper.vad import get_vad_model
+        get_vad_model()
+    except Exception:  # noqa: BLE001 - tanpa VAD andal, jalur energi tetap jalan
+        log.debug("Silero VAD tak bisa dimuat lebih dulu", exc_info=True)
     try:
         import aec_audio_processing  # noqa: F401
     except Exception:  # noqa: BLE001
@@ -223,6 +252,8 @@ def siap() -> tuple[bool, str]:
 
 def nama_mikrofon() -> str:
     """Nama mikrofon yang akan dipakai (kosong bila tak terbaca)."""
+    if termux.IS_TERMUX:
+        return "Mikrofon Android (STT)" if termux.stt_tersedia() else ""
     try:
         import sounddevice as sd
         d = _pilih_mikrofon(sd)
@@ -243,6 +274,26 @@ def _nama_model_whisper() -> str:
     except Exception:  # noqa: BLE001
         nama = ""
     return nama or "small"
+
+
+def _lokasi_model_whisper(nama: str) -> str:
+    """Utamakan snapshot lengkap di disk; unduh hanya file yang belum ada."""
+    from faster_whisper.utils import download_model
+    from huggingface_hub.utils import LocalEntryNotFoundError
+
+    if Path(nama).is_dir():
+        return nama
+    try:
+        cached = Path(download_model(nama, local_files_only=True))
+        files = [cached / name for name in ("model.bin", "config.json", "tokenizer.json")]
+        vocabulary = [p for p in cached.glob("vocabulary.*") if p.is_file() and p.stat().st_size]
+        if vocabulary and all(p.is_file() and p.stat().st_size for p in files):
+            return str(cached)
+    except (LocalEntryNotFoundError, FileNotFoundError):
+        pass
+    # snapshot_download mempertahankan blob/cache dan melanjutkan berkas
+    # parsial. Tidak ada force_download atau penghapusan model yang lama.
+    return download_model(nama)
 
 
 _HALUSINASI_SUNYI = (
@@ -311,6 +362,8 @@ class _Pengenal:
         # Pemuatan sinkron dan latar berbagi satu kunci. Tanpanya dua
         # `/voice on` yang berdekatan dapat memuat dua salinan model besar.
         self._muat_lock = threading.Lock()
+        self._decode_lock = threading.Lock()
+        self._decode_score: float | None = None
         self._muat_error = ""
 
     def pastikan(self, kabar: Callable[..., None] | None = None) -> tuple[bool, str]:
@@ -330,7 +383,8 @@ class _Pengenal:
             try:
                 from faster_whisper import WhisperModel
                 self._whisper = WhisperModel(
-                    nama, device="cpu", compute_type="int8")
+                    _lokasi_model_whisper(nama), device="cpu", compute_type="int8",
+                    local_files_only=True)
                 self._muat_error = ""
                 return True, f"Whisper {nama} siap (lokal, int8)"
             except Exception as exc:  # noqa: BLE001
@@ -357,21 +411,36 @@ class _Pengenal:
             if not ok:
                 return "", f"galat: {pesan}"
         try:
-            return self._whisperkenali(data), "whisper"
+            with self._decode_lock:
+                return self._whisperkenali(data), "whisper"
         except Exception as exc:  # noqa: BLE001
             log.debug("pengenalan Whisper lokal gagal", exc_info=True)
             return "", f"galat: Whisper lokal gagal: {str(exc)[:120]}"
 
     def _transkripsikan(self, audio, *, vad_filter: bool) -> tuple[str, float]:
         """Jalankan satu pass Whisper dan sertakan peluang audio kosong."""
+        from . import config
+        language = getattr(config, "VOICE_STT_LANGUAGE", "id")
+        options = {}
+        if vad_filter:
+            options["vad_parameters"] = {
+                "threshold": 0.35, "min_speech_duration_ms": 120,
+                "min_silence_duration_ms": 250, "speech_pad_ms": 250,
+            }
         segmen, _info = self._whisper.transcribe(
-            audio, language="id", beam_size=5, vad_filter=vad_filter,
+            audio, language=None if language == "auto" else language,
+            beam_size=5, temperature=0.0, vad_filter=vad_filter,
             condition_on_previous_text=False,
             # Jangan memakai initial_prompt: pada rekaman yang sangat pelan,
             # Whisper dapat mengulang prompt itu sebagai hasil seolah-olah
             # pengguna benar-benar mengucapkannya.
+            **options,
         )
         daftar = list(segmen)
+        scores = [(s.avg_logprob, max(1, len(s.text.strip()))) for s in daftar
+                  if isinstance(getattr(s, "avg_logprob", None), (float, int))]
+        self._decode_score = (sum(score * weight for score, weight in scores)
+                              / sum(weight for _, weight in scores)) if scores else None
         teks = " ".join(s.text.strip() for s in daftar).strip()
         # Ambil nilai TERENDAH: hasil multi-segmen hanya dianggap sunyi bila
         # semua segmennya sepakat. Satu segmen ucapan nyata cukup untuk menjaga
@@ -395,8 +464,12 @@ class _Pengenal:
 
         # Pass utama tidak memakai Silero VAD: audio sudah dipotong WebRTC dan
         # VAD kedua dapat membuang suara nyata yang jauh/pelan.
+        self._decode_score = None
         teks, peluang_sunyi = self._transkripsikan(audio, vad_filter=False)
-        if _halusinasi_sunyi(teks, peluang_sunyi):
+        score = self._decode_score
+        stok = _halusinasi_sunyi(teks, peluang_sunyi)
+        ragu = score is not None and score < -0.85
+        if stok or not teks or ragu:
             log.debug(
                 "hasil Whisper dicurigai sebagai halusinasi sunyi (%.3f): %r",
                 peluang_sunyi, teks,
@@ -406,13 +479,16 @@ class _Pengenal:
             # jangan biarkan filter pertama membuat AI tampak tidak menjawab.
             ulang, peluang_ulang = self._transkripsikan(
                 audio, vad_filter=True)
-            if ulang and not _halusinasi_sunyi(ulang, peluang_ulang):
+            score_ulang = self._decode_score
+            lebih_baik = (stok or not teks or (
+                score_ulang is not None and score is not None and score_ulang > score + 0.10))
+            if ulang and not _halusinasi_sunyi(ulang, peluang_ulang) and lebih_baik:
                 log.debug(
                     "pass VAD memulihkan transkripsi (%.3f): %r",
                     peluang_ulang, ulang,
                 )
                 return ulang
-            return ""
+            return "" if stok else teks
         return teks
 
 
@@ -484,6 +560,14 @@ class PilihanMikrofon(NamedTuple):
     hostapi: str
 
 
+def _input_sistem(device: dict) -> bool:
+    name = str(device.get("name", "")).casefold()
+    return bool(device.get("isLoopbackDevice")) or any(token in name for token in (
+        "loopback", "stereo mix", "stereomix", "what u hear", "wave out mix",
+        "monitor of", "cable output", "voicemeeter output", "mixage stéréo",
+    ))
+
+
 def _pilih_mikrofon(sd: Any) -> PilihanMikrofon:
     """Pilih endpoint input terbaik; di Windows utamakan WASAPI native-rate.
 
@@ -495,7 +579,26 @@ def _pilih_mikrofon(sd: Any) -> PilihanMikrofon:
     hostapis = list(sd.query_hostapis())
 
     kandidat: list[int] = []
-    if sys.platform == "win32":
+    from . import config
+    pilihan = getattr(config, "VOICE_INPUT_DEVICE", "")
+    if pilihan:
+        kandidat = ([int(pilihan)] if pilihan.isdigit() else [
+            i for i, dev in enumerate(perangkat)
+            if pilihan.casefold() in str(dev.get("name", "")).casefold()
+            and int(dev.get("max_input_channels", 0)) > 0])
+        if not kandidat:
+            raise RuntimeError(f"Mikrofon pilihan tidak ditemukan: {pilihan}")
+    pilihan_eksplisit = bool(pilihan)
+    if not pilihan_eksplisit:
+        try:
+            index = int(sd.default.device[0])
+            name = str(perangkat[index].get("name", "")).casefold() if index >= 0 else ""
+            kandidat.extend(i for i, dev in enumerate(perangkat)
+                if name and str(dev.get("name", "")).casefold() == name
+                and "wasapi" in str(hostapis[int(dev["hostapi"])].get("name", "")).lower())
+        except (ValueError, TypeError, IndexError, AttributeError, KeyError):
+            pass
+    if sys.platform == "win32" and not pilihan_eksplisit:
         for i, host in enumerate(hostapis):
             if "wasapi" not in str(host.get("name", "")).lower():
                 continue
@@ -510,12 +613,13 @@ def _pilih_mikrofon(sd: Any) -> PilihanMikrofon:
 
     try:
         bawaan = sd.default.device[0]
-        if bawaan is not None and int(bawaan) >= 0:
+        if not pilihan_eksplisit and bawaan is not None and int(bawaan) >= 0:
             kandidat.append(int(bawaan))
     except Exception:  # noqa: BLE001
         pass
-    kandidat.extend(i for i, dev in enumerate(perangkat)
-                    if int(dev.get("max_input_channels", 0)) > 0)
+    if not pilihan_eksplisit:
+        kandidat.extend(i for i, dev in enumerate(perangkat)
+                        if int(dev.get("max_input_channels", 0)) > 0)
 
     dilihat: set[int] = set()
     for index in kandidat:
@@ -523,6 +627,8 @@ def _pilih_mikrofon(sd: Any) -> PilihanMikrofon:
             continue
         dilihat.add(index)
         dev = perangkat[index]
+        if _input_sistem(dev):
+            continue
         if int(dev.get("max_input_channels", 0)) < 1:
             continue
         laju = max(8000, int(round(float(dev.get("default_samplerate", LAJU)))))
@@ -546,6 +652,11 @@ def _ubah_laju(data: Any, sumber: int, tujuan: int = LAJU) -> Any:
     x = np.asarray(data, dtype=np.int16).reshape(-1)
     if not x.size or sumber == tujuan:
         return x.copy()
+    try:
+        import soxr
+        return soxr.resample(x, sumber, tujuan, quality="HQ")
+    except ImportError:
+        pass  # instalasi lama tetap dapat membuka mikrofon
     # Native WASAPI laptop umumnya 48 kHz -> 16 kHz. Rata-rata tiga sampel
     # memberi low-pass murah sebelum desimasi dan jauh lebih aman dari x[::3].
     if sumber > tujuan and sumber % tujuan == 0:
@@ -561,8 +672,81 @@ def _ubah_laju(data: Any, sumber: int, tujuan: int = LAJU) -> Any:
     return np.clip(y, -32768, 32767).astype(np.int16)
 
 
+class _VadSilero:
+    """VAD streaming berbasis Silero — pengganti VAD WebRTC yang mati.
+
+    ``aec-audio-processing`` 1.0.1 mengomentari inisialisasi VAD-nya di
+    ``audio_processing_module.cpp``: ``vad_enabled_`` tak pernah diisi, jadi
+    ``has_voice()`` tak pernah benar — kadang selalu False dan kadang
+    melempar "VAD is not enabled". Yang celaka bukan VAD-nya yang mati,
+    melainkan galatnya ikut menjatuhkan NS/AGC (lihat ``proses``).
+
+    Silero ikut terpasang lewat faster-whisper. Model ONNX yang mendukungnya
+    dijalankan per 512 sampel dengan state h/c per listener; implementasi lama
+    tetap memiliki jalur kompatibilitas berbasis jendela.
+    """
+
+    _PANJANG = 16384            # 32 x 512 sampel = 1,024 detik di 16 kHz
+    _AMBANG = 0.35
+
+    def __init__(self) -> None:
+        import numpy as np
+        from faster_whisper.vad import get_vad_model
+
+        self._np = np
+        self._model = get_vad_model()   # lru_cache — satu model per proses
+        self._jendela = np.zeros(0, dtype=np.float32)
+        self._sisa = np.zeros(0, dtype=np.float32)
+        self._h = np.zeros((1, 1, 128), dtype=np.float32)
+        self._c = np.zeros((1, 1, 128), dtype=np.float32)
+        self._konteks = np.zeros((1, 64), dtype=np.float32)
+        session = getattr(self._model, "session", None)
+        self._session = (session if session is not None and
+                         {i.name for i in session.get_inputs()} == {"input", "h", "c"} else None)
+        self._last = 0.0
+        self.frames_processed = 0
+
+    def proba(self, blok: Any) -> float:
+        """Proba ucapan per blok 32 ms; jendela hanya untuk model legacy."""
+        np = self._np
+        x = np.asarray(blok, dtype=np.float32)
+        if not x.size:
+            return 0.0
+        self._jendela = np.concatenate(
+            [self._jendela, x / 32768.0])[-self._PANJANG:]
+        if self._session is not None:
+            # Inference 32 ms dengan state per listener. Model lama mengulang
+            # seluruh jendela 1 detik pada SETIAP blok dan tuli saat pemanasan.
+            self._sisa = np.concatenate((self._sisa, x / 32768.0))
+            probabilities = []
+            while self._sisa.size >= 512:
+                frame = self._sisa[:512].reshape(1, 512)
+                self._sisa = self._sisa[512:]
+                output, self._h, self._c = self._session.run(None, {
+                    "input": np.concatenate((self._konteks, frame), axis=1),
+                    "h": self._h, "c": self._c,
+                })
+                self._konteks = frame[:, -64:].copy()
+                probabilities.append(float(np.asarray(output).reshape(-1)[-1]))
+                self.frames_processed += 1
+            if probabilities:
+                self._last = max(probabilities)
+            return self._last
+        if self._jendela.size < self._PANJANG:
+            return 0.0
+        keluaran = self._model(self._jendela.copy())
+        return float(np.asarray(keluaran).reshape(-1)[-1])
+
+
 class _AudioFrontEnd:
-    """Resample + WebRTC noise suppression, AGC, dan VAD per 10 ms."""
+    """Resample + WebRTC noise suppression/AGC + penanda ucapan per blok.
+
+    Dua tugasnya terpisah dan harus punya nasib berbeda bila satu gagal:
+    NS/AGC memperbaiki audio yang dikirim ke pengenal suara, sedangkan VAD
+    hanya menandai blok mana yang berisi ucapan. VAD WebRTC rusak pada
+    paket yang terpasang — lihat ``_VadSilero`` — jadi yang dipakai Silero,
+    dan galatnya TIDAK boleh menjatuhkan NS/AGC.
+    """
 
     def __init__(self, sumber: int) -> None:
         import numpy as np
@@ -570,12 +754,21 @@ class _AudioFrontEnd:
         self.sumber = int(sumber)
         self._np = np
         self._sisa = np.empty(0, dtype=np.int16)
+        self._resampler: Any = None
+        if self.sumber != LAJU:
+            try:
+                import soxr
+                self._resampler = soxr.ResampleStream(
+                    self.sumber, LAJU, 1, dtype="int16", quality="HQ")
+            except ImportError:
+                log.debug("SoXR tidak tersedia; memakai resampler kompatibilitas")
         self._apm: Any = None
+        self._echo = None
+        self.echo_only = False
         try:
             from aec_audio_processing import AudioProcessor
-            # Echo dari BagasAI dicegah pada level produk: TTS dihentikan saat
-            # dikte dan listener membuang blok saat speaker aktif. AEC tanpa
-            # reverse stream justru menebak-nebak dan dapat merusak ucapan.
+            # Mulai tanpa AEC. enable_echo() memasang AEC hanya setelah sumber
+            # referensi speaker berhasil dibuka; input mic tidak diganti loopback.
             apm = AudioProcessor(enable_aec=False, enable_ns=True, ns_level=1,
                                  enable_agc=True, agc_mode=1, enable_vad=True)
             apm.set_stream_format(LAJU, 1, LAJU, 1)
@@ -585,19 +778,88 @@ class _AudioFrontEnd:
             self._apm = apm
         except Exception:  # noqa: BLE001
             log.debug("WebRTC audio processing tidak tersedia", exc_info=True)
+        self._vad_web = True
+        self._silero: _VadSilero | None = None
+        try:
+            self._silero = _VadSilero()
+        except Exception:  # noqa: BLE001 - onnxruntime absen -> tetap WebRTC
+            log.debug("Silero VAD tak tersedia", exc_info=True)
 
     @property
     def vad_tersedia(self) -> bool:
-        return self._apm is not None
+        """Ada penanda ucapan yang bisa dipakai (Silero atau WebRTC)."""
+        return self._silero is not None or self._apm is not None
+
+    @property
+    def echo_enabled(self) -> bool:
+        return self._apm is not None and self._echo is not None and self._echo.active
+
+    def enable_echo(self, reference) -> bool:
+        if not reference.active:
+            return False
+        try:
+            from aec_audio_processing import AudioProcessor
+            apm = AudioProcessor(enable_aec=True, enable_ns=True, ns_level=1,
+                                 enable_agc=True, agc_mode=1, enable_vad=False)
+            apm.set_stream_format(LAJU, 1, LAJU, 1)
+            apm.set_reverse_stream_format(LAJU, 1)
+            apm.set_stream_delay(50)
+            self._apm = apm
+            self._echo = reference
+            self._vad_web = False
+            return True
+        except Exception:
+            log.debug("AEC native tidak dapat dimuat", exc_info=True)
+            return False
+
+    @property
+    def vad_handal(self) -> bool:
+        """VAD yang terbukti membedakan ucapan dari derau ruangan.
+
+        Dipakai untuk memutuskan apakah ambang derau boleh ikut naik bila
+        mikrofon meledak sendiri setelah kalibrasi (AGC mengunci gain).
+        """
+        return self._silero is not None
 
     def reset(self) -> None:
         self._sisa = self._np.empty(0, dtype=self._np.int16)
 
+    def _suara(self, audio: Any) -> bool:
+        """Silero atas audio 16 kHz (int16); galat -> anggap VAD mati."""
+        if self._silero is None:
+            return False
+        try:
+            return self._silero.proba(audio) >= _VadSilero._AMBANG
+        except Exception:  # noqa: BLE001
+            log.debug("Silero VAD gagal; kembali ke energi", exc_info=True)
+            self._silero = None
+            return False
+
+    def _suara_web(self) -> bool:
+        """VAD WebRTC — galatnya jangan sampai menjatuhkan NS/AGC."""
+        if self._apm is None or not self._vad_web:
+            return False
+        try:
+            return bool(self._apm.has_voice())
+        except Exception:  # noqa: BLE001
+            # aec-audio-processing 1.0.1 tak pernah mengisi vad_enabled_,
+            # sehingga kadang melempar. Matikan VAD-nya saja; NS/AGC tetap.
+            self._vad_web = False
+            log.debug("VAD WebRTC tidak berfungsi", exc_info=True)
+            return False
+
     def proses(self, data: Any) -> tuple[Any, Any, bool]:
         """Return (audio_bersih, audio_mentah_16k, ada_suara_manusia)."""
-        mentah = _ubah_laju(data, self.sumber)
-        if self._apm is None or not mentah.size:
-            return mentah, mentah, False
+        native = self._np.asarray(data, dtype=self._np.int16).reshape(-1)
+        mentah = (self._resampler.resample_chunk(native) if self._resampler is not None
+                  else _ubah_laju(native, self.sumber))
+        if not mentah.size:
+            kosong = self._np.empty(0, dtype=self._np.int16)
+            return kosong, kosong, False
+        if self._apm is None:
+            # NS/AGC tak ada: audio mentah tetap dinilai VAD-nya, kalau tidak
+            # mikrofon jadi tuli-tuli saja pada keadaan ini.
+            return mentah, mentah, self._suara(mentah)
         gabung = self._np.concatenate((self._sisa, mentah))
         bingkai = int(self._apm.get_frame_size())
         jumlah = len(gabung) // bingkai
@@ -609,17 +871,30 @@ class _AudioFrontEnd:
         dipakai = gabung[:batas]
         self._sisa = gabung[batas:]
         keluaran: list[Any] = []
-        suara = False
         try:
+            reference = (self._echo.read_frames(jumlah) if self.echo_enabled else None)
             for i in range(0, batas, bingkai):
+                if reference is not None:
+                    self._apm.process_reverse_stream(reference[i // bingkai].tobytes())
                 hasil = self._apm.process_stream(dipakai[i:i + bingkai].tobytes())
                 keluaran.append(self._np.frombuffer(hasil, dtype=self._np.int16).copy())
-                suara = bool(self._apm.has_voice()) or suara
-            return self._np.concatenate(keluaran), dipakai, suara
         except Exception:  # noqa: BLE001
             log.debug("pemrosesan WebRTC gagal; memakai audio mentah", exc_info=True)
             self._apm = None
-            return dipakai, dipakai, False
+            return dipakai, dipakai, self._suara(dipakai)
+        bersih = self._np.concatenate(keluaran)
+        self.echo_only = False
+        if self.echo_enabled:
+            from .echo_reference import matches_render
+            if matches_render(bersih, self._echo.history()):
+                self.echo_only = True
+                bersih = self._np.zeros_like(bersih)
+                self._suara(bersih)
+                return bersih, dipakai, False
+        suara = self._suara(bersih)
+        if self._silero is None:
+            suara = suara or self._suara_web()
+        return bersih, dipakai, suara
 
 
 def _buka_input(sd: Any) -> tuple[Any, PilihanMikrofon, int]:
@@ -685,24 +960,14 @@ class Pendengar:
         # detik sesudah suaranya, dan menutup lebih dulu berarti mengirim
         # kalimat yang belum lengkap.
         self._menunggu = 0
-        # --- penyela (barge-in) ---------------------------------------------
-        # Saat bagas-ai sendiri bersuara, pengeras suara ikut terekam. RMS
-        # blok-blok itu dijadikan BASELINE kebocoran; ucapan penyela = energi
-        # yang LOMPAT jauh di atas baseline itu. Ditulis sebagai deque ±2 detik
-        # supaya baseline mengikuti bacaan yang makin pelan/keras.
-        self._bocor: deque[float] = deque(maxlen=32)
-        # Berapa blok BERUNTUN yang melampaui ambang penyela. Dibutuhkan beberapa
-        # blok: puncak satu suku kata TTS yang menekan tak boleh memotong
-        # bacaannya sendiri.
+        # Beberapa blok VAD setelah AEC diperlukan sebelum memotong TTS.
         self._menyela = 0
-        # Penanda "sedang dalam satu sesi bacaan" — kebocoran dihitung ulang
-        # dari nol tiap bacaan baru dimulai.
-        self._bicara_sebelumnya = False
         self._antre: queue.Queue = queue.Queue()
         self._threads: list[threading.Thread] = []
         self.galat = ""
         self.mikrofon: PilihanMikrofon | None = None
         self.audio_overflow = 0
+        self.echo_aktif = False
 
     @property
     def aktif(self) -> bool:
@@ -766,14 +1031,21 @@ class Pendengar:
         try:
             stream, pilihan, blok_sumber = _buka_input(sd)
             self.mikrofon = pilihan
-            with stream:
-                self._gelung(stream, np, pilihan.sample_rate, blok_sumber)
+            from .echo_reference import RenderReference
+            with stream, RenderReference() as reference:
+                frontend = _AudioFrontEnd(pilihan.sample_rate)
+                self.echo_aktif = frontend.enable_echo(reference)
+                if not self.echo_aktif:
+                    self.on_kabar("Anti-gema speaker belum aktif; mikrofon dijeda selama jawaban dibacakan.")
+                self._gelung(stream, np, pilihan.sample_rate, blok_sumber, frontend=frontend)
         except Exception as exc:  # noqa: BLE001 - mikrofon dipakai aplikasi lain, dsb
             self._gagal(f"mikrofon tak bisa dibuka: {exc}")
+        finally:
+            self.echo_aktif = False
 
     def _gelung(self, stream: Any, np: Any,
-                laju_sumber: int = LAJU, blok_sumber: int = BLOK) -> None:
-        depan = _AudioFrontEnd(laju_sumber)
+                laju_sumber: int = LAJU, blok_sumber: int = BLOK, frontend=None) -> None:
+        depan = frontend if frontend is not None else _AudioFrontEnd(laju_sumber)
         # Derau ruangan diukur DULU. Ambang tetap yang dipatok di kode selalu
         # salah di salah satu sisi: di ruangan sunyi ia melewatkan bisikan, di
         # ruangan berkipas ia menganggap kipasnya bicara sepanjang waktu.
@@ -784,13 +1056,19 @@ class Pendengar:
             data, overflow = stream.read(blok_sumber)
             if overflow:
                 self.audio_overflow += 1
-            bersih, mentah, vad = depan.proses(data)
+            bersih, _mentah, vad = depan.proses(data)
+            if self._bagasai_bicara() and not getattr(depan, "echo_enabled", False):
+                continue
             if len(bersih) and vad:
                 # Pengguna langsung bicara setelah /voice on: jangan jadikan
                 # suaranya "derau" dan jangan buang suku kata pertamanya.
                 suara_saat_kalibrasi.append(bersih.copy())
-            elif len(mentah):
-                contoh.append(_rms(mentah))
+            elif len(bersih):
+                # Derau diukur dari audio BERSIH, bukan mentah: ambang yang
+                # dibentuk dari mentah tak pernah cocok dengan yang benar-benar
+                # direkam — derau mentah melonjak sekitar 8x sesudah kalibrasi
+                # (AGC mengunci gain), dan akibatnya mikrofon jadi tuli-tuli.
+                contoh.append(_rms(bersih))
         derau, ramai, ambang, ambang_lanjut = hitung_ambang(contoh, self.profil)
         self.derau, self.derau_ramai = derau, ramai
         self.ambang, self.ambang_lanjut = ambang, ambang_lanjut
@@ -814,6 +1092,7 @@ class Pendengar:
         # membuat ambang awal menjadi usang sepanjang sesi.
         derau_adaptif = deque(contoh, maxlen=max(32, int(10 / _DETIK_BLOK)))
         adaptasi_terakhir = time.time()
+        speaker_tail = 0.0
         while not self._stop.is_set():
             try:
                 data, overflow = stream.read(blok_sumber)
@@ -822,79 +1101,35 @@ class Pendengar:
                 return
             if overflow:
                 self.audio_overflow += 1
-            data_bersih, data_mentah, vad_suara = depan.proses(data)
+            data_bersih, _data_mentah, vad_suara = depan.proses(data)
+            if hasattr(depan, "echo_enabled"):
+                self.echo_aktif = bool(depan.echo_enabled)
             if not len(data_bersih):
                 continue
             bicara = self._bagasai_bicara()
-            if bicara and not self._bicara_sebelumnya:
-                # Bacaan BARU dimulai: baseline kebocoran dihitung dari nol,
-                # jangan diwarisi dari bacaan sebelumnya yang volumenya beda.
-                self._bocor.clear()
+            echo = bool(getattr(depan, "echo_enabled", False))
+            self._menyela = self._menyela + 1 if bicara and echo and vad_suara else 0
+            if self._menyela >= 3:
+                try:
+                    from . import suara
+                    suara.diam()
+                except Exception:
+                    pass
                 self._menyela = 0
-            self._bicara_sebelumnya = bicara
-            if bicara:
-                # PENYELA. Bagas-ai sedang bersuara dan pengeras suaranya ikut
-                # terekam — dulu semua blok DIBUANG begitu saja, mikrofon tuli
-                # total sampai bacaan habis, dan pengguna yang menanggapi di
-                # tengahnya lenyap tanpa jejak. Kini: kebocoran itu diukur
-                # sebagai BASELINE, dan hanya lonjakan energi DI ATASNYA yang
-                # dianggap pengguna MENYELA — memotong bacaan dan memulai
-                # rekaman ucapan penyela. Tanpa AEC inilah satu-satunya cara
-                # membedakan suara pengguna dari gema pengeras suara.
-                tingkat_tts = _rms(data_mentah)
-                # Pre-roll tetap dikumpulkan: suku kata pertama ucapan penyela
-                # jatuh SEBELUM ambangnya terlampaui.
-                awalan.append(data_bersih.copy())
-                if len(awalan) > self.profil.awalan:
-                    awalan.pop(0)
-                sela = False
-                if len(self._bocor) >= 3:
-                    dasar = _persentil(sorted(self._bocor), 0.9)
-                    sela = tingkat_tts > max(self.ambang,
-                                             dasar * 1.6 + 10.0)
-                self._menyela = self._menyela + 1 if sela else 0
-                batas_sela = 3 if vad_suara else 5
-                if self._menyela >= batas_sela:
-                    # VAD + lonjakan energi bisa menangkap respons 0,2 detik.
-                    # Tanpa VAD tetap butuh energi kuat lebih lama agar satu
-                    # suku kata dari speaker tidak dianggap sebagai penyela.
-                    # Bacaannya dipotong SEKARANG, dan yang sudah terkumpul di
-                    # `awalan` jadi awal ucapan penyela.
-                    try:
-                        from . import suara
-                        suara.diam()
-                    except Exception:  # noqa: BLE001 - TTS opsional
-                        pass
-                    potongan = list(awalan)
-                    sampel_potongan = sum(len(x) for x in potongan)
-                    durasi_suara = self._menyela * len(data_bersih) / LAJU
-                    ada_vad = vad_suara
-                    awalan = []
-                    sunyi, energi_beruntun = 0.0, 0
-                    self._sedang_ucapan = True
-                    self._menyela = 0
-                    self._bocor.clear()
-                    self._lapor_level(tingkat_tts, True, paksa=True)
+            if not echo:
+                if bicara:
+                    speaker_tail = time.monotonic() + 0.3
+                if bicara or time.monotonic() < speaker_tail:
+                    # Tanpa referensi speaker, volume tinggi juga bisa berasal
+                    # dari TTS sendiri. Jangan menebaknya sebagai ucapan baru.
+                    potongan, awalan = [], []
+                    sampel_potongan = 0
+                    durasi_suara = sunyi = 0.0
+                    ada_vad = False
+                    energi_beruntun = 0
+                    self._sedang_ucapan = False
+                    self._lapor_level(0.0, False)
                     continue
-                # Bukan penyela: bloknya dibuang — kebocoran TTS tak boleh jadi
-                # perintah — dan hitungan diam diulang supaya bacaan tak
-                # dihitung sebagai "pengguna sudah berhenti".
-                #
-                # Baseline hanya belajar dari blok yang MEMANG kebocoran.
-                # Memasukkan blok suara penyela ke baseline membuat dasarnya
-                # seketika melompati energi suara itu sendiri — menyela tak
-                # pernah terdeteksi dan mikrofon kembali tuli.
-                if not sela:
-                    self._bocor.append(tingkat_tts)
-                potongan = []
-                sampel_potongan = 0
-                durasi_suara = 0.0
-                ada_vad = False
-                energi_beruntun = 0
-                self._sedang_ucapan = False
-                self._lapor_level(tingkat_tts, False)
-                depan.reset()
-                continue
             # HISTERESIS. Bar TINGGI untuk memulai ucapan, bar RENDAH untuk
             # meneruskannya — `potongan` yang tak kosong berarti pembicara
             # sedang di tengah kalimat.
@@ -906,7 +1141,13 @@ class Pendengar:
             # namanya hilang tanpa jejak. Ambang tingginya tetap dipakai di
             # SELA ucapan, supaya derau ruangan tak menahan hitungan diam yang
             # menutup perintah.
-            tingkat = _rms(data_mentah)
+            #
+            # Seperti di atas, tingkatnya dari audio bersih — bukan mentah.
+            # Mengukur dari mentah itulah yang membuat /voice hampir selalu
+            # gagal: ambang dibentuk dari mentah yang tenang pada awal, lalu
+            # derau yang tetap keras di audio mentah dianggap ucapan sepanjang
+            # sesi — "ucapan" yang tak pernah benar-benar selesai.
+            tingkat = _rms(data_bersih)
             batas_energi = (
                 max(self.ambang_lanjut, self.ambang * 0.85)
                 if potongan and depan.vad_tersedia else
@@ -914,18 +1155,34 @@ class Pendengar:
             )
             energi_suara = tingkat > batas_energi
             energi_beruntun = energi_beruntun + 1 if energi_suara else 0
-            # VAD tetap jalur utama. Dua blok energi berturut-turut menjadi
-            # jaring untuk suara jauh yang dianggap bukan-suara oleh WebRTC;
-            # satu dentuman keyboard tidak cukup untuk membuka rekaman.
-            keras = (vad_suara or energi_beruntun >= 2
-                     if depan.vad_tersedia else energi_suara)
+            # VAD tetap jalur utama. Energi dua blok berturut-turut hanya
+            # jaring bila penanda ucapan TIDAK andal — VAD WebRTC yang mati,
+            # atau ia dilewati untuk suara paling pelan. Dengan VAD andal,
+            # energi tak boleh MEMBUKA rekaman: p90 derau ruangan yang
+            # kebetulan melewati ambang sudah cukup untuk membuka potongan pada
+            # bunyi yang sama sekali bukan ucapan, dan blob semacam itu berakhir
+            # jadi prompt kosong. Energi TETAP dipakai untuk MENERUSKAN ucapan:
+            # jeda napas dan blok yang dilewatkan VAD tak boleh memutus
+            # kalimat yang sedang berjalan.
+            dasar_energi = vad_suara or energi_beruntun >= 2
+            if depan.vad_handal:
+                keras = vad_suara if not potongan else dasar_energi
+            elif depan.vad_tersedia:
+                keras = dasar_energi
+            else:
+                keras = energi_suara
             self._lapor_level(tingkat, keras)
             lama_blok = len(data_bersih) / LAJU
-            if not potongan and not vad_suara:
-                # Tanpa VAD, jangan belajar dari bunyi yang sudah melewati
-                # ambang lama — itu mungkin ucapan, bukan perubahan derau.
-                if tingkat < self.ambang_lanjut:
-                    derau_adaptif.append(tingkat)
+            if not potongan and not vad_suara and (
+                    depan.vad_handal or tingkat < self.ambang_lanjut):
+                # Tanpa VAD yang andal, jangan belajar dari bunyi yang sudah
+                # melewati ambang lama — itu mungkin ucapan, bukan perubahan
+                # derau. Dengan VAD andal (Silero) blok yang bukan ucapan
+                # menaikkan ambang juga: derau yang tadinya di bawah ambang
+                # bisa melonjak setelah AGC mengunci gain, dan ambang yang
+                # tak pernah ikut naik membuat derau itu dianggap "ucapan"
+                # sepanjang sesi.
+                derau_adaptif.append(tingkat)
             if (len(derau_adaptif) >= 12
                     and time.time() - adaptasi_terakhir >= 0.8):
                 nd, nr, nm, nl = hitung_ambang(list(derau_adaptif), self.profil)
@@ -1060,9 +1317,45 @@ class Pendengar:
     def _gagal(self, pesan: str) -> None:
         self.galat = pesan
         self._stop.set()
+        self._antre.put(None)  # lepaskan thread pengenal yang menunggu audio
         self._sedang_ucapan = False
         self._lapor_level(0.0, False, paksa=True)
         self.on_kabar(pesan)
+
+
+def _dengar_dikte_termux(
+    *,
+    berhenti: threading.Event | None = None,
+    on_status: Callable[[str], None] | None = None,
+    maks_detik: float = _MAKS_DIKTE,
+) -> tuple[str, dict[str, Any]]:
+    """Dikte sekali-jalan lewat mesin STT Android (Termux:API)."""
+    status = on_status or (lambda _fase: None)
+    if not termux.stt_tersedia():
+        raise RuntimeError(
+            "Dikte Android butuh paket `termux-api` dan aplikasi Termux:API "
+            "dari F-Droid. Pasang keduanya lalu coba lagi."
+        )
+    status("merekam")
+    berhasil, teks = termux.dengar_teks(
+        timeout=max(30.0, maks_detik + 10.0), berhenti=berhenti)
+    if not berhasil:
+        raise RuntimeError(
+            "Dikte Android gagal atau dibatalkan. Pastikan aplikasi Termux:API "
+            "terpasang dan izin mikrofonnya diberikan."
+        )
+    status("menganalisis")
+    info: dict[str, Any] = {
+        "mikrofon": "Android STT",
+        "hostapi": "Termux",
+        "sample_rate": LAJU,
+        "puncak": 0.0,
+        "durasi": 0.0,
+        "durasi_bicara": 0.0,
+        "ambang": 0.0,
+        "engine": "termux-stt",
+    }
+    return teks.strip(), info
 
 
 def dengar_dikte(
@@ -1080,6 +1373,9 @@ def dengar_dikte(
     suara manusia pertama (VAD WebRTC), berhenti otomatis setelah sunyi, atau
     segera ketika tombol ditekan lagi melalui ``berhenti``.
     """
+    if termux.IS_TERMUX:
+        return _dengar_dikte_termux(
+            berhenti=berhenti, on_status=on_status, maks_detik=maks_detik)
     import numpy as np
     import sounddevice as sd
 
@@ -1114,13 +1410,17 @@ def dengar_dikte(
     energi_beruntun = 0
     status("menunggu")
 
-    with stream:
+    with stream, ExitStack() as resources:
+        if hasattr(depan, "enable_echo"):
+            from .echo_reference import RenderReference
+            reference = resources.enter_context(RenderReference())
+            depan.enable_echo(reference)
         while not stop.is_set() and time.time() - mulai < tunggu_mulai:
             data, _overflow = stream.read(blok_sumber)
-            bersih, mentah, vad_suara = depan.proses(data)
+            bersih, _mentah, vad_suara = depan.proses(data)
             if not len(bersih):
                 continue
-            tingkat = _rms(mentah)
+            tingkat = _rms(bersih)
             puncak = max(puncak, tingkat)
             awalan.append(bersih.copy())
             energi_bicara = False
@@ -1159,10 +1459,10 @@ def dengar_dikte(
             if time.time() - bicara_mulai >= maks_detik:
                 break
             data, _overflow = stream.read(blok_sumber)
-            bersih, mentah, vad_suara = depan.proses(data)
+            bersih, _mentah, vad_suara = depan.proses(data)
             if not len(bersih):
                 continue
-            tingkat = _rms(mentah)
+            tingkat = _rms(bersih)
             puncak = max(puncak, tingkat)
             audio.append(bersih.copy())
             lama = len(bersih) / LAJU
@@ -1207,7 +1507,17 @@ def dengar_sekali(detik: float = 5.0) -> tuple[str, float]:
     Mengembalikan (teks, tingkat_suara_tertinggi). Tingkat suaranya ikut
     dikembalikan karena dua kegagalan yang paling sering terjadi TAMPAK SAMA
     dari luar (tak ada teks): mikrofon yang bisu, dan pengenalan yang tak
-    paham. Angka itu memisahkan keduanya."""
+    paham. Angka itu memisahkan keduanya. Di Termux levelnya TIDAK diukur
+    (mesin STT Android yang menangani rekaman), jadi nilainya negatif."""
+    if termux.IS_TERMUX:
+        if not termux.stt_tersedia():
+            raise RuntimeError(
+                "Dikte Android butuh paket `termux-api` dan aplikasi "
+                "Termux:API dari F-Droid.")
+        berhasil, teks = termux.dengar_teks(timeout=max(15.0, detik + 10.0))
+        if not berhasil:
+            raise RuntimeError("Dikte Android gagal atau dibatalkan.")
+        return teks.strip(), -1.0
     import numpy as np
     import sounddevice as sd
 
@@ -1222,10 +1532,10 @@ def dengar_sekali(detik: float = 5.0) -> tuple[str, float]:
         habis = time.time() + detik
         while time.time() < habis:
             data, _ = stream.read(blok_sumber)
-            bersih, mentah, _vad = depan.proses(data)
+            bersih, _mentah, _vad = depan.proses(data)
             if len(bersih):
                 blok.append(bersih.copy())
-                puncak = max(puncak, _rms(mentah))
+                puncak = max(puncak, _rms(bersih))
     if not blok:
         return "", 0.0
     # Mesin yang sama dengan yang dipakai mendengarkan sungguhan — /voice tes
@@ -1264,16 +1574,19 @@ def ukur(detik: float = 6.0, kalibrasi: float = 1.2,
         habis = time.time() + kalibrasi
         while time.time() < habis:
             data, _ = stream.read(blok_sumber)
-            _bersih, mentah, _vad = depan.proses(data)
-            if len(mentah):
-                sunyi.append(_rms(mentah))
+            bersih, _mentah, _vad = depan.proses(data)
+            if len(bersih):
+                # Skala yang sama dengan yang dipakai mendengarkan sungguhan
+                # (audio bersih) — alat ukur yang mengukur dari yang berbeda
+                # memindahkan letak salahnya.
+                sunyi.append(_rms(bersih))
         habis = time.time() + detik
         while time.time() < habis:
             data, _ = stream.read(blok_sumber)
-            bersih, mentah, _vad = depan.proses(data)
+            bersih, _mentah, _vad = depan.proses(data)
             if len(bersih):
                 blok.append(bersih.copy())
-                tingkat.append(_rms(mentah))
+                tingkat.append(_rms(bersih))
 
     derau, ramai, ambang, ambang_lanjut = hitung_ambang(sunyi, jang)
     urut = sorted(tingkat)

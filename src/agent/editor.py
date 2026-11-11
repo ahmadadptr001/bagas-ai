@@ -8,16 +8,22 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
+from . import termux
 from .tools.checkpoint import begin_turn, snapshot
 from .tools.files import _syntax_check
 
 MAX_EDITOR_BYTES = 2 * 1024 * 1024
+HTML_SUFFIXES = frozenset({".html", ".htm", ".xhtml"})
 
 
 class EditorFileError(RuntimeError):
@@ -79,6 +85,50 @@ def load_text_file(path: Path | str) -> TextFileDocument:
     return TextFileDocument(target, normalized, _digest(raw), newline, bom)
 
 
+def open_html_file(path: Path | str) -> None:
+    """Buka HTML proyek tersimpan melalui browser, tanpa mengubah dokumen."""
+    target = _project_file(path)
+    if target.suffix.lower() not in HTML_SUFFIXES:
+        raise EditorFileError("Tombol Browser tersedia untuk file HTML.")
+    uri = target.as_uri()
+    try:
+        if termux.IS_TERMUX:
+            # termux-open menerima path berkas; URI file:// tak selalu
+            # diterjemahkan oleh intent Android.
+            if not termux.buka(str(target)):
+                raise EditorFileError(
+                    "Browser Android tidak dapat dibuka. Pastikan Termux:API "
+                    "terpasang.")
+            return
+        if sys.platform == "win32":
+            # Asosiasi .html bisa menunjuk editor kode. Gunakan browser
+            # bawaan HTTPS agar tombol ini benar-benar membuka browser.
+            executable = None
+            try:
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                    r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice") as key:
+                    progid = winreg.QueryValueEx(key, "ProgId")[0]
+                with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, progid + r"\shell\open\command") as key:
+                    command = winreg.QueryValueEx(key, None)[0]
+                match = re.match(r'^\s*(?:"([^"]+)"|(\S+))', command)
+                if match:
+                    candidate = Path(os.path.expandvars(match[1] or match[2]))
+                    if candidate.is_file():
+                        executable = str(candidate)
+            except (OSError, ValueError, TypeError):
+                pass
+            if executable:
+                subprocess.Popen([executable, uri], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                return
+        if not webbrowser.open(uri, new=2):
+            raise EditorFileError("Browser tidak dapat dibuka. Periksa browser bawaan perangkat.")
+    except OSError as exc:
+        raise EditorFileError(f"Browser tidak dapat dibuka: {exc}") from exc
+
+
 def save_text_file(document: TextFileDocument, text: str) -> str:
     """Simpan dokumen secara atomik dengan conflict guard dan checkpoint."""
     target = _project_file(document.path)
@@ -133,5 +183,5 @@ def save_text_file(document: TextFileDocument, text: str) -> str:
 
 __all__ = [
     "EditorFileError", "MAX_EDITOR_BYTES", "TextFileDocument",
-    "load_text_file", "save_text_file",
+    "load_text_file", "save_text_file", "open_html_file", "HTML_SUFFIXES",
 ]

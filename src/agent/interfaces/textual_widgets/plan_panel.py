@@ -13,6 +13,7 @@ from textual.app import RenderResult
 from rich.text import Text
 
 from ...ui import tema
+from .animasi import tampilkan_halus
 
 
 class PlanPanel(Widget):
@@ -47,7 +48,10 @@ class PlanPanel(Widget):
         """
         self.steps = steps
         self.visible = bool(steps)
-        self.display = self.visible
+        if self.visible:
+            tampilkan_halus(self)
+        else:
+            self.display = False
         if self._content and steps:
             self._content.update(self._render_plan(steps))
 

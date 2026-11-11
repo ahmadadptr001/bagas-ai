@@ -72,6 +72,8 @@ import time
 
 log = logging.getLogger(__name__)
 
+from . import termux
+
 # Panjang maksimal satu ucapan. Diturunkan dari pengukuran, bukan ditebak:
 # TERUKUR ~64 ms per huruf, jadi 160 huruf ≈ 10 detik — batas atas yang masih
 # masuk akal untuk satu kabar antar-langkah.
@@ -180,32 +182,61 @@ while ($null -ne ($baris = [Console]::In.ReadLine())) {
   if ($jenis -eq 'S' -and -not $idv) {
     [Console]::Out.WriteLine('TOLAK'); [Console]::Out.Flush(); continue
   }
+  $berhasil = $false
   try {
     $isi = [System.Text.Encoding]::UTF8.GetString(
              [System.Convert]::FromBase64String($baris.Substring(1)))
     if ($jenis -eq 'S') {
       [Console]::Out.WriteLine('MULAI'); [Console]::Out.Flush()
       $s.Speak($isi)
+      $berhasil = $true
     } elseif ($jenis -eq 'P') {
-      $mp = New-Object System.Windows.Media.MediaPlayer
-      $mp.Open([uri]$isi)
-      $n = 0
-      while (-not $mp.NaturalDuration.HasTimeSpan -and $n -lt 160) {
-        Start-Sleep -Milliseconds 25; $n++
-      }
-      if ($mp.NaturalDuration.HasTimeSpan) {
-        # Diumumkan TEPAT sebelum Play(), sesudah pemuatan selesai.
+      if ([System.IO.Path]::GetExtension($isi) -eq '.wav') {
+        $pemutar = New-Object System.Media.SoundPlayer($isi)
+        $pemutar.Load()
         [Console]::Out.WriteLine('MULAI'); [Console]::Out.Flush()
-        $mp.Play()
-        Start-Sleep -Milliseconds ($mp.NaturalDuration.TimeSpan.TotalMilliseconds + 150)
+        $pemutar.PlaySync()
+        $pemutar.Dispose()
+        $berhasil = $true
+      } else {
+        $mp = New-Object System.Windows.Media.MediaPlayer
+        $mp.Open([uri]$isi)
+        $n = 0
+        while (-not $mp.NaturalDuration.HasTimeSpan -and $n -lt 160) {
+          Start-Sleep -Milliseconds 25; $n++
+        }
+        if ($mp.NaturalDuration.HasTimeSpan) {
+          [Console]::Out.WriteLine('MULAI'); [Console]::Out.Flush()
+          $mp.Play()
+          Start-Sleep -Milliseconds ($mp.NaturalDuration.TimeSpan.TotalMilliseconds + 150)
+          $berhasil = $true
+        }
+        $mp.Close()
       }
-      $mp.Close()
     }
-  } catch { }
-  [Console]::Out.WriteLine('OK')
+  } catch { $berhasil = $false }
+  if ($berhasil) { [Console]::Out.WriteLine('OK') }
+  else { [Console]::Out.WriteLine('GAGAL') }
   [Console]::Out.Flush()
 }
 """
+
+def _mp3_ke_wav(source: str, target: str) -> None:
+    """PCM WAV dapat diputar Windows tanpa event loop WPF/codec MP3."""
+    import av
+    import wave
+
+    with av.open(source) as container, wave.open(target, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(24000)
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
+        for frame in container.decode(audio=0):
+            for pcm in resampler.resample(frame):
+                output.writeframes(pcm.to_ndarray().tobytes())
+        for pcm in resampler.resample(None):
+            output.writeframes(pcm.to_ndarray().tobytes())
+
 
 # --- pembersihan teks -------------------------------------------------------
 _BLOK_KODE = re.compile(r"```.*?```", re.S)
@@ -362,7 +393,9 @@ def sapu_berkas_suara(umur: float = 3600.0) -> int:
     batas = time.time() - umur
     n = 0
     for f in glob.glob(os.path.join(tempfile.gettempdir(),
-                                    "bagasai-suara-*.mp3")):
+                                    "bagasai-suara-*")):
+        if not f.endswith((".mp3", ".wav")):
+            continue
         try:
             if os.path.getmtime(f) <= batas:
                 os.remove(f)
@@ -425,6 +458,12 @@ def mesin_tersedia() -> list[str]:
     TIDAK dianggap tersedia. Lihat aturan di docstring modul: lebih baik diam
     daripada berbunyi dalam bahasa yang salah."""
     out: list[str] = []
+    if termux.IS_TERMUX:
+        # Android: TTS bawaan lewat Termux:API. edge-tts butuh aiohttp yang
+        # berat dibangun di bionic, dan tak ada SAPI/say/espeak di sini.
+        if termux.tts_tersedia():
+            out.append("termux")
+        return out
     if _edge_ada():
         out.append("edge")
     if sys.platform == "win32":
@@ -446,6 +485,10 @@ def alasan_diam() -> str:
     """Kenapa laptop ini tak bisa berbunyi sama sekali ("" bila bisa)."""
     if mesin_tersedia():
         return ""
+    if termux.IS_TERMUX:
+        return ("Termux/Android: TTS Android belum tersedia. Pasang paket "
+                "`termux-api` + aplikasi Termux:API, lalu pastikan mesin TTS "
+                "Android punya suara Indonesia.")
     if sys.platform == "win32":
         return ("tak ada suara Indonesia di laptop ini. Pasang paket suaranya "
                 "lewat `pip install edge-tts` (butuh internet saat dipakai), "
@@ -753,7 +796,15 @@ class Pengucap:
             mesin = siap[0]
             self.mesin = mesin
             try:
-                if mesin == "edge":
+                if mesin == "termux":
+                    alat = termux.perintah("termux-tts-speak")
+                    # Jangan pernah jatuh ke suara bawaan tanpa `-l id`:
+                    # modul ini memilih diam daripada berbunyi dalam bahasa
+                    # yang salah.
+                    if alat and self._jalankan_luar([alat, "-l", "id", teks]):
+                        self._gagal_beruntun = 0
+                        return True
+                elif mesin == "edge":
                     berkas = self._edge_buat(teks)
                     # Menyiapkan suara lewat jaringan makan beberapa detik;
                     # kabar bisa keburu basi sebelum satu kata pun terdengar.
@@ -893,12 +944,24 @@ class Pengucap:
         try:
             self._loop.run_until_complete(
                 asyncio.wait_for(buat(), timeout=_TIMEOUT_EDGE))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             self._catat_lama(time.monotonic() - mulai)
+            self.galat = f"sintesis suara Indonesia gagal ({type(exc).__name__}); periksa jaringan atau /mic tes"
             self._buang(berkas)
             return None
         self._catat_lama(time.monotonic() - mulai)
         if os.path.exists(berkas) and os.path.getsize(berkas) > 1024:
+            if sys.platform == "win32":
+                wav = os.path.splitext(berkas)[0] + ".wav"
+                try:
+                    _mp3_ke_wav(berkas, wav)
+                except Exception as exc:
+                    self.galat = f"audio tidak dapat didekode ({type(exc).__name__})"
+                    self._buang(berkas)
+                    self._buang(wav)
+                    return None
+                self._buang(berkas)
+                return wav
             return berkas
         self._buang(berkas)
         return None
@@ -956,6 +1019,7 @@ class Pengucap:
         # begitu perintahnya terkirim, sehingga waktu memuat (sampai 4 detik)
         # ikut terhitung sebagai waktu terdengar dan kabar bisa dipotong
         # sebelum satu kata pun keluar.
+        mulai_terkonfirmasi = False
         try:
             while True:
                 baris = p.stdout.readline()
@@ -966,11 +1030,15 @@ class Pengucap:
                     return False
                 status = baris.strip()
                 if status == "MULAI":
+                    mulai_terkonfirmasi = True
                     with self._kunci:
                         self._mulai_bunyi = time.monotonic()
                     continue
                 if status == "OK":
-                    return True
+                    return mulai_terkonfirmasi
+                if status == "GAGAL":
+                    self.galat = "pemutar Windows tidak dapat memutar audio"
+                    return False
                 if status == "TOLAK":
                     # Mesinnya sehat, cuma menolak bicara dalam bahasa yang
                     # salah. Bukan kegagalan yang perlu dicoba-coba lagi.
@@ -1031,6 +1099,11 @@ _GETAR = ((110, 80), (0, 55), (110, 120))
 
 def _getar_sekarang() -> None:
     """Bunyikan dengungnya. Dipanggil di thread sendiri — winsound menahan."""
+    if termux.IS_TERMUX:
+        # Android benar-benar punya motor getar — inilah satu-satunya tempat
+        # "getaran" bukan tiruan.
+        if termux.getar(120):
+            return
     if sys.platform == "win32":
         try:
             import winsound

@@ -241,14 +241,27 @@ try:
     jalankan("gerbang", hasil is spec_oc, "_pastikan_aktif meloloskan opencode")
 except Exception as e:
     jalankan("gerbang", False, f"opencode ditolak padahal gratis: {e}")
-# TIDAK ADA model opencode yang boleh ditunda — termasuk entri statis yang
-# belum muncul di `opencode models` (permintaan pengguna 2026-10-31).
-for alias in ("hy3-free", "mimo-v2.5-free"):
-    sp = models.cari(alias)
-    jalankan("sinkron", sp.aktif, f"{alias} tetap aktif walau tak ada di CLI")
-jalankan("sinkron", all(
-    s.aktif for s in models.MODELS.values() if s.provider == "opencode"),
-    "seluruh model opencode aktif (tak ada yang ditunda)")
+# Katalog opencode/* mengikuti daftar hidup `opencode models`: entri statis
+# yang sudah tak muncul lagi TIDAK boleh tetap tampil. Provider lain
+# (apinex/ollama) juga tidak ikut.
+hidup = models.sinkron_model_opencode()
+if hidup:
+    katalog = [k for k, s in models.MODELS.items()
+               if s.provider == "opencode" and s.aktif]
+    jalankan("sinkron", set(katalog) == set(hidup),
+             f"katalog == daftar CLI: {katalog} vs {hidup}")
+    jalankan("sinkron", not ({"hy3-free", "mimo-v2.5-free"} & set(katalog)),
+             "entri statis yang hilang dari CLI tidak tampil")
+    jalankan("sinkron", all(
+        not (s.api_model or "").startswith(("apinex/", "ollama/"))
+        for s in models.MODELS.values() if s.provider == "opencode"),
+        "provider apinex/ollama tidak ikut")
+    jalankan("sinkron", all(
+        s.aktif for s in models.MODELS.values() if s.provider == "opencode"),
+        "seluruh model opencode aktif (tak ada yang ditunda)")
+else:
+    jalankan("sinkron", True,
+             "CLI tidak tersedia — katalog statis dipakai sebagai cadangan")
 # entri opencode hidup harus di katalog dan ber-label CLI
 for hidup in oc_aktif[:3]:
     jalankan("label", "CLI" in models.MODELS[hidup].label

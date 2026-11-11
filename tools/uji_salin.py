@@ -9,12 +9,15 @@ Yang dicek:
 2. Klik polos menghapus sorotan (dan tetap membuka blok write() di area mana pun).
 3. Seret ke atas (arah terbalik) tetap benar.
 4. Klik GANDA = satu kata; klik TIGA KALI = satu baris penuh.
-5. render_line membalik hanya rentang terpilih (baris luar tetap polos).
+5. render_line mewarnai hanya rentang terpilih dengan latar tema;
+   sisa baris dan sel kiri/kanan tetap utuh.
 6. Pemetaan kolom-sel → karakter benar untuk teks lebar-2 (CJK/emoji).
 """
 import asyncio
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -22,6 +25,7 @@ from textual.app import App
 from textual.events import MouseMove
 
 from agent.interfaces.textual_widgets.message_list import MessageList
+from agent.ui import tema
 
 
 class AppUji(App):
@@ -125,14 +129,36 @@ async def main() -> int:
         cek("klik tunggal mereset sorotan",
             ml._salin_lo is None or ml._salin_lo == ml._salin_hi)
 
-        # ── 5. render_line: hanya rentang terpilih yang terbalik ─────
+        # ── 5. render_line: hanya rentang terpilih yang diberi warna tema ─
         ml._salin_lo, ml._salin_hi = (0, 2), (0, 7)
         ml._salin_mode = "huruf"
         ml.refresh()
         await pilot.pause()
-        teks_lo = ml.render_line(0).text
-        cek("render membalik hanya rentang terpilih",
-            teks_lo.lstrip().startswith("alpha"),
+        garis = ml.render_line(0)
+        teks_lo = garis.text
+        tengah = garis.crop(2, 7)
+        kiri = garis.crop(0, 2)
+        kanan = garis.crop(7, 12)
+        def hex_warna(warna):
+            if warna is None:
+                return ""
+            try:
+                return warna.get_truecolor().hex.lower()
+            except Exception:  # noqa: BLE001 — warna bawaan terminal
+                return str(warna).lower()
+
+        bg_sel = tema.p("menu_aktif_bg").lower()
+        bg_tengah = hex_warna(tengah._segments[0].style.bgcolor)
+        bg_kiri = hex_warna(kiri._segments[0].style.bgcolor)
+        bg_kanan = hex_warna(kanan._segments[0].style.bgcolor)
+        cek("sorotan memakai latar tema",
+            bg_tengah == bg_sel,
+            f"bg={bg_tengah}, tema={bg_sel}")
+        cek("sorotan tidak melebar ke kiri/kanan",
+            bg_kiri != bg_sel and bg_kanan != bg_sel,
+            f"kiri={bg_kiri}, kanan={bg_kanan}")
+        cek("sisa baris setelah seleksi tidak hilang",
+            "beta gamma" in teks_lo,
             f"render={teks_lo!r}")
 
         # ── 6. pemetaan lebar-2 (CJK/emoji) ──────────────────────────
@@ -143,6 +169,41 @@ async def main() -> int:
         await _seret(pilot, ml, 2, 2, 4, 2)
         cek("seret teks lebar-2 akurat per karakter",
             "漢" in pilot.app._clipboard and "字" not in pilot.app._clipboard, f"klip={pilot.app._clipboard!r}")
+
+        # ── 7. klik ganda/tiga di blok tool tetap menyeleksi ─────────
+        # Klik polos di blok = toggle; klik ganda/tiga harus memilih teks,
+        # bukan menutup blok, supaya keluaran tool bisa disalin.
+        blok = ml.append_write_block("x.py", "print('halo')")
+        await pilot.pause()
+        idx = next(i for i in ml._blok_klik if "print" in ml.lines[i].text)
+        ev = SimpleNamespace(button=1, x=4, y=idx)
+        ml._klik_terakhir = (time.monotonic(), 4, idx)
+        ml.on_mouse_down(ev)
+        ml.on_mouse_down(ev)
+        cek("klik tiga di blok tool menyeleksi satu baris",
+            ml._salin_mode == "baris"
+            and ml._salin_lo is not None and ml._salin_lo[0] == idx
+            and ml._salin_hi is not None and ml._salin_hi[0] == idx
+            and bool(ml._teks_salin(ml._salin_lo, ml._salin_hi).strip()),
+            f"mode={ml._salin_mode}, lo={ml._salin_lo}, "
+            f"hi={ml._salin_hi}, blok={blok.path}")
+
+        # Klik TIGA KALI sungguhan lewat pilot: klik pertama TIDAK boleh
+        # menutup/membuka blok; klik kedua/ketiga menyeleksi baris yang sama.
+        ml._klik_terakhir = None
+        await pilot.pause(0.6)
+        y = idx - int(ml.scroll_offset.y)
+        for _ in range(3):
+            await klik(pilot, ml, 4, y, jeda=0.08)
+        cek("klik tiga nyata di blok tool menyeleksi satu baris",
+            ml._salin_mode == "baris"
+            and ml._salin_lo is not None and ml._salin_lo[0] == idx
+            and ml._salin_hi is not None and ml._salin_hi[0] == idx
+            and not blok.terbuka
+            and "halo" in pilot.app._clipboard,
+            f"mode={ml._salin_mode}, lo={ml._salin_lo}, "
+            f"hi={ml._salin_hi}, buka={blok.terbuka}, "
+            f"klip={pilot.app._clipboard!r}")
 
     print("\nSEMUA LULUS" if gagal == 0 else f"\n{gagal} uji GAGAL")
     return 0 if gagal == 0 else 1

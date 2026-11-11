@@ -33,12 +33,13 @@ from textual.widget import Widget
 from textual.widgets import Button
 
 from ...ui import tema
+from ...ui.icons import footer_icon
 
 if TYPE_CHECKING:
     from ...core import Agent
 
 # Urutan pelepasan segmen saat ruang habis (paling depan dilepas dulu).
-_URUTAN_LEPAS = ("ctrlc", "perintah", "ubah", "git")
+_URUTAN_LEPAS = ("ctrlc", "perintah", "ubah", "git", "keadaan")
 
 # Cache git: dibaca di thread pekerja, dibaca-tulis dari UI.
 _git_cache: dict = {"t": 0.0, "v": ("", 0)}
@@ -86,9 +87,8 @@ class StatusBar(Widget):
     def compose(self):
         # Ikon menu ditempatkan tepat di area merek footer; hanya terlihat
         # pada breakpoint mobile dan event-nya ditangani BagasAIApp.
-        yield Button("▯", id="statusbar-sidebar-toggle", variant="default")
-
-    # Tanpa compose() — StatusBar memakai render() langsung.
+        yield Button(footer_icon("sidebar_closed"), id="statusbar-sidebar-toggle",
+                     variant="default", tooltip="Buka/tutup sidebar", compact=True)
 
     def on_mount(self) -> None:
         self._muat_git()
@@ -122,32 +122,38 @@ class StatusBar(Widget):
             return "—", False
 
     def render(self) -> RenderResult:
-        lebar = self.size.width or 80
+        # Anak yang di-dock digambar di atas render() Widget. Sisihkan ruang
+        # eksplisit agar tombol sidebar tidak menutupi ikon merek di mobile.
+        menu_width = 3 if any(child.display for child in self.children) else 0
+        lebar = max(1, (self.content_size.width or 80) - menu_width)
         label, is_web = self._label_model()
-        sep = "  │  "
+        sep = " " if lebar < 60 else "  " if lebar < 100 else "   "
         branch, changed = _git_cache["v"]
+        busy = bool(getattr(self.app, "is_turn_active", False))
 
         if self.live_vision_state == "checking":
-            live_label = f"{sep}◌ alat…"
+            live_label = f"{sep}{footer_icon('loading')} alat…"
         elif self.live_vision_state == "ready" and self.live_screen:
-            live_label = f"{sep}◉ alat ✓"
+            live_label = f"{sep}{footer_icon('live')} alat {footer_icon('check')}"
         elif self.live_vision_state == "error":
-            live_label = f"{sep}◌ alat ✗"
+            live_label = f"{sep}{footer_icon('live')} alat {footer_icon('error')}"
         else:
-            live_label = f"{sep}📹 layar" if self.live_screen else ""
+            live_label = f"{sep}{footer_icon('live')} layar" if self.live_screen else ""
 
         segmen: dict[str, str] = {
-            "merek": " ⬢ bagas-ai",
-            "model": f"{sep}{'🌐' if is_web else '🤖'} {label}",
+            # Spasi di kiri/kanan membuat latar merek terbaca sebagai pill.
+            "merek": f" {footer_icon('brand')} bagas-ai" + (" " if lebar >= 40 else ""),
+            "model": f"{sep}{footer_icon('web' if is_web else 'model')} {label}",
             "live": live_label,
-            "voice": (f"{sep}◌ analisis" if self.voice_state == "menganalisis"
-                      else f"{sep}● merekam" if self.voice_state == "merekam"
-                      else f"{sep}🎙 dengar" if self.voice_state else ""),
-            "git": f"{sep}🌿 {branch}" if branch else "",
-            "ubah": f"{sep}📝 {changed}" if changed else "",
-            "perintah": f"{sep}/help · ",
-            "exit": "/exit",
-            "ctrlc": " atau ctrl+c",
+            "voice": (f"{sep}{footer_icon('loading')} analisis" if self.voice_state == "menganalisis"
+                      else f"{sep}{footer_icon('ready')} merekam" if self.voice_state == "merekam"
+                      else f"{sep}{footer_icon('voice')} dengar" if self.voice_state else ""),
+            "git": f"{sep}{footer_icon('git')} {branch}" if branch else "",
+            "ubah": f"{sep}{footer_icon('changed')} {changed}" if changed else "",
+            "perintah": f"{sep}/help",
+            "exit": f"{sep}/exit",
+            "ctrlc": f"{sep}ctrl+c",
+            "keadaan": f"{sep}{footer_icon('ready')} {'Bekerja' if busy else 'Siap'}",
         }
         warna: dict[str, str] = {
             "merek": tema.p("merek_footer"),
@@ -159,15 +165,23 @@ class StatusBar(Widget):
             "perintah": tema.p("cmd_footer"),
             "exit": tema.p("exit_footer"),
             "ctrlc": tema.p("muted_footer"),
+            "keadaan": tema.p("aksen") if busy else tema.p("git_footer"),
         }
         bg = tema.p("bg_footer")
         warna_sep = tema.p("sep_footer")
+        # Gaya per segmen: merek jadi pill beraksen (pasangan menu_aktif
+        # dijamin kontras >= 4.5 oleh uji tema), model ditebalkan.
+        gaya = {s: f"{warna[s]} on {bg}" for s in warna}
+        gaya["merek"] = (f"bold {tema.p('menu_aktif_teks')} "
+                         f"on {tema.p('menu_aktif_bg')}")
+        gaya["model"] = f"{warna['model']} on {bg}"
 
         kiri = [s for s in ("merek", "model", "live", "voice", "git", "ubah")
                 if segmen[s]]
-        kanan = [s for s in ("perintah", "exit", "ctrlc") if segmen[s]]
+        kanan = [s for s in ("perintah", "keadaan") if segmen[s]]
+        self.tooltip = f"{label}\n/exit keluar · Ctrl+C salin / batal"
 
-        # Lepas segmen opsional sampai muat. Merek/model/exit selalu tampil.
+        # Lepas segmen opsional sampai muat, lalu singkat label modelnya.
         def total() -> int:
             return sum(cell_len(segmen[s]) for s in kiri + kanan) + 1
 
@@ -179,15 +193,23 @@ class StatusBar(Widget):
             elif kandidat in kanan:
                 kanan.remove(kandidat)
 
+        if total() > lebar:
+            prefix = f"{sep}{footer_icon('web' if is_web else 'model')} "
+            available = max(0, lebar - (total() - cell_len(segmen['model'])) - cell_len(prefix))
+            short_label = Text(label if available else "", no_wrap=True)
+            if available:
+                short_label.truncate(available, overflow="ellipsis")
+            segmen["model"] = prefix + short_label.plain
+
         bar = Text(style=f"on {bg}", no_wrap=True, overflow="crop")
 
         for s in kiri:
             teks = segmen[s]
-            # Pemisah "│" diwarnai berbeda dari isi segmennya.
+            # Jarak antarseksi mengikuti warna latar footer.
             if teks.startswith(sep):
                 bar.append(sep, style=f"{warna_sep} on {bg}")
                 teks = teks[len(sep):]
-            bar.append(teks, style=f"{warna[s]} on {bg}")
+            bar.append(teks, style=gaya[s])
 
         lebar_kanan = sum(cell_len(segmen[s]) for s in kanan)
         bar.append(" " * max(0, lebar - bar.cell_len - lebar_kanan - 1),
@@ -198,17 +220,11 @@ class StatusBar(Widget):
             if teks.startswith(sep):
                 bar.append(sep, style=f"{warna_sep} on {bg}")
                 teks = teks[len(sep):]
-            if s == "perintah":
-                # "/help · " -> perintah berwarna, titik pemisah diredupkan
-                nama, _, sisa = teks.partition("·")
-                bar.append(nama, style=f"{warna[s]} on {bg}")
-                if sisa or _:
-                    bar.append("·" + sisa, style=f"{warna_sep} on {bg}")
-            else:
-                bar.append(teks, style=f"{warna[s]} on {bg}")
+            bar.append(teks, style=gaya[s])
 
         bar.append(" ", style=f"on {bg}")
-        return bar
+        bar.truncate(lebar, overflow="crop")
+        return Text.assemble(Text(" " * menu_width, style=f"on {bg}"), bar)
 
     def update_model(self, label: str, is_web: bool = False) -> None:
         """Ganti label model (memicu gambar ulang lewat reactive)."""

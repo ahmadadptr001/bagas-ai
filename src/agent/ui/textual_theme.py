@@ -14,12 +14,11 @@ sumber stylesheet kedua saat ``/theme``. Aturan tema LAMA tetap ada di
 stylesheet dan bertarung dengan yang baru — hasilnya ganti tema tampak TIDAK
 berubah sama sekali.
 
-CATATAN LAYOUT (tetap berlaku):
+CATATAN LAYOUT:
 
-Di Textual, SEMUA widget ber-``dock: bottom`` diletakkan pada baris paling
-bawah region induknya — mereka SALING MENIMPA, bukan menumpuk rapi. Hanya
-``#footer`` yang di-dock; panel-panel di dalamnya mengalir vertikal normal
-sehingga ``#messages`` menyusut tepat sebanyak tinggi footer.
+Header dan status bar di-dock pada Screen. Workspace di antaranya berisi
+kolom percakapan dan sidebar. Panel footer mengalir di kolom percakapan,
+sehingga input tidak dapat menimpa sidebar saat panel atau lebar berubah.
 """
 from __future__ import annotations
 
@@ -40,6 +39,10 @@ _CAMPURAN = {
     # Sorotan dropdown: menu_bg ditarik 22% ke arah aksen. Baris sorotan
     # penuh aksen terlalu menyala ("gong"); ini jauh lebih tenang.
     "menu_sorot": ("menu_bg", "aksen", 0.22),
+    # Hover terpisah dari tepi_redup: dulu hover meminjam warna BORDER,
+    # jadi di tema terang teks gelap di atas abu #909090 cuma 3.5:1.
+    # Campuran tipis ke aksen menjaga teks tetap >= 4.5 di semua tema.
+    "menu_hover": ("menu_bg", "aksen", 0.10),
 }
 
 
@@ -104,9 +107,10 @@ def markdown_styles(theme_id: str | None = None) -> dict[str, str]:
     Textual me-render Markdown lewat ``app.console``; cukup suntik dict ini
     ke console saat mount / ganti tema.
 
-    Latar inline-code mengikuti sisi terang/gelap tema: #3a2a1a (cokelat
-    pekat) di atas kanvas putih memberi kontras ~2:1 dan terlihat kotor —
-    tema terang memakai slate netral.
+    Latar inline-code mengikuti permukaan tema: tema gelap memakai
+    ``menu_meta_bg`` (senada panel menu), tema terang memakai slate netral.
+    Dulu latarnya cokelat tetap ``#3a2a1a`` — di tema biru/dingin warnanya
+    terlihat kotor dan tidak ikut /theme.
     """
     if theme_id is not None:
         src = tema.TEMA.get(theme_id, tema.TEMA.get("biru", {}))
@@ -115,13 +119,15 @@ def markdown_styles(theme_id: str | None = None) -> dict[str, str]:
     else:
         ambil = tema.p
         terang = latar_terang()
-    bg_kode = "#eef1f5" if terang else "#3a2a1a"
+    # Latar inline-code mengikuti permukaan tema, bukan cokelat warisan
+    # Ember: di tema dingin (Lautan/Cupertino) cokelat terlihat kotor.
+    bg_kode = "#eef1f5" if terang else ambil("menu_meta_bg")
     return {
         "markdown.h1": f"bold {ambil('aksen')}",
         "markdown.h1.border": ambil("aksen"),
         "markdown.h2": f"bold {ambil('aksen2')}",
         "markdown.h3": f"bold {ambil('aksen_terang')}",
-        "markdown.h4": "bold #9fc93c" if not terang else "bold #3f701c",
+        "markdown.h4": f"bold {ambil('aksen2')}",
         "markdown.h5": f"bold {ambil('aksen_terang')}",
         "markdown.h6": f"bold {ambil('aksen2')}",
         "markdown.item.bullet": f"bold {ambil('aksen')}",
@@ -162,11 +168,115 @@ Screen {
 /* ── Isi utama: logo (auto) + daftar pesan (sisa ruang) ─────────────── */
 
 #logo {
+    dock: top;
+    layout: horizontal;
     width: 100%;
-    height: auto;
-    max-height: 4;
-    padding: 1 2;
+    height: 3;
+    padding: 1 2 0 2;
+    align-vertical: middle;
+    background: $t-bg_footer;
     color: $t-aksen;
+    border-bottom: solid $t-tepi_redup;
+}
+
+#titlebar-brand, #titlebar-actions {
+    width: 1fr;
+    height: 1;
+}
+#titlebar-lights { width: 8; height: 1; }
+#logo-content {
+    width: 1fr;
+    height: 1;
+    text-align: left;
+}
+#titlebar-chat {
+    width: 12;
+    height: 1;
+    text-align: center;
+    background: $t-menu_aktif_bg;
+    color: $t-menu_aktif_teks;
+}
+#titlebar-actions { align-horizontal: right; }
+#titlebar-actions Button {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    min-height: 1;
+    margin-left: 1;
+    padding: 0;
+    border: none;
+    background: $t-menu_bg;
+    color: $t-redup;
+}
+#titlebar-actions Button:hover { color: $t-teks; background: $t-menu_hover; }
+
+#workspace { width: 100%; height: 1fr; }
+#conversation { width: 1fr; height: 100%; }
+#history { width: 100%; height: 1fr; }
+#empty-state {
+    position: absolute;
+    width: 100%;
+    height: 8;
+    max-height: 100%;
+    text-align: center;
+    background: $t-gema_bg;
+}
+
+/* Kartu inspector mengikuti tema, termasuk tema terang. */
+#sidebar {
+    dock: none;
+    background: $t-menu_meta_bg;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+}
+
+#plan-side, #system-panel, #sidebar #path-footer {
+    background: $t-menu_bg;
+    border: round $t-tepi_redup;
+    padding: 0 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+#sidebar #path-footer:hover {
+    border: round $t-tepi;
+    background: $t-menu_hover;
+}
+
+#input-send {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    margin-left: 1;
+    border: none;
+    background: $t-menu_aktif_bg;
+    color: $t-menu_aktif_teks;
+    text-style: bold;
+}
+
+#input-send:hover, #input-send:focus {
+    background: $t-aksen;
+    color: $t-gema_bg;
+    text-style: bold;
+}
+
+#input-more, #input-effort {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0;
+    background: $t-menu_bg;
+    color: $t-redup;
+}
+#input-more { margin-right: 1; }
+#input-effort { margin-left: 1; }
+#input-more:hover, #input-effort:hover {
+    color: $t-teks;
+    background: $t-menu_hover;
 }
 
 #messages {
@@ -178,23 +288,34 @@ Screen {
     padding: 1 2;
     overflow-x: hidden;
     overflow-y: auto;
+    /* ScrollBar membaca warna dari PARENT-nya, bukan dari Screen. Tanpa
+       ini scrollbar memakai token bawaan Textual (track hitam, tebal 2
+       sel). Dibuat 1 sel dan menyatu dengan kanvas. */
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $t-gema_bg;
+    scrollbar-background-hover: $t-gema_bg;
+    scrollbar-background-active: $t-gema_bg;
+    scrollbar-color: $t-tepi_redup;
+    scrollbar-color-hover: $t-tepi;
+    scrollbar-color-active: $t-tepi;
 }
 
-/* ── Footer: SATU-SATUNYA widget yang di-dock ───────────────────────── */
+/* ── Footer di dalam kolom percakapan ────────────────────────────── */
 
 #footer {
-    dock: bottom;
     width: 100%;
     height: auto;
     max-height: 75%;
     background: $t-gema_bg;
-    padding: 0 1;
+    /* Tanpa padding samping: footer harus berhenti TEPAT di divider
+       sidebar. Indentasi teks diatur oleh padding dalam #input-row. */
+    padding: 0;
 }
 
 #statusbar-sidebar-toggle {
     display: none;
     dock: left;
-    width: auto;
+    width: 3;
     min-width: 3;
     margin: 0;
     height: 1;
@@ -213,35 +334,41 @@ Screen {
 #plan, #image-preview, #thinking-block {
     width: 100%;
     height: auto;
-    background: $t-gema_bg;
+    /* Kartu bantuan di atas composer: permukaan naik satu tingkat dari
+       kanvas, sama seperti panel picker dan kotak input. */
+    background: $t-menu_bg;
     padding: 1 1;
     margin-top: 1;
 }
 
 #plan {
     max-height: 12;
-    border-top: tall $t-tepi_redup;
+    /* Hairline, bukan garis tebal: pemisah ala macOS. */
+    border-top: solid $t-tepi_redup;
 }
 
-#image-preview { max-height: 12; }
+#image-preview {
+    max-height: 6;
+    padding: 0 2;
+    margin-top: 0;
+    background: $t-gema_bg;
+}
 
-/* Tanpa max-height: di sini dulu ada batas 8/4/3 baris menurut layar, dan
-   batas itu memotong dari BAWAH — persis baris terbaru yang ingin dibaca
-   yang hilang. Tingginya sekarang dihitung ThinkingBlock._baris_maks(). */
+/* Header satu baris; isi memakai viewport kecil yang bisa digulir.
+   Padding vertikal/margin membuat header tertutup boros beberapa baris. */
 #thinking-block {
-    border-top: tall $t-tepi_redup;
+    padding: 0 1;
+    margin-top: 0;
+    border: none;
 }
 
 #progress {
     width: 100%;
-    height: auto;
-    /* Logo half-block = 2 baris teks; tanpa padding vertikal/margin
-       (dulu padding 1 + margin 1 + max-height 3 = ~4 baris kosong tiap
-       giliran — makan tinggi jawaban cuma untuk animasi menunggu). */
-    max-height: 2;
+    height: 1;
+    max-height: 1;
     background: $t-gema_bg;
     color: $t-aksen;
-    padding: 0 1;
+    padding: 0 2;
     margin-top: 0;
 }
 
@@ -254,7 +381,8 @@ Screen {
     height: auto;
     max-height: 4;
     background: $t-gema_bg;
-    padding: 1 1;
+    /* Sejajarkan gema antrean dengan teks di #messages. */
+    padding: 1 2;
 }
 
 /* ── Kotak input ────────────────────────────────────────────────────── */
@@ -265,7 +393,8 @@ Screen {
     background: $t-gema_bg;
     /* Jarak antara riwayat/panel di atas dan kotak input. */
     margin-top: 1;
-    padding-bottom: 1;
+    /* Napas kiri/kanan: composer tidak menempel ke tepi terminal. */
+    padding: 0 2 1 2;
 }
 
 #input-row {
@@ -274,10 +403,19 @@ Screen {
        (maks 5 baris, diatur _sesuaikan_tinggi di chat_box.py). Border
        round menambah 2 baris sendiri. */
     height: auto;
-    background: $t-gema_bg;
-    border: round $t-tepi;
+    /* Composer adalah kartu terang di atas kanvas gelap — bukan area yang
+       menyatu dengan riwayat. Ini yang membuatnya terasa seperti kotak
+       pesan aplikasi desktop. */
+    background: $t-menu_bg;
+    /* Garis istirahat dibuat selembut mungkin; aksen hanya muncul saat
+       fokus supaya kotak input terasa "hidup" tanpa berteriak. */
+    border: round $t-tepi_redup;
     /* Napas dalam kotak: spasi vertikal + horizontal yang longgar. */
     padding: 1 1;
+}
+
+#input-row:focus-within {
+    border: round $t-tepi;
 }
 
 #input-row.-sibuk {
@@ -285,6 +423,7 @@ Screen {
 }
 
 #input-prompt {
+    display: none;
     width: 2;
     height: 1;
     padding: 0;
@@ -301,14 +440,41 @@ Screen {
     height: 1;
     padding: 0;
     border: none;
-    background: $t-gema_bg;
+    background: $t-menu_bg;
     color: $t-teks;
 }
 
 #chat-input:focus {
     border: none;
-    background: $t-gema_bg;
-    background-tint: $t-gema_bg;
+    background: $t-menu_bg;
+    background-tint: $t-menu_bg;
+}
+
+#input-hint {
+    display: none;
+    width: 100%;
+    height: 1;
+    padding: 0 2;
+    color: $t-redup;
+    background: transparent;
+    text-align: right;
+}
+
+/* Placeholder & seleksi di dalam TextArea memakai palet tema, bukan
+   bawaan Textual (biru generik yang tak ikut /theme). */
+#chat-input .text-area--placeholder {
+    color: $t-redup;
+    text-style: italic;
+}
+
+#chat-input .text-area--cursor {
+    background: $t-aksen;
+    color: $t-gema_bg;
+}
+
+#chat-input .text-area--selection {
+    background: $t-menu_aktif_bg;
+    color: $t-menu_aktif_teks;
 }
 
 /* ── Dropdown autocomplete: DI ATAS kotak input ─────────────────────── */
@@ -333,14 +499,20 @@ Screen {
     display: none;
     width: 100%;
     height: auto;
-    max-height: 12;
+    max-height: 9;
     background: $t-menu_bg;
     color: $t-menu_teks;
     border: round $t-tepi_redup;
-    padding: 1 1;
+    padding: 0 1;
     margin-top: 1;
     overflow-x: hidden;
     scrollbar-size-vertical: 1;
+    scrollbar-background: $t-menu_bg;
+    scrollbar-background-hover: $t-menu_bg;
+    scrollbar-background-active: $t-menu_bg;
+    scrollbar-color: $t-tepi_redup;
+    scrollbar-color-hover: $t-tepi;
+    scrollbar-color-active: $t-tepi;
 }
 
 #autocomplete-list > .option-list--option {
@@ -358,7 +530,7 @@ Screen {
 }
 
 #autocomplete-list > .option-list--option-hover {
-    background: $t-tepi_redup;
+    background: $t-menu_hover;
     color: $t-menu_teks;
 }
 
@@ -374,10 +546,14 @@ Screen {
 /* ── Status bar ─────────────────────────────────────────────────────── */
 
 #statusbar {
+    dock: bottom;
     width: 100%;
-    height: 1;
+    height: 2;
+    border-top: solid $t-tepi_redup;
     background: $t-bg_footer;
     color: $t-model_footer;
+    /* Napas kiri/kanan: pill merek tidak menempel di tepi terminal. */
+    padding: 0 1;
 }
 
 /* ── Modal (menu pilih / konfirmasi / input) ────────────────────────── */
@@ -451,24 +627,31 @@ ConfirmScreen Static.-active {
 
 /* ── Responsif (kelas dipasang otomatis oleh breakpoints) ───────────── */
 
-Screen.-sempit #logo { display: none; }
+Screen.-sempit #titlebar-lights, Screen.-sempit #titlebar-chat { display: none; }
+Screen.-sempit #titlebar-brand { width: 1fr; }
+Screen.-sempit #titlebar-actions { width: 7; }
+Screen.-sempit #logo { padding: 0 1; height: 2; }
+Screen.-sempit #chatbox { padding: 0 1; margin-top: 0; }
+Screen.-sempit #input-row { padding: 0 1; }
 Screen.-sempit #statusbar-sidebar-toggle, Screen.-normal #statusbar-sidebar-toggle {
     display: block;
 }
-Screen.-sempit #statusbar { padding-left: 3; }
-Screen.-normal #statusbar { padding-left: 3; }
+Screen.-sempit #statusbar { padding-left: 1; }
+Screen.-normal #statusbar { padding-left: 1; }
 Screen.-sempit #sidebar-close, Screen.-normal #sidebar-close { display: block; }
 Screen.-sempit #plan { max-height: 5; }
 Screen.-sempit #autocomplete-list { max-height: 6; }
 Screen.-sempit #autocomplete-hint { display: none; }
 
-Screen.-pendek #logo { display: none; }
+Screen.-pendek #logo { height: 2; }
+Screen.-pendek #input-row { padding: 0 1; }
+Screen.-pendek #chatbox { padding-bottom: 0; margin-top: 0; }
 Screen.-pendek #footer { max-height: 60%; }
 Screen.-pendek #plan { max-height: 4; }
 Screen.-pendek #autocomplete-list { max-height: 5; }
 Screen.-pendek #autocomplete-hint { display: none; }
 
 /* Kompatibilitas: kelas lama .compact masih dihormati. */
-.compact #logo { display: none; }
+.compact #logo { height: 2; }
 .compact #plan { max-height: 4; }
 """

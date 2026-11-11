@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
-from agent.ui import textual_theme, tema
+import sys
+from pathlib import Path
+
+# Uji ini dulu mengimpor paket `agent` yang TERPASANG (bukan src/), jadi
+# perubahan tema di working tree tak pernah ikut diuji. Samakan dengan
+# tools lain: utamakan src/ milik repo.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from agent.ui import textual_theme, tema  # noqa: E402
 
 
 def lum(h: str) -> float:
@@ -25,7 +33,7 @@ checks = [
     ("title aksen/gema", "aksen", "gema_bg"),
     ("opt teks/bg", "menu_teks", "menu_bg"),
     ("opt teks/sorot", "menu_teks", "menu_sorot"),
-    ("opt teks/hover", "menu_teks", "tepi_redup"),
+    ("opt teks/hover", "menu_teks", "menu_hover"),
     ("meta/gema", "menu_meta_teks", "gema_bg"),
     ("aktif pair", "menu_aktif_teks", "menu_aktif_bg"),
 ]

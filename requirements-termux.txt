@@ -1,0 +1,22 @@
+# Dependensi minimal bagas-ai untuk Termux/Android (bionic).
+#
+# BUKAN pengganti requirements.txt. Di Termux:
+#   - wheel manylinux TIDAK kompatibel dengan bionic, dan banyak paket harus
+#     dibangun dari sumber (mahal) atau memang tak punya padanan Android;
+#   - Playwright/Chromium, faster-whisper, sounddevice, onnxruntime, PyMuPDF,
+#     edge-tts, openai, pydantic, fastapi, dan mcp sengaja DILEWATI.
+#
+# Yang tetap ada di sini hanya paket murni-Python yang dipakai TUI/chat,
+# konfigurasi, HTTP, dan bot Telegram. Pillow, numpy, dan psutil dipasang
+# lewat `pkg install python-pillow python-numpy python-psutil` (lihat
+# install-termux.sh), bukan lewat pip.
+rich>=13.0.0
+Pygments>=2.17.0
+textual>=1.0.0
+prompt_toolkit>=3.0.39
+pyfiglet>=1.0.0
+python-dotenv>=1.0.0
+packaging>=23.0
+requests>=2.31.0
+python-telegram-bot>=21.0
+psutil>=5.9.0

@@ -123,6 +123,11 @@ async def main() -> None:
                          lambda: not app._voice_state["task_active"],
                          pesan="tes /mic harus selesai di worker")
             assert ucap.called
+            # /mic on juga harus membacakan jawaban saat overlay voice tertutup.
+            app._start_turn("uji jawaban tanpa mode voice")
+            await tunggu(pilot, lambda: not app.is_turn_active)
+            assert any("jawaban audio" in c.args[0] for c in ucap_panjang.call_args_list)
+            agent.run.reset_mock()
             print("  /mic selesai", flush=True)
 
             # /voice on membuka layar orb BESAR dan listener langsung.

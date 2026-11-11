@@ -347,6 +347,9 @@ VOICE_JANGKAUAN: str = os.getenv("VOICE_JANGKAUAN", "jauh").strip().lower()
 # Installer/updater wajib mengunduh dan menguji model ini. Jika model gagal
 # dimuat, /voice menampilkan galat dan tidak mengirim audio ke layanan luar.
 VOICE_STT_MODEL: str = os.getenv("VOICE_STT_MODEL", "small").strip().lower()
+VOICE_STT_LANGUAGE: str = os.getenv("VOICE_STT_LANGUAGE", "id").strip().lower() or "id"
+# Kosong memakai input sistem; nama atau nomor perangkat memilih mic tertentu.
+VOICE_INPUT_DEVICE: str = os.getenv("VOICE_INPUT_DEVICE", "").strip()
 
 # Bunyi penanda "tugas selesai" pilihan sendiri (path ke berkas WAV). Kosong =
 # pakai bawaan di ~/.bagasai/suara/ (lihat tanda.py). Cara lain tanpa menyentuh

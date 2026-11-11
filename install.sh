@@ -9,7 +9,7 @@
 # Langkah: cek Python 3.10+ → dapatkan sumber (folder ini / git / ZIP) →
 # cek kecocokan sistem (sistem.py) → pasang sebagai perintah global →
 # unduh Chromium untuk Playwright → cek Brave → cek Tesseract OCR (OCR
-# lokal /image) → rapikan PATH → cek/pasang opencode CLI (opsional) →
+# lokal /image) → rapikan PATH → cek/pasang opencode CLI →
 # wizard login (opsional; tanpa API key).
 #
 # Variabel lingkungan (opsional):
@@ -18,6 +18,13 @@
 #   BAGASAI_SKIP_LOGIN  isi "1" untuk melewati wizard di akhir
 # ============================================================================
 set -euo pipefail
+INSTALL_HOME="${BAGASAI_HOME:-${HOME}/.bagasai}"
+mkdir -p "$INSTALL_HOME/logs"
+INSTALL_HOME="$(cd "$INSTALL_HOME" && pwd -P)"
+[ "$INSTALL_HOME" != "/" ] || { printf '%s\n' 'Direktori instalasi tidak valid.' >&2; exit 1; }
+INSTALL_LOG="$INSTALL_HOME/logs/install-$(date +%Y%m%d-%H%M%S).log"
+export BAGASAI_INSTALL_LOG="$INSTALL_LOG"
+STEP_INDEX=0
 
 # ---------- Util & warna ----------
 # Warna hanya bila output-nya terminal sungguhan (bukan pipe/log/CI) dan
@@ -31,7 +38,7 @@ else
 fi
 
 say()  { printf '%s\n' "$*"; }
-step() { printf '\n%s\n' "${MAG}${BOLD}» $*${RST}"; }
+step() { STEP_INDEX=$((STEP_INDEX + 1)); printf '\n  %s%02d  %s%s\n' "$CYN" "$STEP_INDEX" "$*" "$RST"; }
 ok()   { printf '  %s %s\n' "${GRN}✓${RST}" "$*"; }
 warn() { printf '  %s %s\n' "${YLW}!${RST}" "$*"; }
 err()  { printf '  %s %s\n' "${RED}✗${RST}" "$*" >&2; }
@@ -42,10 +49,40 @@ REPO_URL="${BAGASAI_REPO:-https://github.com/ahmadadptr001/bagas-ai}"
 REPO_URL="${REPO_URL%/}"
 REPO_BRANCH="${BAGASAI_BRANCH:-master}"
 
-printf '\n%s %s\n\n' "${MAG}${BOLD}bagas-ai${RST}" "${DIM}· installer${RST}"
+# --- Termux/Android: jalur pemasangan sendiri ------------------------------
+# Di Termux, `sys.platform` tetap "linux" tetapi bionic bukan glibc: wheel
+# manylinux tak bisa dipakai, Playwright/Chromium tak ada, dan Ollama/Whisper
+# tidak berjalan di Android. install-termux.sh menangani semua itu (paket
+# `pkg`, requirements-termux.txt, OpenCode Android aarch64).
+IS_TERMUX=0
+[ -n "${TERMUX_VERSION:-}" ] && IS_TERMUX=1
+case "${PREFIX:-}" in *com.termux*) IS_TERMUX=1 ;; esac
+if [ "$IS_TERMUX" = "1" ]; then
+  # Saat dijalankan lewat `curl | bash`, BASH_SOURCE kosong/$0 = "bash" —
+  # jangan sampai file install-termux.sh acak di folder aktif ikut dieksekusi.
+  SELF_DIR=""
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  fi
+  if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/install-termux.sh" ]; then
+    printf '\n  %sTermux terdeteksi%s — beralih ke installer Android.\n' "$CYN$BOLD" "$RST"
+    exec bash "$SELF_DIR/install-termux.sh" "$@"
+  fi
+  TERMUX_INSTALLER="$INSTALL_HOME/install-termux.sh"
+  if command -v curl >/dev/null 2>&1; then
+    printf '\n  %sTermux terdeteksi%s — mengunduh installer Android.\n' "$CYN$BOLD" "$RST"
+    curl -fsSL -o "$TERMUX_INSTALLER" \
+      "${REPO_URL}/raw/${REPO_BRANCH}/install-termux.sh" \
+      || die "install-termux.sh gagal diunduh — periksa koneksi internet."
+    exec bash "$TERMUX_INSTALLER" "$@"
+  fi
+  die "Termux terdeteksi tetapi install-termux.sh tak ada. Jalankan dari folder proyek: bash install-termux.sh"
+fi
+
+printf '\n  %sbagas-ai%s\n  %sPemasangan | komponen yang tersedia dipakai kembali%s\n' "$CYN$BOLD" "$RST" "$DIM" "$RST"
 
 # --- 1. Python 3.10+ ---
-step "Memeriksa Python"
+step "Python"
 PY=""
 for c in python3 python py; do
   if command -v "$c" >/dev/null 2>&1; then
@@ -55,56 +92,78 @@ for c in python3 python py; do
   fi
 done
 [ -n "$PY" ] || die "Butuh Python 3.10+. Pasang dari https://www.python.org/downloads/ lalu ulangi."
-ok "Python: $("$PY" --version 2>&1)"
+ok "$("$PY" --version 2>&1)"
 
 # --- 2. Dapatkan sumber kode ---
 # Kalau sudah di folder proyek (ada pyproject.toml), pasang dari sini.
 # Kalau tidak: clone via git; tanpa git, unduh ZIP cabang lalu ekstrak
 # (python dijamin ada — dipakai untuk ekstraksi, tak butuh unzip/tar).
 SRC=""
+step "Kode sumber"
 if [ -f "pyproject.toml" ] && grep -q "bagasai" pyproject.toml 2>/dev/null; then
   SRC="$(pwd)"
   ok "Sumber: folder saat ini"
 else
-  step "Mengunduh bagas-ai"
-  DEST="${HOME}/.bagasai/src"
-  rm -rf "$DEST"; mkdir -p "$DEST"
-  if command -v git >/dev/null 2>&1; then
-    git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$DEST" \
-      || die "git clone gagal — periksa koneksi internet."
-    SRC="$DEST"
+  DEST="$INSTALL_HOME/src"
+  SOURCE_ID="$REPO_URL#$REPO_BRANCH"
+  for candidate in "$DEST" "$DEST"/*; do
+    [ -f "$candidate/pyproject.toml" ] && [ -f "$candidate/src/agent/install_support.py" ] || continue
+    if [ -f "$candidate/.bagasai-source-id" ]; then
+      [ "$(cat "$candidate/.bagasai-source-id")" = "$SOURCE_ID" ] || continue
+    elif [ -n "${BAGASAI_REPO:-}${BAGASAI_BRANCH:-}" ]; then
+      continue
+    fi
+    SRC="$candidate"; break
+  done
+  if [ -n "$SRC" ]; then
+    ok "Kode sumber sudah tersedia"
   else
+    if [ -e "$DEST" ]; then
+      mv "$DEST" "$INSTALL_HOME/src-lama-$(date +%Y%m%d-%H%M%S)-$$"
+    fi
+    if command -v git >/dev/null 2>&1; then
+      git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$DEST" >>"$INSTALL_LOG" 2>&1 \
+        || die "Kode sumber gagal diunduh. Log: $INSTALL_LOG"
+      SRC="$DEST"
+    else
     note "git tidak ada — memakai unduhan ZIP"
     ZIP_URL="${REPO_URL}/archive/${REPO_BRANCH}.zip"
-    TMPD="$(mktemp -d)"
-    if command -v curl >/dev/null 2>&1; then
-      curl -fsSL -o "${TMPD}/src.zip" "$ZIP_URL" \
+    mkdir -p "$INSTALL_HOME/downloads"
+    CACHE_KEY="$("$PY" -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "$SOURCE_ID")"
+    ZIP_FILE="$INSTALL_HOME/downloads/source-$CACHE_KEY.zip"
+    if ! "$PY" -c 'import sys,zipfile; raise SystemExit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$ZIP_FILE"; then
+      if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -o "${ZIP_FILE}.part" "$ZIP_URL" \
         || die "Unduhan gagal — periksa koneksi internet."
-    elif command -v wget >/dev/null 2>&1; then
-      wget -qO "${TMPD}/src.zip" "$ZIP_URL" \
+      elif command -v wget >/dev/null 2>&1; then
+      wget -qO "${ZIP_FILE}.part" "$ZIP_URL" \
         || die "Unduhan gagal — periksa koneksi internet."
-    else
-      if ! "$PY" - "$ZIP_URL" "${TMPD}/src.zip" <<'PYEOF'
+      else
+      if ! "$PY" - "$ZIP_URL" "${ZIP_FILE}.part" <<'PYEOF'
 import sys, urllib.request
 urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
 PYEOF
       then die "Unduhan gagal — periksa koneksi internet."; fi
+      fi
+      mv "${ZIP_FILE}.part" "$ZIP_FILE"
     fi
-    "$PY" -m zipfile -e "${TMPD}/src.zip" "$DEST" || die "Ekstraksi ZIP gagal."
-    rm -rf "${TMPD:?}"
+    "$PY" -m zipfile -e "$ZIP_FILE" "$DEST" || die "Ekstraksi ZIP gagal."
     # GitHub mengekstrak ke <repo>-<cabang>; ambil folder pertama apa adanya.
     SRC="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
     [ -n "$SRC" ] || die "Isi ZIP tidak terduga — ekstraksi gagal."
+    fi
+    printf '%s\n' "$SOURCE_ID" > "$SRC/.bagasai-source-id"
+    ok "Kode sumber siap"
   fi
-  ok "Kode sumber: $SRC"
 fi
+SUPPORT="$SRC/src/agent/install_support.py"
 
 # --- 2b. Cek kecocokan sistem (sebelum apa pun dipasang) ---
 # sistem.py: OS/arsitektur/RAM/disk/Python/internet + Ketentuan & Kebijakan,
 # lalu konfirmasi lanjut/batal sebelum pip install. Keluar 1 = dibatalkan
 # pengguna (bukan galat); 2 = sistem tak didukung. set -e akan menelan exit
 # code-nya, jadi tangkap dulu.
-step "Cek kecocokan sistem"
+step "Pemeriksaan perangkat"
 SISTEM_RC=0
 "$PY" "${SRC}/src/agent/sistem.py" || SISTEM_RC=$?
 case "$SISTEM_RC" in
@@ -113,53 +172,41 @@ case "$SISTEM_RC" in
   *) die "Sistem ini belum didukung — pemasangan dihentikan." ;;
 esac
 # --- 3. Pasang sebagai perintah global ---
-step "Memasang bagas-ai (pip install)"
-# Pastikan pip ada dulu (sebagian Python minimal/venv tak memuatnya).
-if ! "$PY" -m pip --version >/dev/null 2>&1; then
-  note "pip belum ada — memasang via ensurepip"
-  "$PY" -m ensurepip --upgrade --default-pip >/dev/null 2>&1 \
-    || die "pip tidak tersedia dan ensurepip gagal."
-fi
+step "Paket aplikasi"
 
 # pip --user ditolak di dalam venv ("user site-packages are not visible"),
 # jadi flag-nya dilepas bila installer dijalankan dari venv aktif.
 USER_FLAG="--user"
 if [ -n "${VIRTUAL_ENV:-}" ]; then USER_FLAG=""; fi
 
-INSTALLER=""
-if command -v pipx >/dev/null 2>&1 && pipx install --force "$SRC" >/dev/null 2>&1; then
-  INSTALLER="pipx"
-fi
-if [ -z "$INSTALLER" ]; then
-  # Di Linux/macOS modern (PEP 668) 'pip install --user' bisa ditolak karena
-  # environment "externally-managed". Coba normal dulu, lalu fallback.
-  if "$PY" -m pip install $USER_FLAG --upgrade "$SRC" 2>/dev/null; then
-    if [ -n "$USER_FLAG" ]; then INSTALLER="pip --user"; else INSTALLER="pip (venv)"; fi
-  elif "$PY" -m pip install $USER_FLAG --break-system-packages --upgrade "$SRC" 2>/dev/null; then
-    INSTALLER="pip --user (--break-system-packages)"
-  elif "$PY" -m pip install --upgrade "$SRC"; then
-    INSTALLER="pip"
-  else
-    die "pip install gagal — lihat pesan error di atas."
-  fi
-fi
-ok "Terpasang via $INSTALLER"
-
-# --- 3b. Tentukan interpreter runtime (pipx punya venv sendiri) ---
 PW_PY="$PY"
-if ! "$PY" -c 'import agent' >/dev/null 2>&1 && [ "$INSTALLER" = "pipx" ]; then
+INSTALLER="pip"
+if command -v pipx >/dev/null 2>&1 && [ -z "${VIRTUAL_ENV:-}" ]; then
   PIPX_HOME_DIR="$(pipx environment --value PIPX_HOME 2>/dev/null || printf '%s' "${HOME}/.local/pipx")"
   for cand in "${PIPX_HOME_DIR}/venvs/bagasai/bin/python" \
               "${PIPX_HOME_DIR}/venvs/bagasai/Scripts/python.exe"; do
-    if [ -x "$cand" ]; then PW_PY="$cand"; break; fi
+    if [ -x "$cand" ]; then PW_PY="$cand"; INSTALLER="pipx"; USER_FLAG=""; break; fi
   done
+  # pipx yang sudah ada dipakai kembali; --force tidak pernah diperlukan.
+  if [ "$INSTALLER" != "pipx" ] && ! "$PY" -c 'import importlib.metadata as m; m.distribution("bagasai")' >/dev/null 2>&1; then
+    if pipx install "$SRC" >>"$INSTALL_LOG" 2>&1; then
+      for cand in "${PIPX_HOME_DIR}/venvs/bagasai/bin/python" "${PIPX_HOME_DIR}/venvs/bagasai/Scripts/python.exe"; do
+        if [ -x "$cand" ]; then PW_PY="$cand"; INSTALLER="pipx"; USER_FLAG=""; break; fi
+      done
+    fi
+  fi
+fi
+if ! "$PW_PY" "$SUPPORT" python --source "$SRC" $USER_FLAG; then
+  if [ "$INSTALLER" = "pipx" ] || ! "$PW_PY" "$SUPPORT" python --source "$SRC" $USER_FLAG --break-system-packages; then
+    die "Paket aplikasi belum siap. Log: $INSTALL_LOG"
+  fi
 fi
 
 # --- 3c. Pengenal suara lokal ---
-step "Menyiapkan pengenal suara lokal Whisper"
-"$PW_PY" -m agent.dengar --prepare-model \
+step "Pengenal suara"
+# Helper menjalankan --prepare-model dengan cache lokal terlebih dahulu.
+"$PW_PY" "$SUPPORT" voice \
   || die "Whisper lokal gagal dipasang atau dimuat."
-ok "Pengenal suara lokal aktif dan teruji"
 
 # --- 3d. Browser Chromium untuk Playwright ---
 # WAJIB: seluruh model bagas-ai berjalan lewat browser. Paket pip `playwright`
@@ -168,9 +215,9 @@ ok "Pengenal suara lokal aktif dan teruji"
 #
 # Pakai interpreter yang SUDAH punya playwright: kalau dipasang via pipx,
 # paketnya hidup di venv pipx, bukan di Python sistem.
-step "Mengunduh browser Chromium (sekali saja, ~120 MB)"
-if "$PW_PY" -m playwright install chromium; then
-  ok "Browser siap"
+step "Browser Chromium"
+if "$PW_PY" "$SUPPORT" browser; then
+  :
 else
   warn "Gagal mengunduh Chromium — jalankan nanti:"
   note "$PW_PY -m playwright install chromium"
@@ -191,7 +238,7 @@ fi
 # untuk dikerjakan tanpa ditanya. Yang dilakukan cuma memeriksa & menunjukkan
 # perintahnya. bagas-ai tetap jalan tanpanya: ia memakai Chrome/Chromium yang
 # sudah ada (lihat _pilih_exe).
-step "Memeriksa browser Brave"
+step "Browser sistem"
 if command -v brave-browser >/dev/null 2>&1 \
    || command -v brave >/dev/null 2>&1 \
    || [ -x "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" ]; then
@@ -208,9 +255,9 @@ fi
 # Opsional: tanpanya /image tetap jalan, hanya bagian "OCR lokal" kosong.
 # Tidak dipasang diam-diam: butuh sudo (apt) atau Homebrew yang belum tentu
 # ada — cukup periksa & tunjukkan perintahnya.
-step "Memeriksa Tesseract OCR (untuk OCR lokal /image)"
+step "OCR lokal"
 if command -v tesseract >/dev/null 2>&1; then
-  ok "Tesseract sudah ada ($(command -v tesseract))"
+  ok "Tesseract sudah tersedia"
 else
   warn "Tesseract belum terpasang - OCR lokal (/image) akan nonaktif."
   case "$(uname -s)" in
@@ -220,24 +267,20 @@ else
 fi
 
 # --- 3e. Ollama + Gemma 3 4B (WAJIB untuk vision lokal) ---
-step "Memeriksa Ollama (wajib untuk vision lokal Gemma 3 4B)"
+step "Model gambar lokal"
 if ! command -v ollama >/dev/null 2>&1; then
   case "$(uname -s)" in
     Darwin)
-      if command -v brew >/dev/null 2>&1; then brew install --cask ollama >/dev/null 2>&1 || true; fi ;;
+      if command -v brew >/dev/null 2>&1; then brew install --cask ollama >>"$INSTALL_LOG" 2>&1 || true; fi ;;
     Linux)
-      curl -fsSL https://ollama.com/install.sh | sh >/dev/null 2>&1 || true ;;
+      curl -fsSL https://ollama.com/install.sh | sh >>"$INSTALL_LOG" 2>&1 || true ;;
   esac
 fi
 command -v ollama >/dev/null 2>&1 || die "Ollama wajib tetapi gagal dipasang. Pasang dari https://ollama.com/download lalu jalankan installer lagi."
-ok "Ollama tersedia ($(command -v ollama))"
-note "mengunduh model vision Gemma 3 4B (sekitar 3.3 GB)..."
-ollama pull gemma3:4b >/dev/null || die "Gagal mengunduh gemma3:4b. Instalasi dibatalkan."
-"$PY" -c 'from agent.tools.vision_local import ensure_vision_ready; ok, why = ensure_vision_ready(force_probe=True); print(why); raise SystemExit(0 if ok else 1)' >/dev/null || die "Gemma 3 4B terpasang tetapi gagal merespons gambar. Instalasi dibatalkan."
-ok "Ollama + Gemma 3 4B aktif dan teruji untuk read_image_local serta /live"
+"$PW_PY" "$SUPPORT" vision || die "Model gambar belum siap. Log: $INSTALL_LOG"
 
 # --- 4. Pastikan direktori bin/Scripts ada di PATH ---
-step "Memeriksa PATH"
+step "Perintah terminal"
 # Cari lokasi executable yang BENAR-BENAR terpasang (lebih andal daripada
 # menebak dari getuserbase, mis. pada Python Store di Windows).
 BIN_DIR=""
@@ -336,26 +379,17 @@ else
   note "Buka terminal baru (atau: source $SHELL_RC) bila 'bagas-ai' belum dikenali."
 fi
 
-# --- 4b. opencode CLI (opsional) ---
-# Model opencode/* di bagas-ai memakai API OpenCode Zen secara LANGSUNG dan
-# GRATIS TANPA key (akses anonim per-IP), jadi CLI ini murni OPSIONAL —
-# dipasang hanya bila kamu memakai opencode sendiri. Satu manfaat sampingnya:
-# `opencode auth login` menyimpan key yang dipakai bagas-ai otomatis (kuota
-# pribadi alih-alih kuota anonim). Gagal pun TIDAK menggagalkan pemasangan.
-step "Memeriksa opencode CLI (opsional)"
+# --- 4b. OpenCode CLI: runtime model AI ---
+step "OpenCode"
 if command -v opencode >/dev/null 2>&1; then
   ok "opencode sudah terpasang"
-  note "model opencode/* di bagas-ai gratis tanpa key; login (opencode auth"
-  note "login) hanya untuk kuota pribadi di CLI-nya sendiri"
 else
   note "memasang opencode lewat skrip resminya..."
-  if curl -fsSL https://opencode.ai/install | bash >/dev/null 2>&1; then
+  if curl -fsSL https://opencode.ai/install | bash >>"$INSTALL_LOG" 2>&1; then
     ok "opencode terpasang"
-    note "opsional: opencode auth login untuk kuota pribadi"
   else
     warn "pemasangan opencode gagal — bagas-ai tetap terpasang."
     note "pasang manual nanti: curl -fsSL https://opencode.ai/install | bash"
-    note "atau: npm install -g opencode-ai  (butuh Node.js)"
   fi
 fi
 
@@ -393,7 +427,5 @@ fi
 
 printf '\n'
 say "${GRN}${BOLD}Selesai!${RST} Ketik ${CYN}${BOLD}bagas-ai${RST} di terminal mana pun untuk mulai."
-note "sumber   : $SRC"
-note "pemasang : $INSTALLER"
-note "bantuan  : bagas-ai help"
+note "Log: $INSTALL_LOG"
 printf '\n'

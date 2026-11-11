@@ -2,14 +2,14 @@
 
 Prompt yang dikirim saat giliran sedang berjalan TIDAK di-echo ke riwayat
 percakapan. Ia tampil di strip ini — nempel di bawah area jawaban —
-dengan gaya redup penuh (baris + latar diredupkan) sebagai penanda bahwa
-prompt itu BARU menunggu giliran. Begitu antrean benar-benar
-dijalankan, aplikasi mengosongkan strip ini dan meng-echo promptnya
-sebagai pesan pengguna normal di riwayat: posisinya tak lagi menempel,
-warnanya tak lagi disabled.
+dengan gaya redup penuh sebagai penanda bahwa prompt itu BARU menunggu
+giliran. Begitu antrean benar-benar dijalankan, aplikasi mengosongkan
+strip ini dan meng-echo promptnya sebagai pesan pengguna normal di
+riwayat: posisinya tak lagi menempel, warnanya tak lagi disabled.
 
-Tanpa ikon, tanpa teks tambahan ("diantrekan", "menunggu", dst.) —
-isi prompt itu sendiri cukup jelas sebagai konteks.
+Bentuknya mengikuti gema prompt di riwayat: panah + teks, tanpa latar.
+Tanpa label tambahan ("diantrekan", "menunggu", dst.) — isi prompt itu
+sendiri cukup jelas sebagai konteks.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from ...ui import tema
-from ...ui.textual_theme import campur
+from .animasi import tampilkan_halus
 
 
 class QueueStrip(Widget):
@@ -27,7 +27,7 @@ class QueueStrip(Widget):
     DEFAULT_CSS = """
     QueueStrip {
         height: auto;
-        max-height: 4;
+        max-height: 3;
     }
     """
 
@@ -64,22 +64,21 @@ class QueueStrip(Widget):
             except Exception:  # noqa: BLE001 — di luar konteks app
                 lebar = 80
 
-        # Gaya sama dengan blok prompt pengguna, tapi diredupkan penuh
-        # ("disabled"): garis, isi, dan latar semuanya kusam.
-        garis = f"dim {tema.p('redup')}"
+        # Gaya sama dengan gema prompt pengguna, tapi diredupkan penuh
+        # ("disabled"): panah dan isi sama-sama kusam.
+        panah = f"dim bold {tema.p('redup')}"
         isi = f"dim italic {tema.p('redup')}"
-        bg = campur(tema.p("gema_bg"), tema.p("redup"), 0.06)
 
         t = Text()
-        for i, teks in enumerate(self._items):
+        for i, teks in enumerate(self._items[:2]):
             if i:
                 t.append("\n")
             # Baris panjang dipotong — strip cuma pengingat, bukan editor.
-            sisa = max(4, lebar - 4)
+            sisa = max(4, lebar - 2)
             baris = teks if len(teks) <= sisa else teks[:max(1, sisa - 1)] + "…"
-            t.append("▌", style=f"{garis} on {bg}")
-            t.append(" ", style=f"on {bg}")
-            t.append(baris, style=f"{isi} on {bg}")
-            t.append(" ", style=f"on {bg}")
+            t.append("❯ ", style=panah)
+            t.append(baris, style=isi)
+        if len(self._items) > 2:
+            t.append(f"\n  +{len(self._items) - 2} pesan", style=isi)
         self._content.update(t)
-        self.display = True
+        tampilkan_halus(self)

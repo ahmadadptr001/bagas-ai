@@ -17,8 +17,14 @@ Exit code 0 = semua lulus.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import tempfile
 from pathlib import Path
+
+_root = Path(tempfile.mkdtemp(prefix="uji_textual_"))
+os.environ["BAGASAI_HOME"] = str(_root / "home")
+os.environ["BAGASAI_PROJECT_ROOT"] = str(_root)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -41,6 +47,7 @@ async def main() -> int:
     from agent.core import Agent
     from agent.interfaces.textual_app import BagasAIApp
     from agent.interfaces.textual_widgets import ChatBox, MessageList
+    from agent.ui.help import HelpContent
     from textual.widgets import OptionList
 
     agent = Agent()
@@ -100,7 +107,7 @@ async def main() -> int:
         await pilot.press("enter")
         await pilot.pause(0.3)
         pesan = app.query_one("#messages", MessageList)
-        cek("/help menghasilkan keluaran", len(pesan._items) > 3,
+        cek("/help menghasilkan keluaran", any(isinstance(item, HelpContent) for item in pesan._items),
             f"items={len(pesan._items)}")
 
         # 4. Menu pilih (/model tanpa argumen) — INLINE, bukan modal

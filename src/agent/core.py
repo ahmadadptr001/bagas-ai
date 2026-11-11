@@ -1572,6 +1572,9 @@ class Agent:
         spec = self.model_spec
         if spec.is_web or not spec.effort_levels:
             return None
+        if spec.effort_cli:
+            name = {"bawaan": "default", "auto": "default", "ringkas": "low",
+                    "seimbang": "medium", "mendalam": "high", "langsung": "none"}.get(name, name)
         if name not in spec.effort_levels:
             raise ValueError(
                 f"Effort '{name}' tak dikenal untuk {spec.label}. Pilihan: "
@@ -2506,11 +2509,12 @@ class Agent:
                     "tugas utama tetap aman dan tidak diubah.")
         konteks = ("\nKonteks percakapan terminal utama (gunakan hanya bila relevan):\n"
                    + context[-8000:]) if context else ""
-        prompt = [{"role": "system", "content": "Kamu adalah teman ngobrol santai. Jawab singkat, jangan menjalankan tool dan jangan mengubah berkas." + konteks},
+        prompt = [{"role": "system", "content": "Kamu adalah bagas-ai dalam obrolan sampingan. Jawab alami, langsung, dan ringkas tanpa sapaan berulang. Jangan menjalankan tool atau mengubah berkas." + konteks},
                   {"role": "user", "content": str(user_input)}]
         try:
             answer, _calls, _usage = llm.stream_completion(
                 prompt, tools=None, model=self.model_spec.api_model,
+                variant=self.model_spec.cli_variant_for(self.effort),
                 provider=self.model_spec.provider,
                 api_style=getattr(self.model_spec, "api_style", "chat"),
                 max_tokens=600, on_content=on_token)
@@ -2723,6 +2727,41 @@ class Agent:
         media_diblokir = False
         extra_diblokir = False
         tools_diblokir = False
+        # Versi file yang benar-benar terbaca pada giliran OpenCode ini.
+        # Dipakai hanya untuk pratinjau write yang tidak membawa metadata diff.
+        oc_files: dict[str, str] = {}
+        oc_session = None
+        oc_worked = oc_changed = oc_verified = oc_read = False
+        oc_followups = {"action": 0, "verify": 0, "length": 0}
+        request_text = next((str(msg.get("content") or "")
+                             for msg in reversed(self.memory.messages)
+                             if msg.get("role") == "user"
+                             and str(msg.get("content") or "").strip().lower()
+                             not in ("lanjut", "lanjutkan", "continue")), "")
+        asks_for_change = bool(re.search(
+            r"\b(perbaiki|ubah|modifikasi|terapkan|buat|bikin|sesuaikan|tambahkan|"
+            r"pasang|hapus|upgrade|fix|implement|modify|update|create)\b", request_text, re.I))
+        code_request = bool(re.search(
+            r"\b(file|kode|script|proyek|project|repository|ui|ux|fitur|tombol|"
+            r"menu|ikon|desktop|aplikasi|app|bug|error)\b|\.\w{1,6}\b", request_text, re.I))
+        if re.search(r"\b(?:jangan|tidak perlu)\s+(?:ubah|mengubah|edit|menulis)|"
+                     r"\b(?:cukup|hanya)\s+(?:jelaskan|analisis|review)|no code changes",
+                     request_text, re.I):
+            asks_for_change = False
+
+        def oc_path(value):
+            from pathlib import Path
+            path = Path(str(value)).expanduser()
+            return path if path.is_absolute() else config.PROJECT_ROOT / path
+
+        def oc_snapshot(value):
+            try:
+                path = oc_path(value)
+                if path.is_file() and path.stat().st_size <= 1_000_000:
+                    return path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError, ValueError):
+                pass
+            return None
 
         while True:
             guard += 1
@@ -2805,6 +2844,7 @@ class Agent:
                     on_reasoning(piece)
 
             def _on_tool_pending(name: str, detail: dict | None = None) -> None:
+                nonlocal oc_worked, oc_changed, oc_verified, oc_read
                 state["tool_received"] = True
                 if on_status:
                     on_status(f"Menerima instruksi tool: {name}")
@@ -2815,11 +2855,13 @@ class Agent:
                 # Hanya status completed (atau kosong) yang digambar: event
                 # running/pending akan menggambar pratinjau dua kali (sekali
                 # sebelum eksekusi, sekali sesudah) di jalur yang sama.
-                if detail and on_tool:
+                if detail:
                     st = str(detail.get("status") or "")
-                    if st not in ("", "completed"):
+                    if st not in ("", "completed", "error"):
                         return
                     args = dict(detail.get("input") or {})
+                    if st == "error":
+                        args["_tool_failed"] = True
                     # Peta nama tool OpenCode -> nama bagas-ai yang dikenal UI.
                     peta = {
                         "write": "write_file",
@@ -2832,8 +2874,20 @@ class Agent:
                         "list": "list_dir",
                         "delete": "delete_file",
                         "patch": "edit_file",
+                        "apply_patch": "edit_files",
                     }
                     ui_name = peta.get(name, name)
+                    failed = st == "error" or str(detail.get("output") or "").strip().startswith(
+                        ("[GAGAL", "[error]", "Error:"))
+                    if not failed:
+                        if ui_name in ("read_file", "read_files", "grep", "glob_files", "list_dir", "search_text"):
+                            oc_read = True
+                        if ui_name in _LANGKAH_VERIFIKASI:
+                            oc_worked = True
+                        if ui_name in _TOOL_MUTASI:
+                            oc_changed, oc_verified = True, False
+                        elif ui_name in ("run_command", "run_python", "run_script", "take_screenshot"):
+                            oc_verified = True
                     # filePath (OpenCode) -> path (bagas-ai).
                     if "filePath" in args and "path" not in args:
                         args["path"] = args.pop("filePath")
@@ -2858,8 +2912,31 @@ class Agent:
                         args["_oc_baru"] = not bool(meta.get("exists"))
                     # edit: unified diff siap pakai dari metadata — cadangan
                     # bila rekonstruksi old/new di UI tidak memungkinkan.
-                    if meta.get("diff") and ui_name in ("edit_file", "edit_files"):
-                        args["_oc_diff"] = str(meta.get("diff") or "")
+                    filediff = meta.get("filediff") or {}
+                    patch = meta.get("diff") or (filediff.get("patch") if isinstance(filediff, dict) else "")
+                    if patch and ui_name in ("write_file", "edit_file", "edit_files"):
+                        args["_oc_diff"] = str(patch)
+                    if ui_name == "edit_files" and isinstance(meta.get("files"), list):
+                        args["edits"] = [
+                            {"path": item.get("filePath") or item.get("path"),
+                             "_oc_diff": item.get("diff") or item.get("patch") or "",
+                             "_oc_deleted": item.get("type") == "delete",
+                             "_oc_baru": item.get("type") == "add"}
+                            for item in meta["files"] if isinstance(item, dict)]
+                    path = args.get("path")
+                    if path and st != "error":
+                        key = str(oc_path(path).resolve())
+                        if ui_name == "write_file":
+                            if args.get("_oc_baru"):
+                                args["_oc_before"] = ""
+                            elif key in oc_files:
+                                args["_oc_before"] = oc_files[key]
+                        if ui_name in ("read_file", "write_file", "edit_file", "append_file"):
+                            snapshot = oc_snapshot(path)
+                            if snapshot is not None:
+                                oc_files[key] = snapshot
+                                while len(oc_files) > 16 or sum(map(len, oc_files.values())) > 4_000_000:
+                                    del oc_files[next(iter(oc_files))]
                     # edit_files: tandai tiap suntingan agar pratinjau tahu
                     # file SUDAH berubah (flag di level atas saja tak terbaca
                     # oleh loop proses() per-edit).
@@ -2876,7 +2953,8 @@ class Agent:
                                 if "filePath" in e and "path" not in e:
                                     e["path"] = e.pop("filePath")
                     try:
-                        on_tool(ui_name, args)
+                        if on_tool:
+                            on_tool(ui_name, args)
                         if on_tool_result:
                             on_tool_result(
                                 ui_name,
@@ -2913,6 +2991,7 @@ class Agent:
                     # api_model, BUKAN spec.id: `id` adalah identitas internal
                     # bagas-ai yang bisa berbeda dari ID yang dikenal server.
                     model=spec.api_model,
+                    variant=spec.cli_variant_for(self.effort),
                     extra_body=extra,
                     max_tokens=spec.max_tokens,
                     # Penyedia menentukan klien: opencode -> CLI `opencode run`
@@ -2928,6 +3007,7 @@ class Agent:
                     on_reasoning=_on_reasoning,
                     cancel_event=cancel_event,
                     on_retry=_on_retry,
+                    **({"session_id": oc_session} if oc_session else {}),
                 )
             except (llm.Cancelled, KeyboardInterrupt):
                 if partial_content:
@@ -3036,7 +3116,7 @@ class Agent:
                     on_notice(f"media dilewati: {ringkas}")
 
             # Konfirmasi token: pakai usage ASLI bila ada, estimasi bila tidak.
-            if usage:
+            if usage and getattr(usage, "has_usage", True):
                 self.tokens_last.add(usage)
                 self.tokens_session.add(usage)
             else:
@@ -3048,6 +3128,50 @@ class Agent:
                 self.tokens_last.add_raw(prompt_est, keluar)
                 self.tokens_session.add_raw(prompt_est, keluar)
             self.tokens_live = self.tokens_last.total
+
+            # OpenCode menjalankan tool di prosesnya sendiri, sehingga
+            # tool_calls di sini kosong bahkan saat tugas belum diselesaikan.
+            native_session = getattr(usage, "session_id", "") if usage else ""
+            if spec.provider == "opencode" and native_session and not tool_calls:
+                oc_session = native_session
+                reason = getattr(usage, "finish_reason", "")
+                blocked = bool(re.search(
+                    r"\b(tidak perlu|tidak ada (?:perubahan|yang perlu)|belum (?:bisa|dapat)|"
+                    r"tidak (?:bisa|dapat)|terhalang|gagal|memerlukan izin|butuh akses)\b",
+                    content or "", re.I))
+                missing_action = asks_for_change and (code_request or oc_read) and not oc_worked and not blocked
+                followup = ""
+                if reason in ("length", "max-tokens", "max_tokens", "max_output_tokens"):
+                    if oc_followups["length"] >= 2:
+                        raise llm.IncompleteResponseError(
+                            "Batas keluaran model tercapai. Pekerjaan dan jawaban parsial tersimpan.")
+                    oc_followups["length"] += 1
+                    followup = (
+                        "Lanjutkan bagian yang terpotong dalam sesi ini. Jangan ulangi teks "
+                        "atau langkah yang sudah selesai. Selesaikan tugas dan berikan hasil singkat.")
+                elif (missing_action or _looks_like_promise(content)) and oc_followups["action"] < 1:
+                    oc_followups["action"] += 1
+                    followup = (
+                        "Periksa penyelesaian tugas: yang tercatat baru pembacaan/pencarian. "
+                        "Lanjutkan dari hasil yang sudah ada dan terapkan tindakan yang diminta. "
+                        "Jika perubahan tidak perlu atau terhalang, jelaskan alasannya. "
+                        "Jangan mengklaim selesai tanpa tindakan nyata atau mengulang sapaan/rencana.")
+                elif oc_changed and not oc_verified and not blocked and oc_followups["verify"] < 1:
+                    oc_followups["verify"] += 1
+                    followup = _VERIFIKASI_PASIF
+                if followup:
+                    if content and content.strip():
+                        self.memory.add_assistant_text(content)
+                        if on_token:
+                            on_token("\n\n")
+                    self.memory.add_user("[SISTEM] " + followup)
+                    if on_status:
+                        on_status("Memeriksa penyelesaian")
+                    continue
+                if missing_action and oc_followups["action"]:
+                    content = "Model berhenti setelah pemeriksaan. Belum ada perubahan atau eksekusi yang tercatat."
+                elif oc_changed and not oc_verified and not blocked and oc_followups["verify"]:
+                    content = "Perubahan diterapkan. Pengujian setelah perubahan terakhir belum tercatat."
 
             # --- deteksi "performa menurun" ---
             if tool_calls and any(
@@ -3077,11 +3201,8 @@ class Agent:
                 # teks apa pun, beri pesan cadangan yang jelas alih-alih layar
                 # kosong yang tak bisa dibedakan dari aplikasi menggantung.
                 final = content if (content and content.strip()) else (
-                    "Hmm, aku berhenti tanpa sempat menyusun jawaban. Coba "
-                    "ulangi atau perjelas permintaanmu"
-                    + (". Bisa juga turunkan /effort supaya anggaran "
-                       "berpikirnya tak habis sebelum menjawab."
-                       if spec.effort_levels else ".")
+                    "Model tidak mengirim jawaban akhir. Coba lanjutkan "
+                    "atau pilih model lain lewat /model."
                 )
                 self.memory.add_assistant_text(final)
                 self._persist()

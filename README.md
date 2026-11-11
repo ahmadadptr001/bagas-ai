@@ -16,7 +16,7 @@ dari **terminal mana pun** — mirip CLI `claude`.
 | 📁 **File** | Baca, tulis, dan daftar file di folder kerja. |
 | 🖥️ **Eksekusi kode** | Jalankan Python & perintah shell (dengan timeout, bisa dimatikan). |
 | 🖼️ **Gambar lokal + multimodal** | `/image <path>` membaca metadata, warna, struktur, QR, dan OCR secara lokal tanpa upload; model vision tetap tersedia untuk analisis semantik. |
-| 📹 **Live screen** | `/live on` mengambil screenshot terbaru pada tiap pertanyaan dan melampirkannya ke model vision (`/video` adalah alias). |
+| 📹 **Layar** | `/video on` membuka galeri thumbnail dan nama jendela untuk memilih sumber. BLIP INT8 merangkum visual; UI Automation/OCR membaca teks, dan Gemma memeriksa detail bila diperlukan. Hasil disimpan selama gambar belum berubah. `/video pilih` memilih atau mengganti sumber; `/live` menjadi alias. |
 | 🧠 **Memori** | Ingat preferensi & fakta penting lintas sesi; simpan skrip reusable. |
 | 🔁 **Banyak model** | Ganti model kapan pun lewat `/model`. |
 
@@ -47,6 +47,45 @@ irm https://raw.githubusercontent.com/ahmadadptr001/bagas-ai/master/install.ps1 
 
 > Sudah punya foldernya? Jalankan dari dalam proyek: `bash install.sh`
 > (atau `./install.ps1` di PowerShell).
+
+**Termux (Android)**
+```bash
+pkg install git
+git clone https://github.com/ahmadadptr001/bagas-ai
+cd bagas-ai
+bash install-termux.sh
+```
+Installer Termux memasang paket `pkg` (Python, Pillow, numpy, psutil,
+Tesseract), dependensi murni-Python dari `requirements-termux.txt`, lalu
+binary **OpenCode Android aarch64** dari `guysoft/opencode-termux`. `install.sh`
+otomatis beralih ke jalur ini bila mendeteksi Termux.
+
+Yang sengaja tidak tersedia di Android/bionic:
+
+- **Playwright/Chromium** — otomasi browser dan model `web/*` tidak jalan;
+  model berjalan lewat CLI OpenCode.
+- **Ollama/Gemma vision & BLIP** — vision lokal digantikan model yang bisa
+  melihat gambar lewat chat.
+- **faster-whisper/sounddevice** — mode `/voice` kontinu tidak tersedia. Dikte
+  (F4 / `/voice tekan`) memakai mesin STT Android `termux-speech-to-text`.
+- **PyMuPDF, openai, pydantic, fastapi, mcp** — pratinjau PDF dan perintah
+  `bagas-ai api`/`mcp` tidak terpasang. Chat, Telegram, berkas, screenshot,
+  OCR, notifikasi, clipboard, dan suara TTS Android tetap berjalan.
+- **ddgs/primp** — pencarian web tidak tersedia karena `primp` belum punya
+  wheel untuk Android/bionic.
+
+Untuk dikte, notifikasi, clipboard, getar, dan membuka berkas, pasang paket
+`termux-api` **dan** aplikasi **Termux:API** dari F-Droid.
+
+Menjalankan installer kembali akan memakai paket, browser, model suara, dan
+model gambar yang sudah siap. Unduhan sumber disimpan di `~/.bagasai/downloads`;
+output teknis pemasangan ada di `~/.bagasai/logs`. Installer memakai sumber
+yang tersimpan; gunakan `bagas-ai update` untuk mengambil versi aplikasi terbaru.
+
+Klik file pada sidebar untuk membuka editor dengan warna sintaks. Gambar dan
+PDF dibuka dalam jendela pratinjau; PDF mendukung navigasi halaman serta mode
+teks/visual. Dokumen Office, arsip, dan media memiliki pratinjau hanya-baca.
+Tombol **Buka** memakai aplikasi bawaan perangkat untuk format yang didukung.
 
 <details>
 <summary>Pasang manual (tanpa installer)</summary>
@@ -84,13 +123,14 @@ Wizard akan:
 
 Seluruh model aktif **gratis TANPA API key** lewat CLI `opencode run`.
 Syaratnya cuma satu: binary `opencode` ada di PATH (`npm i -g opencode-ai`).
-Katalog `/model` disinkronkan otomatis dari `opencode models` — model baru
-muncul, dan seluruh entri statis tetap bisa dipilih walau belum muncul di CLI
-(tidak ada model opencode yang ditunda).
+Katalog `/model` mengikuti daftar hidup `opencode models` — hanya model
+provider `opencode/*` yang ditampilkan; provider lain (mis. apinex/ollama)
+diabaikan. Daftar disegarkan saat `/model` dibuka, jadi model baru langsung
+muncul tanpa restart.
 
 ```bash
 npm i -g opencode-ai
-opencode models opencode    # lihat katalog yang tersedia
+opencode models             # lihat katalog yang tersedia
 bagas-ai                    # lalu pilih lewat /model
 ```
 
@@ -147,9 +187,43 @@ satu ucapan dan mengirimnya. `Esc` atau tombol `⌵` menutup layar sekaligus
 mikrofon. Transkrip pengguna dan jawaban AI tetap dicatat di chat utama—layar
 voice hanya menampilkan animasi. Mikrofon selalu mati pada sesi baru.
 Audio Windows diambil lewat WASAPI pada sample rate asli perangkat, kemudian
-WebRTC lokal menjalankan peredam bising, automatic gain control, dan deteksi
-suara sebelum Whisper. Model Whisper `small` (±460 MB) wajib diunduh dan diuji
+SoXR menjaga kontinuitas dan menyaring alias sebelum audio diubah ke 16 kHz.
+WebRTC meredam bising dan mengatur gain; Silero mendeteksi ucapan per 32 ms.
+Di Windows, referensi keluaran WASAPI dipakai WebRTC AEC untuk membatalkan
+gema speaker. Input sistem seperti Stereo Mix tidak dipilih sebagai mikrofon.
+Jika AEC tidak tersedia, mikrofon dijeda selama TTS untuk mencegah jawaban
+masuk lagi sebagai prompt. Efektivitasnya tetap bergantung pada perangkat dan ruangan.
+Whisper membaca ulang hasil yang meragukan dengan penyaringan ucapan tambahan.
+Model Whisper `small` (±460 MB) wajib diunduh dan diuji
 saat instalasi maupun pembaruan; ukurannya diatur lewat `VOICE_STT_MODEL`.
+`VOICE_STT_LANGUAGE=id` mengutamakan bahasa Indonesia; `auto` mendeteksi bahasa.
+`VOICE_INPUT_DEVICE` dapat diisi nama atau nomor mikrofon tertentu.
+
+`/help` menampilkan perintah utama; `/help semua` membuka daftar lengkap.
+Autocomplete `/` memuat perintah aktif yang sering dipakai; daftar bisa digulir
+dan `/effort` hanya ditawarkan jika model mendukungnya.
+Hasil tool dan penalaran dapat dibuka dengan klik. Perubahan file tampil
+langsung sebagai kartu diff dengan nomor baris lama/baru dan statistik perubahan.
+Hasil tool memperlihatkan dua baris awal; klik chevron untuk membuka atau
+menciutkan hasilnya. Drop gambar menambahkan lampiran pada draf yang ada;
+pratinjau dan tombol hapus tersedia pada baris lampiran. Menghapus penanda
+`[foto]` dari draf juga melepas lampiran dan preview-nya. Baris lampiran tetap
+ringkas; klik untuk melihat thumbnail tanpa memenuhi area percakapan.
+Penalaran memakai satu baris saat tertutup dan viewport 2–3 baris saat dibuka.
+Gulir pada area penalaran untuk membaca lanjutannya. Penalaran dari beberapa
+tahap disimpan dalam satu entri, sehingga tidak memenuhi footer atau riwayat.
+Loading memakai satu baris status dengan animasi kecil dan waktu tunggu bila
+ruang cukup. `Esc` menutup menu/popup teratas; pembatalan menu memulihkan draf
+tanpa menghentikan tugas agen. Editor tetap melindungi perubahan yang belum disimpan.
+Untuk penulisan OpenCode, versi lama diambil dari file yang telah dibaca pada
+giliran tersebut atau metadata diff; versi yang tidak tersedia tidak direkayasa.
+Popup `/btw` memakai tema chat, mendukung Markdown, dan menjaga draf saat
+menunggu jawaban. Jika OpenCode berhenti setelah pemeriksaan saja atau keluarannya
+terpotong, kelanjutannya memakai ID sesi yang sama dengan batas pengingat.
+
+Tombol `ϟ` dan `/effort` membaca varian dari katalog OpenCode lokal. Pilihan
+tersimpan dan dipakai mulai pesan berikutnya, lewat `model#variant` pada V2
+atau `--variant` pada V1. Model tanpa varian tetap memakai setelan bawaannya.
 
 `/image "path gambar.png"` membuka gambar langsung melalui Python/Pillow di
 laptop dan menampilkan format, dimensi, frame, transparansi, warna dominan,

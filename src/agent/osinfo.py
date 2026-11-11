@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 
 from . import longmem
+from . import termux
 
 # Prefix stabil sebagai "kunci" fakta OS di memory (untuk upsert).
 _PREFIX = "Sistem operasi pengguna:"
@@ -27,6 +28,9 @@ _HW_PREFIX = "Spesifikasi perangkat pengguna:"
 
 def label() -> str:
     """Nama OS + versi yang ringkas & manusiawi."""
+    if termux.IS_TERMUX:
+        versi = termux.versi_android()
+        return f"Termux (Android {versi})" if versi else "Termux (Android)"
     system = platform.system()
     if system == "Windows":
         rel = platform.release()
@@ -41,6 +45,8 @@ def label() -> str:
 
 def shell_hint() -> str:
     """Shell/terminal khas OS ini — untuk mengarahkan sintaks perintah."""
+    if termux.IS_TERMUX:
+        return "bash (Termux)"
     system = platform.system()
     if system == "Windows":
         return "PowerShell / cmd"
@@ -181,7 +187,15 @@ def _mac_hardware() -> dict:
 def hardware_summary() -> str:
     """Ringkasan spesifikasi perangkat dalam satu baris (deteksi lokal murni)."""
     system = platform.system()
-    if system == "Windows":
+    if termux.IS_TERMUX:
+        # /proc tetap terbaca di Android; DMI tidak ada, jadi merek/SoC diambil
+        # dari getprop (ro.product.* / ro.soc.model).
+        info = _linux_hardware()
+        if termux.model_perangkat():
+            info["model"] = termux.model_perangkat()
+        if termux.chipset():
+            info["cpu"] = termux.chipset()
+    elif system == "Windows":
         info = _win_hardware()
     elif system == "Darwin":
         info = _mac_hardware()

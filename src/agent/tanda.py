@@ -56,10 +56,12 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import wave
 from pathlib import Path
 
 from . import config
+from . import termux
 
 log = logging.getLogger(__name__)
 
@@ -178,6 +180,24 @@ def _bunyikan() -> None:
         berkas = berkas_bunyi()
     if not berkas.is_file():
         return
+    if termux.IS_TERMUX:
+        # Android memutar WAV lewat pemutar sistem (Termux:API). Bila tak ada,
+        # jatuh ke TTS Android supaya penanda tetap terdengar.
+        if termux.putar_audio(berkas):
+            try:
+                time.sleep(min(3.0, termux.durasi_audio(berkas)))
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        alat = termux.perintah("termux-tts-speak")
+        if alat:
+            try:
+                subprocess.run([alat, "-l", "id", "Tugas selesai"],
+                               timeout=30, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+                return
+            except Exception:  # noqa: BLE001
+                pass
     if sys.platform == "win32":
         try:
             import winsound

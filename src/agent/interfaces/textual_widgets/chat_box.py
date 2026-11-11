@@ -40,11 +40,12 @@ from textual import events
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import OptionList, Static, TextArea
+from textual.widgets import Button, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from rich.text import Text
 
 from ...ui import tema
+from ...ui.commands import QUICK_COMMANDS
 
 try:
     from ...ui.ascii_art import is_image_path, is_video_path
@@ -56,39 +57,10 @@ except Exception:  # noqa: BLE001 — modul opsional
         return False
 
 
-# (perintah, keterangan, butuh_argumen)
-# Keterangan ikut tampil di dropdown supaya pengguna tak perlu hafal.
-# Daftar ini WAJIB sinkron dengan _handle_command() di textual_app.py.
-_SLASH_COMMANDS: list[tuple[str, str, bool]] = [
-    ("/help", "daftar semua perintah", False),
-    ("/model", "ganti model / varian situs", True),
-    ("/effort", "usaha berpikir (web & API)", True),
-    ("/theme", "ganti tema warna", True),
-    ("/compact", "padatkan konteks ke berkas ingatan", False),
-    ("/send-compact", "kirim memory terakhir ke percakapan", False),
-    ("/memory", "kelola ingatan panjang", True),
-    ("/add-dir", "tambah folder konteks", True),
-    ("/dirs", "lihat folder konteks", False),
-    ("/scan", "pindai ulang & segarkan peta proyek", False),
-    ("/review", "buru bug di seluruh proyek", False),
-    ("/tim", "tim review spesialis", True),
-    ("/live", "screenshot layar tiap pertanyaan", False),
-    ("/video", "alias mode screenshot /live", False),
-    ("/stream", "hidup/matikan tampilan mengalir", False),
-    ("/mic", "bacakan kabar dan jawaban AI", True),
-    ("/voice", "percakapan suara dengan layar orb", False),
-    ("/image", "baca gambar lokal via Python", True),
-    ("/export", "ekspor riwayat chat", True),
-    ("/btw", "ngobrol santai tanpa mengganggu tugas", True),
-    ("/new", "mulai sesi baru", False),
-    ("/reset", "reset percakapan sesi ini", False),
-    ("/clear", "bersihkan layar", False),
-    ("/version", "lihat versi bagas-ai", False),
-    ("/exit", "keluar", False),
-]
+# Katalog ringkas bersama CLI; kemampuan model disaring saat menu dibuka.
+_SLASH_COMMANDS: list[tuple[str, str, bool]] = list(QUICK_COMMANDS)
 
 _CMD_LEBAR = max(len(c) for c, _, _ in _SLASH_COMMANDS)
-_MAKS_BARIS = 9
 # Tinggi maksimal kotak input (baris layar) sebelum mulai menggulir.
 _MAKS_TINGGI_INPUT = 5
 
@@ -183,12 +155,21 @@ class ChatBox(Widget):
     class Submitted(Message, namespace="chatbox"):
         """Pengguna mengirim teks."""
 
-        def __init__(self, text: str):
+        def __init__(self, text: str, attachments: dict[str, str] | None = None):
             self.text = text
+            # Snapshot sebelum input dikosongkan: perubahan draf tidak boleh
+            # melepas lampiran dari pesan yang sudah dikirim.
+            self.attachments = attachments
             super().__init__()
+
+    class DraftChanged(Message, namespace="chatbox"):
+        """Penanda media berubah bersama isi draf."""
 
     class Cancelled(Message, namespace="chatbox"):
         """Pengguna membatalkan."""
+
+    class PopupCancelled(Message, namespace="chatbox"):
+        """Esc menutup pilihan; terpisah dari pembatalan giliran/aplikasi."""
 
     class Recall(Message, namespace="chatbox"):
         """Panah-atas/bawah dengan dropdown tertutup.
@@ -224,22 +205,25 @@ class ChatBox(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._input = ChatInput(
-            placeholder="Ketik pesan, / untuk perintah…",
+            placeholder="Tulis pesan… (/ untuk perintah)",
             id="chat-input",
         )
         self._title = Static("", id="autocomplete-title")
         self._autocomplete = OptionList(id="autocomplete-list")
         self._hint = Static("", id="autocomplete-hint")
         self._prompt = Static("❯", id="input-prompt")
+        self._input_hint = Static("Enter kirim · / perintah", id="input-hint")
         # Perintah yang sedang ditawarkan, searah indeks dengan OptionList.
         self._matches: list[tuple[str, str, bool]] = []
+        self._media_attachments: dict[str, str] = {}
         self._open = False
         self._mention_mode = False
         self._mention_token = ""
         # Mode prompt inline (ask_user / menu / konfirmasi tanpa modal):
         # autocomplete slash dimatikan supaya jawaban bernomor tak terganggu.
         self._prompt_mode = False
-        self._placeholder_normal = "Ketik pesan, / untuk perintah…"
+        self._effort_available = True
+        self._placeholder_normal = "Tulis pesan… (/ untuk perintah)"
         # Picker pilihan (mode pilihan/confirm): daftar di ATAS input —
         # navigasi panah, Enter = opsi tersorot, ketik = filter / nomor.
         self._picker = False
@@ -253,8 +237,30 @@ class ChatBox(Widget):
         yield self._autocomplete
         yield self._hint
         with Horizontal(id="input-row"):
+            yield Button("+", id="input-more", tooltip="Perintah (/)")
             yield self._prompt
             yield self._input
+            yield Button("ϟ", id="input-effort", tooltip="Usaha berpikir (/effort)")
+            yield Button("↑", id="input-send", tooltip="Kirim pesan (Enter)")
+        yield self._input_hint
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        control = event.button.id
+        if control == "input-send":
+            event.stop()
+            self.kirim()
+            self._input.focus()
+        elif control == "input-more":
+            event.stop()
+            # Membuka autocomplete yang sama dengan mengetik slash.
+            if not self._input.text and not self._prompt_mode:
+                self.set_text("/")
+            self._input.focus()
+        elif control == "input-effort":
+            event.stop()
+            if not self._prompt_mode:
+                self.post_message(self.Submitted("/effort"))
+            self._input.focus()
 
     def on_mount(self):
         # RichLog/OptionList bisa merebut fokus dari input saat diklik.
@@ -319,14 +325,23 @@ class ChatBox(Widget):
             return
         data = data.replace("\r\n", "\n").replace("\r", "\n")
 
-        # Berkas media yang di-drop -> penanda [foto] + pratinjau.
+        # Drop media menambahkan lampiran pada kursor tanpa mengganti draf.
         try:
-            cek = data.strip().strip('"').strip("'")
-            if cek and (is_image_path(cek) or is_video_path(cek)):
-                resolved = str(Path(cek).resolve(strict=False))
-                self._set_value("[foto]")
-                self.post_message(
-                    self.Pasted("[foto]", is_media=True, media_path=resolved))
+            from ...ui.attachments import media_paths
+            paths = media_paths(data)
+            if paths:
+                for path in paths:
+                    number = 1
+                    marker = "[foto]"
+                    while marker in self.current_text:
+                        number += 1
+                        marker = f"[foto {number}]"
+                    before = self.current_text[:self.cursor_position]
+                    prefix = " " if before and not before[-1].isspace() else ""
+                    self.insert_text_at_cursor(prefix + marker + " ")
+                    self._media_attachments[marker] = path
+                    self.post_message(self.Pasted(marker, is_media=True, media_path=path))
+                self.focus()
                 return
         except Exception:  # noqa: BLE001 — path aneh dari OS
             pass
@@ -390,7 +405,7 @@ class ChatBox(Widget):
                 return True
             if key == "escape":
                 self.close_picker()
-                self.post_message(self.Cancelled())
+                self.post_message(self.PopupCancelled())
                 return True
             if key == "tab":
                 self._accept_picker()
@@ -449,8 +464,8 @@ class ChatBox(Widget):
             self.post_message(self.Recall(maju=True))
             return True
         if key == "escape":
-            if self._input.text:
-                self._set_value("")
+            if self._prompt_mode:
+                self.post_message(self.PopupCancelled())
                 return True
             return False
         return False
@@ -482,13 +497,20 @@ class ChatBox(Widget):
         text = self._input.text.strip()
         if not text:
             return
+        attachments = {marker: path for marker, path in self._media_attachments.items()
+                       if marker in text}
+        self.post_message(self.Submitted(text, attachments=attachments))
         self._set_value("")
         self._close()
-        self.post_message(self.Submitted(text))
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Teks berubah — segarkan tawaran autocomplete & tinggi kotak."""
         event.stop()
+        if self._media_attachments and not self._prompt_mode and not self._picker:
+            self._media_attachments = {
+                marker: path for marker, path in self._media_attachments.items()
+                if marker in self._input.text}
+            self.post_message(self.DraftChanged())
         if self._picker:
             self._filter_picker(self._input.text)
             self._sesuaikan_tinggi()
@@ -542,11 +564,13 @@ class ChatBox(Widget):
             return
 
         q = text.lower()
+        commands = [c for c in _SLASH_COMMANDS
+                    if c[0] != "/effort" or self._effort_available]
         if q == "/":
-            matches = list(_SLASH_COMMANDS)
+            matches = commands
         else:
-            awalan = [c for c in _SLASH_COMMANDS if c[0].startswith(q)]
-            isi = [c for c in _SLASH_COMMANDS
+            awalan = [c for c in commands if c[0].startswith(q)]
+            isi = [c for c in commands
                    if not c[0].startswith(q) and q[1:] in c[0][1:]]
             matches = awalan + isi
 
@@ -568,7 +592,9 @@ class ChatBox(Widget):
         tersorot background-nya juga aksen, jadi teks menyatu dengan
         background dan tak terlihat.
         """
-        self._matches = matches[:_MAKS_BARIS]
+        # Tinggi dibatasi CSS; semua kandidat tetap bisa dijangkau dengan
+        # panah/scroll, termasuk yang berada di bawah viewport.
+        self._matches = list(matches)
         lebar = self.size.width or 80
         # Keterangan hanya ditampilkan bila memang ada ruangnya.
         tampil_ket = lebar >= _CMD_LEBAR + 22
@@ -727,6 +753,16 @@ class ChatBox(Widget):
             except Exception:  # noqa: BLE001 — saat unmount
                 pass
 
+    def dismiss_popup(self) -> bool:
+        """Tutup dropdown teratas sambil mempertahankan teks yang diketik."""
+        if self._picker:
+            self.close_picker()
+        elif self._open:
+            self._close()
+        else:
+            return False
+        return True
+
     @property
     def picker_open(self) -> bool:
         return self._picker
@@ -827,6 +863,8 @@ class ChatBox(Widget):
         Picker ditutup bersama transisi ini (app membuka ulang bila perlu).
         """
         self._prompt_mode = placeholder is not None
+        self.query_one("#input-more", Button).disabled = self._prompt_mode
+        self.query_one("#input-effort", Button).disabled = self._prompt_mode or not self._effort_available
         self._input.placeholder = placeholder or self._placeholder_normal
         self.close_picker()
         if self._prompt_mode:
@@ -846,6 +884,19 @@ class ChatBox(Widget):
             return
         if self._open and self._matches:
             self._open_with(self._matches)
+
+    def set_effort_state(self, available: bool, label: str = "", note: str = "") -> None:
+        changed = available != self._effort_available
+        self._effort_available = available
+        button = self.query_one("#input-effort", Button)
+        button.disabled = self._prompt_mode or not available
+        short = label if self.app.size.width >= 60 else ""
+        button.label = f"ϟ {short}" if short else "ϟ"
+        button.styles.width = max(3, min(14, len(short) + 3))
+        button.tooltip = ((f"Effort: {label or 'bawaan'} · klik untuk mengubah (/effort)")
+                          if available else (note or "Model ini tidak menyediakan pilihan effort."))
+        if changed and self._input.text.startswith("/"):
+            self._refresh_matches(self._input.text)
 
     def set_text(self, text: str) -> None:
         self._set_value(text)

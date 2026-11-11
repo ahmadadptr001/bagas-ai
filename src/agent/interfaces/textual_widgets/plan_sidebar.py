@@ -62,16 +62,15 @@ class PlanSidebar(Widget):
     def _render_kosong(self) -> Text:
         """Empty-state yang membuat fitur planning tetap terlihat."""
         t = Text()
-        t.append("◈ Rencana\n", style=f"bold {tema.p('aksen')}")
-        t.append("─" * self._lebar_garis() + "\n",
-                 style=tema.p("tepi_redup"))
-        t.append("· Belum ada rencana aktif\n", style=tema.p("redup"))
+        t.append("✦ ", style=tema.p("aksen"))
+        t.append("Rencana\n\n", style=tema.p("teks"))
+        t.append("● Belum ada rencana", style=tema.p("redup"))
         return t
 
     def _lebar_garis(self) -> int:
         """Lebar divider mengikuti area nyata, termasuk sidebar minimum."""
         try:
-            return max(10, int(self.size.width or 28))
+            return max(10, int(self.content_size.width or 24))
         except Exception:  # noqa: BLE001 — widget belum masuk layout
             return 28
 
@@ -82,13 +81,12 @@ class PlanSidebar(Widget):
         Nama sengaja BUKAN ``_render`` — itu metode internal Widget milik
         Textual dan tertimpa kita bikin render seluruh app mogok.
         """
-        garis = tema.p("tepi_redup")
         selesai = sum(1 for s in steps if s.get("status") == "done")
 
         t = Text()
-        t.append("◈ Rencana ", style=f"bold {tema.p('aksen')}")
-        t.append(f"{selesai}/{len(steps)}\n", style=f"bold {tema.p('aksen_terang')}")
-        t.append("─" * self._lebar_garis() + "\n", style=garis)
+        t.append("✦ ", style=tema.p("aksen"))
+        t.append("Rencana ", style=tema.p("teks"))
+        t.append(f"{selesai}/{len(steps)}\n\n", style=tema.p('redup'))
         for step in steps:
             status = step.get("status", "pending")
             teks = str(step.get("text", ""))
@@ -99,7 +97,9 @@ class PlanSidebar(Widget):
             else:
                 ikon, style = "·", tema.p("redup")
             t.append(f"{ikon} ", style=style)
-            t.append(teks + "\n", style=style)
+            t.append(teks, style=style)
+            if step is not steps[-1]:
+                t.append("\n")
         return t
 
     def on_resize(self, _event) -> None:
